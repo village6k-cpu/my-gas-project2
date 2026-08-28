@@ -6,7 +6,7 @@ Kakao Hermes can understand a customer's equipment addition, removal, replacemen
 or date change, but the current execution boundary does not reliably carry that
 decision into the authoritative reservation records.
 
-The `최승식` incident demonstrates the gap:
+The registered replacement incident demonstrates the gap:
 
 - The customer explicitly asked to cancel the 28-135 lens and use a Sony GM
   70-200mm instead.
@@ -212,7 +212,7 @@ Deployment order:
 
 1. Ship typed decision validation and dry-run/readback tests.
 2. Ship durable Gateway operation wiring with writes disabled.
-3. Run a no-write replay of recorded incidents, including `최승식`.
+3. Run a no-write replay of recorded incidents, including the registered replacement incident.
 4. Enable registered mutation execution while retaining customer `no_reply`.
 5. Repair live trade `260824-008` through the same production path, regenerate the
    contract, and verify raw schedule plus contract readback.

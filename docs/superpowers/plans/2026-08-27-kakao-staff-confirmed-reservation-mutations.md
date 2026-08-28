@@ -619,7 +619,7 @@ For `blocked`, `failed`, or `partial_success`:
 - never say the customer change was applied;
 - allow the existing durable Slack failure-notification coordinator to retry delivery, but never rerun Hermes, DOM application, or GAS correction.
 
-- [ ] **Step 5: Add the 최승식 regression**
+- [ ] **Step 5: Add the registered replacement regression**
 
 Use registered trade `260824-008` with current top-level row `소니 FE 28-135mm ×1` and desired row `소니 GM 70-200mm II ×1`. Prove:
 
@@ -645,7 +645,7 @@ git commit -m "feat: apply staff confirmed Kakao mutations"
 
 **Files:**
 
-- Create: `test/fixtures/kakao-staff-confirmed-mutations/choi-seungsik-260824-008.json`
+- Create: `test/fixtures/kakao-staff-confirmed-mutations/incident-registered-replacement-001.json`
 - Modify only if a fixture loader is needed: `tools/ai-browser-worker/staff-confirmed-mutation.test.mjs`
 - Modify only if a fixture loader is needed: `tools/kakao-dom-bridge/server.test.mjs`
 
@@ -751,7 +751,7 @@ Use the repository's reviewed plugin installation/start scripts. Before restart,
 
 - [ ] **Step 4: Run a no-write replay first**
 
-Start the Kakao transport in `gateway_no_send`, replay the sanitized 최승식 decision through the real plugin and Gateway, and prove:
+Start the Kakao transport in `gateway_no_send`, replay the sanitized registered replacement decision through the real plugin and Gateway, and prove:
 
 - typed registered tool selection;
 - `403 writes_disabled` before reservation/executor;

@@ -44,6 +44,9 @@ function harness({
   checkoutStarted = false,
   leaseError = '',
   structureQueuePending = false,
+  useRealRemovalPreflight = false,
+  baselineRows = null,
+  expectedExcludeScheduleIds = ['260813-005-01'],
 } = {}) {
   const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
   const body = section(
@@ -54,9 +57,17 @@ function harness({
 
   const calls = {
     preflight: [], mutate: [], lockTries: 0, lockReleases: 0,
-    regenerations: 0, lockHeldDuringRegeneration: null, triggerLockStates: [], reads: 0,
+    regenerations: 0, notifications: 0, lockHeldDuringRegeneration: null, triggerLockStates: [], reads: 0,
+    removeEntries: [],
   };
   let lockHeld = false;
+  const effectiveBaselineRows = baselineRows || [
+    { scheduleId: '260813-005-01', setName: '', name: 'FX9', qty: 1, isComponent: false },
+  ];
+  const baselineTopLevelQuantities = {};
+  effectiveBaselineRows.forEach((row) => {
+    if (!row.isComponent) baselineTopLevelQuantities[row.name] = (baselineTopLevelQuantities[row.name] || 0) + row.qty;
+  });
   const baseline = {
     contract: {
       startDate: '2026-08-17', startTime: '04:30',
@@ -64,10 +75,8 @@ function harness({
     },
     schedule: {
       periods: ['2026-08-17|04:30|2026-08-20|04:30'],
-      rows: [
-        { scheduleId: '260813-005-01', setName: '', name: 'FX9', qty: 1, isComponent: false },
-      ],
-      topLevelQuantities: { FX9: 1 },
+      rows: effectiveBaselineRows,
+      topLevelQuantities: baselineTopLevelQuantities,
     },
     ledger: { rows: 1, startDate: '2026-08-17', contractLink: 'https://docs.example/old' },
   };
@@ -95,6 +104,11 @@ function harness({
     DASHBOARD_STRUCTURE_QUEUE_PREFIX_: 'dashboardStructureQueue_',
     dashboardTradeMutationLeaseError_() {
       return leaseError ? { error: leaseError, code: 'BUSY', retryable: true } : null;
+    },
+    resolveDashboardRemovalRows_(removalData, _tradeId, scheduleId) {
+      return removalData
+        .map((row, index) => String(row[0]) === String(scheduleId) ? index + 2 : 0)
+        .filter(Boolean);
     },
     isDashboardTradeCheckoutStarted_() { return checkoutStarted; },
     normalizeDashboardAddEntries_(entries) {
@@ -132,7 +146,7 @@ function harness({
     dashboardAddEquipments(_tid, _entries, options) {
       assert.deepEqual(
         Array.from(options.excludeScheduleIds || []),
-        ['260813-005-01'],
+        expectedExcludeScheduleIds,
         'combined availability must exclude the exact removal plan',
       );
       assert.equal(options.requireExactCatalog, true);
@@ -141,9 +155,13 @@ function harness({
         return addPreflightError ? { error: addPreflightError } : {
           success: true,
           dryRun: true,
-          plannedItems: [
-            { scheduleId: '260813-005-12', setName: '', name: 'BURANO 8K', qty: 1, isComponent: false },
-          ],
+          plannedItems: _entries.map((entry, index) => ({
+            scheduleId: `260813-005-${12 + index}`,
+            setName: '',
+            name: entry.name,
+            qty: entry.qty,
+            isComponent: false,
+          })),
         };
       }
       assert.equal(lockHeld, true, 'add mutation must run under the outer lock');
@@ -157,7 +175,12 @@ function harness({
       assert.equal(options.lockAlreadyHeld, true);
       assert.equal(options.deferContractRegeneration, true);
       calls.mutate.push('remove');
-      return { success: true, removedRows: 1, removedScheduleIds: ['260813-005-01'] };
+      calls.removeEntries = _entries.map((entry) => ({ ...entry }));
+      return {
+        success: true,
+        removedRows: _entries.length,
+        removedScheduleIds: _entries.map((entry) => entry.scheduleId),
+      };
     },
     regenerateContractById() {
       calls.regenerations += 1;
@@ -168,6 +191,10 @@ function harness({
         fileId: 'contract-file',
         linkUpdate: { success: true },
       };
+    },
+    sendRegisteredTradeCorrectionNotification_() {
+      calls.notifications += 1;
+      return { sent: true };
     },
     ensureDashboardStructureProjectionTrigger_() {
       calls.triggerLockStates.push(lockHeld);
@@ -180,10 +207,12 @@ function harness({
     calls.reads += 1;
     return calls.reads === 1 ? baseline : successState();
   };
-  context.preflightRegisteredTradeRemoval_ = () => {
-    calls.preflight.push('remove');
-    return { success: true, scheduleIds: ['260813-005-01'] };
-  };
+  if (!useRealRemovalPreflight) {
+    context.preflightRegisteredTradeRemoval_ = () => {
+      calls.preflight.push('remove');
+      return { success: true, scheduleIds: ['260813-005-01'] };
+    };
+  }
   context.verifyRegisteredTradeCorrectionState_ = (_baseline, finalState) => finalState;
 
   return { context, calls, verifyActual, baseline };
@@ -192,16 +221,158 @@ function harness({
 const input = {
   tradeId: '260813-005',
   operationId: '8f6c77d1-8828-4a85-bf74-13815d96bf51',
+  expectedPeriod: {
+    startDate: '2026-08-17', startTime: '04:30',
+    endDate: '2026-08-20', endTime: '04:30',
+  },
   dateChange: {
     newStartDate: '2026-08-18', newEndDate: '2026-08-21',
     startTime: '04:30', endTime: '04:30', allowConflicts: false,
   },
-  remove: [{ scheduleId: '260813-005-01', expectedName: 'FX9' }],
+  remove: [{ scheduleId: '260813-005-01', expectedName: 'FX9', expectedQty: 1 }],
   add: [{ name: 'BURANO 8K', qty: 1 }],
 };
 
-test('one correction preflights all item deltas, locks once, adds before remove, and regenerates after unlock', () => {
+function assertNoWriteSideEffects(calls) {
+  assert.deepEqual(calls.mutate, []);
+  assert.equal(calls.regenerations, 0);
+  assert.equal(calls.notifications, 0);
+  assert.deepEqual(calls.triggerLockStates, []);
+}
+
+test('a removal quantity baseline mismatch fails before every write', () => {
+  const { context, calls } = harness({ useRealRemovalPreflight: true });
+
+  assert.throws(
+    () => context.correct({
+      ...input,
+      expectedPeriod: undefined,
+      remove: [{ ...input.remove[0], expectedQty: 2 }],
+    }),
+    /수량이 일치하지 않습니다/,
+  );
+
+  assertNoWriteSideEffects(calls);
+});
+
+test('a contract period baseline mismatch fails before removal or add preflight', () => {
   const { context, calls } = harness();
+
+  assert.throws(
+    () => context.correct({
+      ...input,
+      expectedPeriod: { ...input.expectedPeriod, endTime: '05:00' },
+    }),
+    /baseline period mismatch/i,
+  );
+
+  assert.deepEqual(calls.preflight, []);
+  assertNoWriteSideEffects(calls);
+});
+
+test('a replacement stock conflict after target allocation exclusion fails before every write', () => {
+  const { context, calls } = harness({ addPreflightError: 'BURANO unavailable' });
+
+  assert.throws(() => context.correct(input), /BURANO unavailable/);
+
+  assert.deepEqual(calls.preflight, ['remove', 'add']);
+  assertNoWriteSideEffects(calls);
+});
+
+test('a replacement available only after exact target allocation exclusion preflights and succeeds', () => {
+  const { context, calls } = harness();
+  const result = context.correct(input);
+
+  assert.deepEqual(calls.preflight, ['remove', 'add']);
+  assert.deepEqual(calls.mutate, ['date', 'add', 'remove']);
+  assert.equal(result.success, true);
+});
+
+test('component quantity change is typed blocked in locked preflight with zero writes', () => {
+  const componentRows = [
+    { scheduleId: '260813-005-01', setName: 'Cinema Set', name: 'Cinema Set', qty: 1, isComponent: false },
+    { scheduleId: '260813-005-02', setName: 'Cinema Set', name: 'Battery', qty: 1, isComponent: true },
+  ];
+  const { context, calls } = harness({
+    baselineRows: componentRows,
+    useRealRemovalPreflight: true,
+    expectedExcludeScheduleIds: ['260813-005-02'],
+  });
+
+  const result = context.correct({
+    tradeId: input.tradeId,
+    operationId: input.operationId,
+    remove: [{ scheduleId: '260813-005-02', expectedName: 'Battery', expectedQty: 1 }],
+    add: [{ name: 'Battery', qty: 2 }],
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.status, 'ERROR');
+  assert.equal(result.code, 'UNSAFE_COMPONENT_READD');
+  assert.equal(result.attemptedStage, 'preflight');
+  assert.deepEqual(Array.from(result.appliedStages), []);
+  assert.equal(result.customerNotificationSent, false);
+  assert.deepEqual(calls.preflight, []);
+  assertNoWriteSideEffects(calls);
+});
+
+test('component replacement is typed blocked before add preflight or any write', () => {
+  const componentRows = [
+    { scheduleId: '260813-005-01', setName: 'Cinema Set', name: 'Cinema Set', qty: 1, isComponent: false },
+    { scheduleId: '260813-005-02', setName: 'Cinema Set', name: 'Battery', qty: 1, isComponent: true },
+  ];
+  const { context, calls } = harness({
+    baselineRows: componentRows,
+    useRealRemovalPreflight: true,
+    expectedExcludeScheduleIds: ['260813-005-02'],
+  });
+
+  const result = context.correct({
+    tradeId: input.tradeId,
+    operationId: input.operationId,
+    remove: [{ scheduleId: '260813-005-02', expectedName: 'Battery', expectedQty: 1 }],
+    add: [{ name: 'High Capacity Battery', qty: 1 }],
+  });
+
+  assert.equal(result.code, 'UNSAFE_COMPONENT_READD');
+  assert.deepEqual(calls.preflight, []);
+  assertNoWriteSideEffects(calls);
+});
+
+test('component removal-only keeps the surrounding set and removes only the exact component row', () => {
+  const componentRows = [
+    { scheduleId: '260813-005-01', setName: 'Cinema Set', name: 'Cinema Set', qty: 1, isComponent: false },
+    { scheduleId: '260813-005-02', setName: 'Cinema Set', name: 'Battery', qty: 1, isComponent: true },
+    { scheduleId: '260813-005-03', setName: 'Cinema Set', name: 'Charger', qty: 1, isComponent: true },
+  ];
+  const { context, calls } = harness({ baselineRows: componentRows, useRealRemovalPreflight: true });
+
+  const result = context.correct({
+    tradeId: input.tradeId,
+    operationId: input.operationId,
+    remove: [{ scheduleId: '260813-005-02', expectedName: 'Battery', expectedQty: 1 }],
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(calls.mutate, ['remove']);
+  assert.deepEqual(calls.removeEntries, [{ scheduleId: '260813-005-02' }]);
+});
+
+test('ordinary top-level quantity change remains supported', () => {
+  const { context, calls } = harness();
+  const result = context.correct({
+    tradeId: input.tradeId,
+    operationId: input.operationId,
+    remove: [{ scheduleId: '260813-005-01', expectedName: 'FX9', expectedQty: 1 }],
+    add: [{ name: 'FX9', qty: 2 }],
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(calls.mutate, ['add', 'remove']);
+});
+
+test('one correction preflights all item deltas, locks once, adds before remove, and regenerates after unlock', () => {
+  const { context, calls, baseline } = harness();
   const result = context.correct(input);
 
   assert.deepEqual(calls.preflight, ['remove', 'add']);
@@ -214,6 +385,10 @@ test('one correction preflights all item deltas, locks once, adds before remove,
   assert.equal(result.success, true);
   assert.equal(result.customerNotificationSent, false);
   assert.equal(result.readback.ledger.contractLink, 'https://docs.example/contract');
+  assert.deepEqual(result.authoritativeReadback.before, baseline);
+  assert.deepEqual(result.authoritativeReadback.after, result.readback);
+  assert.equal(result.authoritativeReadback.before.schedule.topLevelQuantities.FX9, 1);
+  assert.equal(result.authoritativeReadback.after.schedule.topLevelQuantities['BURANO 8K'], 1);
 });
 
 test('BUSY is terminal for this invocation and never spins or mutates', () => {
@@ -334,6 +509,129 @@ test('combined availability projection removes every expanded schedule id before
     /if\s*\(periodOverride\s*\|\|\s*excludeScheduleIds\.length\)[\s\S]*?findDashboardScheduleRowsForEquipments_[\s\S]*?else\s*\{[\s\S]*?getDashboardAvailabilityScheduleData_/,
     'projected preflight must branch before the ordinary full availability-map call',
   );
+});
+
+test('actual single-equipment GAS add preserves schedule suffix 100 without changing row width', () => {
+  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+  const body = section(gas, 'function dashboardAddEquipment(', '\n/**\n * Dashboard에서 장비 삭제.');
+  const tradeId = '260813-005';
+  const existing = [
+    `${tradeId}-99`, tradeId, '', 'FX9', 1,
+    '2026-08-17', '04:30', '2026-08-20', '04:30', '대기', '', 0, '테스트 고객',
+  ];
+  let writtenRows = null;
+  const sched = {
+    getLastRow() { return 2; },
+    getRange(row, column, rowCount, columnCount) {
+      return {
+        getValues() { return [existing.slice()]; },
+        getDisplayValues() { return [existing.slice()]; },
+        setValues(rows) { writtenRows = rows.map((entry) => Array.from(entry)); return this; },
+        setNumberFormat() { return this; },
+      };
+    },
+    insertRowsAfter() {},
+  };
+  const ss = {
+    getSheetByName(name) {
+      if (name === '스케줄상세') return sched;
+      if (name === '장비마스터' || name === '세트마스터') return {};
+      return null;
+    },
+  };
+  const context = {
+    Date, JSON, Math, Object, Array, String, Number, RegExp, Error,
+    LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: () => '' }) },
+    SpreadsheetApp: { getActiveSpreadsheet: () => ss },
+    dashboardTradeMutationLeaseError_: () => null,
+    resolveEquipmentName_: (name) => name,
+    parseDT: () => new Date('2026-08-17T00:00:00Z'),
+    getSetComponents: () => [],
+    buildAvailabilityItems_: (name, qty) => [{ name, qty }],
+    checkAvailabilityForAdd_: () => ({ ok: true, conflicts: [], warnings: [] }),
+    findSetPrice: () => 0,
+    invalidateDashboardReturnInspectionForTrade_: () => ({ success: true }),
+    isDashboardTradeCheckoutStarted_: () => false,
+    formatScheduleSheet() {},
+    scheduleContractRegenUnderLock_() {},
+    ensureDashboardStructureProjectionTrigger_() {},
+    ensureContractRegenTrigger_() {},
+    dashboardAddedItemsFromRows_: (rows) => rows.map((row) => ({
+      scheduleId: row[0], setName: row[2], name: row[3], qty: row[4], isComponent: !!row[2] && row[2] !== row[3],
+    })),
+  };
+  vm.runInNewContext(`${body}\nthis.addOne = dashboardAddEquipment;`, context);
+
+  const result = context.addOne(tradeId, 'BURANO 8K', 1);
+
+  assert.equal(result.success, true);
+  assert.deepEqual(Array.from(writtenRows, (row) => row[0]), [`${tradeId}-100`]);
+  assert.equal(writtenRows[0].length, 13);
+  assert.equal(writtenRows.some((row) => /-00$/.test(row[0])), false);
+});
+
+test('actual batch/set GAS add allocates unique monotonic suffixes 100 and 101', () => {
+  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+  const body = section(gas, 'function dashboardAddEquipments(', '\nvar DASHBOARD_ONSITE_IDEM_PROP_');
+  const tradeId = '260813-005';
+  let plannedRowWidths = [];
+  const sched = {
+    getLastRow: () => 2,
+    getRange: () => ({
+      getDisplayValues: () => [[
+        '2026-08-17', '04:30', '2026-08-20', '04:30', '', '', '', '테스트 고객',
+      ]],
+    }),
+  };
+  const ss = {
+    getSheetByName(name) {
+      if (name === '스케줄상세') return sched;
+      if (name === '장비마스터' || name === '세트마스터') return {};
+      return null;
+    },
+  };
+  const context = {
+    Date, JSON, Math, Object, Array, String, Number, RegExp, Error,
+    normalizeDashboardAddEntries_: (entries) => entries.map((entry) => ({ name: entry.name, qty: entry.qty })),
+    SpreadsheetApp: { getActiveSpreadsheet: () => ss },
+    findDashboardRowsByValue_: () => [2],
+    readDashboardScheduleRows_: () => [[`${tradeId}-99`]],
+    parseDT: () => new Date('2026-08-17T00:00:00Z'),
+    buildDashboardSetLookup_: () => ({
+      items: { 'Cinema Set': true },
+      prices: { 'Cinema Set': 1000 },
+      components: { 'Cinema Set': [{ name: 'Battery', qty: 1 }] },
+    }),
+    buildAvailabilityItems_: (name, qty, components) => [
+      { name, qty },
+      ...components.map((component) => ({ name: component.name, qty: component.qty * qty })),
+    ],
+    buildDashboardEquipmentMeta_: () => ({ equipment: {} }),
+    mergeAvailabilityItems_: (items) => items,
+    dashboardAddedItemsFromRows_: (rows) => {
+      plannedRowWidths = rows.map((row) => row.length);
+      return rows.map((row) => ({
+        scheduleId: row[0], setName: row[2], name: row[3], qty: row[4], isComponent: !!row[2] && row[2] !== row[3],
+      }));
+    },
+  };
+  vm.runInNewContext(`${body}\nthis.addMany = dashboardAddEquipments;`, context);
+
+  const result = context.addMany(tradeId, [{ name: 'Cinema Set', qty: 1 }], {
+    dryRun: true,
+    rawNames: true,
+    lockAlreadyHeld: true,
+    availabilityPreflighted: true,
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(Array.from(result.plannedItems, (row) => row.scheduleId), [
+    `${tradeId}-100`, `${tradeId}-101`,
+  ]);
+  assert.equal(new Set(Array.from(result.plannedItems, (row) => row.scheduleId)).size, 2);
+  assert.equal(Array.from(result.plannedItems).every((row) => !/-00$/.test(row.scheduleId)), true);
+  assert.deepEqual(Array.from(plannedRowWidths), [13, 13]);
 });
 
 test('sheetAPI exposes the bounded correction action and capability', () => {

@@ -23,6 +23,7 @@ import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-brows
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { buildGatewayHealthReadback, createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
+import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
 
 export { buildGatewayHealthReadback } from './hermes-gateway-http.mjs';
 
@@ -476,6 +477,49 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
   });
 }
 
+export function createGatewayRegisteredReservationChangeExecutor({
+  getConfig,
+  executeOperation = executeVillageRegisteredReservationChange,
+  runRegisteredTradeCorrection,
+  randomUUID = crypto.randomUUID,
+  now
+} = {}) {
+  if (typeof getConfig !== 'function') throw new Error('Gateway registered reservation change config loader is required');
+  if (typeof executeOperation !== 'function') throw new Error('Gateway registered reservation change operation is required');
+  return async (request, { assertCurrentClaim, operationFence } = {}) => {
+    const dependencies = {
+      assertCurrentClaim,
+      operationFence,
+      ...(typeof runRegisteredTradeCorrection === 'function' ? { runRegisteredTradeCorrection } : {}),
+      ...(typeof randomUUID === 'function' ? { randomUUID } : {}),
+      ...(typeof now === 'function' ? { now } : {})
+    };
+    return executeOperation({
+      config: resolveGatewayRegisteredReservationChangeConfig(getConfig()),
+      job: {
+        job_id: request.job_id,
+        room_key: request.room_key,
+        room_revision: request.room_revision
+      },
+      roomRevision: request.room_revision,
+      mutation: request.mutation,
+      dependencies
+    });
+  };
+}
+
+export function resolveGatewayRegisteredReservationChangeConfig(workerConfig = {}) {
+  const gasApiUrl = String(workerConfig.gasApiUrl || '').trim();
+  const sheetApiKey = String(workerConfig.sheetApiKey || '').trim();
+  if (!gasApiUrl || !sheetApiKey) {
+    throw new Error('Gateway registered reservation change configuration is incomplete');
+  }
+  return {
+    VILLAGE2_API_URL: gasApiUrl,
+    VILLAGE2_API_KEY: sheetApiKey
+  };
+}
+
 export function createGatewayDocumentExecutor({
   getConfig,
   executeRequest = executeVillageDocumentRequest,
@@ -676,7 +720,9 @@ export function createGatewayResultApplicationCoordinator({
     if (!operation || operation.state !== 'completed') return [];
     const expectedSchema = operation.tool === 'document_send'
       ? 'village-document-receipt/v1'
-      : 'village-confirmation-receipt/v1';
+      : operation.tool === 'registered_reservation_change'
+        ? 'village-registered-reservation-change-receipt/v1'
+        : 'village-confirmation-receipt/v1';
     const exact = (Array.isArray(durableJob?.tool_receipts) ? durableJob.tool_receipts : []).find((receipt) => (
       receipt?.schema === expectedSchema
       && receipt.receipt_id === operation.receipt_id
@@ -837,6 +883,11 @@ const gatewayDocumentExecutor = gatewayTransportEnabled
       )
     })
   : null;
+const gatewayRegisteredReservationChangeExecutor = gatewayTransportEnabled
+  ? createGatewayRegisteredReservationChangeExecutor({
+      getConfig: () => getKakaoWorkerRuntimeConfigForTransport()
+    })
+  : null;
 const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
@@ -845,6 +896,7 @@ const gatewayHttpHandler = createHermesGatewayHttpHandler({
   executeConfirmation: gatewayConfirmationExecutor,
   validateConfirmation: gatewayConfirmationValidator,
   executeDocument: gatewayDocumentExecutor,
+  executeRegisteredReservationChange: gatewayRegisteredReservationChangeExecutor,
   recoverFailureNotifications: gatewayTransportEnabled
     ? () => getGatewayFailureNotificationCoordinator().recover()
     : null,

@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import http from 'node:http';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
+import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 
 process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
 const {
@@ -17,6 +22,7 @@ const {
   p0SlackEscalationDue,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
+  createGatewayRegisteredReservationChangeExecutor,
   createGatewayConfirmationValidator,
   createGatewayDocumentExecutor,
   resolveGatewayDocumentConfig,
@@ -44,6 +50,260 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+const TASK7_NEUTRAL_INCIDENT_URL = new URL(
+  '../../test/fixtures/kakao-staff-confirmed-mutations/incident-registered-replacement-001.json',
+  import.meta.url
+);
+const TASK7_INCIDENT = JSON.parse(await readFile(TASK7_NEUTRAL_INCIDENT_URL, 'utf8'));
+const TASK7_TOKEN = 'task-7-local-token';
+const TASK7_NOW = Date.parse('2026-08-27T01:00:00.000Z');
+
+test('Task 7 loads the sanitized replay fixture through a neutral incident identifier', async () => {
+  const incident = JSON.parse(await readFile(TASK7_NEUTRAL_INCIDENT_URL, 'utf8'));
+  assert.equal(incident.trade_id, '260824-008');
+  assert.equal(incident.room_revision, 8);
+  assert.deepEqual(incident.exact_old_rows, [{
+    schedule_id: '260824-008-07',
+    name: '소니 FE 28-135mm',
+    quantity: 1
+  }]);
+});
+
+function task7Mutation(overrides = {}) {
+  return {
+    confirmed: true,
+    kind: 'equipment_replace',
+    target_scope: 'registered_trade',
+    trade_id: TASK7_INCIDENT.trade_id,
+    source_evidence: {
+      customer_request: TASK7_INCIDENT.customer_change_text,
+      staff_confirmation: TASK7_INCIDENT.staff_confirmation_text,
+      conversation_revision: TASK7_INCIDENT.room_revision
+    },
+    expected_period: structuredClone(TASK7_INCIDENT.expected_period),
+    expected_before: structuredClone(TASK7_INCIDENT.exact_old_rows),
+    desired_after: structuredClone(TASK7_INCIDENT.exact_desired_rows),
+    date_change: null,
+    ...overrides
+  };
+}
+
+function task7HermesDecision(mutation) {
+  return {
+    classification: 'reservation',
+    confidence: 'high',
+    should_write_to_sheet: false,
+    kill_switch_observed: 'active',
+    customer: { name: '테스트 고객' },
+    owner_review_required: false,
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      confirmed: true,
+      already_registered: true,
+      equipment_requested: []
+    },
+    existing_confirm_request_ids: [],
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
+      no_auto_reply_sent: true,
+      latest_customer_message_after_last_staff_reply: false
+    },
+    staff_confirmed_mutation: mutation,
+    follow_up_items: [{
+      type: 'reservation_review', route: 'schedule', taskKey: 'must-be-removed-after-exact-success',
+      priority: 'high', status: 'open', title: '중복 승인', customer_name: '테스트 고객',
+      summary: '이미 직원 확정된 변경', recommended_action: '다시 승인', suggested_reply_draft: '',
+      evidence: [], requiresHumanAction: true, actionFamily: 'reservation_change',
+      businessKey: `trade:${mutation.trade_id}`, alertLevel: 'none'
+    }],
+    suggested_reply_draft: '변경 완료되었습니다.',
+    reply_decision: {
+      replyMode: 'no_reply', text: '', confidence: 'high', reason: '직원 답변으로 이미 안내됨',
+      shouldCreateTask: false, safetyClass: 'no_send', grounding: 'staff_confirmation',
+      requiresRag: false, attachmentKeys: [], alreadyDelivered: true
+    }
+  };
+}
+
+function task7AuthoritativeReadback() {
+  const desired = TASK7_INCIDENT.exact_desired_rows[0];
+  return {
+    contract: {
+      startDate: TASK7_INCIDENT.expected_period.start_date,
+      startTime: TASK7_INCIDENT.expected_period.start_time,
+      endDate: TASK7_INCIDENT.expected_period.end_date,
+      endTime: TASK7_INCIDENT.expected_period.end_time
+    },
+    schedule: {
+      periods: [`${TASK7_INCIDENT.expected_period.start_date}|${TASK7_INCIDENT.expected_period.start_time}|${TASK7_INCIDENT.expected_period.end_date}|${TASK7_INCIDENT.expected_period.end_time}`],
+      rows: [{
+        scheduleId: '260824-008-08', setName: '', name: desired.name,
+        qty: desired.quantity, isComponent: false
+      }],
+      topLevelQuantities: { [desired.name]: desired.quantity }
+    },
+    ledger: {
+      rows: 1,
+      startDate: TASK7_INCIDENT.expected_period.start_date,
+      contractLink: 'https://example.test/contracts/260824-008',
+      links: ['https://example.test/contracts/260824-008']
+    }
+  };
+}
+
+function task7AuthoritativeBeforeReadback() {
+  const expected = TASK7_INCIDENT.exact_old_rows[0];
+  return {
+    contract: {
+      startDate: TASK7_INCIDENT.expected_period.start_date,
+      startTime: TASK7_INCIDENT.expected_period.start_time,
+      endDate: TASK7_INCIDENT.expected_period.end_date,
+      endTime: TASK7_INCIDENT.expected_period.end_time
+    },
+    schedule: {
+      periods: [`${TASK7_INCIDENT.expected_period.start_date}|${TASK7_INCIDENT.expected_period.start_time}|${TASK7_INCIDENT.expected_period.end_date}|${TASK7_INCIDENT.expected_period.end_time}`],
+      rows: [{
+        scheduleId: expected.schedule_id, setName: '', name: expected.name,
+        qty: expected.quantity, isComponent: false
+      }],
+      topLevelQuantities: { [expected.name]: expected.quantity }
+    },
+    ledger: null
+  };
+}
+
+async function startTask7Http(handler) {
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    if (!(await handler(req, res, url))) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end('{}');
+    }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  let closed = false;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: () => {
+      if (closed) return Promise.resolve();
+      closed = true;
+      return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  };
+}
+
+async function task7Post(app, pathname, body) {
+  return fetch(app.url + pathname, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TASK7_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+}
+
+async function createTask7Replay({ id, runRegisteredTradeCorrection, finalize, onFailure } = {}) {
+  const directory = await mkdtemp(path.join(tmpdir(), `kakao-staff-confirmed-${id}-`));
+  const channel = createHermesGatewayChannel({
+    directory, leaseMs: 60_000, maxAttempts: 2, now: () => TASK7_NOW
+  });
+  const jobId = `task7-${id}-job`;
+  const roomKey = `task7-${id}-room`;
+  const revision = TASK7_INCIDENT.room_revision;
+  const event = {
+    schema: 'village-kakao-gateway-event/v1', job_id: jobId, room_key: roomKey,
+    room_revision: revision, detected_at: '2026-08-27T00:59:59.000Z', prompt: 'native Hermes prompt', raw: {}
+  };
+  const localJob = {
+    jobId, roomKey, roomRevision: revision,
+    detectedAt: event.detected_at, previewText: TASK7_INCIDENT.customer_change_text
+  };
+  await channel.enqueue(event, {
+    localContext: {
+      job: localJob,
+      turn_internal: {
+        snapshot: { schema: 'kakao-room-snapshot/v1', jobId, roomKey, roomRevision: revision },
+        lookupContext: { kill_switch: { status: 'active', error: null } },
+        ragContext: null,
+        brainContext: null
+      }
+    }
+  });
+  const claim = await channel.claim({ consumerId: `task7-${id}-consumer`, waitMs: 0 });
+  const preparedDecisions = [];
+  let applyCalls = 0;
+  let finalizeCalls = 0;
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel,
+    getConfig: () => ({ autoSendEnabled: true }),
+    apply: async ({ prepared }) => {
+      applyCalls += 1;
+      preparedDecisions.push(structuredClone(prepared.decision));
+      return {
+        prepared, snapshotChanged: false, superseded: false,
+        autoReplyResult: { attempted: false, sent: false }
+      };
+    },
+    finalize: async ({ applied }) => {
+      finalizeCalls += 1;
+      if (typeof finalize === 'function') return finalize(applied.prepared);
+      return {
+        status: 'ai_completed', decision: applied.prepared.decision,
+        followUpResult: { inserted: 0, rows: [] },
+        slackDeliveryResult: { skipped: true, reason: 'no_rows', results: [] },
+        autoReplyResult: { attempted: false, sent: false }
+      };
+    },
+    onFailure: typeof onFailure === 'function' ? onFailure : async () => {}
+  });
+  const executeRegisteredReservationChange = createGatewayRegisteredReservationChangeExecutor({
+    getConfig: () => ({
+      gasApiUrl: 'https://script.google.com/macros/s/offline-fixture/exec',
+      sheetApiKey: 'offline-fake-only'
+    }),
+    runRegisteredTradeCorrection,
+    randomUUID: () => `task7-${id}-receipt`,
+    now: () => new Date(TASK7_NOW)
+  });
+  const handler = createHermesGatewayHttpHandler({
+    token: TASK7_TOKEN, channel, transport: 'gateway', now: () => TASK7_NOW,
+    executeRegisteredReservationChange,
+    enqueueResultApplication: (completed) => coordinator.enqueue(completed)
+  });
+  const app = await startTask7Http(handler);
+  const mutation = task7Mutation();
+  const toolBody = {
+    schema: 'village-registered-reservation-change-request/v1',
+    job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+    lease_id: claim.lease_id, mutation
+  };
+  return {
+    app, channel, claim, coordinator, directory, mutation, toolBody, preparedDecisions,
+    counts: () => ({ applyCalls, finalizeCalls }),
+    async executeTool() {
+      const response = await task7Post(app, '/hermes/v1/tools/registered-reservation-change', toolBody);
+      assert.equal(response.status, 200);
+      return response.json();
+    },
+    async completeHermesFinal() {
+      const response = await task7Post(app, '/hermes/v1/results', {
+        job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+        lease_id: claim.lease_id,
+        content: `FINAL_JSON\n${JSON.stringify(task7HermesDecision(mutation))}`
+      });
+      assert.equal(response.status, 200);
+      await coordinator.idle();
+    },
+    async close() {
+      await app.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  };
+}
 
 test('Gateway initial unread scans become no-send startup catch-up work even when legacy scan processing is disabled', () => {
   for (const hermesTransport of ['gateway', 'gateway_no_send']) {
@@ -384,6 +644,10 @@ test('Gateway health readback requires a fresh consumer and exposes only safe ag
       last_completed_job_id: 'completed-job',
       last_consumer_id: 'gateway-consumer-1',
       last_consumer_seen_at: '2026-08-21T00:00:30.000Z',
+      registered_reservation_change: {
+        reserved: 2, completed: 5, failed_human_review: 1, pending_failure_notifications: 1,
+        oldest_reserved_age_ms: 45_000, last_success_at: '2026-08-21T00:00:20.000Z'
+      },
       token: 'must-not-leak', prompt: 'must-not-leak', local_context: { secret: true }
     }
   });
@@ -393,7 +657,11 @@ test('Gateway health readback requires a fresh consumer and exposes only safe ag
     queue: { ready: 2, claimed: 1, retry: 0, failed: 3, oldest_claim_age_ms: 75_000, last_completed_job_id: 'completed-job' },
     application_counts: { pending: 1, claimed: 0, applying: 0, applied: 0, finalized: 3, failed: 1 },
     failure_notification_counts: { pending: 2, delivered: 5 },
-    unnotified_application_failures: 1
+    unnotified_application_failures: 1,
+    registered_reservation_change: {
+      reserved: 2, completed: 5, failed_human_review: 1, pending_failure_notifications: 1,
+      oldest_reserved_age_ms: 45_000, last_success_at: '2026-08-21T00:00:20.000Z'
+    }
   });
   assert.equal(JSON.stringify(readback).includes('must-not-leak'), false);
   const stale = buildGatewayHealthReadback({
@@ -440,6 +708,411 @@ test('server confirmation executor forwards the channel claim fence into the wor
   assert.equal(operationArgs.job.roomRevision, 3);
   assert.equal(operationArgs.dependencies.assertCurrentClaim, assertCurrentClaim);
   assert.equal(operationArgs.dependencies.operationFence, operationFence);
+});
+
+test('server registered change executor maps authenticated worker config into the real correction runner contract', async () => {
+  const assertCurrentClaim = async () => {};
+  const operationFence = {
+    schema: 'village-tool-operation-reservation/v1', operation_id: 'registered-operation-1',
+    tool: 'registered_reservation_change', job_id: 'registered-job-1', room_key: 'registered-room-1',
+    room_revision: 8, lease_id: 'registered-lease-1', request_digest: 'registered-digest-1',
+    state: 'reserved', created_at: '2026-08-27T00:00:00.000Z', receipt_id: null, completed_at: null
+  };
+  const mutation = {
+    confirmed: true, kind: 'equipment_replace', target_scope: 'registered_trade', trade_id: '260824-008',
+    source_evidence: { customer_request: '교체 요청', staff_confirmation: '교체 확정', conversation_revision: 8 },
+    expected_period: { start_date: '2026-08-28', start_time: '09:00', end_date: '2026-08-29', end_time: '18:00' },
+    expected_before: [{ schedule_id: '260824-008-07', name: '기존 렌즈', quantity: 1 }],
+    desired_after: [{ name: '교체 렌즈', quantity: 1 }], date_change: null
+  };
+  const runnerCalls = [];
+  const authoritativeAfter = { contract: {}, schedule: {}, ledger: {} };
+  const executor = createGatewayRegisteredReservationChangeExecutor({
+    getConfig: () => ({
+      gasApiUrl: 'https://script.google.com/macros/s/internal-only/exec',
+      sheetApiKey: 'internal-key',
+      publicCatalogKey: 'must-not-be-forwarded'
+    }),
+    runRegisteredTradeCorrection: async (request) => {
+      runnerCalls.push(request);
+      return {
+        ok: true,
+        verified: true,
+        tradeId: mutation.trade_id,
+        readback: authoritativeAfter,
+        authoritativeReadback: { before: { contract: {}, schedule: {} }, after: authoritativeAfter },
+        appliedStages: ['scheduleCorrectRegisteredTrade']
+      };
+    }
+  });
+
+  const result = await executor({
+    schema: 'village-registered-reservation-change-request/v1',
+    job_id: 'registered-job-1', room_key: 'registered-room-1', room_revision: 8,
+    lease_id: 'registered-lease-1', mutation
+  }, { assertCurrentClaim, operationFence });
+
+  assert.equal(result.schema, 'village-registered-reservation-change-receipt/v1');
+  assert.equal(result.status, 'ok');
+  assert.match(result.receipt_id, /^[0-9a-f-]{36}$/i);
+  assert.equal(JSON.stringify(result).includes('internal-key'), false);
+  assert.equal(runnerCalls.length, 1);
+  assert.deepEqual(runnerCalls[0], {
+    config: {
+      VILLAGE2_API_URL: 'https://script.google.com/macros/s/internal-only/exec',
+      VILLAGE2_API_KEY: 'internal-key'
+    },
+    input: {
+      tradeId: '260824-008',
+      operationId: 'registered-operation-1',
+      expectedPeriod: {
+        startDate: '2026-08-28', startTime: '09:00', endDate: '2026-08-29', endTime: '18:00'
+      },
+      remove: [{ scheduleId: '260824-008-07', expectedName: '기존 렌즈', expectedQty: 1 }],
+      add: [{ name: '교체 렌즈', qty: 1 }],
+      sendEstimate: false
+    }
+  });
+});
+
+test('server registered change executor rejects missing authenticated transport config before the correction runner', async () => {
+  const mutation = task7Mutation();
+  const operationFence = { operation_id: 'registered-operation-missing-config' };
+  for (const config of [
+    { gasApiUrl: '', sheetApiKey: 'internal-key' },
+    { gasApiUrl: 'https://script.google.com/macros/s/internal-only/exec', sheetApiKey: '' }
+  ]) {
+    let runnerCalls = 0;
+    const executor = createGatewayRegisteredReservationChangeExecutor({
+      getConfig: () => config,
+      runRegisteredTradeCorrection: async () => { runnerCalls += 1; }
+    });
+    await assert.rejects(
+      executor({
+        job_id: 'registered-missing-config', room_key: 'registered-room', room_revision: 8,
+        mutation
+      }, { assertCurrentClaim: async () => {}, operationFence }),
+      /registered reservation change configuration is incomplete/i
+    );
+    assert.equal(runnerCalls, 0);
+  }
+});
+
+test('Task 7 replays the sanitized registered replacement across the durable channel and worker exactly once', async () => {
+  let correctionCalls = 0;
+  const replay = await createTask7Replay({
+    id: 'success',
+    runRegisteredTradeCorrection: async ({ input }) => {
+      correctionCalls += 1;
+      assert.deepEqual(input, {
+        tradeId: TASK7_INCIDENT.trade_id,
+        operationId: input.operationId,
+        expectedPeriod: {
+          startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00'
+        },
+        remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
+        add: [{ name: '소니 GM 70-200mm II', qty: 1 }],
+        sendEstimate: false
+      });
+      assert.match(input.operationId, /^[0-9a-f-]{36}$/i);
+      return {
+        ok: true, verified: true, tradeId: TASK7_INCIDENT.trade_id,
+        readback: task7AuthoritativeReadback(),
+        authoritativeReadback: {
+          before: task7AuthoritativeBeforeReadback(),
+          after: task7AuthoritativeReadback()
+        },
+        appliedStages: ['scheduleCorrectRegisteredTrade']
+      };
+    }
+  });
+  try {
+    const receipt = await replay.executeTool();
+    assert.equal(correctionCalls, 1);
+    assert.equal(receipt.schema, 'village-registered-reservation-change-receipt/v1');
+    assert.equal(receipt.status, 'ok');
+    assert.deepEqual(receipt.authoritative_result, {
+      before: task7AuthoritativeBeforeReadback(),
+      after: task7AuthoritativeReadback()
+    });
+    await replay.completeHermesFinal();
+
+    assert.deepEqual(replay.counts(), { applyCalls: 1, finalizeCalls: 1 });
+    assert.equal(replay.preparedDecisions.length, 1);
+    assert.equal(replay.preparedDecisions[0].reply_decision.replyMode, 'no_reply');
+    assert.equal(replay.preparedDecisions[0].reply_decision.text, '');
+    assert.equal(replay.preparedDecisions[0].reply_decision.shouldCreateTask, false);
+    assert.equal(replay.preparedDecisions[0].owner_review_required, false);
+    assert.deepEqual(replay.preparedDecisions[0].follow_up_items, []);
+    assert.deepEqual(
+      replay.preparedDecisions[0].trusted_registered_reservation_change_receipt,
+      receipt
+    );
+    assert.equal((await replay.channel.get(replay.claim.job_id)).application.state, 'finalized');
+
+    await replay.app.close();
+    const restarted = createHermesGatewayChannel({
+      directory: replay.directory, leaseMs: 60_000, maxAttempts: 2, now: () => TASK7_NOW
+    });
+    let restartCorrectionCalls = 0;
+    const restartExecutor = createGatewayRegisteredReservationChangeExecutor({
+      getConfig: () => ({
+        gasApiUrl: 'https://script.google.com/macros/s/offline-fixture/exec',
+        sheetApiKey: 'offline-fake-only'
+      }),
+      runRegisteredTradeCorrection: async () => { restartCorrectionCalls += 1; },
+      randomUUID: () => 'must-not-create-another-receipt',
+      now: () => new Date(TASK7_NOW)
+    });
+    const restartedApp = await startTask7Http(createHermesGatewayHttpHandler({
+      token: TASK7_TOKEN, channel: restarted, transport: 'gateway', now: () => TASK7_NOW,
+      executeRegisteredReservationChange: restartExecutor
+    }));
+    try {
+      const retry = await task7Post(
+        restartedApp,
+        '/hermes/v1/tools/registered-reservation-change',
+        replay.toolBody
+      );
+      assert.equal(retry.status, 200);
+      assert.deepEqual(await retry.json(), receipt);
+      assert.equal(restartCorrectionCalls, 0);
+      assert.equal((await restarted.get(replay.claim.job_id)).application.state, 'finalized');
+    } finally {
+      await restartedApp.close();
+    }
+  } finally {
+    await replay.close();
+  }
+});
+
+test('Task 7 conflict performs zero correction writes and leaves one durable owner notification pending', async () => {
+  let correctionCalls = 0;
+  let correctionWrites = 0;
+  const fakeGasOperations = [];
+  const fakeCorrectionGas = {
+    async preflight(input) {
+      fakeGasOperations.push({ stage: 'preflight', input: structuredClone(input) });
+      return { conflicts: [{ name: '소니 GM 70-200mm II', available: 0, requested: 1 }] };
+    },
+    async write(input) {
+      correctionWrites += 1;
+      fakeGasOperations.push({ stage: 'write', input: structuredClone(input) });
+    }
+  };
+  const replay = await createTask7Replay({
+    id: 'conflict',
+    runRegisteredTradeCorrection: async ({ input }) => {
+      correctionCalls += 1;
+      const preflight = await fakeCorrectionGas.preflight(input);
+      if (!preflight.conflicts.length) {
+        await fakeCorrectionGas.write(input);
+        return {
+          ok: true, verified: true, tradeId: input.tradeId,
+          readback: task7AuthoritativeReadback(), appliedStages: ['scheduleCorrectRegisteredTrade']
+        };
+      }
+      const error = new Error('replacement stock conflict');
+      error.name = 'CorrectionStageError';
+      error.stage = 'preflight';
+      error.appliedStages = [];
+      error.outcomeUnknown = false;
+      error.details = preflight;
+      throw error;
+    },
+    finalize: async (prepared) => {
+      assert.equal(prepared.decision.follow_up_items.length, 1);
+      assert.equal(prepared.decision.follow_up_items[0].priority, 'urgent');
+      assert.equal(prepared.decision.follow_up_items[0].alertLevel, 'p0');
+      return {
+        status: 'ai_completed', decision: prepared.decision,
+        followUpResult: { inserted: 1, rows: [{ id: 'task7-conflict-owner-card' }] },
+        slackDeliveryResult: {
+          skipped: false,
+          results: [{ ok: false, rowId: 'task7-conflict-owner-card', error: 'offline Slack fixture' }]
+        },
+        autoReplyResult: { attempted: false, sent: false }
+      };
+    },
+    onFailure: async () => { throw new Error('owner notification remains offline'); }
+  });
+  try {
+    const receipt = await replay.executeTool();
+    assert.equal(receipt.status, 'blocked');
+    assert.deepEqual(receipt.applied_stages, []);
+    assert.equal(receipt.attempted_stage, 'preflight');
+    assert.equal(correctionCalls, 1);
+    assert.deepEqual(fakeGasOperations.map((operation) => operation.stage), ['preflight']);
+    assert.equal(fakeGasOperations[0].input.tradeId, TASK7_INCIDENT.trade_id);
+    assert.deepEqual(fakeGasOperations[0].input.remove, [{
+      scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1
+    }]);
+    assert.equal(correctionWrites, 0);
+    await replay.completeHermesFinal();
+
+    const pending = await replay.channel.listPendingApplicationFailureNotifications();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].job_id, replay.claim.job_id);
+    assert.equal(pending[0].application.failure_notification.state, 'pending');
+    assert.deepEqual(replay.preparedDecisions[0].registered_mutation_review.error, receipt.error);
+    assert.deepEqual(replay.preparedDecisions[0].registered_mutation_review.applied_stages, []);
+    assert.equal(replay.preparedDecisions[0].reply_decision.replyMode, 'draft_only');
+    assert.equal(replay.preparedDecisions[0].reply_decision.text, '');
+  } finally {
+    await replay.close();
+  }
+});
+
+test('Task 7 partial write persists stage evidence, never replays after restart, and notifies only on delivery', async () => {
+  let correctionCalls = 0;
+  let correctionWrites = 0;
+  const notificationAttempts = [];
+  const notificationStatusUpdates = [];
+  let notificationDeliveryAvailable = false;
+  const applicationFailureNotifier = createGatewayApplicationFailureNotifier({
+    slackEnabled: true,
+    createFollowUp: async ({ job, error, context }) => {
+      notificationAttempts.push(notificationDeliveryAvailable);
+      assert.equal(job.jobId, 'task7-partial-job');
+      assert.match(error.message, /gateway_owner_review_slack_failed/);
+      assert.equal(context.origin, 'hermes_gateway_result_application');
+      return {
+        inserted: 1,
+        rows: [{ id: 'task7-partial-failure-notification' }],
+        slackDeliveryResult: {
+          skipped: false,
+          results: [notificationDeliveryAvailable
+            ? { ok: true, rowId: 'task7-partial-failure-notification', channelId: 'C-OFFLINE', ts: '1.0' }
+            : { ok: false, rowId: 'task7-partial-failure-notification', error: 'Slack still offline' }]
+        }
+      };
+    },
+    updateStatus: async (jobId, patch) => {
+      notificationStatusUpdates.push({ jobId, patch: structuredClone(patch) });
+    },
+    now: () => '2026-08-27T01:00:01.000Z'
+  });
+  const replay = await createTask7Replay({
+    id: 'partial',
+    runRegisteredTradeCorrection: async () => {
+      correctionCalls += 1;
+      correctionWrites += 1;
+      const error = new Error('add response lost after remove write');
+      error.name = 'CorrectionStageError';
+      error.stage = 'scheduleAddEquips';
+      error.appliedStages = ['scheduleRemoveEquips'];
+      error.outcomeUnknown = true;
+      error.details = {
+        last_readback: {
+          tradeId: TASK7_INCIDENT.trade_id,
+          remaining: structuredClone(TASK7_INCIDENT.exact_old_rows)
+        }
+      };
+      throw error;
+    },
+    finalize: async (prepared) => ({
+      status: 'ai_completed', decision: prepared.decision,
+      followUpResult: { inserted: 1, rows: [{ id: 'task7-partial-owner-card' }] },
+      slackDeliveryResult: {
+        skipped: false,
+        results: [{ ok: false, rowId: 'task7-partial-owner-card', error: 'offline Slack fixture' }]
+      },
+      autoReplyResult: { attempted: false, sent: false }
+    }),
+    onFailure: applicationFailureNotifier
+  });
+  try {
+    const receipt = await replay.executeTool();
+    assert.equal(receipt.status, 'partial_success');
+    assert.deepEqual(receipt.applied_stages, ['scheduleRemoveEquips']);
+    assert.equal(receipt.attempted_stage, 'scheduleAddEquips');
+    assert.deepEqual(receipt.error.details, {
+      last_readback: {
+        tradeId: TASK7_INCIDENT.trade_id,
+        remaining: TASK7_INCIDENT.exact_old_rows
+      }
+    });
+    assert.deepEqual({ correctionCalls, correctionWrites }, { correctionCalls: 1, correctionWrites: 1 });
+    await replay.completeHermesFinal();
+    assert.deepEqual(
+      replay.preparedDecisions[0].registered_mutation_review.applied_stages,
+      ['scheduleRemoveEquips']
+    );
+    assert.deepEqual(replay.preparedDecisions[0].registered_mutation_review.error, receipt.error);
+    assert.equal((await replay.channel.listPendingApplicationFailureNotifications()).length, 1);
+
+    await replay.app.close();
+    const restarted = createHermesGatewayChannel({
+      directory: replay.directory, leaseMs: 60_000, maxAttempts: 2, now: () => TASK7_NOW
+    });
+    let replayedCorrections = 0;
+    const restartedExecutor = createGatewayRegisteredReservationChangeExecutor({
+      getConfig: () => ({
+        gasApiUrl: 'https://script.google.com/macros/s/offline-fixture/exec',
+        sheetApiKey: 'offline-fake-only'
+      }),
+      runRegisteredTradeCorrection: async () => { replayedCorrections += 1; },
+      randomUUID: () => 'must-not-create-partial-receipt',
+      now: () => new Date(TASK7_NOW)
+    });
+    const restartedApp = await startTask7Http(createHermesGatewayHttpHandler({
+      token: TASK7_TOKEN, channel: restarted, transport: 'gateway', now: () => TASK7_NOW,
+      executeRegisteredReservationChange: restartedExecutor
+    }));
+    try {
+      const retry = await task7Post(
+        restartedApp,
+        '/hermes/v1/tools/registered-reservation-change',
+        replay.toolBody
+      );
+      assert.equal(retry.status, 200);
+      assert.deepEqual(await retry.json(), receipt);
+      assert.equal(replayedCorrections, 0);
+
+      let recoveryWork = 0;
+      const failedDelivery = createGatewayResultApplicationCoordinator({
+        channel: restarted, getConfig: () => ({}),
+        prepare: async () => { recoveryWork += 1; },
+        apply: async () => { recoveryWork += 1; },
+        finalize: async () => { recoveryWork += 1; },
+        onFailure: applicationFailureNotifier
+      });
+      assert.deepEqual(await failedDelivery.recoverApplicationFailureNotifications(), [{
+        job_id: replay.claim.job_id,
+        notified: false,
+        error: 'gateway_failure_notification_slack_failed: Slack still offline'
+      }]);
+      assert.equal((await restarted.listPendingApplicationFailureNotifications()).length, 1);
+
+      notificationDeliveryAvailable = true;
+      const delivered = createGatewayResultApplicationCoordinator({
+        channel: restarted, getConfig: () => ({}),
+        prepare: async () => { recoveryWork += 1; },
+        apply: async () => { recoveryWork += 1; },
+        finalize: async () => { recoveryWork += 1; },
+        onFailure: applicationFailureNotifier
+      });
+      assert.deepEqual(await delivered.recoverApplicationFailureNotifications(), [{
+        job_id: replay.claim.job_id, notified: true
+      }]);
+      assert.equal((await restarted.listPendingApplicationFailureNotifications()).length, 0);
+      assert.equal(recoveryWork, 0);
+      assert.equal(replayedCorrections, 0);
+      assert.deepEqual(notificationAttempts, [false, false, true]);
+      assert.equal(notificationStatusUpdates.length, 1);
+      assert.equal(notificationStatusUpdates[0].jobId, replay.claim.job_id);
+      assert.equal(notificationStatusUpdates[0].patch.status, 'needs_human_review');
+      assert.equal(notificationStatusUpdates[0].patch.completed_at, '2026-08-27T01:00:01.000Z');
+      assert.deepEqual(
+        notificationStatusUpdates[0].patch.payload.ai_worker_result.failure_follow_up.slackDeliveryResult.results,
+        [{ ok: true, rowId: 'task7-partial-failure-notification', channelId: 'C-OFFLINE', ts: '1.0' }]
+      );
+    } finally {
+      await restartedApp.close();
+    }
+  } finally {
+    await replay.close();
+  }
 });
 
 test('server document executor fences then sends the exact registered supply-only quote and returns a correlated receipt', async () => {

@@ -8,7 +8,11 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
-import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
+import {
+  createHermesGatewayHttpHandler,
+  registeredReservationChangeRequestDigest,
+  validateRegisteredReservationChangeBody
+} from './hermes-gateway-http.mjs';
 
 function canonicalTestJson(value) {
   if (Array.isArray(value)) return value.map(canonicalTestJson);
@@ -40,6 +44,61 @@ function expectedDocumentRequestDigest(body) {
     tax_mode: body.tax_mode
   };
   return createHash('sha256').update(JSON.stringify(canonicalTestJson(payload))).digest('hex');
+}
+
+function expectedRegisteredReservationChangeDigest(body) {
+  const payload = {
+    schema: body.schema,
+    job_id: body.job_id,
+    room_key: body.room_key,
+    room_revision: body.room_revision,
+    lease_id: body.lease_id,
+    mutation: body.mutation
+  };
+  return createHash('sha256').update(JSON.stringify(canonicalTestJson(payload))).digest('hex');
+}
+
+function registeredMutation(overrides = {}) {
+  return {
+    confirmed: true,
+    kind: 'equipment_replace',
+    target_scope: 'registered_trade',
+    trade_id: '260824-008',
+    source_evidence: {
+      customer_request: '기존 렌즈 대신 다른 렌즈를 요청함',
+      staff_confirmation: '직원이 교체 확정함',
+      conversation_revision: 3
+    },
+    expected_period: {
+      start_date: '2026-08-28', start_time: '09:00', end_date: '2026-08-29', end_time: '18:00'
+    },
+    expected_before: [{ schedule_id: '260824-008-07', name: '소니 FE 28-135mm', quantity: 1 }],
+    desired_after: [{ name: '소니 GM 70-200mm II', quantity: 1 }],
+    date_change: null,
+    ...overrides
+  };
+}
+
+function registeredChangeBody(overrides = {}) {
+  return {
+    schema: 'village-registered-reservation-change-request/v1',
+    job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId,
+    mutation: registeredMutation(),
+    ...overrides
+  };
+}
+
+function registeredChangeReceipt(request, overrides = {}) {
+  return {
+    schema: 'village-registered-reservation-change-receipt/v1',
+    receipt_id: 'registered-change-receipt-1',
+    job_id: request.job_id, room_key: request.room_key, room_revision: request.room_revision,
+    status: 'ok', target_scope: 'registered_trade', trade_id: request.mutation.trade_id,
+    mutation_kind: request.mutation.kind, authoritative_result: { verified: true },
+    applied_stages: ['schedule_rows'], attempted_stage: null, customer_reply: 'no_reply',
+    created_at: '2026-08-21T00:00:00.000Z', error: null,
+    ...overrides
+  };
 }
 
 const token = 'test-token-not-a-secret';
@@ -97,6 +156,10 @@ function makeChannel() {
         last_completed_job_id: 'private-job',
         last_consumer_id: 'gateway-test-consumer',
         last_consumer_seen_at: '2026-08-21T00:00:00.000Z',
+        registered_reservation_change: {
+          reserved: 1, completed: 2, failed_human_review: 3, pending_failure_notifications: 4,
+          oldest_reserved_age_ms: 5678, last_success_at: '2026-08-20T23:59:00.000Z'
+        },
         token: 'must-not-leak', prompt: 'must-not-leak', local_context: { secret: true }
       };
     }
@@ -198,6 +261,328 @@ test('Gateway HTTP executes and durably receipts one exact native supply-only qu
     assert.equal(channel.calls.receipt.length, 1);
     assert.equal(channel.calls.receipt[0].schema, 'village-document-receipt/v1');
     assert.equal(channel.calls.receipt[0].operation_id, 'operation-opaque-1');
+  } finally {
+    await app.close();
+  }
+});
+
+test('registered change digest is lease-correlated, complete, and invariant to object key order', () => {
+  const first = registeredChangeBody();
+  const reordered = {
+    mutation: {
+      date_change: null,
+      desired_after: [{ quantity: 1, name: '소니 GM 70-200mm II' }],
+      expected_before: [{ quantity: 1, name: '소니 FE 28-135mm', schedule_id: '260824-008-07' }],
+      expected_period: { end_time: '18:00', end_date: '2026-08-29', start_time: '09:00', start_date: '2026-08-28' },
+      source_evidence: {
+        conversation_revision: 3, staff_confirmation: '직원이 교체 확정함', customer_request: '기존 렌즈 대신 다른 렌즈를 요청함'
+      },
+      trade_id: '260824-008', target_scope: 'registered_trade', kind: 'equipment_replace', confirmed: true
+    },
+    lease_id: leaseId, room_revision: 3, room_key: 'room-1', job_id: 'job-1',
+    schema: 'village-registered-reservation-change-request/v1'
+  };
+  const digest = expectedRegisteredReservationChangeDigest(first);
+  assert.equal(registeredReservationChangeRequestDigest(first), digest);
+  assert.equal(registeredReservationChangeRequestDigest(reordered), digest);
+  for (const changed of [
+    { ...first, schema: 'village-registered-reservation-change-request/v2' },
+    { ...first, job_id: 'job-2' },
+    { ...first, room_key: 'room-2' },
+    { ...first, room_revision: 4 },
+    { ...first, lease_id: 'lease-2' },
+    { ...first, mutation: registeredMutation({ kind: 'equipment_add' }) }
+  ]) {
+    assert.notEqual(registeredReservationChangeRequestDigest(changed), digest);
+  }
+  assert.equal(validateRegisteredReservationChangeBody(first), true);
+  assert.equal(validateRegisteredReservationChangeBody({ ...first, unexpected: true }), false);
+  assert.equal(validateRegisteredReservationChangeBody({
+    ...first, mutation: { ...first.mutation, target_scope: 'pending_request', request_id: 'RQ-260827-001' }
+  }), false);
+});
+
+test('Gateway HTTP publishes one in-flight registered change and coalesces only its exact digest', async () => {
+  const channel = makeChannel();
+  const request = registeredChangeBody();
+  let releaseExecution;
+  const executionGate = new Promise((resolve) => { releaseExecution = resolve; });
+  let markExecutionStarted;
+  const executionStarted = new Promise((resolve) => { markExecutionStarted = resolve; });
+  let executions = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeRegisteredReservationChange: async (body) => {
+      executions += 1;
+      markExecutionStarted();
+      await executionGate;
+      return registeredChangeReceipt(body, { receipt_id: 'registered-concurrent-receipt' });
+    }
+  }));
+  try {
+    const post = (body) => gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const firstPromise = post(request);
+    await executionStarted;
+    const duplicatePromise = post(request);
+    const conflicting = await post({
+      ...request,
+      mutation: registeredMutation({ desired_after: [{ name: '다른 렌즈', quantity: 1 }] })
+    });
+    assert.equal(conflicting.status, 409);
+    assert.deepEqual(await conflicting.json(), { error: 'registered_reservation_change_conflict' });
+    releaseExecution();
+    const [first, duplicate] = await Promise.all([firstPromise, duplicatePromise]);
+    assert.deepEqual([first.status, duplicate.status], [200, 200]);
+    assert.deepEqual(await duplicate.json(), await first.json());
+    assert.equal(executions, 1);
+    assert.equal(channel.calls.reservation.length, 1);
+    assert.equal(channel.calls.receipt.length, 1);
+  } finally {
+    releaseExecution?.();
+    await app.close();
+  }
+});
+
+test('Gateway HTTP executes and persists one exact fenced registered reservation change receipt', async () => {
+  const channel = makeChannel();
+  const request = registeredChangeBody();
+  let executions = 0;
+  let receivedFence = null;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeRegisteredReservationChange: async (body, { assertCurrentClaim, operationFence }) => {
+      executions += 1;
+      receivedFence = operationFence;
+      assert.deepEqual(body, request);
+      await assertCurrentClaim();
+      return registeredChangeReceipt(body);
+    }
+  }));
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request)
+    });
+    assert.equal(response.status, 200);
+    const receipt = await response.json();
+    const requestDigest = expectedRegisteredReservationChangeDigest(request);
+    assert.equal(executions, 1);
+    assert.deepEqual(channel.calls.reservation, [{
+      tool: 'registered_reservation_change', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+      lease_id: leaseId, request_digest: requestDigest
+    }]);
+    assert.equal(receivedFence.operation_id, 'operation-opaque-1');
+    assert.deepEqual(receipt, {
+      ...registeredChangeReceipt(request), lease_id: leaseId, request_digest: requestDigest,
+      operation_id: 'operation-opaque-1'
+    });
+    assert.deepEqual(channel.calls.receipt, [receipt]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP reuses a registered change receipt for a semantic key-order retry', async () => {
+  const channel = makeChannel();
+  const request = registeredChangeBody();
+  const reordered = {
+    ...request,
+    mutation: {
+      ...request.mutation,
+      source_evidence: {
+        conversation_revision: 3,
+        staff_confirmation: request.mutation.source_evidence.staff_confirmation,
+        customer_request: request.mutation.source_evidence.customer_request
+      },
+      expected_before: [{ quantity: 1, name: '소니 FE 28-135mm', schedule_id: '260824-008-07' }]
+    }
+  };
+  let executions = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeRegisteredReservationChange: async (body) => {
+      executions += 1;
+      return registeredChangeReceipt(body);
+    }
+  }));
+  try {
+    const post = (body) => gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const first = await post(request);
+    const second = await post(reordered);
+    assert.deepEqual([first.status, second.status], [200, 200]);
+    assert.deepEqual(await second.json(), await first.json());
+    assert.equal(executions, 1);
+    assert.equal(channel.calls.reservation.length, 1);
+    assert.equal(channel.calls.receipt.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP conflicts a different typed mutation under the same registered change claim', async () => {
+  const channel = makeChannel();
+  const request = registeredChangeBody();
+  let executions = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeRegisteredReservationChange: async (body) => {
+      executions += 1;
+      return registeredChangeReceipt(body);
+    }
+  }));
+  try {
+    const post = (body) => gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    assert.equal((await post(request)).status, 200);
+    const conflict = await post({
+      ...request,
+      mutation: registeredMutation({
+        desired_after: [{ name: '소니 GM 24-70mm II', quantity: 1 }]
+      })
+    });
+    assert.equal(conflict.status, 409);
+    assert.deepEqual(await conflict.json(), { error: 'registered_reservation_change_conflict' });
+    assert.equal(executions, 1);
+    assert.equal(channel.calls.reservation.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP rejects an expired registered change lease before reservation or execution', async () => {
+  const channel = makeChannel();
+  channel.setJob({ lease_expires_at_ms: 999 });
+  let executions = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway', now: () => 1000,
+    executeRegisteredReservationChange: async () => { executions += 1; }
+  }));
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(registeredChangeBody())
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: 'stale_lease' });
+    assert.equal(executions, 0);
+    assert.equal(channel.calls.reservation.length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP persists exact late registered change evidence after expiry or same-room supersession', async () => {
+  await withRealGatewayChannel(async ({ channel, clock }) => {
+    const claims = {};
+    for (const scenario of ['expiry', 'supersession']) {
+      await channel.enqueue({ job_id: `registered-${scenario}`, room_key: `registered-${scenario}-room`, room_revision: 1 });
+      claims[scenario] = await channel.claim({ consumerId: 'gateway-registered-change', waitMs: 0 });
+    }
+    let executions = 0;
+    const app = await start(createHermesGatewayHttpHandler({
+      token, channel, transport: 'gateway', now: () => clock.now,
+      executeRegisteredReservationChange: async (request, { operationFence }) => {
+        executions += 1;
+        if (request.job_id === claims.expiry.job_id) {
+          clock.now += 1_000;
+        } else {
+          await channel.enqueue({
+            job_id: 'registered-superseding-turn', room_key: request.room_key, room_revision: request.room_revision + 1
+          });
+        }
+        return registeredChangeReceipt(request, {
+          receipt_id: `${request.job_id}-receipt`, operation_id: operationFence.operation_id
+        });
+      }
+    }));
+    try {
+      for (const claim of [claims.supersession, claims.expiry]) {
+        const response = await gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(registeredChangeBody({
+            job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+            lease_id: claim.lease_id,
+            mutation: registeredMutation({
+              source_evidence: {
+                ...registeredMutation().source_evidence,
+                conversation_revision: claim.room_revision
+              }
+            })
+          }))
+        });
+        assert.equal(response.status, 200);
+        const receipt = await response.json();
+        const persisted = await channel.get(claim.job_id);
+        assert.equal(persisted.tool_operation.operation_id, receipt.operation_id);
+        assert.equal(persisted.tool_operation.state, 'completed');
+        assert.equal(persisted.tool_receipts.length, 1);
+      }
+      assert.equal(executions, 2);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+test('Gateway HTTP returns registered change unresolved after restart without replay', async () => {
+  await withRealGatewayChannel(async ({ channel, clock, directory }) => {
+    await channel.enqueue({ job_id: 'registered-unresolved', room_key: 'registered-unresolved-room', room_revision: 1 });
+    const claim = await channel.claim({ consumerId: 'gateway-registered-change', waitMs: 0 });
+    const request = registeredChangeBody({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision, lease_id: claim.lease_id,
+      mutation: registeredMutation({
+        source_evidence: { ...registeredMutation().source_evidence, conversation_revision: claim.room_revision }
+      })
+    });
+    await channel.reserveToolOperation({
+      tool: 'registered_reservation_change', job_id: claim.job_id, room_key: claim.room_key,
+      room_revision: claim.room_revision, lease_id: claim.lease_id,
+      request_digest: expectedRegisteredReservationChangeDigest(request)
+    });
+    const restarted = createHermesGatewayChannel({ directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now });
+    const review = await restarted.get(claim.job_id);
+    assert.equal(review.state, 'failed');
+    assert.equal(review.human_review_required, true);
+    assert.equal(review.error.type, 'confirmation_operation_unresolved');
+    assert.equal(review.error.operation_state, 'reserved');
+    assert.equal(review.failure_notification.state, 'pending');
+    assert.equal(await restarted.claim({ consumerId: 'gateway-after-restart', waitMs: 0 }), null);
+    let executions = 0;
+    const app = await start(createHermesGatewayHttpHandler({
+      token, channel: restarted, transport: 'gateway', now: () => clock.now,
+      executeRegisteredReservationChange: async () => { executions += 1; }
+    }));
+    try {
+      const response = await gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request)
+      });
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { error: 'registered_reservation_change_unresolved' });
+      assert.equal(executions, 0);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+test('Gateway HTTP gateway_no_send rejects registered changes before reservation or execution', async () => {
+  const channel = makeChannel();
+  let executions = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway_no_send',
+    executeRegisteredReservationChange: async () => { executions += 1; }
+  }));
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(registeredChangeBody())
+    });
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { error: 'writes_disabled' });
+    assert.equal(channel.calls.reservation.length, 0);
+    assert.equal(executions, 0);
   } finally {
     await app.close();
   }
@@ -1013,7 +1398,11 @@ test('Gateway HTTP status exposes only gateway-safe queue health', async () => {
       },
       application_counts: { pending: 1, claimed: 0, applying: 0, applied: 0, finalized: 2, failed: 1 },
       failure_notification_counts: { pending: 2, delivered: 3 },
-      unnotified_application_failures: 1
+      unnotified_application_failures: 1,
+      registered_reservation_change: {
+        reserved: 1, completed: 2, failed_human_review: 3, pending_failure_notifications: 4,
+        oldest_reserved_age_ms: 5678, last_success_at: '2026-08-20T23:59:00.000Z'
+      }
     });
   } finally {
     await app.close();

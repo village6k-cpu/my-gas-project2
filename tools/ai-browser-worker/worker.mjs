@@ -18,6 +18,7 @@ import {
   buildFollowUpCaseLifecycle,
   mergeFollowUpCaseLifecycle
 } from './follow-up-case-lifecycle.mjs';
+import { validateStaffConfirmedMutation } from './staff-confirmed-mutation.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -645,20 +646,27 @@ export function buildHermesPrompt(job, options = {}) {
   const sheetExecutionText = options.gatewayConfirmationToolAvailable
     ? `GATEWAY NATIVE SHEET EXECUTION CONTRACT:
 - In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
-- If your complete business decision has should_write_to_sheet=true, call village_confirmation_request 반드시 먼저 호출하고, only then emit FINAL_JSON.
-- Call it with the 완성된 decision. For should_write_to_sheet=true, include the complete sheet_row_candidate so the tool can write exactly that decision.
+- If a complete genuinely new or exact typed pending decision has should_write_to_sheet=true, call village_confirmation_request 반드시 먼저 호출하고, only then emit FINAL_JSON.
+- For that authorized write, call it with the 완성된 decision and complete sheet_row_candidate.
 - When existing_confirm_request_ids names an unchanged existing RQ, call village_confirmation_request once with should_write_to_sheet=false to 검증 기존 RQ 실재 여부; never pre-verify a write.
-- For a pending-RQ addition, make one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only"; the executor verifies the exact RQ and merges its authoritative full plan inside that same operation. Never spend the operation fence on a should_write_to_sheet=false pre-read.
-- For a pending-RQ replacement, make one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ in that operation.
+- Typed pending-RQ addition: one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only"; the executor verifies the exact RQ and merges the authoritative plan. Never pre-read with the operation fence.
+- Typed pending-RQ replacement: one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ.
+- A customer request without a later staff confirmation is read-only: set staff_confirmed_mutation=null and call no mutation tool.
+- For target_scope="pending_request" and kind="equipment_add", call village_confirmation_request once with additions_only. For pending_request equipment_remove, equipment_replace, equipment_quantity_change, or date_time_change, call village_confirmation_request once with replace_full_plan.
+- Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use only village_registered_reservation_change exactly once before FINAL_JSON. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
+- A registered_trade mutation must not call village_confirmation_request and must never claim that a new RQ is the registered change.
+- Do not parse RQ or trade IDs from prose. Only exact typed fields backed by authoritative lookups count.
+- For ambiguous target, catalog, or staff evidence: set staff_confirmed_mutation=null, call no mutation tool, make no customer success claim, and create one urgent owner-review follow-up.
+- blocked, failed, partial_success, or contradictory registered readback is draft-only/no-send owner review. Never call either mutation tool again to replay it.
 - For an explicit registered-trade quote send, call village_document_send with the exact trade_id before FINAL_JSON. Choose tax_mode="supply_only" only for an explicit VAT-exclusive request; otherwise use "vat_included".
 - A successful correlated village_document_send receipt is the only delivery authority. Do not promise that a quote was or will be sent without that receipt; on tool failure use draft_only + owner review.
-- If that verification says an existing RQ was not found and the reservation remains unregistered, correct the decision to should_write_to_sheet=true and call the tool again with the complete sheet row before finishing.
-- A no_action receipt is not 입력 성공이 아니다. If the row still needs to be written, correct the decision and call the tool with should_write_to_sheet=true before finishing.
+- If verification of an existing RQ returns an authoritative no-record result, retry a write only after setting existing_confirm_request_ids=[], reservation_inquiry.already_registered=false, and recording an explicit genuinely-new reclassification; only then may should_write_to_sheet=true. If any condition is missing or ambiguous, remain read-only/invalid and do not call the tool again.
+- A no_action receipt is not 입력 성공이 아니다 and never authorizes a retry. A later write requires an authoritative no-record result, existing_confirm_request_ids=[], reservation_inquiry.already_registered=false, and explicit genuinely-new reclassification before should_write_to_sheet=true; otherwise remain read-only/invalid and do not call any mutation tool again.
 - Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
     : `SHEETS TOOL AVAILABLE VIA GAS API:
 - The outer worker owns the configured GAS endpoint; Hermes does not need its raw URL or credential.
 - Target sheet for reservation inquiry candidates: 확인요청
-- Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true. Be 적극적: if the latest customer turn is a reservation-format request with enough fields for a review row, set should_write_to_sheet=true.
+- Outer worker writes only a genuinely new reservation-format request with no registered trade/RQ when FINAL_JSON says should_write_to_sheet=true. Existing records require the typed route.
 - Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.`;
   return `AI-first Kakao rental-shop worker task.
 
@@ -670,12 +678,13 @@ CRITICAL RULES:
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
 - Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
+- 기존 등록/기존 RQ customer-only 변경은 read-only다. 정확한 이후 직원 확인과 일치하는 typed staff_confirmed_mutation만 허용하며, registered changes use the native route.
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때 근거가 확보된 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
 - 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 일반 가격·환불정책·파손규정·세금 안내는 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
 - 예외(항상 사장 확인): 고객이 현재 대여/수령 장비의 기스·흠집·스크래치·파손·고장·작동이상·분실을 알린 실제 사고, 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의는 근거가 있어도 auto_send 금지. 계속 사용/그대로 수령/교체/배상 여부를 임의로 승인하지 말고 draft_only + owner_review_required=true + urgent damage_repair로 올린다.
 - follow_up_items의 alertLevel은 네 판단이다. 사장을 깨워야 하거나 즉시 확인하지 않으면 고객·금전·장비 피해가 커지는 사건만 "p0"로 하고 구체적인 alertReason을 쓴다. 단순히 priority가 urgent이거나 특정 단어가 있다는 이유만으로 p0로 올리지 않는다. 나머지는 "none"이다.
-- 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
-- Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
+- 예약 확정, 재고 가능 단정, 가격 확정은 근거 없이 단정하지 않는다. Genuinely new 예약형식만 확인요청 입력을 적극 수행한다.
+- Google Sheets API 입력에서 충분한 genuinely new 예약형식은 should_write_to_sheet=true가 기본이다.
 
 CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 최근 1시간 내 새 메시지 후보라도 반드시 채팅방을 열고, 화면에서 보이는 메시지 + 가능하면 최근 24시간 맥락을 확인한다.
@@ -715,7 +724,7 @@ REPLY TONE POLICY:
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. READ-ONLY VILLAGE LIVE LOOKUP에 자동 제공된 정확 장비명 카탈로그 equipment_catalog.exact_names 전체를 먼저 비교하고, 매칭 가능하면 그 문자열을 한 글자도 바꾸지 말고 exact_name_from_equipment_catalog와 F열 item에 쓴다.
-- 세트/장비마스터를 조회한다. 신규="full_plan"+전체 목록, 기존 추가/증가="additions_only"+delta. 미등록 RQ 장비 삭제/교체="replace_full_plan"+complete final plan. Do not repeat existing equipment in additions_only.
+- 세트/장비마스터를 조회한다. equipment_write_mode: genuinely new="full_plan"+전체; typed pending 추가/증가="additions_only"+delta; typed pending 삭제/교체/감소="replace_full_plan"+complete final plan. Do not repeat existing equipment in additions_only.
 - 세트 옵션은 set_component_selections로만 지정: 600X 젬볼 => 어퓨쳐 600X/소프트박스/젬볼 90. Never add set options as top-level equipment.
 - 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
 - RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
@@ -728,7 +737,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 할인유형: 고객DB I열이 카톡보다 우선. DB 값(학생/개인사업자/프리랜서/단골/제휴/일반)이 있으면 sheet_row_candidate.discount_type에 그대로 쓰고, 없을 때만 카톡에서 학생/개사프/일반 추론.
 - 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리한다. 없거나 동명이인이어도 확인요청 생성은 막지 말고 sheet_row_candidate.phone=""로 둔다. 연락처는 등록 단계 필수라 follow_up/답장에서는 연락처 요청을 남긴다.
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
-- 예약형식이면 확인요청 입력이 기본이다. 장비마다 matched+정확 카탈로그명 또는 explicit unmatched 판정이 필요하다. 중복확인/연락처 없음은 입력 차단 사유가 아니라 follow_up/evidence 대상이다. F열 item은 matched면 정확 카탈로그명, unmatched면 고객 원문을 넣고 Q/R에는 AI 설명을 넣지 않는다. 연락처는 있으면 넣고 없으면 L열 공란으로 둔다.
+- 기존 레코드가 없는 genuinely new 예약형식만 확인요청 입력이 기본이다. 장비마다 matched+정확 카탈로그명 또는 explicit unmatched가 필요하다. 중복확인/연락처 없음은 신규 입력의 차단 사유가 아니다. F열은 matched면 정확명, unmatched면 고객 원문; Q/R에는 AI 설명 금지. 연락처 없으면 L열 공란.
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
 - 확인요청은 보수적인 정시 경계만 쓴다. 반출은 해당 시각의 시(hour)로 내림(12:59→12:00), 반납은 다음 시로 올림(18:01→19:00), 정시 HH:00은 그대로 둔다. 날짜와 함께 적힌 \`27일 24:00\`은 다음 날인 \`28일 00:00\`으로 정규화한다. 이 결과 반납이 반출 이후가 아니면 추측해서 쓰지 말고 확인 질문/후속조치를 만든다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
@@ -756,9 +765,9 @@ TASK:
 9-1. For FAQ/procedure/policy/components auto_send, use CURRENT_CONFIRMED_POLICY first, otherwise call RAG and fill rag_usage. Outer worker verifies current-policy match or high-confidence retrieved support. Never use RAG for current stock/booking/schedule truth.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 10-1. Doc types은 서류 생성/발송/발행만. 확인요청/예약/가용/스케줄/파손/반납/정산은 견적서 단어가 섞여도 doc 아님; primary item에 합친다.
-11. For reservation-format requests, missing phone is NOT a sheet-write blocker. Search 고객DB by name; if a unique DB phone is found, use it, otherwise leave sheet_row_candidate.phone="" and still write 확인요청. discount_type: 고객DB I열 outranks Kakao; use DB 학생/개인사업자/프리랜서/단골/제휴/일반 when present, otherwise infer from Kakao. Missing equipment/duplicate lookup/phone goes to follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or an unchanged duplicate. An existing booking with newly added or increased equipment is not a duplicate. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; phone may still be blank.
+11. For genuinely new reservation-format requests with no registered trade/RQ, missing phone is NOT a sheet-write blocker. Search 고객DB by name; use one exact phone or leave phone="". 고객DB I열 discount_type outranks Kakao. Put missing equipment/duplicate lookup/phone in follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or unchanged duplicate. If newest is staff/outbound, write only staff-confirmed-unregistered.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
-11-2. Multiple/revised equipment: separate top-level entries. New booking="full_plan"+complete plan; registered booking or pending-RQ additions="additions_only"+delta; pending-RQ removals/replacements/reductions="replace_full_plan"+complete final plan. Never replace a registered booking. Set plan_complete=true only after reconciling that write set; otherwise no write + one review follow-up.
+11-2. Separate top-level equipment. Genuinely new="full_plan"+complete plan; exact typed pending additions="additions_only"+delta; exact typed pending remove/replace/reduce="replace_full_plan"+final plan. Registered changes use the native route, never equipment_write_mode. Otherwise no write + one review.
 11-3. sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM. Village uses literal 24-hour time: 오전/오후 표시가 없는 \`5시\` means \`05:00\` and \`17시\` means \`17:00\`; only explicit \`오후 5시\` means \`17:00\`. 맥락을 추측해 12시간을 더하지 마라. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If the normalized return is not later than pickup, set should_write_to_sheet=false and create one review follow-up instead of guessing.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
@@ -805,6 +814,7 @@ The JSON schema:
   "latest_staff_message": string | null,
   "visible_messages_used": [{ "sender": string, "message": string, "time": string | null }],
   "existing_confirm_request_ids": ["RQ-YYMMDD-NNN"],
+  "staff_confirmed_mutation": object | null,
   "rag_usage": { "used": boolean, "required_for_auto_send": boolean, "question": string | null, "logId": string | null, "confidence": string | null, "knowledgeSource": string | null, "usedSources": array, "applied_to_reply": boolean, "reason": string },
   "follow_up_items": [
     {
@@ -981,8 +991,101 @@ function replyAlreadyDelivered(decision = {}) {
   return reply.alreadyDelivered ?? reply.already_delivered;
 }
 
-export function validateAiDecisionContract(decision = {}) {
+function normalizedStaffMutationPlan(rows, nameField) {
+  if (!Array.isArray(rows)) return null;
+  return rows.map((row) => ({
+    name: text(row?.[nameField]).trim(),
+    quantity: Number(row?.quantity)
+  }));
+}
+
+function staffConfirmedMutationDecisionErrors(decision, mutation, options = {}) {
+  if (mutation === null) return [];
   const errors = [];
+  const roomRevision = options?.roomRevision;
+  const validation = validateStaffConfirmedMutation(mutation, { roomRevision });
+  if (!validation.valid) {
+    return validation.errors.map((error) => `staff_confirmed_mutation.${error}`);
+  }
+  const inquiry = decision?.reservation_inquiry && typeof decision.reservation_inquiry === 'object'
+    ? decision.reservation_inquiry
+    : {};
+  const safetyChecks = decision?.safety_checks && typeof decision.safety_checks === 'object'
+    ? decision.safety_checks
+    : {};
+  const existingIds = Array.isArray(decision?.existing_confirm_request_ids)
+    ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
+    : [];
+
+  if (mutation.target_scope === 'registered_trade') {
+    if (decision.should_write_to_sheet !== false) {
+      errors.push('registered staff_confirmed_mutation requires should_write_to_sheet=false');
+    }
+    if (inquiry.already_registered !== true) {
+      errors.push('registered staff_confirmed_mutation requires reservation_inquiry.already_registered=true');
+    }
+    if (safetyChecks.duplicate_checked_contract_master !== true
+      || safetyChecks.duplicate_checked_schedule_detail !== true) {
+      errors.push('registered staff_confirmed_mutation requires authoritative contract and schedule checks');
+    }
+    if (safetyChecks.no_auto_reply_sent !== true) {
+      errors.push('registered staff_confirmed_mutation requires safety_checks.no_auto_reply_sent=true');
+    }
+    if (existingIds.length > 0) {
+      errors.push('registered staff_confirmed_mutation must not claim a confirmation request ID');
+    }
+    return errors;
+  }
+
+  if (decision.should_write_to_sheet !== true) {
+    errors.push('pending staff_confirmed_mutation requires should_write_to_sheet=true');
+  }
+  if (inquiry.already_registered === true) {
+    errors.push('pending staff_confirmed_mutation requires reservation_inquiry.already_registered=false');
+  }
+  if (existingIds.length !== 1 || existingIds[0] !== mutation.request_id) {
+    errors.push('pending staff_confirmed_mutation requires one exact matching existing_confirm_request_ids entry');
+  }
+  const expectedMode = mutation.kind === 'equipment_add' ? 'additions_only' : 'replace_full_plan';
+  if (text(decision?.sheet_row_candidate?.equipment_write_mode).trim() !== expectedMode) {
+    errors.push(`pending ${mutation.kind} requires sheet_row_candidate.equipment_write_mode=${expectedMode}`);
+  }
+  const desiredPlan = normalizedStaffMutationPlan(mutation.desired_after, 'name');
+  const sheetPlan = normalizedStaffMutationPlan(decision?.sheet_row_candidate?.equipment, 'item');
+  if (!sameGatewayDecisionValue(desiredPlan, sheetPlan)) {
+    errors.push('pending staff_confirmed_mutation desired_after must equal the normalized sheet_row_candidate equipment plan');
+  }
+  return errors;
+}
+
+function existingRecordWriteGateErrors(decision, options = {}) {
+  if (decision?.should_write_to_sheet !== true) return [];
+  const inquiry = decision?.reservation_inquiry && typeof decision.reservation_inquiry === 'object'
+    ? decision.reservation_inquiry
+    : {};
+  const existingIds = Array.isArray(decision?.existing_confirm_request_ids)
+    ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
+    : [];
+  if (inquiry.already_registered === true) {
+    return ['existing registered booking writes require the typed registered mutation route with should_write_to_sheet=false'];
+  }
+  if (!existingIds.length) return [];
+  const mutation = decision?.staff_confirmed_mutation;
+  if (!mutation || typeof mutation !== 'object' || Array.isArray(mutation)) {
+    return ['existing pending RQ writes require an exact valid staff_confirmed_mutation'];
+  }
+  const mutationErrors = staffConfirmedMutationDecisionErrors(decision, mutation, options);
+  if (mutation.target_scope !== 'pending_request' || mutationErrors.length > 0) {
+    return mutationErrors.length > 0
+      ? mutationErrors
+      : ['existing pending RQ writes require an exact valid staff_confirmed_mutation'];
+  }
+  return [];
+}
+
+export function validateAiDecisionContract(decision = {}, options = {}) {
+  const errors = [];
+  const roomRevision = options?.roomRevision;
   if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
     return { valid: false, errors: ['decision must be an object'] };
   }
@@ -1008,6 +1111,7 @@ export function validateAiDecisionContract(decision = {}) {
   }
 
   if (decision.should_write_to_sheet === true) {
+    errors.push(...existingRecordWriteGateErrors(decision, { roomRevision }));
     errors.push(...sheetSafetyValidationErrors(decision));
     const row = decision.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'
       ? decision.sheet_row_candidate
@@ -1233,6 +1337,10 @@ export function validateAiDecisionContract(decision = {}) {
         }
       });
     }
+  }
+
+  if (Object.hasOwn(decision, 'staff_confirmed_mutation')) {
+    errors.push(...staffConfirmedMutationDecisionErrors(decision, decision.staff_confirmed_mutation, { roomRevision }));
   }
 
   return { valid: errors.length === 0, errors };
@@ -1636,6 +1744,19 @@ export function buildSheetAppendPayload(decision, options = {}) {
     장비명원문보존: true,
     장비: equipment.map((item) => ({ 이름: item.item, 수량: item.quantity }))
   };
+  const pendingMutation = decision?.staff_confirmed_mutation?.target_scope === 'pending_request'
+    ? decision.staff_confirmed_mutation
+    : null;
+  if (pendingMutation) {
+    args.staff_confirmed_pending_mutation = {
+      target_scope: 'pending_request',
+      request_id: text(pendingMutation.request_id).trim(),
+      expected_before: pendingMutation.expected_before.map((item) => ({
+        name: text(item?.name).trim(),
+        quantity: Number(item?.quantity)
+      }))
+    };
+  }
   const setComponentSelections = (Array.isArray(row.set_component_selections) ? row.set_component_selections : [])
     .map((selection) => ({
       setItem: text(selection?.set_item).trim(),
@@ -1652,8 +1773,9 @@ export function buildSheetAppendPayload(decision, options = {}) {
   };
 }
 
-export function validateVillageConfirmationExecutionDecision(decision = {}) {
-  const validation = validateAiDecisionContract(decision);
+export function validateVillageConfirmationExecutionDecision(decision = {}, options = {}) {
+  const roomRevision = options?.roomRevision;
+  const validation = validateAiDecisionContract(decision, { roomRevision });
   if (!validation.valid) return validation;
   if (decision.should_write_to_sheet === true) {
     const planned = Array.isArray(decision?.sheet_row_candidate?.equipment)
@@ -5029,14 +5151,76 @@ function mapConfirmRequestSearchDataToSheetResult(data = {}, reqID = '') {
       수량: Math.max(1, Number.parseInt(text(row[6]).trim(), 10) || 1)
     }));
   const exactReqID = matchingRows.length ? reqID : '';
+  const firstRow = matchingRows[0] || [];
+  const requestPeriod = matchingRows.length
+    ? normalizeConfirmRequestWindowForSheet({
+        start_date: text(firstRow[1]).trim(),
+        pickup_time: text(firstRow[2]).trim(),
+        end_date: text(firstRow[3]).trim(),
+        return_time: text(firstRow[4]).trim()
+      })
+    : null;
   return {
     success: true,
     duplicate: Boolean(exactReqID),
     reqID: exactReqID,
     results: normalizeAvailabilityResultRows(resultRows),
     topLevelEquipment,
+    requestPeriod,
     source: 'existing_confirm_request_lookup',
     data
+  };
+}
+
+function canonicalPendingMutationPlan(rows = [], { nameField = 'name', quantityField = 'quantity' } = {}) {
+  const totals = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const name = text(row?.[nameField]).normalize('NFKC').trim();
+    const quantity = Number(row?.[quantityField]);
+    if (!name || !Number.isInteger(quantity) || quantity <= 0) return null;
+    totals.set(name, (totals.get(name) || 0) + quantity);
+  }
+  if (!totals.size) return null;
+  return [...totals.entries()]
+    .map(([name, quantity]) => ({ name, quantity }))
+    .sort((left, right) => left.name.localeCompare(right.name, 'ko-KR'));
+}
+
+function attachStaffConfirmedPendingFence(sheetPayload, decision, existingRequestResult) {
+  const mutation = decision?.staff_confirmed_mutation;
+  if (mutation?.target_scope !== 'pending_request') return { ok: true, payload: sheetPayload };
+  const actualId = text(existingRequestResult?.reqID).trim().toUpperCase();
+  const expectedId = text(mutation.request_id).trim().toUpperCase();
+  const expectedBefore = canonicalPendingMutationPlan(mutation.expected_before);
+  const actualBefore = canonicalPendingMutationPlan(existingRequestResult?.topLevelEquipment, {
+    nameField: '이름', quantityField: '수량'
+  });
+  const expectedPeriod = existingRequestResult?.requestPeriod;
+  if (!sheetPayload || !actualId || actualId !== expectedId || !expectedBefore || !actualBefore
+    || !sameGatewayDecisionValue(expectedBefore, actualBefore) || !expectedPeriod) {
+    return {
+      ok: false,
+      payload: null,
+      error: '직원 확정 변경의 exact RQ baseline을 권위 시트에서 검증하지 못해 입력을 중단했습니다.'
+    };
+  }
+  return {
+    ok: true,
+    payload: {
+      ...sheetPayload,
+      args: {
+        ...sheetPayload.args,
+        staff_confirmed_pending_mutation: {
+          ...sheetPayload.args.staff_confirmed_pending_mutation,
+          expected_period: {
+            start_date: expectedPeriod.start_date,
+            start_time: expectedPeriod.pickup_time,
+            end_date: expectedPeriod.end_date,
+            end_time: expectedPeriod.return_time
+          }
+        }
+      }
+    }
   };
 }
 
@@ -8850,7 +9034,21 @@ export async function executeVillageConfirmationRequest({
     error
   });
 
-  const validation = (dependencies.validateAiDecisionContract || validateVillageConfirmationExecutionDecision)(decision);
+  const existingRecordGateErrors = existingRecordWriteGateErrors(decision, {
+    roomRevision: requestedRevision
+  });
+  if (existingRecordGateErrors.length) {
+    return buildReceipt({
+      status: 'failed',
+      error: confirmationReceiptError('invalid_decision', 'AI decision contract validation failed', {
+        validation_errors: existingRecordGateErrors
+      })
+    });
+  }
+
+  const validation = (dependencies.validateAiDecisionContract || validateVillageConfirmationExecutionDecision)(decision, {
+    roomRevision: requestedRevision
+  });
   if (!validation?.valid) {
     return buildReceipt({
       status: 'failed',
@@ -8943,6 +9141,7 @@ export async function executeVillageConfirmationRequest({
       let existingRequestForMerge = null;
       if (executedDecision?.reservation_inquiry?.already_registered !== true) {
         existingRequestForMerge = await fetchExistingImpl(config, executedDecision, []);
+        existingRequestResult = existingRequestForMerge;
       }
       const merged = mergeAdditionsOnlySheetPayloadWithExistingRequest(sheetPayload, executedDecision, existingRequestForMerge);
       if (!merged.ok) {
@@ -8954,6 +9153,19 @@ export async function executeVillageConfirmationRequest({
         };
       }
       sheetPayload = merged.payload;
+    }
+
+    if (executedDecision?.staff_confirmed_mutation?.target_scope === 'pending_request' && sheetPayload) {
+      const fenced = attachStaffConfirmedPendingFence(sheetPayload, executedDecision, existingRequestResult);
+      if (!fenced.ok) {
+        sheetResult = {
+          success: false,
+          error: fenced.error,
+          error_type: 'staff_confirmed_pending_baseline_verification_failed',
+          recoverable: false
+        };
+      }
+      sheetPayload = fenced.payload;
     }
 
     if (executedDecision.should_write_to_sheet === true && !sheetPayload && !sheetResult) {
@@ -9133,12 +9345,245 @@ function exactTrustedDocumentReceipt(receipt, { jobId, roomKey, roomRevision }) 
     || (receipt.error && typeof receipt.error === 'object' && !Array.isArray(receipt.error));
 }
 
+function exactTrustedRegisteredReservationChangeReceipt(receipt, { jobId, roomKey, roomRevision }) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return false;
+  if (receipt.schema !== 'village-registered-reservation-change-receipt/v1') return false;
+  if (!text(receipt.receipt_id).trim()
+    || !text(receipt.lease_id).trim()
+    || !/^[a-f0-9]{64}$/i.test(text(receipt.request_digest).trim())
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text(receipt.operation_id).trim())) return false;
+  if (receipt.job_id !== jobId || receipt.room_key !== roomKey || receipt.room_revision !== roomRevision) return false;
+  if (receipt.target_scope !== 'registered_trade' || !/^\d{6}-\d{3}$/.test(text(receipt.trade_id).trim())) return false;
+  if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change']
+    .includes(text(receipt.mutation_kind).trim())) return false;
+  if (!['ok', 'blocked', 'failed', 'partial_success'].includes(text(receipt.status).trim())) return false;
+  if (!Array.isArray(receipt.applied_stages)
+    || receipt.applied_stages.some((stage) => !text(stage).trim())) return false;
+  if (!(receipt.attempted_stage === null || text(receipt.attempted_stage).trim())) return false;
+  if (receipt.customer_reply !== 'no_reply' || !validGatewayReceiptTimestamp(receipt.created_at)) return false;
+  const authoritativeResult = receipt.authoritative_result;
+  if (!(authoritativeResult === null
+    || (authoritativeResult && typeof authoritativeResult === 'object' && !Array.isArray(authoritativeResult)))) return false;
+  const validError = receipt.error === null || typeof receipt.error === 'string'
+    || (receipt.error && typeof receipt.error === 'object' && !Array.isArray(receipt.error));
+  if (!validError) return false;
+  if (receipt.status === 'ok') return authoritativeResult !== null && receipt.error === null;
+  return receipt.error !== null;
+}
+
+function registeredMutationDeltaQuantities(rows) {
+  const quantities = {};
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const name = text(row?.name).trim();
+    const quantity = Number(row?.quantity);
+    if (!name || !Number.isInteger(quantity) || quantity <= 0) return null;
+    quantities[name] = (quantities[name] || 0) + quantity;
+  }
+  return quantities;
+}
+
+function registeredAuthoritativeSnapshot(value, { tradeId, requireLedger }) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const contract = value.contract;
+  const schedule = value.schedule;
+  const ledger = value.ledger;
+  if (!contract || typeof contract !== 'object' || Array.isArray(contract)
+    || !schedule || typeof schedule !== 'object' || Array.isArray(schedule)
+    || (requireLedger && (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)))) return null;
+  const period = {
+    startDate: text(contract.startDate).trim(),
+    startTime: text(contract.startTime).trim(),
+    endDate: text(contract.endDate).trim(),
+    endTime: text(contract.endTime).trim()
+  };
+  const periodKey = `${period.startDate}|${period.startTime}|${period.endDate}|${period.endTime}`;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(period.startDate)
+    || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(period.startTime)
+    || !/^\d{4}-\d{2}-\d{2}$/.test(period.endDate)
+    || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(period.endTime)
+    || !Array.isArray(schedule.periods)
+    || !sameGatewayDecisionValue(schedule.periods, [periodKey])
+    || !Array.isArray(schedule.rows)) return null;
+  const rows = [];
+  const rowsById = new Map();
+  const calculatedTopLevel = {};
+  for (const raw of schedule.rows) {
+    const row = {
+      scheduleId: text(raw?.scheduleId).trim(),
+      setName: text(raw?.setName).trim(),
+      name: text(raw?.name).trim(),
+      qty: Number(raw?.qty),
+      isComponent: raw?.isComponent
+    };
+    const match = /^(\d{6}-\d{3})-\d{2,}$/.exec(row.scheduleId);
+    const derivedIsComponent = Boolean(row.setName) && row.setName !== row.name;
+    if (!match || match[1] !== tradeId || rowsById.has(row.scheduleId)
+      || !row.name || !Number.isInteger(row.qty) || row.qty <= 0
+      || typeof row.isComponent !== 'boolean' || row.isComponent !== derivedIsComponent) return null;
+    rows.push(row);
+    rowsById.set(row.scheduleId, row);
+    if (!row.isComponent) calculatedTopLevel[row.name] = (calculatedTopLevel[row.name] || 0) + row.qty;
+  }
+  const topLevel = schedule.topLevelQuantities;
+  if (!topLevel || typeof topLevel !== 'object' || Array.isArray(topLevel)) return null;
+  const normalizedTopLevel = {};
+  for (const [name, rawQuantity] of Object.entries(topLevel)) {
+    const quantity = Number(rawQuantity);
+    if (!text(name).trim() || !Number.isInteger(quantity) || quantity <= 0) return null;
+    normalizedTopLevel[name] = quantity;
+  }
+  if (!sameGatewayDecisionValue(normalizedTopLevel, calculatedTopLevel)) return null;
+  return { contract: period, rows, rowsById, topLevel: normalizedTopLevel };
+}
+
+function sameRegisteredScheduleRow(left, right) {
+  return left?.scheduleId === right?.scheduleId
+    && left?.setName === right?.setName
+    && left?.name === right?.name
+    && left?.qty === right?.qty
+    && left?.isComponent === right?.isComponent;
+}
+
+function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
+  const authoritative = receipt?.authoritative_result;
+  const before = registeredAuthoritativeSnapshot(authoritative?.before, {
+    tradeId: text(mutation?.trade_id).trim(), requireLedger: false
+  });
+  const after = registeredAuthoritativeSnapshot(authoritative?.after, {
+    tradeId: text(mutation?.trade_id).trim(), requireLedger: true
+  });
+  if (!before || !after) return false;
+  const expectedPeriod = {
+    startDate: mutation?.expected_period?.start_date,
+    startTime: mutation?.expected_period?.start_time,
+    endDate: mutation?.expected_period?.end_date,
+    endTime: mutation?.expected_period?.end_time
+  };
+  const desiredPeriod = mutation?.date_change === null
+    ? expectedPeriod
+    : {
+        startDate: mutation?.date_change?.new_start_date,
+        startTime: mutation?.date_change?.new_start_time,
+        endDate: mutation?.date_change?.new_end_date,
+        endTime: mutation?.date_change?.new_end_time
+      };
+  if (!sameGatewayDecisionValue(before.contract, expectedPeriod)
+    || !sameGatewayDecisionValue(after.contract, desiredPeriod)) return false;
+
+  if (Array.isArray(mutation?.desired_after) && mutation.desired_after.length > 0) {
+    const componentRewriteRequested = (mutation.expected_before || []).some((expected) => {
+      const current = before.rowsById.get(text(expected?.schedule_id).trim());
+      return current?.isComponent === true;
+    });
+    if (componentRewriteRequested) return false;
+  }
+
+  const additionDelta = registeredMutationDeltaQuantities(mutation?.desired_after);
+  if (!additionDelta) return false;
+  const projectedTopLevel = { ...before.topLevel };
+  const removedIds = new Set();
+  for (const expected of mutation.expected_before) {
+    const scheduleId = text(expected?.schedule_id).trim();
+    const current = before.rowsById.get(scheduleId);
+    if (!current || current.name !== text(expected?.name).trim()
+      || current.qty !== Number(expected?.quantity)) return false;
+    const targetIndex = before.rows.indexOf(current);
+    removedIds.add(scheduleId);
+    if (!current.isComponent) {
+      const setKey = current.setName || current.name;
+      for (let index = targetIndex + 1; index < before.rows.length; index += 1) {
+        const following = before.rows[index];
+        if (!following.isComponent || following.setName !== setKey) break;
+        removedIds.add(following.scheduleId);
+      }
+    }
+  }
+  for (const scheduleId of removedIds) {
+    const row = before.rowsById.get(scheduleId);
+    if (row.isComponent) continue;
+    const remaining = (projectedTopLevel[row.name] || 0) - row.qty;
+    if (remaining < 0) return false;
+    if (remaining === 0) delete projectedTopLevel[row.name];
+    else projectedTopLevel[row.name] = remaining;
+  }
+  for (const [name, quantity] of Object.entries(additionDelta)) {
+    projectedTopLevel[name] = (projectedTopLevel[name] || 0) + quantity;
+  }
+  if (!sameGatewayDecisionValue(after.topLevel, projectedTopLevel)) return false;
+
+  for (const row of before.rows) {
+    const finalRow = after.rowsById.get(row.scheduleId);
+    if (removedIds.has(row.scheduleId)) {
+      if (finalRow) return false;
+    } else if (!sameRegisteredScheduleRow(row, finalRow)) {
+      return false;
+    }
+  }
+  const addedNames = new Set(Object.keys(additionDelta));
+  let activeAddedSetName = '';
+  for (const row of after.rows) {
+    if (before.rowsById.has(row.scheduleId)) {
+      activeAddedSetName = '';
+      continue;
+    }
+    if (!row.isComponent) {
+      if (!addedNames.has(row.name)) return false;
+      activeAddedSetName = row.setName === row.name ? row.name : '';
+    } else if (!activeAddedSetName || row.setName !== activeAddedSetName) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function exactPendingMutationAuthoritativeReadback(receipt, decision) {
+  const mutation = decision?.staff_confirmed_mutation;
+  const authoritative = receipt?.authoritative_sheet_result;
+  const evidence = authoritative?.staff_confirmed_pending_mutation;
+  if (!mutation || mutation.target_scope !== 'pending_request'
+    || !authoritative || authoritative.success !== true
+    || !evidence || evidence.target_scope !== 'pending_request') return false;
+  const requestId = text(mutation.request_id).trim().toUpperCase();
+  if (text(evidence.target_request_id).trim().toUpperCase() !== requestId
+    || text(evidence.replacement_request_id).trim().toUpperCase() !== text(authoritative.reqID).trim().toUpperCase()
+    || !/^RQ-\d{6}-\d{3}$/.test(text(evidence.replacement_request_id).trim().toUpperCase())) return false;
+  const replacedIds = Array.isArray(authoritative.replacedReqIDs)
+    ? authoritative.replacedReqIDs.map((value) => text(value).trim().toUpperCase())
+    : [];
+  if (!sameGatewayDecisionValue(replacedIds, [requestId])) return false;
+  const expectedBefore = canonicalPendingMutationPlan(mutation.expected_before);
+  const readExpectedBefore = canonicalPendingMutationPlan(evidence.expected_before);
+  if (!expectedBefore || !readExpectedBefore || !sameGatewayDecisionValue(expectedBefore, readExpectedBefore)) return false;
+  const expectedPeriod = evidence.expected_period;
+  if (!expectedPeriod || !normalizeConfirmRequestWindowForSheet({
+    start_date: expectedPeriod.start_date,
+    pickup_time: expectedPeriod.start_time,
+    end_date: expectedPeriod.end_date,
+    return_time: expectedPeriod.end_time
+  })) return false;
+  const desiredDelta = canonicalPendingMutationPlan(mutation.desired_after);
+  let expectedFinal = desiredDelta;
+  if (text(decision?.sheet_row_candidate?.equipment_write_mode).trim() === 'additions_only') {
+    expectedFinal = canonicalPendingMutationPlan([...(mutation.expected_before || []), ...(mutation.desired_after || [])]);
+  }
+  const readFinal = canonicalPendingMutationPlan(evidence.final_plan);
+  if (!expectedFinal || !readFinal || !sameGatewayDecisionValue(expectedFinal, readFinal)) return false;
+  const desiredPeriod = normalizeConfirmRequestWindowForSheet(decision.sheet_row_candidate || {});
+  return Boolean(desiredPeriod) && sameGatewayDecisionValue(evidence.final_period, {
+    start_date: desiredPeriod.start_date,
+    start_time: desiredPeriod.pickup_time,
+    end_date: desiredPeriod.end_date,
+    end_time: desiredPeriod.return_time
+  });
+}
+
 function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
   const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
   const classification = text(decision?.classification).trim();
   const reservationAuthorityClaim = classification === 'reservation'
     && (replySafetyClass(decision) === 'sensitive_commitment' || replyGrounding(decision) === 'authoritative_sheet');
   return decision?.should_write_to_sheet === true
+    || (decision?.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object')
     || decision?.post_action_reconciled === true
     || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object')
     || replySafetyClass(decision) === 'authoritative_availability_answer'
@@ -9164,9 +9609,160 @@ function stripAgentSuppliedReceiptFields(decision = {}) {
     trusted_confirmation_receipt: _trustedConfirmationReceipt,
     document_receipt: _documentReceipt,
     trusted_document_receipt: _trustedDocumentReceipt,
+    registered_reservation_change_receipt: _registeredReservationChangeReceipt,
+    trusted_registered_reservation_change_receipt: _trustedRegisteredReservationChangeReceipt,
+    registered_mutation_review: _registeredMutationReview,
+    registered_mutation_readback: _registeredMutationReadback,
+    authoritative_registered_result: _authoritativeRegisteredResult,
     ...withoutReceipts
   } = decision;
   return withoutReceipts;
+}
+
+function registeredMutationOwnerReviewItem({ decision = {}, job = {}, receipt = null, reason }) {
+  const mutation = decision?.staff_confirmed_mutation || {};
+  const customerName = text(
+    decision?.customer?.name
+    || decision?.sheet_row_candidate?.customer_name
+    || job?.customer_name
+    || job?.customerName
+    || '미확인 고객'
+  ).slice(0, 120);
+  const jobId = text(job?.jobId || job?.job_id || job?.id).trim();
+  const tradeId = text(mutation?.trade_id || receipt?.trade_id).trim();
+  return {
+    type: 'reservation_review',
+    route: 'schedule',
+    taskKey: `registered-mutation-review:${tradeId || jobId || 'unknown'}`,
+    priority: 'urgent',
+    status: 'open',
+    customer_name: customerName,
+    title: `${customerName} 등록예약 변경 즉시 확인 필요`,
+    summary: text(reason).trim().slice(0, 1000) || '등록예약 변경 결과를 권위 있는 원장과 대조할 수 없습니다.',
+    recommended_action: `거래 ${tradeId || '미확인'}의 계약마스터·스케줄상세 readback과 적용 단계를 직접 확인하고, 고객에게는 확인 전 성공 안내를 보내지 마세요.`,
+    suggested_reply_draft: '',
+    evidence: [
+      tradeId ? `trade_id: ${tradeId}` : '',
+      receipt?.receipt_id ? `receipt_id: ${receipt.receipt_id}` : '',
+      receipt?.status ? `receipt_status: ${receipt.status}` : '',
+      receipt?.attempted_stage ? `attempted_stage: ${receipt.attempted_stage}` : ''
+    ].filter(Boolean),
+    requiresHumanAction: true,
+    actionFamily: 'reservation_change',
+    businessKey: tradeId ? `trade:${tradeId}` : `job:${jobId || 'unknown'}`,
+    blocking_reason: text(receipt?.error?.message || receipt?.error || reason).slice(0, 1000) || null,
+    due_hint: 'now',
+    alertLevel: 'p0',
+    alertReason: '등록예약 변경의 적용 결과가 실패·부분 적용·모순 상태여서 즉시 원장 확인이 필요합니다.'
+  };
+}
+
+function forceRegisteredMutationOwnerReview(decision = {}, { job, receipt = null, reason } = {}) {
+  const mutation = decision?.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object'
+    ? decision.staff_confirmed_mutation
+    : null;
+  return {
+    ...decision,
+    classification: 'reservation',
+    should_write_to_sheet: false,
+    owner_review_required: true,
+    post_action_reconciled: false,
+    safety_checks: {
+      ...(decision?.safety_checks && typeof decision.safety_checks === 'object' ? decision.safety_checks : {}),
+      latest_customer_message_after_last_staff_reply: true,
+      no_auto_reply_sent: true
+    },
+    follow_up_items: [registeredMutationOwnerReviewItem({ decision, job, receipt, reason })],
+    suggested_reply_draft: '',
+    registered_mutation_review: {
+      trade_id: text(mutation?.trade_id || receipt?.trade_id).trim() || null,
+      mutation_kind: text(mutation?.kind || receipt?.mutation_kind).trim() || null,
+      expected_before: Array.isArray(mutation?.expected_before) ? mutation.expected_before : [],
+      desired_after: Array.isArray(mutation?.desired_after) ? mutation.desired_after : [],
+      date_change: mutation?.date_change ?? null,
+      applied_stages: Array.isArray(receipt?.applied_stages) ? receipt.applied_stages : [],
+      attempted_stage: receipt?.attempted_stage ?? null,
+      authoritative_result: receipt?.authoritative_result ?? null,
+      error: receipt?.error ?? null
+    },
+    ...(receipt ? { trusted_registered_reservation_change_receipt: receipt } : {}),
+    reply_decision: {
+      ...decisionReply(decision),
+      replyMode: 'draft_only',
+      text: '',
+      confidence: 'low',
+      reason: text(reason).trim().slice(0, 1000) || 'Registered mutation requires owner review.',
+      shouldCreateTask: true,
+      safetyClass: 'no_send',
+      grounding: receipt ? 'authoritative_sheet' : 'none',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
+    }
+  };
+}
+
+function forceRegisteredMutationSuccess(decision = {}, receipt) {
+  return {
+    ...decision,
+    should_write_to_sheet: false,
+    owner_review_required: false,
+    post_action_reconciled: true,
+    safety_checks: {
+      ...(decision?.safety_checks && typeof decision.safety_checks === 'object' ? decision.safety_checks : {}),
+      no_auto_reply_sent: true
+    },
+    follow_up_items: (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [])
+      .filter((item) => text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done'),
+    suggested_reply_draft: '',
+    registered_mutation_readback: receipt.authoritative_result,
+    trusted_registered_reservation_change_receipt: receipt,
+    reply_decision: {
+      ...decisionReply(decision),
+      replyMode: 'no_reply',
+      text: '',
+      confidence: 'high',
+      reason: '직원 확정 변경이 권위 있는 원장 readback으로 검증되어 중복 고객 답장을 보내지 않습니다.',
+      shouldCreateTask: false,
+      safetyClass: 'no_send',
+      grounding: 'authoritative_sheet',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: true
+    }
+  };
+}
+
+function forcePendingMutationSuccess(decision = {}, receipt) {
+  return {
+    ...decision,
+    should_write_to_sheet: false,
+    owner_review_required: false,
+    post_action_reconciled: true,
+    safety_checks: {
+      ...(decision?.safety_checks && typeof decision.safety_checks === 'object' ? decision.safety_checks : {}),
+      no_auto_reply_sent: true
+    },
+    follow_up_items: (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [])
+      .filter((item) => text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done'),
+    suggested_reply_draft: '',
+    authoritative_sheet_result: receipt.authoritative_sheet_result,
+    pending_mutation_readback: receipt.authoritative_sheet_result.staff_confirmed_pending_mutation,
+    trusted_confirmation_receipt: receipt,
+    reply_decision: {
+      ...decisionReply(decision),
+      replyMode: 'no_reply',
+      text: '',
+      confidence: 'high',
+      reason: '직원 확정 pending RQ 변경이 exact receipt와 권위 readback으로 검증되어 중복 답장을 보내지 않습니다.',
+      shouldCreateTask: false,
+      safetyClass: 'no_send',
+      grounding: 'authoritative_sheet',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: true
+    }
+  };
 }
 
 function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, reason, receipt = null }) {
@@ -9325,6 +9921,13 @@ export async function prepareKakaoGatewayDecision({
   if (decision) {
     const validation = validateAiDecisionContract(decision);
     if (!validation.valid) safetyFailures.push('invalid_gateway_decision');
+    if (decision.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object') {
+      const mutationValidation = validateStaffConfirmedMutation(decision.staff_confirmed_mutation, { roomRevision });
+      if (!mutationValidation.valid) {
+        safetyFailures.push('invalid_staff_confirmed_mutation');
+        safetyFailures.push('invalid_gateway_decision');
+      }
+    }
     decision = stripAgentSuppliedReceiptFields(decision);
     if (!text(decision.kill_switch_observed).trim() && internal?.lookupContext?.kill_switch?.status) {
       decision.kill_switch_observed = internal.lookupContext.kill_switch.status;
@@ -9339,14 +9942,20 @@ export async function prepareKakaoGatewayDecision({
   const exactDocumentReceipts = exactTurn
     ? suppliedReceipts.filter((receipt) => exactTrustedDocumentReceipt(receipt, receiptCoordinates))
     : [];
-  const exactReceipts = [...exactConfirmationReceipts, ...exactDocumentReceipts];
+  const exactRegisteredChangeReceipts = exactTurn
+    ? suppliedReceipts.filter((receipt) => exactTrustedRegisteredReservationChangeReceipt(receipt, receiptCoordinates))
+    : [];
+  const exactReceipts = [...exactConfirmationReceipts, ...exactDocumentReceipts, ...exactRegisteredChangeReceipts];
   if (suppliedReceipts.length !== exactReceipts.length) safetyFailures.push('invalid_trusted_receipt');
   if (exactReceipts.length > 1 && exactReceipts.some((receipt) => !sameGatewayDecisionValue(receipt, exactReceipts[0]))) {
     safetyFailures.push('conflicting_trusted_receipts');
   }
   const trustedConfirmationReceipt = exactConfirmationReceipts[0] || null;
   const trustedDocumentReceipt = exactDocumentReceipts[0] || null;
-  const trustedToolReceipt = trustedConfirmationReceipt || trustedDocumentReceipt;
+  const trustedRegisteredChangeReceipt = exactRegisteredChangeReceipts[0] || null;
+  const trustedToolReceipt = trustedRegisteredChangeReceipt || trustedConfirmationReceipt || trustedDocumentReceipt;
+  const structuredRegisteredMutation = decision?.staff_confirmed_mutation?.target_scope === 'registered_trade';
+  const structuredPendingMutation = decision?.staff_confirmed_mutation?.target_scope === 'pending_request';
   const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
   const structuredDocumentClaim = decision ? gatewayDecisionHasStructuredDocumentClaim(decision) : false;
   const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
@@ -9354,7 +9963,80 @@ export async function prepareKakaoGatewayDecision({
   let sheetResult = null;
   let sheetPayload = null;
   let reason = '';
-  if (trustedConfirmationReceipt) {
+  if (structuredRegisteredMutation) {
+    const mutation = decision.staff_confirmed_mutation;
+    if (!parsedDecisionValid) {
+      reason = '직원 확정 등록예약 변경의 typed 결정이 현재 방/리비전 계약을 충족하지 못했습니다.';
+      decision = forceRegisteredMutationOwnerReview(decision || {}, {
+        job, receipt: trustedRegisteredChangeReceipt, reason
+      });
+    } else if (!trustedRegisteredChangeReceipt) {
+      safetyFailures.push('registered_change_without_trusted_receipt');
+      reason = '직원 확정 등록예약 변경이 있지만 채널에 영속화된 registered-change receipt가 없습니다.';
+      decision = forceRegisteredMutationOwnerReview(decision || {}, { job, reason });
+    } else if (trustedRegisteredChangeReceipt.trade_id !== mutation.trade_id
+      || trustedRegisteredChangeReceipt.mutation_kind !== mutation.kind) {
+      safetyFailures.push('trusted_registered_change_decision_contradiction');
+      reason = '영속화된 등록예약 변경 receipt의 거래 또는 변경 종류가 최종 typed 결정과 일치하지 않습니다.';
+      decision = forceRegisteredMutationOwnerReview(decision || {}, {
+        job, receipt: trustedRegisteredChangeReceipt, reason
+      });
+    } else if (trustedRegisteredChangeReceipt.status === 'ok'
+      && exactRegisteredMutationAuthoritativeReadback(trustedRegisteredChangeReceipt, mutation)) {
+      decision = forceRegisteredMutationSuccess(decision, trustedRegisteredChangeReceipt);
+    } else {
+      if (trustedRegisteredChangeReceipt.status === 'ok') {
+        safetyFailures.push('trusted_registered_change_readback_contradiction');
+        reason = '등록예약 변경 receipt는 성공이지만 권위 있는 readback이 typed desired-after 상태와 일치하지 않습니다.';
+      } else {
+        safetyFailures.push('trusted_registered_change_failed');
+        reason = '등록예약 변경이 차단·실패·부분 적용되어 즉시 사장 확인이 필요합니다.';
+      }
+      decision = forceRegisteredMutationOwnerReview(decision || {}, {
+        job, receipt: trustedRegisteredChangeReceipt, reason
+      });
+    }
+  } else if (trustedRegisteredChangeReceipt) {
+    safetyFailures.push('trusted_registered_change_decision_contradiction');
+    reason = '영속화된 등록예약 변경 receipt와 일치하는 final typed mutation이 없습니다.';
+    decision = forceRegisteredMutationOwnerReview(decision || {}, {
+      job, receipt: trustedRegisteredChangeReceipt, reason
+    });
+  } else if (structuredPendingMutation) {
+    if (!parsedDecisionValid) {
+      reason = '직원 확정 pending RQ typed 결정이 현재 방/리비전 계약을 충족하지 못했습니다.';
+      decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: true, reason });
+    } else if (exactConfirmationReceipts.length > 1
+      || exactReceipts.length > 1
+      || safetyFailures.includes('invalid_trusted_receipt')
+      || safetyFailures.includes('conflicting_trusted_receipts')) {
+      safetyFailures.push('pending_change_receipt_set_invalid');
+      reason = '직원 확정 pending RQ 변경을 확정할 수 있는 exact confirmation receipt가 단 하나로 확정되지 않았습니다.';
+      decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: true, reason });
+    } else if (!trustedConfirmationReceipt) {
+      safetyFailures.push('pending_change_without_trusted_receipt');
+      reason = '직원 확정 pending RQ 변경이 있지만 채널에 영속화된 confirmation receipt가 없습니다.';
+      decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: true, reason });
+    } else if (trustedConfirmationReceipt.status === 'ok'
+      && trustedConfirmationReceipt.error === null
+      && exactPendingMutationAuthoritativeReadback(trustedConfirmationReceipt, decision)) {
+      decision = forcePendingMutationSuccess(decision, trustedConfirmationReceipt);
+    } else {
+      sheetResult = sheetResultFromTrustedReceipt(trustedConfirmationReceipt);
+      if (trustedConfirmationReceipt.status === 'ok') {
+        safetyFailures.push('trusted_pending_change_readback_contradiction');
+        reason = '직원 확정 pending RQ receipt는 성공이지만 exact request/plan/readback이 typed 결정과 일치하지 않습니다.';
+      } else {
+        safetyFailures.push('trusted_pending_change_failed');
+        reason = '직원 확정 pending RQ 변경이 실패 또는 부분 실패하여 사장 확인이 필요합니다.';
+      }
+      decision = forceGatewayOwnerReviewDecision(decision || {}, {
+        job, schedule: true, reason, receipt: trustedConfirmationReceipt,
+        authoritativeSheetResult: trustedConfirmationReceipt.authoritative_sheet_result
+      });
+      decision.trusted_confirmation_receipt = trustedConfirmationReceipt;
+    }
+  } else if (trustedConfirmationReceipt) {
     sheetResult = sheetResultFromTrustedReceipt(trustedConfirmationReceipt);
     const receiptFailed = trustedConfirmationReceipt.status === 'failed' || trustedConfirmationReceipt.error !== null;
     const report = buildSheetAvailabilityReport(sheetResult, null);
@@ -9427,7 +10109,7 @@ export async function prepareKakaoGatewayDecision({
     job
   );
   if (!availabilityAwareRows.length && decision?.owner_review_required === true) {
-    const scheduleReview = Boolean(trustedConfirmationReceipt || structuredScheduleClaim);
+    const scheduleReview = Boolean(trustedConfirmationReceipt || trustedRegisteredChangeReceipt || structuredScheduleClaim);
     const fallbackDecision = {
       ...decision,
       safety_checks: {

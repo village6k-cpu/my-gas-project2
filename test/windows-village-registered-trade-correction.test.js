@@ -19,6 +19,46 @@ function response(payload, { ok = true, status = 200 } = {}) {
 }
 
 function correctedPayload(overrides = {}) {
+  const before = {
+    contract: {
+      startDate: '2026-08-11', startTime: '05:00',
+      endDate: '2026-08-14', endTime: '05:00', rounds: 3,
+    },
+    schedule: {
+      periods: ['2026-08-11|05:00|2026-08-14|05:00'],
+      rows: [
+        { scheduleId: '260810-003-04', setName: '', name: '소니 GM 줌렌즈 세트', qty: 1, isComponent: false },
+        { scheduleId: '260810-003-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false },
+      ],
+      topLevelQuantities: { '소니 GM 줌렌즈 세트': 1, '소니 FX3': 1 },
+    },
+    ledger: null,
+  };
+  const after = {
+    contract: {
+      startDate: '2026-08-12', startTime: '05:00',
+      endDate: '2026-08-15', endTime: '05:00', rounds: 3,
+    },
+    schedule: {
+      periods: ['2026-08-12|05:00|2026-08-15|05:00'],
+      rows: [
+        { scheduleId: '260810-003-12', setName: '', name: '소니 GM 24-70mm F2.8 GM II', qty: 1, isComponent: false },
+        { scheduleId: '260810-003-13', setName: '', name: '소니 GM 70-200mm F2.8 GM II', qty: 1, isComponent: false },
+        { scheduleId: '260810-003-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false },
+      ],
+      topLevelQuantities: {
+        '소니 GM 24-70mm F2.8 GM II': 1,
+        '소니 GM 70-200mm F2.8 GM II': 1,
+        '소니 FX3': 1,
+      },
+    },
+    ledger: {
+      rows: 1,
+      startDate: '2026-08-12',
+      contractLink: 'https://docs.google.com/spreadsheets/d/corrected-contract/edit',
+      links: ['https://docs.google.com/spreadsheets/d/corrected-contract/edit'],
+    },
+  };
   return {
     success: true,
     status: 'CORRECTED',
@@ -31,29 +71,8 @@ function correctedPayload(overrides = {}) {
       fileId: 'corrected-contract',
       linkUpdate: { success: true },
     },
-    readback: {
-      contract: {
-        startDate: '2026-08-12', startTime: '05:00',
-        endDate: '2026-08-15', endTime: '05:00', rounds: 3,
-      },
-      schedule: {
-        periods: ['2026-08-12|05:00|2026-08-15|05:00'],
-        rows: [
-          { scheduleId: '260810-003-12', setName: '', name: '소니 GM 24-70mm F2.8 GM II', qty: 1, isComponent: false },
-          { scheduleId: '260810-003-13', setName: '', name: '소니 GM 70-200mm F2.8 GM II', qty: 1, isComponent: false },
-        ],
-        topLevelQuantities: {
-          '소니 GM 24-70mm F2.8 GM II': 1,
-          '소니 GM 70-200mm F2.8 GM II': 1,
-        },
-      },
-      ledger: {
-        rows: 1,
-        startDate: '2026-08-12',
-        contractLink: 'https://docs.google.com/spreadsheets/d/corrected-contract/edit',
-        links: ['https://docs.google.com/spreadsheets/d/corrected-contract/edit'],
-      },
-    },
+    readback: after,
+    authoritativeReadback: { before, after },
     customerNotificationSent: false,
     ...overrides,
   };
@@ -90,6 +109,12 @@ function createFetchFixture({ responseByAction = {} } = {}) {
 const fullInput = {
   tradeId: '260810-003',
   operationId,
+  expectedPeriod: {
+    startDate: '2026-08-11',
+    startTime: '05:00',
+    endDate: '2026-08-14',
+    endTime: '05:00',
+  },
   dateChange: {
     newStartDate: '2026-08-12',
     newEndDate: '2026-08-15',
@@ -97,13 +122,78 @@ const fullInput = {
     endTime: '05:00',
     allowConflicts: false,
   },
-  remove: [{ scheduleId: '260810-003-04', expectedName: '소니 GM 줌렌즈 세트' }],
+  remove: [{ scheduleId: '260810-003-04', expectedName: '소니 GM 줌렌즈 세트', expectedQty: 1 }],
   add: [
     { name: '소니 GM 24-70mm F2.8 GM II', qty: 1 },
     { name: '소니 GM 70-200mm F2.8 GM II', qty: 1 },
   ],
   sendEstimate: true,
 };
+
+test('normalizes an exact baseline period and removal quantity', () => {
+  const normalized = normalizeCorrectionInput({
+    tradeId: '260824-008',
+    operationId: '11111111-2222-4333-8444-555555555555',
+    expectedPeriod: {
+      startDate: '2026-08-27',
+      startTime: '06:00',
+      endDate: '2026-08-27',
+      endTime: '18:00',
+    },
+    remove: [{
+      scheduleId: '260824-008-07',
+      expectedName: '소니 FE 28-135mm',
+      expectedQty: 1,
+    }],
+    add: [{ name: '소니 GM 70-200mm II', qty: 1 }],
+  });
+
+  assert.equal(normalized.remove[0].expectedQty, 1);
+  assert.equal(normalized.expectedPeriod.startTime, '06:00');
+});
+
+test('rejects invalid supplied baseline expectations without narrowing legacy CLI inputs', () => {
+  const base = {
+    tradeId: '260824-008',
+    operationId: '11111111-2222-4333-8444-555555555555',
+    expectedPeriod: {
+      startDate: '2026-08-27', startTime: '06:00',
+      endDate: '2026-08-27', endTime: '18:00',
+    },
+    remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
+  };
+
+  for (const expectedQty of [0, 1.5, 100]) {
+    assert.throws(
+      () => normalizeCorrectionInput({ ...base, remove: [{ ...base.remove[0], expectedQty }] }),
+      /expectedQty/i,
+    );
+  }
+  assert.throws(
+    () => normalizeCorrectionInput({ ...base, remove: [{ ...base.remove[0], expectedQty: '1' }] }),
+    /expectedQty/i,
+  );
+  assert.throws(
+    () => normalizeCorrectionInput({ ...base, expectedPeriod: { ...base.expectedPeriod, startTime: '24:00' } }),
+    /startTime/i,
+  );
+  assert.throws(
+    () => normalizeCorrectionInput({ ...base, expectedPeriod: { ...base.expectedPeriod, unexpected: true } }),
+    /expectedPeriod/i,
+  );
+  assert.throws(
+    () => normalizeCorrectionInput({ ...base, expectedPeriod: { ...base.expectedPeriod, endTime: '06:00' } }),
+    /after start/i,
+  );
+
+  const legacy = normalizeCorrectionInput({
+    tradeId: base.tradeId,
+    operationId: base.operationId,
+    remove: [{ scheduleId: base.remove[0].scheduleId, expectedName: base.remove[0].expectedName }],
+  });
+  assert.equal(legacy.expectedPeriod, null);
+  assert.equal(Object.hasOwn(legacy.remove[0], 'expectedQty'), false);
+});
 
 test('strict input requires exact identity and rejects a generic write surface', () => {
   assert.throws(
@@ -143,6 +233,7 @@ test('one explicit run performs one correction POST, one send POST, and zero sea
   assert.deepEqual(fixture.calls[0].body.args, {
     tradeId: fullInput.tradeId,
     operationId,
+    expectedPeriod: fullInput.expectedPeriod,
     dateChange: fullInput.dateChange,
     remove: fullInput.remove,
     add: fullInput.add,
@@ -151,7 +242,29 @@ test('one explicit run performs one correction POST, one send POST, and zero sea
   assert.equal(result.verified, true);
   assert.equal(result.send.accepted, true);
   assert.equal(result.readback.contract.rounds, 3);
+  assert.equal(result.authoritativeReadback.before.schedule.topLevelQuantities['소니 FX3'], 1);
+  assert.equal(result.authoritativeReadback.after.schedule.topLevelQuantities['소니 FX3'], 1);
   assert.doesNotMatch(JSON.stringify(result), /synthetic-key/);
+});
+
+test('a correction response without the locked authoritative before envelope is rejected', async () => {
+  const fixture = createFetchFixture({
+    responseByAction: {
+      scheduleCorrectRegisteredTrade: correctedPayload({ authoritativeReadback: null }),
+    },
+  });
+
+  await assert.rejects(
+    runRegisteredTradeCorrection({ config, input: { ...fullInput, sendEstimate: false }, fetchImpl: fixture.fetchImpl }),
+    (error) => {
+      assert.equal(error.name, 'CorrectionStageError');
+      assert.equal(error.stage, 'scheduleCorrectRegisteredTrade');
+      assert.equal(error.outcomeUnknown, true);
+      assert.match(error.message, /authoritative.*before|before.*readback/i);
+      return true;
+    },
+  );
+  assert.equal(fixture.calls.length, 1);
 });
 
 test('a correction without explicit send makes only the single correction request', async () => {
@@ -191,6 +304,45 @@ test('BUSY is attempted once, sends nothing, and is never automatically retried'
     (error) => {
       assert.equal(error.stage, 'scheduleCorrectRegisteredTrade');
       assert.equal(error.outcomeUnknown, false);
+      return true;
+    },
+  );
+  assert.equal(fixture.calls.filter((call) => call.action === 'scheduleCorrectRegisteredTrade').length, 1);
+  assert.equal(fixture.calls.filter((call) => call.action === 'sendEstimate').length, 0);
+});
+
+test('unsafe component re-add stays typed, customer no-send, and is never replayed', async () => {
+  const fixture = createFetchFixture({
+    responseByAction: {
+      scheduleCorrectRegisteredTrade: {
+        success: false,
+        status: 'ERROR',
+        code: 'UNSAFE_COMPONENT_READD',
+        retryable: false,
+        tradeId: '260810-003',
+        operationId,
+        attemptedStage: 'preflight',
+        stages: [],
+        appliedStages: [],
+        error: '세트 구성품의 소속을 정확히 보존할 수 없어 자동 재추가를 차단했습니다: 260810-003-05',
+        customerNotificationSent: false,
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => runRegisteredTradeCorrection({
+      config, input: { ...fullInput, sendEstimate: false }, fetchImpl: fixture.fetchImpl, timeoutMs: 1_000,
+    }),
+    (error) => {
+      assert.equal(error.stage, 'scheduleCorrectRegisteredTrade');
+      assert.equal(error.outcomeUnknown, false);
+      assert.deepEqual(error.appliedStages, []);
+      assert.equal(error.details.code, 'UNSAFE_COMPONENT_READD');
+      assert.equal(error.details.tradeId, '260810-003');
+      assert.equal(error.details.operationId, operationId);
+      assert.equal(error.details.attemptedStage, 'preflight');
+      assert.equal(error.details.customerNotificationSent, false);
       return true;
     },
   );

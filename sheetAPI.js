@@ -1624,6 +1624,44 @@ function runFunction(funcName, params) {
       };
       if (result.duplicate) response.duplicate = true;
       if (result.message) response.message = result.message;
+      if (Array.isArray(result.replacedReqIDs)) {
+        response.replacedReqIDs = result.replacedReqIDs.map(function(reqID) {
+          return String(reqID || "").trim().toUpperCase();
+        }).filter(function(reqID) {
+          return /^RQ-\d{6}-\d{3}$/.test(reqID);
+        });
+      }
+      if (result.staff_confirmed_pending_mutation &&
+          typeof result.staff_confirmed_pending_mutation === "object" &&
+          !Array.isArray(result.staff_confirmed_pending_mutation)) {
+        var pendingMutation = result.staff_confirmed_pending_mutation;
+        var cleanPendingPlan = function(rows) {
+          return Array.isArray(rows) ? rows.map(function(row) {
+            return {
+              name: String(row && row.name || "").trim(),
+              quantity: Number(row && row.quantity)
+            };
+          }) : [];
+        };
+        var cleanPendingPeriod = function(period) {
+          period = period && typeof period === "object" && !Array.isArray(period) ? period : {};
+          return {
+            start_date: String(period.start_date || "").trim(),
+            start_time: String(period.start_time || "").trim(),
+            end_date: String(period.end_date || "").trim(),
+            end_time: String(period.end_time || "").trim()
+          };
+        };
+        response.staff_confirmed_pending_mutation = {
+          target_scope: String(pendingMutation.target_scope || "").trim(),
+          target_request_id: String(pendingMutation.target_request_id || "").trim().toUpperCase(),
+          expected_before: cleanPendingPlan(pendingMutation.expected_before),
+          expected_period: cleanPendingPeriod(pendingMutation.expected_period),
+          replacement_request_id: String(pendingMutation.replacement_request_id || "").trim().toUpperCase(),
+          final_plan: cleanPendingPlan(pendingMutation.final_plan),
+          final_period: cleanPendingPeriod(pendingMutation.final_period)
+        };
+      }
       return response;
     }
     if (funcName === "updateRequest" && params.args) {

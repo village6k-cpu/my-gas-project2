@@ -14,7 +14,8 @@ const JOB_STATES = new Set(['ready', 'claimed', 'completed', 'superseded', 'retr
 const TOOL_OPERATION_STATES = new Set(['reserved', 'completed']);
 const TOOL_RECEIPT_SCHEMAS = new Map([
   ['confirmation_request', 'village-confirmation-receipt/v1'],
-  ['document_send', 'village-document-receipt/v1']
+  ['document_send', 'village-document-receipt/v1'],
+  ['registered_reservation_change', 'village-registered-reservation-change-receipt/v1']
 ]);
 const APPLICATION_STATES = new Set(['pending', 'claimed', 'applying', 'applied', 'finalized', 'failed']);
 const FAILURE_NOTIFICATION_STATES = new Set(['pending', 'delivered']);
@@ -65,6 +66,8 @@ const isObjectOrNull = (value) => value === null || (value && typeof value === '
 const isValidIso = (value) => typeof value === 'string'
   && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)
   && Number.isFinite(Date.parse(value));
+const hasPendingApplicationFailureNotification = (job) => job?.application?.state === 'failed'
+  && job.application?.failure_notification?.state === 'pending';
 
 function validateReceipt(receipt) {
   if (!new Set(TOOL_RECEIPT_SCHEMAS.values()).has(receipt?.schema)) throw channelError('invalid_receipt', 'receipt schema is invalid');
@@ -73,11 +76,22 @@ function validateReceipt(receipt) {
   if (receipt.schema === 'village-confirmation-receipt/v1') {
     if (!Array.isArray(receipt?.availability_report)) throw channelError('invalid_receipt', 'availability_report must be a list');
     if (!isObjectOrNull(receipt?.authoritative_sheet_result)) throw channelError('invalid_receipt', 'authoritative_sheet_result must be an object or null');
-  } else {
+  } else if (receipt.schema === 'village-document-receipt/v1') {
     if (receipt?.document_type !== 'quote') throw channelError('invalid_receipt', 'document_type must be quote');
     if (!/^\d{6}-\d{3}$/.test(String(receipt?.trade_id || ''))) throw channelError('invalid_receipt', 'trade_id is invalid');
     if (!['vat_included', 'supply_only'].includes(receipt?.tax_mode)) throw channelError('invalid_receipt', 'tax_mode is invalid');
     if (!isObjectOrNull(receipt?.authoritative_document_result)) throw channelError('invalid_receipt', 'authoritative_document_result must be an object or null');
+  } else {
+    if (receipt?.target_scope !== 'registered_trade') throw channelError('invalid_receipt', 'target_scope must be registered_trade');
+    if (!/^\d{6}-\d{3}$/.test(String(receipt?.trade_id || ''))) throw channelError('invalid_receipt', 'trade_id is invalid');
+    if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change']
+      .includes(receipt?.mutation_kind)) throw channelError('invalid_receipt', 'mutation_kind is invalid');
+    if (!isObjectOrNull(receipt?.authoritative_result)) throw channelError('invalid_receipt', 'authoritative_result must be an object or null');
+    if (!Array.isArray(receipt?.applied_stages)) throw channelError('invalid_receipt', 'applied_stages must be a list');
+    if (!(receipt?.attempted_stage === null || typeof receipt?.attempted_stage === 'string')) {
+      throw channelError('invalid_receipt', 'attempted_stage must be null or a string');
+    }
+    if (receipt?.customer_reply !== 'no_reply') throw channelError('invalid_receipt', 'customer_reply must be no_reply');
   }
   if (!isValidIso(receipt?.created_at)) throw channelError('invalid_receipt', 'created_at must be ISO-8601');
   if (!(receipt?.error === null || typeof receipt?.error === 'string' || isObjectOrNull(receipt?.error))) {
@@ -184,6 +198,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   const jobs = new Map();
   let initialized = false;
   let needsReconciliation = false;
+  let needsStartupOperationReconciliation = false;
   let queueOrder = 0;
   let mutationTail = Promise.resolve();
   let lastConsumerId = null;
@@ -225,6 +240,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     }
     initialized = true;
     needsReconciliation = true;
+    needsStartupOperationReconciliation = jobs.size > 0;
   }
 
   async function update(job, changes) {
@@ -272,6 +288,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
 
   async function reconcilePending() {
     if (!needsReconciliation) return;
+    const reconcileRestartedOperations = needsStartupOperationReconciliation;
     for (const job of [...jobs.values()]) {
       if (job.state === 'retry_wait') await update(job, { state: 'ready' });
       if (job.application?.state === 'claimed') {
@@ -312,18 +329,42 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           }
         });
       }
-      const missingOperationalFailureNotification = !job.failure_notification
-        && job.human_review_required === true
-        && (job.state === 'failed'
-          || (job.state === 'superseded'
-            && job.error?.type === 'confirmation_operation_unresolved'
-            && Boolean(job.tool_operation)));
+      let reconciledJob = jobs.get(job.job_id);
+      if (reconcileRestartedOperations
+        && reconciledJob.tool_operation?.state === 'reserved'
+        && !TERMINAL_STATES.has(reconciledJob.state)) {
+        const operation = reconciledJob.tool_operation;
+        reconciledJob = await update(reconciledJob, {
+          state: 'failed',
+          claimed_by: null,
+          lease_id: null,
+          lease_expires_at: null,
+          lease_expires_at_ms: null,
+          claimed_at: null,
+          claimed_at_ms: null,
+          human_review_required: true,
+          failure_notification: pendingFailureNotification(reconciledJob),
+          error: {
+            type: 'confirmation_operation_unresolved',
+            operation_id: operation.operation_id,
+            operation_state: operation.state,
+            reason: 'receipt_not_persisted'
+          }
+        });
+      }
+      const missingOperationalFailureNotification = !reconciledJob.failure_notification
+        && reconciledJob.human_review_required === true
+        && (reconciledJob.state === 'failed'
+          || (reconciledJob.state === 'superseded'
+            && reconciledJob.error?.type === 'confirmation_operation_unresolved'
+            && Boolean(reconciledJob.tool_operation)));
       if (missingOperationalFailureNotification) {
-        await update(jobs.get(job.job_id), { failure_notification: pendingFailureNotification(job) });
+        await update(reconciledJob, { failure_notification: pendingFailureNotification(reconciledJob) });
       }
     }
     for (const roomKey of new Set([...jobs.values()].map((job) => job.room_key))) await reconcileRoom(roomKey);
     needsReconciliation = false;
+    needsStartupOperationReconciliation = false;
   }
 
   async function mutate(operation) {
@@ -815,6 +856,15 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const failureNotificationCounts = Object.fromEntries([...FAILURE_NOTIFICATION_STATES].map((state) => [state, 0]));
         let lastCompleted = null;
         let oldestLeaseAgeMs = null;
+        const registeredReservationChange = {
+          reserved: 0,
+          completed: 0,
+          failed_human_review: 0,
+          pending_failure_notifications: 0,
+          oldest_reserved_age_ms: null,
+          last_success_at: null
+        };
+        let registeredLastSuccessAtMs = null;
         const nowMs = currentTime();
         for (const job of jobs.values()) {
           counts[job.state] += 1;
@@ -830,18 +880,55 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
             }
           }
           if (job.state === 'completed' && (!lastCompleted || job.updated_at > lastCompleted.updated_at)) lastCompleted = job;
+          if (job.tool_operation?.tool === 'registered_reservation_change') {
+            const operation = job.tool_operation;
+            const exactReceipt = exactReceiptForToolOperation(job);
+            if (operation.state === 'reserved') {
+              registeredReservationChange.reserved += 1;
+              const createdAtMs = Date.parse(operation.created_at);
+              if (Number.isFinite(createdAtMs)) {
+                const age = Math.max(0, nowMs - createdAtMs);
+                registeredReservationChange.oldest_reserved_age_ms = registeredReservationChange.oldest_reserved_age_ms === null
+                  ? age
+                  : Math.max(registeredReservationChange.oldest_reserved_age_ms, age);
+              }
+            } else if (operation.state === 'completed') {
+              registeredReservationChange.completed += 1;
+            }
+            const receiptRequiresHumanReview = exactReceipt?.schema === 'village-registered-reservation-change-receipt/v1'
+              && ['blocked', 'failed', 'partial_success'].includes(exactReceipt.status);
+            if (receiptRequiresHumanReview || job.human_review_required === true) {
+              registeredReservationChange.failed_human_review += 1;
+            }
+            if (job.failure_notification?.state === 'pending') {
+              registeredReservationChange.pending_failure_notifications += 1;
+            }
+            if (hasPendingApplicationFailureNotification(job)) {
+              registeredReservationChange.pending_failure_notifications += 1;
+            }
+            const completedAtMs = Date.parse(operation.completed_at);
+            const successfulCompletion = exactReceipt?.schema === 'village-registered-reservation-change-receipt/v1'
+              && exactReceipt.status === 'ok'
+              && isValidIso(operation.completed_at)
+              && Number.isFinite(completedAtMs)
+              ? operation.completed_at
+              : null;
+            if (successfulCompletion && (registeredLastSuccessAtMs === null || completedAtMs > registeredLastSuccessAtMs)) {
+              registeredLastSuccessAtMs = completedAtMs;
+              registeredReservationChange.last_success_at = successfulCompletion;
+            }
+          }
         }
         return {
           counts,
           application_counts: applicationCounts,
           failure_notification_counts: failureNotificationCounts,
-          unnotified_application_failures: [...jobs.values()].filter((job) => (
-            job.application?.state === 'failed' && job.application?.failure_notification?.state === 'pending'
-          )).length,
+          unnotified_application_failures: [...jobs.values()].filter(hasPendingApplicationFailureNotification).length,
           oldest_lease_age_ms: oldestLeaseAgeMs,
           last_completed_job_id: lastCompleted?.job_id ?? null,
           last_consumer_id: lastConsumerId,
-          last_consumer_seen_at: lastConsumerSeenAt
+          last_consumer_seen_at: lastConsumerSeenAt,
+          registered_reservation_change: registeredReservationChange
         };
       });
     }
