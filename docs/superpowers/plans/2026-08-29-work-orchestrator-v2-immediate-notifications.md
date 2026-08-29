@@ -167,11 +167,12 @@ Required cases:
 1. a new receipt transitions `pending -> delivering -> delivered` and posts once;
 2. a duplicate event whose receipt is `delivered` posts zero times;
 3. two concurrent calls allow only one `pending|failed -> delivering` claim;
-4. a pre-existing `delivering` row searches history before any post: an exact `client_msg_id` match stores coordinates, no match becomes typed unconfirmed/failed, and a history failure leaves the row delivering;
+4. a pre-existing `delivering` row searches history before any post: only a result whose `client_msg_id` exactly equals the receipt `client_message_id` stores coordinates; missing/mismatched IDs are no match, and a history failure leaves the row delivering;
 5. an ambiguous timeout with no readback moves to `failed` with `last_delivery_error`;
 6. delivered persistence failure and empty compare-and-swap results are never reported as successful delivery;
-7. customer content cannot inject Slack mentions, special broadcasts, or links;
-8. P0 is not inferred from customer text or Hermes. No reviewed trusted-alert transport field exists, so receipt urgency remains the schema default `normal`.
+7. every claimed receipt identity is a lowercase UUID v5 with RFC variant before any post/history call, including the row returned by the delivery CAS;
+8. customer content cannot inject Slack mentions, special broadcasts, links, bold, italic, strike, or code markup;
+9. P0 is not inferred from customer text or Hermes. No reviewed trusted-alert transport field exists, so receipt urgency remains the schema default `normal`.
 
 Use an expected delivered row:
 
@@ -213,7 +214,8 @@ export function buildImmediateNotice(event = {}, { mentionUserIds = [] } = {}) {
     .filter((id) => /^[UW][A-Z0-9]{1,79}$/.test(id))
     .map((id) => `<@${id}>`).join(' ');
   const escape = (value, fallback, max) => String(value || fallback).slice(0, max)
-    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('*', '＊').replaceAll('_', '＿').replaceAll('~', '～').replaceAll('`', '｀');
   const customer = escape(event.customerName, '고객명 미확인', 200);
   const preview = escape(event.messagePreview || event.previewText, '내용 확인 필요', 1000);
   return {
@@ -228,6 +230,7 @@ export function buildImmediateNotice(event = {}, { mentionUserIds = [] } = {}) {
 export async function ensureImmediateNotification({ event, config, store, slack, now = () => new Date() } = {}) {
   const claim = await store.claimNotificationReceipt(notificationReceiptInput(event));
   const receipt = claim.row;
+  assertDeterministicClientMessageId(receipt.client_message_id); // lowercase UUID v5 + RFC variant
   if (receipt.notification_state === 'delivered') return { status: 'delivered', receipt, delivery: null, reconciled: false };
   if (receipt.notification_state === 'delivering') return reconcileExactHistoryOrThrowUnconfirmed(receipt);
   if (receipt.delivery_attempts >= 3) throw new ImmediateNotificationError('attempts_exhausted', 'exhausted');
@@ -239,6 +242,7 @@ export async function ensureImmediateNotification({ event, config, store, slack,
     await store.getNotificationByEventKey(receipt.source_event_key);
     throw new ImmediateNotificationError('claim_conflict', 'unconfirmed');
   }
+  assertDeterministicClientMessageId(claimed.row.client_message_id);
   const notice = buildImmediateNotice(event, { mentionUserIds: config.mentionUserIds });
   let delivery;
   try {
@@ -258,7 +262,7 @@ export async function ensureImmediateNotification({ event, config, store, slack,
 }
 ```
 
-`reconcileExactHistoryOrThrowUnconfirmed` searches the exact `client_message_id` from five minutes before receipt creation to five minutes after the current attempt. A match is successful only after the delivered CAS readback applies. No match records the reviewed `delivery_unconfirmed` token and throws typed unconfirmed; history or persistence failure also throws bounded typed unconfirmed without copying store/Slack data. It never reposts inside the same call. A later exact retry may claim a failed row only while `delivery_attempts < 3`.
+`reconcileExactHistoryOrThrowUnconfirmed` searches the exact `client_message_id` from five minutes before receipt creation to five minutes after the current attempt, then independently requires `match.client_msg_id === receipt.client_message_id` before storing coordinates. Missing/mismatched IDs are no match. A match is successful only after the delivered CAS readback applies. No match records the reviewed `delivery_unconfirmed` token and throws typed unconfirmed; history or persistence failure also throws bounded typed unconfirmed without copying store/Slack data. It never reposts inside the same call. A later exact retry may claim a failed row only while `delivery_attempts < 3`.
 
 - [ ] **Step 5: Run GREEN and commit**
 

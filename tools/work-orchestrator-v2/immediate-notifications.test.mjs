@@ -6,6 +6,7 @@ const { buildImmediateNotice, ensureImmediateNotification } = immediateModule;
 
 const fixedNow = new Date('2026-08-29T00:02:00.000Z');
 const clientMessageId = 'b1d33dc4-d1f9-550b-a345-1525035f5e45';
+const otherClientMessageId = 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa';
 const event = {
   source: 'kakao_channel_manager_dom',
   sourceEventKey: 'event-1',
@@ -232,6 +233,28 @@ test('a delivering receipt reconciles an exact history match without posting', a
   assert.equal(store.row.slack_message_ts, '100.2');
 });
 
+test('a delivering receipt treats mismatched or missing history client IDs as no match', async (t) => {
+  for (const [name, historyResult] of [
+    ['mismatched', { client_msg_id: otherClientMessageId, ts: '100.4' }],
+    ['missing', { ts: '100.4' }]
+  ]) {
+    await t.test(name, async () => {
+      const store = createStore({ initial: receipt({ notification_state: 'delivering', delivery_attempts: 1 }) });
+      const slack = createSlack({ historyResult });
+
+      await assert.rejects(
+        ensureImmediateNotification({ event, config, store, slack, now }),
+        isTypedError('history_no_match', 'unconfirmed')
+      );
+      assert.equal(slack.posts.length, 0);
+      assert.equal(slack.searches.length, 1);
+      assert.equal(store.calls.delivered.length, 0);
+      assert.deepEqual(store.calls.failed, [{ id: 'receipt-1', failureCode: 'delivery_unconfirmed' }]);
+      assert.equal(store.row.notification_state, 'failed');
+    });
+  }
+});
+
 test('a delivering receipt with no history match fails unconfirmed without posting in the same call', async () => {
   const store = createStore({ initial: receipt({ notification_state: 'delivering', delivery_attempts: 1 }) });
   const slack = createSlack({ historyResult: null });
@@ -274,6 +297,29 @@ test('an ambiguous post reconciles an exact match and never reposts', async () =
   assert.equal(slack.posts.length, 1);
   assert.equal(slack.searches.length, 1);
   assert.equal(store.row.slack_message_ts, '100.3');
+});
+
+test('an ambiguous post treats mismatched or missing history client IDs as no match', async (t) => {
+  for (const [name, historyResult] of [
+    ['mismatched', { client_msg_id: otherClientMessageId, ts: '100.5' }],
+    ['missing', { ts: '100.5' }]
+  ]) {
+    await t.test(name, async () => {
+      const ambiguous = Object.assign(new Error('unsafe arbitrary Slack body'), { ambiguous: true });
+      const store = createStore();
+      const slack = createSlack({ postError: ambiguous, historyResult });
+
+      await assert.rejects(
+        ensureImmediateNotification({ event, config, store, slack, now }),
+        isTypedError('history_no_match', 'unconfirmed')
+      );
+      assert.equal(slack.posts.length, 1);
+      assert.equal(slack.searches.length, 1);
+      assert.equal(store.calls.delivered.length, 0);
+      assert.deepEqual(store.calls.failed, [{ id: 'receipt-1', failureCode: 'delivery_unconfirmed' }]);
+      assert.equal(store.row.notification_state, 'failed');
+    });
+  }
 });
 
 test('an ambiguous post with no history match stores a safe failure and throws typed unconfirmed', async () => {
@@ -348,21 +394,94 @@ test('an empty delivery-claim CAS is observable and never reported as delivered'
   assert.equal(slack.posts.length, 0);
 });
 
+test('malformed receipt client IDs fail validation before every delivery state branch', async (t) => {
+  const invalidClientIds = [
+    ['empty', ''],
+    ['arbitrary', 'customer-room-event'],
+    ['wrong UUID version', 'b1d33dc4-d1f9-450b-a345-1525035f5e45'],
+    ['wrong UUID variant', 'b1d33dc4-d1f9-550b-7345-1525035f5e45'],
+    ['uppercase', clientMessageId.toUpperCase()]
+  ];
+
+  for (const [state, deliveryAttempts] of [['pending', 0], ['delivering', 1], ['delivered', 1]]) {
+    for (const [name, invalidClientId] of invalidClientIds) {
+      await t.test(`${state}: ${name}`, async () => {
+        const store = createStore({
+          initial: receipt({
+            notification_state: state,
+            delivery_attempts: deliveryAttempts,
+            client_message_id: invalidClientId
+          })
+        });
+        const slack = createSlack({ historyResult: { client_msg_id: invalidClientId, ts: '100.6' } });
+
+        await assert.rejects(
+          ensureImmediateNotification({ event, config, store, slack, now }),
+          (error) => isTypedError('receipt_identity_invalid', 'unconfirmed')(error)
+            && (!invalidClientId || !error.message.includes(invalidClientId))
+            && error.cause === undefined
+        );
+        assert.equal(store.calls.receiptInputs.length, 1);
+        assert.equal(store.calls.deliveryClaims.length, 0);
+        assert.equal(store.calls.delivered.length, 0);
+        assert.equal(store.calls.failed.length, 0);
+        assert.equal(slack.posts.length, 0);
+        assert.equal(slack.searches.length, 0);
+      });
+    }
+  }
+});
+
+test('a malformed client ID returned by the delivery CAS stops before Slack or a terminal transition', async () => {
+  const malformedClaimedRow = receipt({
+    notification_state: 'delivering',
+    delivery_attempts: 1,
+    client_message_id: 'not-a-deterministic-uuid'
+  });
+  const store = createStore({
+    claimDeliveryResult: { applied: true, row: malformedClaimedRow }
+  });
+  const slack = createSlack();
+
+  await assert.rejects(
+    ensureImmediateNotification({ event, config, store, slack, now }),
+    (error) => isTypedError('receipt_identity_invalid', 'unconfirmed')(error)
+      && !error.message.includes(malformedClaimedRow.client_message_id)
+      && error.cause === undefined
+  );
+  assert.equal(store.calls.deliveryClaims.length, 1);
+  assert.equal(store.calls.delivered.length, 0);
+  assert.equal(store.calls.failed.length, 0);
+  assert.equal(slack.posts.length, 0);
+  assert.equal(slack.searches.length, 0);
+});
+
 test('buildImmediateNotice escapes Kakao content and emits only validated deduplicated raw mentions', () => {
   const notice = buildImmediateNotice({
-    customerName: '<Alice & <!channel>>',
-    messagePreview: '<@UINJECT> & <https://evil.example|click>'
+    customerName: '<Alice & <!channel>> *bold* _italic_ ~strike~ `code`',
+    messagePreview: '<@UINJECT> & <https://evil.example|click> *preview* _under_ ~gone~ `literal`'
   }, {
     mentionUserIds: ['UOWNER1', 'UOWNER1', 'WOWNER2', 'U_BAD', 'U3><!channel>']
   });
 
   assert.ok(notice.text.includes('<@UOWNER1> <@WOWNER2>'));
   assert.ok(notice.blocks[1].text.text.includes('<@UOWNER1> <@WOWNER2>'));
-  assert.ok(notice.text.includes('&lt;Alice &amp; &lt;!channel&gt;&gt;'));
-  assert.ok(notice.blocks[1].text.text.includes('&lt;@UINJECT&gt; &amp; &lt;https://evil.example|click&gt;'));
+  const section = notice.blocks[1].text.text;
+  assert.ok(notice.text.includes('&lt;Alice &amp; &lt;!channel&gt;&gt; ＊bold＊ ＿italic＿ ～strike～ ｀code｀'));
+  assert.ok(section.includes('&lt;@UINJECT&gt; &amp; &lt;https://evil.example|click&gt; ＊preview＊ ＿under＿ ～gone～ ｀literal｀'));
   assert.equal(notice.text.includes('<!channel>'), false);
   assert.equal(notice.text.includes('<@UINJECT>'), false);
   assert.equal(notice.text.includes('<https://evil.example'), false);
+  assert.equal(notice.text.includes('*bold*'), false);
+  assert.equal(notice.text.includes('_italic_'), false);
+  assert.equal(notice.text.includes('~strike~'), false);
+  assert.equal(notice.text.includes('`code`'), false);
+  assert.equal(section.includes('*preview*'), false);
+  assert.equal(section.includes('_under_'), false);
+  assert.equal(section.includes('~gone~'), false);
+  assert.equal(section.includes('`literal`'), false);
+  assert.equal((section.match(/\*/g) || []).length, 2);
+  assert.equal((section.match(/[_~`]/g) || []).length, 0);
   assert.equal(notice.text.includes('U_BAD'), false);
   assert.ok(notice.text.length <= 2900);
   assert.ok(notice.blocks[1].text.text.length <= 2900);

@@ -4,6 +4,7 @@ const RECONCILIATION_MARGIN_MS = 5 * 60 * 1000;
 const MAX_DELIVERY_ATTEMPTS = 3;
 const SLACK_USER_ID = /^[UW][A-Z0-9]{1,79}$/;
 const SLACK_TIMESTAMP = /^\d{1,16}\.\d{1,10}$/;
+const DETERMINISTIC_CLIENT_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export class ImmediateNotificationError extends Error {
   constructor(code, kind = 'unconfirmed') {
@@ -25,7 +26,11 @@ function escapeSlackText(value, fallback, maxLength) {
     .slice(0, maxLength)
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
+    .replaceAll('>', '&gt;')
+    .replaceAll('*', '＊')
+    .replaceAll('_', '＿')
+    .replaceAll('~', '～')
+    .replaceAll('`', '｀');
 }
 
 function validatedMentions(mentionUserIds) {
@@ -44,6 +49,10 @@ function validReceipt(row) {
     && typeof row.notification_state === 'string'
     && Number.isInteger(row.delivery_attempts)
     && row.delivery_attempts >= 0;
+}
+
+function hasValidClientMessageId(receipt) {
+  return DETERMINISTIC_CLIENT_MESSAGE_ID_PATTERN.test(receipt.client_message_id);
 }
 
 function validDelivery(delivery) {
@@ -120,7 +129,7 @@ async function reconcileDelivery({ receipt, config, store, slack, attemptedAt })
     throw typedError('history_unavailable');
   }
 
-  if (match) {
+  if (match?.client_msg_id === receipt.client_message_id) {
     if (typeof match.ts !== 'string' || !SLACK_TIMESTAMP.test(match.ts)) {
       throw typedError('history_unavailable');
     }
@@ -174,6 +183,7 @@ export async function ensureImmediateNotification({ event, config = {}, store, s
   }
   const receipt = claim?.row;
   if (!validReceipt(receipt)) throw typedError('receipt_unavailable');
+  if (!hasValidClientMessageId(receipt)) throw typedError('receipt_identity_invalid');
 
   if (receipt.notification_state === 'delivered') {
     return { status: 'delivered', receipt, delivery: null, reconciled: false };
@@ -212,6 +222,9 @@ export async function ensureImmediateNotification({ event, config = {}, store, s
   const deliveringReceipt = deliveryClaim.row;
   if (deliveringReceipt.notification_state !== 'delivering') {
     throw typedError('claim_conflict');
+  }
+  if (!hasValidClientMessageId(deliveringReceipt)) {
+    throw typedError('receipt_identity_invalid');
   }
 
   const notice = buildImmediateNotice(event, { mentionUserIds: config.mentionUserIds });
