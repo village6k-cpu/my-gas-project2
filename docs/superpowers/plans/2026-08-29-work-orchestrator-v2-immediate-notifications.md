@@ -156,8 +156,9 @@ git commit -m "feat: add bounded Slack notification client"
 - Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
 
 **Interfaces:**
-- Consumes: `store.claimNotificationReceipt`, `store.transitionNotification`, `slack.postMessage`, `slack.findMessageByClientId`.
+- Consumes: `store.claimNotificationReceipt`, `store.claimNotificationDelivery`, `store.getNotificationByEventKey`, `store.markNotificationDelivered`, `store.markNotificationFailed`, `slack.postMessage`, `slack.findMessageByClientId`.
 - Produces: `ensureImmediateNotification({event,config,store,slack,now}) -> {status,receipt,delivery,reconciled}`.
+- `store.claimNotificationReceipt(...)` returns `{created,row}`. The receipt is always `claim.row`, and its deterministic Slack identity is exactly `row.client_message_id`.
 
 - [ ] **Step 1: Write RED tests for the state machine**
 
@@ -166,9 +167,11 @@ Required cases:
 1. a new receipt transitions `pending -> delivering -> delivered` and posts once;
 2. a duplicate event whose receipt is `delivered` posts zero times;
 3. two concurrent calls allow only one `pending|failed -> delivering` claim;
-4. an ambiguous timeout finds the exact `client_msg_id`, stores coordinates, and does not repost;
+4. a pre-existing `delivering` row searches history before any post: an exact `client_msg_id` match stores coordinates, no match becomes typed unconfirmed/failed, and a history failure leaves the row delivering;
 5. an ambiguous timeout with no readback moves to `failed` with `last_delivery_error`;
-6. P0 is not inferred before Hermes; the immediate event starts with `urgency=normal` unless the source event carries an explicit trusted alert level.
+6. delivered persistence failure and empty compare-and-swap results are never reported as successful delivery;
+7. customer content cannot inject Slack mentions, special broadcasts, or links;
+8. P0 is not inferred from customer text or Hermes. No reviewed trusted-alert transport field exists, so receipt urgency remains the schema default `normal`.
 
 Use an expected delivered row:
 
@@ -193,12 +196,12 @@ Expected: FAIL because the state machine is missing.
 Add:
 
 ```js
-claimNotificationDelivery({ id })
+claimNotificationDelivery({ id, expectedDeliveryAttempts })
 markNotificationDelivered({ id, channelId, messageTs, deliveredAt })
-markNotificationFailed({ id, error, attemptedAt })
+markNotificationFailed({ id, failureCode })
 ```
 
-`claimNotificationDelivery` must filter `notification_state=in.(pending,failed)` and increment `delivery_attempts`. Empty representation means another process owns the claim.
+`claimNotificationDelivery` must atomically filter by `id`, `notification_state=in.(pending,failed)`, and the observed `delivery_attempts`, then set exactly `observed+1`, clear `last_delivery_error`, and refuse a fourth attempt. Empty representation means another process owns the claim and must remain observable. Both delivery terminal methods compare-and-swap only from `delivering`; failure accepts only reviewed bounded tokens and never writes an `attempted_at` column.
 
 - [ ] **Step 4: Implement rendering and delivery**
 
@@ -206,9 +209,13 @@ Export:
 
 ```js
 export function buildImmediateNotice(event = {}, { mentionUserIds = [] } = {}) {
-  const mentions = [...new Set(mentionUserIds)].map((id) => `<@${id}>`).join(' ');
-  const customer = String(event.customerName || '고객명 미확인').slice(0, 200);
-  const preview = String(event.messagePreview || event.previewText || '내용 확인 필요').slice(0, 1000);
+  const mentions = [...new Set(mentionUserIds)]
+    .filter((id) => /^[UW][A-Z0-9]{1,79}$/.test(id))
+    .map((id) => `<@${id}>`).join(' ');
+  const escape = (value, fallback, max) => String(value || fallback).slice(0, max)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  const customer = escape(event.customerName, '고객명 미확인', 200);
+  const preview = escape(event.messagePreview || event.previewText, '내용 확인 필요', 1000);
   return {
     text: `${mentions ? `${mentions} ` : ''}💬 카카오 새 메시지 · ${customer} · ${preview}`.slice(0, 2900),
     blocks: [
@@ -219,49 +226,45 @@ export function buildImmediateNotice(event = {}, { mentionUserIds = [] } = {}) {
 }
 
 export async function ensureImmediateNotification({ event, config, store, slack, now = () => new Date() } = {}) {
-  const receipt = await store.claimNotificationReceipt(notificationReceiptInput(event));
+  const claim = await store.claimNotificationReceipt(notificationReceiptInput(event));
+  const receipt = claim.row;
   if (receipt.notification_state === 'delivered') return { status: 'delivered', receipt, delivery: null, reconciled: false };
-  const claimed = await store.claimNotificationDelivery({ id: receipt.id });
+  if (receipt.notification_state === 'delivering') return reconcileExactHistoryOrThrowUnconfirmed(receipt);
+  if (receipt.delivery_attempts >= 3) throw new ImmediateNotificationError('attempts_exhausted', 'exhausted');
+  const claimed = await store.claimNotificationDelivery({
+    id: receipt.id,
+    expectedDeliveryAttempts: receipt.delivery_attempts
+  });
   if (!claimed.applied) {
-    const current = await store.getNotificationByEventKey(receipt.source_event_key);
-    return { status: current?.notification_state || 'busy', receipt: current || receipt, delivery: null, reconciled: false };
+    await store.getNotificationByEventKey(receipt.source_event_key);
+    throw new ImmediateNotificationError('claim_conflict', 'unconfirmed');
   }
   const notice = buildImmediateNotice(event, { mentionUserIds: config.mentionUserIds });
+  let delivery;
   try {
-    const delivery = await slack.postMessage({
+    delivery = await slack.postMessage({
       channel: config.inboxChannelId,
       ...notice,
-      clientMsgId: claimed.row.slack_client_msg_id
+      clientMsgId: claimed.row.client_message_id
     });
-    const delivered = await store.markNotificationDelivered({ id: receipt.id, channelId: delivery.channel, messageTs: delivery.ts, deliveredAt: now().toISOString() });
-    return { status: 'delivered', receipt: delivered.row, delivery, reconciled: false };
   } catch (error) {
-    if (error?.ambiguous) {
-      const createdAt = Date.parse(receipt.created_at);
-      const match = await slack.findMessageByClientId({
-        channel: config.inboxChannelId,
-        clientMsgId: claimed.row.slack_client_msg_id,
-        oldest: (createdAt - 300000) / 1000,
-        latest: (now().getTime() + 300000) / 1000
-      });
-      if (match) {
-        const delivered = await store.markNotificationDelivered({ id: receipt.id, channelId: config.inboxChannelId, messageTs: match.ts, deliveredAt: now().toISOString() });
-        return { status: 'delivered', receipt: delivered.row, delivery: match, reconciled: true };
-      }
-    }
-    await store.markNotificationFailed({ id: receipt.id, error: String(error?.message || error).slice(0, 500), attemptedAt: now().toISOString() });
-    throw error;
+    if (error?.ambiguous) return reconcileExactHistoryOrThrowUnconfirmed(claimed.row);
+    await store.markNotificationFailed({ id: receipt.id, failureCode: 'post_rejected' });
+    throw new ImmediateNotificationError('post_rejected', 'failed');
   }
+  const delivered = await store.markNotificationDelivered({ id: receipt.id, channelId: delivery.channel, messageTs: delivery.ts, deliveredAt: now().toISOString() });
+  if (!delivered.applied) throw new ImmediateNotificationError('delivery_persistence_failed', 'unconfirmed');
+  return { status: 'delivered', receipt: delivered.row, delivery, reconciled: false };
 }
 ```
 
-On ambiguous error, search from five minutes before receipt creation to five minutes after the attempt. Do not retry inside the same call unless reconciliation proves absence and `delivery_attempts < 3`.
+`reconcileExactHistoryOrThrowUnconfirmed` searches the exact `client_message_id` from five minutes before receipt creation to five minutes after the current attempt. A match is successful only after the delivered CAS readback applies. No match records the reviewed `delivery_unconfirmed` token and throws typed unconfirmed; history or persistence failure also throws bounded typed unconfirmed without copying store/Slack data. It never reposts inside the same call. A later exact retry may claim a failed row only while `delivery_attempts < 3`.
 
 - [ ] **Step 5: Run GREEN and commit**
 
 ```powershell
 node --test tools\work-orchestrator-v2\supabase-store.test.mjs tools\work-orchestrator-v2\immediate-notifications.test.mjs
-git add -- tools/work-orchestrator-v2/supabase-store.mjs tools/work-orchestrator-v2/supabase-store.test.mjs tools/work-orchestrator-v2/immediate-notifications.mjs tools/work-orchestrator-v2/immediate-notifications.test.mjs
+git add -- docs/superpowers/plans/2026-08-29-work-orchestrator-v2-immediate-notifications.md tools/work-orchestrator-v2/package.json tools/work-orchestrator-v2/supabase-store.mjs tools/work-orchestrator-v2/supabase-store.test.mjs tools/work-orchestrator-v2/immediate-notifications.mjs tools/work-orchestrator-v2/immediate-notifications.test.mjs
 git commit -m "feat: deliver idempotent immediate notifications"
 ```
 

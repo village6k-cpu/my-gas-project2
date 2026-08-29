@@ -2,6 +2,8 @@ import { assertNotificationTransition } from './contracts.mjs';
 
 const REQUEST_ERROR_PREFIX = 'Work Orchestrator Supabase request failed';
 const MAX_EVENT_KEY_LENGTH = 500;
+const MAX_DELIVERY_ATTEMPTS = 3;
+const DELIVERY_FAILURE_CODES = new Set(['post_rejected', 'delivery_unconfirmed']);
 
 function invalidInput() {
   return new Error('Work Orchestrator Supabase input is invalid');
@@ -77,6 +79,27 @@ function normalizeTransition(input = {}) {
 
 function notificationEventKey(sourceEventKey) {
   return requiredText(sourceEventKey, MAX_EVENT_KEY_LENGTH);
+}
+
+function expectedDeliveryAttempts(value) {
+  if (!Number.isInteger(value) || value < 0) throw invalidInput();
+  return value;
+}
+
+function deliveredPatch(input = {}) {
+  const deliveredAt = requiredText(input.deliveredAt, 100);
+  if (Number.isNaN(new Date(deliveredAt).getTime())) throw invalidInput();
+  return {
+    slack_channel_id: requiredText(input.channelId, 500),
+    slack_message_ts: requiredText(input.messageTs, 100),
+    delivered_at: deliveredAt,
+    last_delivery_error: null
+  };
+}
+
+function failurePatch(input = {}) {
+  if (!DELIVERY_FAILURE_CODES.has(input.failureCode)) throw invalidInput();
+  return { last_delivery_error: input.failureCode };
 }
 
 export function toRpcReceipt(input) {
@@ -169,6 +192,33 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
     return { data, count: countMatch ? Number(countMatch[1]) : null };
   };
 
+  const transitionNotification = async (input, compare = {}) => {
+    let transition;
+    try {
+      transition = normalizeTransition(input);
+      for (const fromState of transition.fromStates) {
+        assertNotificationTransition(fromState, transition.toState);
+      }
+    } catch {
+      throw new Error('Work Orchestrator Supabase transition input is invalid');
+    }
+    const query = new URLSearchParams({
+      id: `eq.${transition.id}`,
+      notification_state: `in.(${transition.fromStates.join(',')})`,
+      ...compare,
+      select: '*'
+    });
+    let body;
+    try {
+      body = safeJson({ ...transition.patch, notification_state: transition.toState });
+    } catch {
+      throw new Error('Work Orchestrator Supabase transition input is invalid');
+    }
+    const { data } = await request(`message_notification_receipts?${query}`, { method: 'PATCH', body });
+    const row = Array.isArray(data) ? data[0] || null : null;
+    return { applied: Boolean(row), row };
+  };
+
   return {
     claimNotificationReceipt: async (input) => {
       const { data } = await request('rpc/claim_message_notification_receipt', {
@@ -186,30 +236,60 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const { data } = await request(`message_notification_receipts?${query}`);
       return Array.isArray(data) ? data[0] || null : null;
     },
-    transitionNotification: async (input) => {
-      let transition;
+    transitionNotification,
+    claimNotificationDelivery: async (input = {}) => {
+      let id;
+      let attempts;
       try {
-        transition = normalizeTransition(input);
-        for (const fromState of transition.fromStates) {
-          assertNotificationTransition(fromState, transition.toState);
+        id = requiredText(input.id, 200);
+        attempts = expectedDeliveryAttempts(input.expectedDeliveryAttempts);
+      } catch {
+        throw new Error('Work Orchestrator Supabase transition input is invalid');
+      }
+      if (attempts >= MAX_DELIVERY_ATTEMPTS) return { applied: false, row: null };
+      return transitionNotification({
+        id,
+        fromStates: ['pending', 'failed'],
+        toState: 'delivering',
+        patch: {
+          delivery_attempts: attempts + 1,
+          last_delivery_error: null
         }
-      } catch {
-        throw new Error('Work Orchestrator Supabase transition input is invalid');
-      }
-      const query = new URLSearchParams({
-        id: `eq.${transition.id}`,
-        notification_state: `in.(${transition.fromStates.join(',')})`,
-        select: '*'
+      }, {
+        delivery_attempts: `eq.${attempts}`
       });
-      let body;
+    },
+    markNotificationDelivered: async (input = {}) => {
+      let id;
+      let patch;
       try {
-        body = safeJson({ ...transition.patch, notification_state: transition.toState });
+        id = requiredText(input.id, 200);
+        patch = deliveredPatch(input);
       } catch {
         throw new Error('Work Orchestrator Supabase transition input is invalid');
       }
-      const { data } = await request(`message_notification_receipts?${query}`, { method: 'PATCH', body });
-      const row = Array.isArray(data) ? data[0] || null : null;
-      return { applied: Boolean(row), row };
+      return transitionNotification({
+        id,
+        fromStates: ['delivering'],
+        toState: 'delivered',
+        patch
+      });
+    },
+    markNotificationFailed: async (input = {}) => {
+      let id;
+      let patch;
+      try {
+        id = requiredText(input.id, 200);
+        patch = failurePatch(input);
+      } catch {
+        throw new Error('Work Orchestrator Supabase transition input is invalid');
+      }
+      return transitionNotification({
+        id,
+        fromStates: ['delivering'],
+        toState: 'failed',
+        patch
+      });
     },
     counts: async () => {
       const count = async (table, filters) => {

@@ -131,6 +131,97 @@ test('transitionNotification reports no application for an empty representation'
   );
 });
 
+test('claimNotificationDelivery atomically compares the observed attempt count for concurrent callers', async () => {
+  let claimed = false;
+  const requests = [];
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      if (claimed) return response({ data: [] });
+      claimed = true;
+      return response({ data: [{ id: 'receipt-1', notification_state: 'delivering', delivery_attempts: 2 }] });
+    }
+  });
+
+  const results = await Promise.all([
+    store.claimNotificationDelivery({ id: 'receipt-1', expectedDeliveryAttempts: 1 }),
+    store.claimNotificationDelivery({ id: 'receipt-1', expectedDeliveryAttempts: 1 })
+  ]);
+
+  assert.equal(results.filter(({ applied }) => applied).length, 1);
+  assert.equal(results.filter(({ applied }) => !applied).length, 1);
+  assert.deepEqual(requests.map(({ url }) => url), [
+    'https://supabase.example/rest/v1/message_notification_receipts?id=eq.receipt-1&notification_state=in.%28pending%2Cfailed%29&delivery_attempts=eq.1&select=*',
+    'https://supabase.example/rest/v1/message_notification_receipts?id=eq.receipt-1&notification_state=in.%28pending%2Cfailed%29&delivery_attempts=eq.1&select=*'
+  ]);
+  assert.deepEqual(requests.map(({ init }) => JSON.parse(init.body)), [
+    { delivery_attempts: 2, last_delivery_error: null, notification_state: 'delivering' },
+    { delivery_attempts: 2, last_delivery_error: null, notification_state: 'delivering' }
+  ]);
+});
+
+test('claimNotificationDelivery fails closed at the three-attempt cap without a request', async () => {
+  const fetch = createFetch();
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  assert.deepEqual(
+    await store.claimNotificationDelivery({ id: 'receipt-1', expectedDeliveryAttempts: 3 }),
+    { applied: false, row: null }
+  );
+  assert.equal(fetch.requests.length, 0);
+});
+
+test('markNotificationDelivered stores exact coordinates only from delivering and clears the prior error', async () => {
+  const fetch = createFetch([response({ data: [{ id: 'receipt-1', notification_state: 'delivered' }] })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  const result = await store.markNotificationDelivered({
+    id: 'receipt-1',
+    channelId: 'CINBOX',
+    messageTs: '100.1',
+    deliveredAt: '2026-08-29T00:01:00.000Z'
+  });
+
+  assert.equal(result.applied, true);
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/message_notification_receipts?id=eq.receipt-1&notification_state=in.%28delivering%29&select=*');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    slack_channel_id: 'CINBOX',
+    slack_message_ts: '100.1',
+    delivered_at: '2026-08-29T00:01:00.000Z',
+    last_delivery_error: null,
+    notification_state: 'delivered'
+  });
+});
+
+test('markNotificationFailed persists only a bounded reviewed token and no nonexistent attempted-at column', async () => {
+  const fetch = createFetch([response({ data: [{ id: 'receipt-1', notification_state: 'failed' }] })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  const result = await store.markNotificationFailed({ id: 'receipt-1', failureCode: 'delivery_unconfirmed' });
+
+  assert.equal(result.applied, true);
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/message_notification_receipts?id=eq.receipt-1&notification_state=in.%28delivering%29&select=*');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    last_delivery_error: 'delivery_unconfirmed',
+    notification_state: 'failed'
+  });
+  assert.equal('attempted_at' in JSON.parse(fetch.requests[0].init.body), false);
+});
+
+test('markNotificationFailed rejects arbitrary failure text before any request', async () => {
+  const fetch = createFetch();
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  await assert.rejects(
+    store.markNotificationFailed({ id: 'receipt-1', failureCode: `customer room token ${serviceRoleKey}` }),
+    (error) => error.message === 'Work Orchestrator Supabase transition input is invalid'
+      && !error.message.includes(serviceRoleKey)
+  );
+  assert.equal(fetch.requests.length, 0);
+});
+
 test('transitionNotification rejects incomplete transition inputs before any request', async () => {
   const fetch = createFetch();
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
