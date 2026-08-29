@@ -1,50 +1,126 @@
-﻿# register-hermes-gateway-tasks.ps1 — 게이트웨이 예약작업 2종을 등록한다 (멱등).
-#
-# 카카오 워커는 8787 bridge가 필요할 때 Hermes CLI를 실행한다. 플랫폼이 하나도 없는
-# 옛 AppData kakaoworker gateway는 워커가 아니므로 비활성화한다.
-# Village-Hermes-Gateway-Lineage-Watchdog은 30분마다 root Slack 게이트웨이의
-# Redirection Guard 오염/사망 여부를 실측하고, 문제 있을 때만 자동 치유한다.
-#    누가 에이전트 셸에서 raw `hermes gateway restart`를 쳐도 30분 안에 회복된다.
-#
-# 실행: powershell -ExecutionPolicy Bypass -File register-hermes-gateway-tasks.ps1
+<#
+.SYNOPSIS
+Registers the root lineage watchdog and a profile-scoped Kakao Gateway task.
 
+.DESCRIPTION
+The root Slack Gateway task is never rewritten. The kakaoworker task is
+registered disabled by default and runs only through Task Scheduler clean
+lineage. Use -PlanOnly for a strictly read-only task plan.
+#>
+[CmdletBinding()]
+param(
+    [string]$HermesHome = (Join-Path $env:LOCALAPPDATA 'hermes'),
+    [string]$HermesPythonPath = '',
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$EnvFile,
+    [switch]$EnableKakaoworker,
+    [switch]$PlanOnly
+)
+
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$WrapperPs1 = 'C:\Village\my-gas-project2\scripts\windows\restart-hermes-gateway.ps1'
-$HiddenDir  = Join-Path $env:LOCALAPPDATA 'Village\hidden-tasks'
-$WatchVbs   = Join-Path $HiddenDir 'Village-Hermes-Gateway-Lineage-Watchdog.vbs'
-$PsExe      = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-
-if (-not (Test-Path $WrapperPs1)) { throw "래퍼 스크립트가 없다: $WrapperPs1" }
-if (-not (Test-Path $HiddenDir))  { New-Item -ItemType Directory -Path $HiddenDir -Force | Out-Null }
-
-# --- 워치독 vbs (기존 hidden-tasks 패턴 그대로: 창 깜빡임 없음) ---------------
-$vbsLine = 'CreateObject("WScript.Shell").Run """' + $PsExe + '"" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File ""' + $WrapperPs1 + '"" -Target root -HealOnly", 0, False'
-Set-Content -Path $WatchVbs -Value $vbsLine -Encoding ASCII
-Write-Host "워치독 vbs 작성: $WatchVbs"
-
-# --- 1) Hermes_Gateway_Kakaoworker (root의 Hermes_Gateway 작업 설정 미러링) ---
-if (Get-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker' -ErrorAction SilentlyContinue) {
-    Disable-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker' | Out-Null
-    Write-Host "비활성화: Hermes_Gateway_Kakaoworker (실제 카카오 워커는 8787 bridge가 소유)"
+function Get-FullPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
 }
 
-# --- 2) 혈통 워치독: 30분 간격 ------------------------------------------------
-$action2  = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('//B //Nologo "{0}"' -f $WatchVbs)
-$trigger2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) `
-    -RepetitionInterval (New-TimeSpan -Minutes 30) `
-    -RepetitionDuration ([TimeSpan]::MaxValue)
-$settings2 = New-ScheduledTaskSettingsSet `
+function Quote-TaskArgument {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+$resolvedHermesHome = Get-FullPath -Path $HermesHome
+if ([string]::IsNullOrWhiteSpace($HermesPythonPath)) {
+    $HermesPythonPath = Join-Path $resolvedHermesHome 'hermes-agent\venv\Scripts\python.exe'
+}
+$resolvedPython = Get-FullPath -Path (Resolve-Path -LiteralPath $HermesPythonPath -ErrorAction Stop).Path
+$resolvedEnvFile = Get-FullPath -Path (Resolve-Path -LiteralPath $EnvFile -ErrorAction Stop).Path
+$expectedPython = Get-FullPath -Path (Join-Path $resolvedHermesHome 'hermes-agent\venv\Scripts\python.exe')
+if (-not $resolvedPython.Equals($expectedPython, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Hermes_Gateway_Kakaoworker_Native must use hermes-agent\venv\Scripts\python.exe.'
+}
+
+$wrapperPs1 = Join-Path $PSScriptRoot 'restart-hermes-gateway.ps1'
+$launcherPs1 = Join-Path $PSScriptRoot 'start-hermes-kakaoworker-gateway.ps1'
+$psExe = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+foreach ($required in @($wrapperPs1, $launcherPs1, $psExe)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required Gateway launcher is missing: '$required'." }
+}
+
+$hiddenDir = Join-Path $env:LOCALAPPDATA 'Village\hidden-tasks'
+$watchVbs = Join-Path $hiddenDir 'Village-Hermes-Gateway-Lineage-Watchdog.vbs'
+$kakaoArguments = @(
+    '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
+    '-File', (Quote-TaskArgument -Value $launcherPs1),
+    '-HermesHome', (Quote-TaskArgument -Value $resolvedHermesHome),
+    '-HermesPythonPath', (Quote-TaskArgument -Value $resolvedPython),
+    '-EnvFile', (Quote-TaskArgument -Value $resolvedEnvFile)
+) -join ' '
+
+$plan = [ordered]@{
+    ok = $true
+    mode = if ($PlanOnly.IsPresent) { 'plan' } else { 'apply' }
+    root = [ordered]@{
+        taskName = 'Hermes_Gateway'
+        mutated = $false
+        watchdogTaskName = 'Village-Hermes-Gateway-Lineage-Watchdog'
+    }
+    kakaoworker = [ordered]@{
+        taskName = 'Hermes_Gateway_Kakaoworker_Native'
+        legacyTaskPreserved = 'Hermes_Gateway_Kakaoworker'
+        enabled = $EnableKakaoworker.IsPresent
+        profile = 'kakaoworker'
+        executable = $psExe
+        actionScript = $launcherPs1
+        arguments = $kakaoArguments
+        pythonPath = $resolvedPython
+        envFile = $resolvedEnvFile
+        pidFile = Join-Path $resolvedHermesHome 'profiles\kakaoworker\gateway.pid'
+        pluginPath = Join-Path $resolvedHermesHome 'profiles\kakaoworker\plugins\kakao_village'
+        launchCommand = @($resolvedPython, '-m', 'hermes_cli.main', '--profile', 'kakaoworker', 'gateway', 'run')
+        cleanLineage = $true
+    }
+}
+if ($PlanOnly.IsPresent) {
+    [pscustomobject]$plan | ConvertTo-Json -Depth 6 -Compress
+    exit 0
+}
+
+[void](New-Item -ItemType Directory -Path $hiddenDir -Force -ErrorAction Stop)
+$vbsLine = 'CreateObject("WScript.Shell").Run """' + $psExe + '"" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File ""' + $wrapperPs1 + '"" -Target root -HealOnly", 0, False'
+Set-Content -LiteralPath $watchVbs -Value $vbsLine -Encoding ASCII
+
+$kakaoAction = New-ScheduledTaskAction -Execute $psExe -Argument $kakaoArguments
+$kakaoSettings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -StartWhenAvailable `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
-Register-ScheduledTask -TaskName 'Village-Hermes-Gateway-Lineage-Watchdog' `
-    -Description 'Detect and heal the poisoned (RedirectionTrust) or dead root Hermes Slack gateway every 30 min' `
-    -Action $action2 -Trigger $trigger2 -Settings $settings2 -Force | Out-Null
-Write-Host "등록: Village-Hermes-Gateway-Lineage-Watchdog (30분 간격)"
+    -ExecutionTimeLimit ([TimeSpan]::Zero)
+Register-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker_Native' `
+    -Description 'Profile-scoped native Hermes Gateway for Village Kakao bridge events' `
+    -Action $kakaoAction -Settings $kakaoSettings -Force -ErrorAction Stop | Out-Null
+if ($EnableKakaoworker.IsPresent) {
+    Enable-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker_Native' -ErrorAction Stop | Out-Null
+}
+else {
+    Disable-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker_Native' -ErrorAction Stop | Out-Null
+}
 
-Write-Host ""
-Write-Host "완료. 재시작이 필요할 때는 어디서든:"
-Write-Host "  powershell -ExecutionPolicy Bypass -File $WrapperPs1 -Target root"
+$existingWatchdog = Get-ScheduledTask -TaskName 'Village-Hermes-Gateway-Lineage-Watchdog' -ErrorAction SilentlyContinue
+if ($null -eq $existingWatchdog) {
+    $watchAction = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('//B //Nologo "{0}"' -f $watchVbs)
+    $watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) `
+        -RepetitionInterval (New-TimeSpan -Minutes 30)
+    $watchSettings = New-ScheduledTaskSettingsSet `
+        -MultipleInstances IgnoreNew `
+        -StartWhenAvailable `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+    Register-ScheduledTask -TaskName 'Village-Hermes-Gateway-Lineage-Watchdog' `
+        -Description 'Detect and heal the poisoned or dead root Hermes Slack gateway every 30 minutes' `
+        -Action $watchAction -Trigger $watchTrigger -Settings $watchSettings -ErrorAction Stop | Out-Null
+}
+
+[pscustomobject]$plan | ConvertTo-Json -Depth 6 -Compress

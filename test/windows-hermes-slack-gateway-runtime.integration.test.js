@@ -50,7 +50,7 @@ test('Windows Heybilli gateway uses the runtime that can load Slack Socket Mode'
   }
 });
 
-test('reboot owns only the root messaging gateway; Kakao work stays on the bridge worker', () => {
+test('root Slack gateway stays independent while Kakao gets a disabled-by-default native Gateway task', () => {
   const root = path.resolve(__dirname, '..');
   const register = fs.readFileSync(
     path.join(root, 'scripts', 'windows', 'register-hermes-gateway-tasks.ps1'),
@@ -61,13 +61,15 @@ test('reboot owns only the root messaging gateway; Kakao work stays on the bridg
     'utf8'
   );
 
-  assert.doesNotMatch(
-    register,
-    /Register-ScheduledTask\s+-TaskName\s+['"]Hermes_Gateway_Kakaoworker['"]/i
-  );
-  assert.match(register, /Disable-ScheduledTask\s+-TaskName\s+['"]Hermes_Gateway_Kakaoworker['"]/i);
+  assert.match(register, /Register-ScheduledTask[\s\S]*Hermes_Gateway_Kakaoworker_Native/i);
+  assert.match(register, /if\s*\(\$EnableKakaoworker\.IsPresent\)/i);
+  assert.match(register, /Disable-ScheduledTask[\s\S]*Hermes_Gateway_Kakaoworker_Native/i);
+  assert.match(register, /Register-ScheduledTask[\s\S]*-ErrorAction\s+Stop/i);
+  assert.doesNotMatch(register, /RepetitionDuration\s+\(\[TimeSpan\]::MaxValue\)/i);
   assert.match(register, /-Target\s+root\s+-HealOnly/i);
   assert.match(restart, /if\s*\(\$Target\s+-eq\s+['"]all['"]\)\s*\{\s*\$targets\s*=\s*@\(['"]root['"]\)\s*\}/i);
+  assert.match(restart, /profiles\\kakaoworker\\gateway\.pid/i);
+  assert.match(restart, /--profile['"],?\s*['"]kakaoworker/i);
 });
 
 test('manual Kakao gateway restart uses the native task and validates it before stopping the live worker', () => {

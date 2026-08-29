@@ -27,7 +27,17 @@ param(
     [ValidateRange(2, 120)]
     [int]$WatchdogIntervalMinutes = 5,
 
-    [switch]$ConfirmProductionOwnership
+    [string]$BenchmarkReportPath = (Join-Path (Join-Path $PSScriptRoot '..\..') 'docs\kakao-hermes-gateway-benchmark-report.json'),
+
+    [string]$PluginReceiptPath = (Join-Path $env:LOCALAPPDATA 'hermes\profiles\kakaoworker\plugin-state\kakao_village.json'),
+
+    [string]$SmokeEvidencePath = '',
+
+    [switch]$ConfirmProductionOwnership,
+
+    [switch]$ConfirmKakaoGatewayCutover,
+
+    [switch]$PlanOnly
 )
 
 Set-StrictMode -Version Latest
@@ -35,35 +45,31 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'KakaoStaging.Common.psm1') -Force
 
-if (-not $ConfirmProductionOwnership.IsPresent) {
-    throw 'Production registration requires -ConfirmProductionOwnership: confirm the Mac (or any other machine) no longer owns the Kakao bridge/worker before enabling an always-on write path.'
-}
-
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') -ErrorAction Stop).Path
 $resolvedEnvFile = (Resolve-Path -LiteralPath $EnvFile -ErrorAction Stop).Path
 $resolvedChromePath = (Resolve-Path -LiteralPath $ChromePath -ErrorAction Stop).Path
 $resolvedNodePath = (Resolve-Path -LiteralPath $NodePath -ErrorAction Stop).Path
 $resolvedHermesPythonPath = (Resolve-Path -LiteralPath $HermesPythonPath -ErrorAction Stop).Path
+$resolvedBenchmarkReportPath = (Resolve-Path -LiteralPath $BenchmarkReportPath -ErrorAction Stop).Path
+$resolvedPluginReceiptPath = [IO.Path]::GetFullPath($PluginReceiptPath)
+$resolvedSmokeEvidencePath = if ([string]::IsNullOrWhiteSpace($SmokeEvidencePath)) { '' } else { [IO.Path]::GetFullPath($SmokeEvidencePath) }
 $startScriptPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'start-kakao-live.ps1') -ErrorAction Stop).Path
 $watchdogScriptPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'watch-kakao-production.ps1') -ErrorAction Stop).Path
 
-$powerShellExecutable = if ($PSVersionTable.PSEdition -eq 'Core') {
-    Join-Path $PSHOME 'pwsh.exe'
-}
-else {
-    Join-Path $PSHOME 'powershell.exe'
-}
-$powerShellExecutable = (Resolve-Path -LiteralPath $powerShellExecutable -ErrorAction Stop).Path
+$powerShellExecutable = (Resolve-Path -LiteralPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -ErrorAction Stop).Path
 
 function New-ProductionArgumentLine {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
-        [Parameter(Mandatory = $true)][bool]$WithEnableWrites
+        [Parameter(Mandatory = $true)][bool]$WithEnableWrites,
+        [switch]$GatewayMaintenance
     )
 
     $parts = @(
         '-NoProfile',
         '-NonInteractive',
+        '-WindowStyle',
+        'Hidden',
         '-ExecutionPolicy',
         'Bypass',
         '-File',
@@ -75,7 +81,14 @@ function New-ProductionArgumentLine {
         '-NodePath',
         (ConvertTo-WindowsCommandLineArgument -Value $resolvedNodePath),
         '-HermesPythonPath',
-        (ConvertTo-WindowsCommandLineArgument -Value $resolvedHermesPythonPath)
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedHermesPythonPath),
+        '-BenchmarkReportPath',
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedBenchmarkReportPath),
+        '-PluginReceiptPath',
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedPluginReceiptPath),
+        '-SmokeEvidencePath',
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedSmokeEvidencePath),
+        '-ConfirmKakaoGatewayCutover'
     )
     if ($IncludeGateway.IsPresent) {
         if ([string]::IsNullOrWhiteSpace($HermesPath)) {
@@ -91,21 +104,113 @@ function New-ProductionArgumentLine {
     if ($WithEnableWrites) {
         $parts += '-EnableWrites'
     }
+    if ($GatewayMaintenance.IsPresent) {
+        $parts += '-GatewayMaintenance'
+    }
     # -Confirm는 넘기지 않는다. 두 스크립트 모두 ConfirmImpact Medium이라 기본
     # ConfirmPreference(High)에서 프롬프트 없이 진행되고, powershell.exe -File은
     # `-Confirm:$false` 형태 인자를 신뢰성 있게 바인딩하지 못한다.
     return $parts -join ' '
 }
 
-$startArguments = New-ProductionArgumentLine -ScriptPath $startScriptPath -WithEnableWrites $false
+function ConvertTo-VbsStringLiteral {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+    return '"' + $Value.Replace('"', '""') + '"'
+}
+
+function Set-ExistingHiddenTaskWrapper {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$PowerShellArguments
+    )
+
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    if (-not [bool]$task.Settings.Enabled) {
+        throw "Existing production task '$TaskName' is disabled."
+    }
+    $actions = @($task.Actions)
+    if ($actions.Count -ne 1 -or [IO.Path]::GetFileName([string]$actions[0].Execute) -ine 'wscript.exe') {
+        throw "Existing production task '$TaskName' is not an approved hidden-wrapper task."
+    }
+    $actionArguments = [string]$actions[0].Arguments
+    if ($actionArguments -notmatch '^//B\s+//Nologo\s+"([^"]+\.vbs)"$') {
+        throw "Existing production task '$TaskName' has an unexpected wrapper action."
+    }
+    $wrapperPath = [IO.Path]::GetFullPath($matches[1])
+    $expectedWrapperPath = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Village\hidden-tasks\$TaskName.vbs"))
+    if (-not [string]::Equals($wrapperPath, $expectedWrapperPath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $wrapperPath -PathType Leaf)) {
+        throw "Existing production task '$TaskName' wrapper path is outside the approved runtime directory."
+    }
+    foreach ($path in @((Split-Path -Parent $wrapperPath), $wrapperPath)) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Existing production task '$TaskName' wrapper path is a reparse point."
+        }
+    }
+
+    $commandLine = '"' + $powerShellExecutable + '" ' + $PowerShellArguments
+    $content = 'CreateObject("WScript.Shell").Run ' + (ConvertTo-VbsStringLiteral -Value $commandLine) + ', 0, False' + "`r`n"
+    $suffix = [Guid]::NewGuid().ToString('N')
+    $temporary = "$wrapperPath.tmp.$suffix"
+    $backup = "$wrapperPath.backup.$suffix"
+    $encoding = New-Object Text.UTF8Encoding($false)
+    try {
+        [IO.File]::WriteAllText($temporary, $content, $encoding)
+        [IO.File]::Replace($temporary, $wrapperPath, $backup, $true)
+        if (Test-Path -LiteralPath $backup) { [IO.File]::Delete($backup) }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) }
+    }
+    if ([IO.File]::ReadAllText($wrapperPath, [Text.Encoding]::UTF8) -ne $content) {
+        throw "Existing production task '$TaskName' wrapper verification failed."
+    }
+}
+
+$startArguments = New-ProductionArgumentLine -ScriptPath $startScriptPath -WithEnableWrites $false -GatewayMaintenance
 $watchdogArguments = New-ProductionArgumentLine -ScriptPath $watchdogScriptPath -WithEnableWrites $false
+
+$registrationPlan = [pscustomobject]@{
+    schema = 'village-kakao-production-task-plan/v2'
+    mode = if ($PlanOnly.IsPresent) { 'plan' } else { 'apply' }
+    benchmarkReportPath = $resolvedBenchmarkReportPath
+    pluginReceiptPath = $resolvedPluginReceiptPath
+    smokeEvidencePath = $resolvedSmokeEvidencePath
+    requiredConfirmations = @('ConfirmProductionOwnership', 'ConfirmKakaoGatewayCutover')
+    tasks = @(
+        [pscustomobject]@{ name = 'Village-Kakao-Production-Start'; enabled = $true; arguments = $startArguments },
+        [pscustomobject]@{ name = 'Village-Kakao-Production-Watchdog'; enabled = $true; arguments = $watchdogArguments }
+    )
+    rootSlackGatewayMutated = $false
+}
+if ($PlanOnly.IsPresent) {
+    $registrationPlan | ConvertTo-Json -Depth 6
+    return
+}
+
+if (-not $ConfirmProductionOwnership.IsPresent) {
+    throw 'Production registration requires -ConfirmProductionOwnership: confirm the Mac (or any other machine) no longer owns the Kakao bridge/worker before enabling an always-on write path.'
+}
+if (-not $ConfirmKakaoGatewayCutover.IsPresent) {
+    throw 'Production registration requires -ConfirmKakaoGatewayCutover after an accepted provider-backed benchmark.'
+}
+if ([string]::IsNullOrWhiteSpace($resolvedSmokeEvidencePath) -or
+    -not (Test-Path -LiteralPath $resolvedSmokeEvidencePath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $resolvedPluginReceiptPath -PathType Leaf)) {
+    throw 'Production registration requires existing plugin receipt and native smoke evidence files.'
+}
+$benchmarkReport = [IO.File]::ReadAllText($resolvedBenchmarkReportPath, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
+if ($benchmarkReport.accepted -ne $true -or $benchmarkReport.latency_status -ne 'pass') {
+    throw 'Production registration refuses a blocked or failed Kakao Gateway benchmark.'
+}
 
 $enabledSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn
-# RepetitionDuration을 MaxValue로 명시해 모든 PS/OS 조합에서 무기한 반복을 보장한다.
+# Windows Task Scheduler가 거부하는 TimeSpan.MaxValue 대신 충분히 긴 10년 반복창을 사용한다.
 $watchdogTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Now.AddMinutes(2)) `
     -RepetitionInterval (New-TimeSpan -Minutes $WatchdogIntervalMinutes) `
-    -RepetitionDuration ([TimeSpan]::MaxValue)
+    -RepetitionDuration (New-TimeSpan -Days 3650)
 
 $taskDefinitions = @(
     [pscustomobject]@{
@@ -126,8 +231,19 @@ if (-not $PSCmdlet.ShouldProcess('Village Windows Kakao production scheduled tas
     return
 }
 
+$registrationModes = New-Object System.Collections.ArrayList
 foreach ($definition in $taskDefinitions) {
-    Register-ScheduledTask -TaskName $definition.Name -Action $definition.Action -Trigger $definition.Trigger -Settings $enabledSettings -Description $definition.Description -Force | Out-Null
+    try {
+        Register-ScheduledTask -TaskName $definition.Name -Action $definition.Action -Trigger $definition.Trigger -Settings $enabledSettings -Description $definition.Description -Force | Out-Null
+        [void]$registrationModes.Add("$($definition.Name):registered")
+    }
+    catch {
+        # Some long-lived tasks have an administrator-owned ACL. Do not bypass
+        # that ACL or create duplicate triggers: update only their exact,
+        # already-registered profile-scoped hidden wrapper atomically.
+        Set-ExistingHiddenTaskWrapper -TaskName $definition.Name -PowerShellArguments ([string]$definition.Action.Arguments)
+        [void]$registrationModes.Add("$($definition.Name):wrapper_updated")
+    }
 }
 
 # 스테이징 시절의 비활성 태스크가 남아 있으면 혼동을 막기 위해 상태만 보고한다(삭제하지 않음).
@@ -138,4 +254,4 @@ foreach ($stagingTaskName in @('Village-Kakao-Staging-Status', 'Village-Kakao-St
     }
 }
 
-Write-Output 'Village-Kakao-Production-Start and Village-Kakao-Production-Watchdog registered and enabled.'
+Write-Output ('Village Kakao production persistence updated: ' + ($registrationModes -join ', '))

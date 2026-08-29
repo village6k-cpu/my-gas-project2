@@ -2,7 +2,10 @@
 param(
     [Parameter(Mandatory = $true)] [string]$EnvFile,
     [Parameter(Mandatory = $true)] [string]$NodePath,
-    [Parameter(Mandatory = $true)] [string]$HermesPythonPath
+    [Parameter(Mandatory = $true)] [string]$HermesPythonPath,
+
+    [ValidateSet('cli', 'gateway')]
+    [string]$HermesTransport = 'cli'
 )
 
 Set-StrictMode -Version Latest
@@ -23,7 +26,7 @@ Import-DotEnvFile -Path $resolvedEnvFile
 [Environment]::SetEnvironmentVariable('HERMES_WORKER_COMMAND', $resolvedHermesPythonPath, 'Process')
 [Environment]::SetEnvironmentVariable('HERMES_WORKER_COMMAND_MODE', 'python_module', 'Process')
 Set-KakaoStagingSafeEnvironment -EnableWrites
-Set-KakaoLiveRuntimeEnvironment
+Set-KakaoLiveRuntimeEnvironment -HermesTransport $HermesTransport
 
 $watcherInjector = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'tools\kakao-dom-bridge\inject-watcher-cdp.py')).Path
 $probeOutput = & $resolvedHermesPythonPath $watcherInjector --port 9223 --wait 3 --probe-only 2>$null

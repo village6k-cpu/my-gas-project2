@@ -10,6 +10,14 @@ const root = path.resolve(here, '..');
 const fixturePath = path.join(root, 'test', 'fixtures', 'hermes-kakaoworker-native-benchmark.json');
 const helperPath = path.join(root, 'scripts', 'windows', 'hermes-kakaoworker-benchmark-prompt.mjs');
 const runnerPath = path.join(root, 'scripts', 'windows', 'measure-hermes-village-skill-latency.ps1');
+const invokePath = path.join(root, 'scripts', 'windows', 'hermes-village-benchmark-invoke.py');
+const analyzePath = path.join(root, 'scripts', 'windows', 'hermes-village-benchmark-analyze.py');
+const providerBenchmarkTestPath = path.join(root, 'test', 'windows-hermes-provider-benchmark.test.py');
+const gatewayReplayPath = path.join(root, 'tools', 'kakao-dom-bridge', 'fixtures', 'hermes-gateway-replay.json');
+const modelContractPath = path.join(root, 'scripts', 'windows', 'hermes-model-contract.json');
+const recordedEvidencePath = path.join(root, 'docs', 'kakao-hermes-gateway-benchmark-evidence.json');
+const benchmarkReportPath = path.join(root, 'docs', 'kakao-hermes-gateway-benchmark.md');
+const hermesPython = path.join(process.env.LOCALAPPDATA ?? '', 'hermes', 'hermes-agent', 'venv', 'Scripts', 'python.exe');
 const workerModulePath = path.join(root, 'tools', 'ai-browser-worker', 'worker.mjs');
 const historySkillPath = path.join(
   root,
@@ -121,4 +129,208 @@ test('worker benchmark WhatIf creates no profiles or results', { skip: process.p
   for (const target of targets) {
     assert.equal(fs.existsSync(target), false, `-WhatIf created ${target}`);
   }
+});
+
+test('A/B benchmark plan has one warm-up plus 20 matched turns per transport', { skip: process.platform !== 'win32' }, () => {
+  const tempRoot = fs.mkdtempSync(path.join(process.env.TEMP, 'kakao-gateway-benchmark-plan-'));
+  const outputPath = path.join(tempRoot, 'plan.json');
+  try {
+    const result = spawnSync(
+      hermesPython,
+      [
+        invokePath,
+        '--ab-plan',
+        '--replay-fixture', gatewayReplayPath,
+        '--model-contract', modelContractPath,
+        '--output-plan', outputPath,
+        '--sample-count', '20',
+        '--warmup-count', '1'
+      ],
+      { encoding: 'utf8', timeout: 30_000 }
+    );
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const plan = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    assert.equal(plan.schema, 'village-kakao-hermes-benchmark-plan/v1');
+    assert.deepEqual(plan.config, {
+      provider: 'xai-oauth',
+      model: 'grok-4.5',
+      reasoning_effort: 'xhigh',
+      max_turns: 90,
+      disabled_toolsets: ['computer_use']
+    });
+    assert.deepEqual(plan.transports.map(({ name }) => name), ['baseline', 'gateway']);
+    for (const transport of plan.transports) {
+      assert.equal(transport.invocations.length, 21);
+      assert.equal(transport.invocations.filter(({ measured }) => measured).length, 20);
+      assert.equal(transport.invocations[0].measured, false);
+    }
+    assert.equal(plan.transports[0].process_model, 'one_shot_cli');
+    assert.equal(plan.transports[1].process_model, 'persistent_native_gateway');
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('provider-backed benchmark runner passes its real loopback and evidence contracts', { skip: process.platform !== 'win32' }, () => {
+  const result = spawnSync(hermesPython, [providerBenchmarkTestPath], {
+    encoding: 'utf8',
+    timeout: 30_000
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stderr, /Ran 5 tests/);
+});
+
+function benchmarkInput({ measurementKind = 'provider_backed', sampleCount = 20, configOverride = {} } = {}) {
+  const config = {
+    provider: 'xai-oauth',
+    model: 'grok-4.5',
+    reasoning_effort: 'xhigh',
+    max_turns: 90,
+    disabled_toolsets: ['computer_use'],
+    tools_signature: 'same-tools',
+    skills_signature: 'same-skills',
+    ...configOverride
+  };
+  return {
+    schema: 'village-kakao-hermes-benchmark-evidence/v1',
+    measurement_kind: measurementKind,
+    baseline: {
+      sample_count: 23,
+      total_median_ms: 176_300,
+      total_p95_ms: 246_300,
+      config: { ...config }
+    },
+    gateway: {
+      config: { ...config, ...(configOverride.gateway ?? {}) },
+      samples: Array.from({ length: sampleCount }, (_, index) => ({
+        total_ms: 82_000 + index * 1_000,
+        agent_ms: 74_000 + index * 900,
+        process_starts: 0,
+        post_action_agent_runs: 0,
+        session_reused: true,
+        schedule: index % 2 === 0,
+        owner_review_required: index % 2 === 0,
+        send_count: 0,
+        write_count: 0,
+        provider_calls: 1,
+        terminal: 'result'
+      }))
+    }
+  };
+}
+
+function analyzeBenchmark(input) {
+  const tempRoot = fs.mkdtempSync(path.join(process.env.TEMP, 'kakao-gateway-benchmark-analyze-'));
+  const inputPath = path.join(tempRoot, 'evidence.json');
+  fs.writeFileSync(inputPath, JSON.stringify(input));
+  try {
+    const result = spawnSync(hermesPython, [analyzePath, '--ab-evidence', inputPath], {
+      encoding: 'utf8',
+      timeout: 30_000
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    return JSON.parse(result.stdout);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+test('A/B analyzer materializes matching JSON and Markdown reports from one calculation', { skip: process.platform !== 'win32' }, () => {
+  const tempRoot = fs.mkdtempSync(path.join(process.env.TEMP, 'kakao-gateway-benchmark-report-'));
+  const inputPath = path.join(tempRoot, 'evidence.json');
+  const outputPath = path.join(tempRoot, 'report.json');
+  const markdownPath = path.join(tempRoot, 'report.md');
+  const smokePath = path.join(tempRoot, 'smoke.json');
+  fs.writeFileSync(inputPath, JSON.stringify({ ...benchmarkInput(), run_id: '20260822-test' }));
+  try {
+    const result = spawnSync(hermesPython, [
+      analyzePath,
+      '--ab-evidence', inputPath,
+      '--output-report', outputPath,
+      '--markdown-report', markdownPath,
+      '--smoke-report', smokePath,
+      '--kill-switch-observed', 'active'
+    ], { encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const stdoutReport = JSON.parse(result.stdout);
+    const fileReport = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    const markdown = fs.readFileSync(markdownPath, 'utf8');
+    const smoke = JSON.parse(fs.readFileSync(smokePath, 'utf8'));
+    const embedded = markdown.match(/```json\s*([\s\S]*?)```/i)?.[1]?.trim();
+    assert.deepEqual(fileReport, stdoutReport);
+    assert.deepEqual(JSON.parse(embedded), stdoutReport);
+    assert.match(markdown, /Decision: \*\*ACCEPTED/i);
+    assert.match(markdown, /provider-backed/i);
+    assert.deepEqual(smoke, {
+      schema: 'village-kakao-native-smoke/v1',
+      nativeSessionResult: 'pass',
+      scheduleOwnerReviewRequired: true,
+      sendCount: 0,
+      writeCount: 0,
+      killSwitchObserved: 'active',
+      benchmarkRunId: '20260822-test'
+    });
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('provider-backed matched benchmark emits every acceptance field and passes only all gates', { skip: process.platform !== 'win32' }, () => {
+  const report = analyzeBenchmark(benchmarkInput());
+  for (const field of [
+    'sample_count',
+    'baseline_total_median_ms',
+    'baseline_total_p95_ms',
+    'gateway_total_median_ms',
+    'gateway_total_p95_ms',
+    'gateway_agent_median_ms',
+    'gateway_agent_p95_ms',
+    'process_starts_per_request',
+    'post_action_agent_runs_per_schedule',
+    'session_reuse_rate',
+    'schedule_owner_review_rate',
+    'send_count',
+    'write_count'
+  ]) {
+    assert.ok(Object.hasOwn(report, field), `missing ${field}`);
+  }
+  assert.equal(report.sample_count, 20);
+  assert.equal(report.process_starts_per_request, 0);
+  assert.equal(report.post_action_agent_runs_per_schedule, 0);
+  assert.equal(report.session_reuse_rate, 1);
+  assert.equal(report.schedule_owner_review_rate, 1);
+  assert.equal(report.send_count, 0);
+  assert.equal(report.write_count, 0);
+  assert.equal(report.comparable_config, true);
+  assert.equal(report.latency_status, 'pass');
+  assert.equal(report.accepted, true);
+});
+
+test('offline timings, short runs, or config drift are BLOCKED even when raw latency looks fast', { skip: process.platform !== 'win32' }, () => {
+  const offline = analyzeBenchmark(benchmarkInput({ measurementKind: 'offline_structural' }));
+  assert.equal(offline.accepted, false);
+  assert.equal(offline.latency_status, 'blocked');
+  assert.ok(offline.blockers.includes('provider_backed_measurement_required'));
+
+  const short = analyzeBenchmark(benchmarkInput({ sampleCount: 19 }));
+  assert.equal(short.accepted, false);
+  assert.ok(short.blockers.includes('gateway_sample_count_below_20'));
+
+  const drifted = benchmarkInput();
+  drifted.gateway.config.reasoning_effort = 'low';
+  const drift = analyzeBenchmark(drifted);
+  assert.equal(drift.accepted, false);
+  assert.equal(drift.comparable_config, false);
+  assert.ok(drift.blockers.includes('model_provider_reasoning_tools_or_skills_drift'));
+});
+
+test('checked-in benchmark report embeds the accepted analyzer output', { skip: process.platform !== 'win32' }, () => {
+  const evidence = JSON.parse(fs.readFileSync(recordedEvidencePath, 'utf8'));
+  const generated = analyzeBenchmark(evidence);
+  const report = fs.readFileSync(benchmarkReportPath, 'utf8');
+  const embedded = report.match(/```json\s*([\s\S]*?)```/i)?.[1]?.trim();
+  assert.ok(embedded, 'benchmark report has no embedded analyzer JSON');
+  assert.deepEqual(JSON.parse(embedded), generated);
+  assert.equal(generated.accepted, true);
+  assert.equal(generated.latency_status, 'pass');
 });

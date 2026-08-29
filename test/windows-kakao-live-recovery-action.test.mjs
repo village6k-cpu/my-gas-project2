@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const modulePath = fileURLToPath(new URL('../scripts/windows/KakaoLive.Common.psm1', import.meta.url));
@@ -98,6 +101,90 @@ function combinedLiveHealth(runtimeState, { authenticated = true, watcherReady =
   }
 }
 
+function gatewayCutoverHealth({ failed = 0, fresh = true, receiptVerified = true } = {}) {
+  const escapedPath = modulePath.replaceAll("'", "''");
+  const command = [
+    `$ErrorActionPreference='Stop'`,
+    `Import-Module '${escapedPath}' -Force`,
+    `$health=[pscustomobject]@{ok=$true; config=[pscustomobject]@{hermesTransport='gateway'; scheduleOwnerReviewRequired=$true; killSwitchPolicyEnforced=$true}; gateway=[pscustomobject]@{gatewayReady=$true; consumer=[pscustomobject]@{fresh=$${fresh ? 'true' : 'false'}}; queue=[pscustomobject]@{ready=0; claimed=0; retry=0; failed=${failed}}; unnotified_application_failures=0}}`,
+    `$probe=[pscustomobject]@{state='healthy'; cdpReady=$true; authenticated=$true; watcherReady=$true}`,
+    `$runtime=[pscustomobject]@{profile='kakaoworker'; pid=123; pluginPath='C:\\fixture\\kakao_village'; manifestSha256=('a' * 64); pluginReceiptVerified=$${receiptVerified ? 'true' : 'false'}}`,
+    `$smoke=[pscustomobject]@{nativeSessionResult='pass'; scheduleOwnerReviewRequired=$true; sendCount=0; writeCount=0; killSwitchObserved='active'}`,
+    `Test-KakaoGatewayCutoverHealth -Health $health -RuntimeProbe $probe -GatewayRuntime $runtime -SmokeEvidence $smoke`
+  ].join('; ');
+  return execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+    encoding: 'utf8',
+    windowsHide: true
+  }).trim() === 'True';
+}
+
+function gatewayWatchdogHealth({
+  ready = 0,
+  claimed = 0,
+  retry = 0,
+  failed = 0,
+  unnotified = 0,
+  fresh = true,
+  receiptVerified = true
+} = {}) {
+  const escapedPath = modulePath.replaceAll("'", "''");
+  const command = [
+    `$ErrorActionPreference='Stop'`,
+    `Import-Module '${escapedPath}' -Force`,
+    `$health=[pscustomobject]@{ok=$true; config=[pscustomobject]@{hermesTransport='gateway'; scheduleOwnerReviewRequired=$true; killSwitchPolicyEnforced=$true}; gateway=[pscustomobject]@{gatewayReady=$true; consumer=[pscustomobject]@{fresh=$${fresh ? 'true' : 'false'}}; queue=[pscustomobject]@{ready=${ready}; claimed=${claimed}; retry=${retry}; failed=${failed}}; unnotified_application_failures=${unnotified}}}`,
+    `$probe=[pscustomobject]@{state='healthy'; cdpReady=$true; authenticated=$true; watcherReady=$true}`,
+    `$runtime=[pscustomobject]@{profile='kakaoworker'; pid=123; pluginPath='C:\\fixture\\kakao_village'; manifestSha256=('a' * 64); pluginReceiptVerified=$${receiptVerified ? 'true' : 'false'}}`,
+    `$smoke=[pscustomobject]@{nativeSessionResult='pass'; scheduleOwnerReviewRequired=$true; sendCount=0; writeCount=0; killSwitchObserved='active'}`,
+    `Test-KakaoGatewayWatchdogHealth -Health $health -RuntimeProbe $probe -GatewayRuntime $runtime -SmokeEvidence $smoke`
+  ].join('; ');
+  try {
+    return execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+      encoding: 'utf8',
+      windowsHide: true
+    }).trim() === 'True';
+  } catch {
+    return false;
+  }
+}
+
+function verifyPluginReceipt({ tamper = false } = {}) {
+  const temp = mkdtempSync(path.join(tmpdir(), 'kakao-plugin-receipt-'));
+  try {
+    const target = path.join(temp, 'hermes', 'profiles', 'kakaoworker', 'plugins', 'kakao_village');
+    mkdirSync(target, { recursive: true });
+    const body = Buffer.from('reviewed plugin fixture\n', 'utf8');
+    const filePath = path.join(target, '__init__.py');
+    writeFileSync(filePath, body);
+    const fileSha = createHash('sha256').update(body).digest('hex').toUpperCase();
+    const canonical = `__init__.py|${body.length}|${fileSha}`;
+    const manifestSha = createHash('sha256').update(canonical, 'utf8').digest('hex').toUpperCase();
+    const receipt = {
+      schema: 'village-kakao-plugin-install/v1',
+      pluginName: 'kakao_village',
+      targetPluginPath: target,
+      manifestSha256: manifestSha,
+      fileManifest: [{ relativePath: '__init__.py', bytes: body.length, sha256: fileSha }]
+    };
+    if (tamper) writeFileSync(filePath, 'tampered\n');
+    const escapedModule = modulePath.replaceAll("'", "''");
+    const escapedRoot = temp.replaceAll("'", "''");
+    const encodedReceipt = Buffer.from(JSON.stringify(receipt), 'utf8').toString('base64');
+    const command = [
+      `$ErrorActionPreference='Stop'`,
+      `$env:LOCALAPPDATA='${escapedRoot}'`,
+      `Import-Module '${escapedModule}' -Force`,
+      `$receipt=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedReceipt}')) | ConvertFrom-Json`,
+      `Test-KakaoPluginInstallReceipt -Receipt $receipt`
+    ].join('; ');
+    return execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+      encoding: 'utf8',
+      windowsHide: true
+    }).trim() === 'True';
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
 test('Kakao live recovery action preserves authentication pages and repairs only the failed layer', () => {
   const cases = {
     healthy: 'none',
@@ -127,6 +214,28 @@ test('bridge health is combined with the direct CDP authentication and watcher p
     state: 'watcher_repair_required',
     healthy: false
   });
+});
+
+test('Gateway cutover health fails closed on queue, consumer, or plugin receipt drift', () => {
+  assert.equal(gatewayCutoverHealth(), true);
+  assert.equal(gatewayCutoverHealth({ failed: 1 }), false);
+  assert.equal(gatewayCutoverHealth({ fresh: false }), false);
+  assert.equal(gatewayCutoverHealth({ receiptVerified: false }), false);
+});
+
+test('Gateway watchdog ignores terminal history but still requires an idle safe live path', () => {
+  assert.equal(gatewayWatchdogHealth(), true);
+  assert.equal(gatewayWatchdogHealth({ failed: 3, unnotified: 1 }), true);
+  assert.equal(gatewayWatchdogHealth({ ready: 1 }), false);
+  assert.equal(gatewayWatchdogHealth({ claimed: 1 }), false);
+  assert.equal(gatewayWatchdogHealth({ retry: 1 }), false);
+  assert.equal(gatewayWatchdogHealth({ fresh: false }), false);
+  assert.equal(gatewayWatchdogHealth({ receiptVerified: false }), false);
+});
+
+test('plugin receipt verification hashes the exact installed profile files', () => {
+  assert.equal(verifyPluginReceipt(), true);
+  assert.equal(verifyPluginReceipt({ tamper: true }), false);
 });
 
 test('new bridge source waits for a fully idle runtime before restart', () => {

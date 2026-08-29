@@ -2174,7 +2174,9 @@ test('health config exposes the live safety contract used by supervised restarts
     autoSendEnabled: true,
     workerDryRun: false,
     windowsWritesEnabled: true,
-    startupCatchupSupported: true
+    startupCatchupSupported: true,
+    scheduleOwnerReviewRequired: true,
+    killSwitchPolicyEnforced: true
   });
 
   const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');

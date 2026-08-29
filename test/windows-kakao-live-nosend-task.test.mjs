@@ -32,24 +32,28 @@ test('live/no-send health contract rejects every customer-send or approval-polle
     Import-Module ${psLiteral(modulePath)} -Force
     $base = [pscustomobject]@{
       ok = $true
+      gateway = [pscustomobject]@{ gatewayReady = $true; consumer = [pscustomobject]@{ fresh = $true } }
       config = [pscustomobject]@{
         workerLive = $true
+        workerDryRun = $true
+        windowsWritesEnabled = $false
         autoSendEnabled = $false
-        slackCardDeliveryEnabled = $true
+        slackCardDeliveryEnabled = $false
         slackActionPollEnabled = $false
+        hermesTransport = 'gateway_no_send'
       }
     }
     $autoSend = $base | ConvertTo-Json -Depth 4 | ConvertFrom-Json
     $autoSend.config.autoSendEnabled = $true
     $poller = $base | ConvertTo-Json -Depth 4 | ConvertFrom-Json
     $poller.config.slackActionPollEnabled = $true
-    $noCards = $base | ConvertTo-Json -Depth 4 | ConvertFrom-Json
-    $noCards.config.slackCardDeliveryEnabled = $false
+    $cards = $base | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    $cards.config.slackCardDeliveryEnabled = $true
     [pscustomobject]@{
       safe = Test-KakaoLiveNoSendHealth -Health $base
       autoSend = Test-KakaoLiveNoSendHealth -Health $autoSend
       poller = Test-KakaoLiveNoSendHealth -Health $poller
-      noCards = Test-KakaoLiveNoSendHealth -Health $noCards
+      cards = Test-KakaoLiveNoSendHealth -Health $cards
     } | ConvertTo-Json -Compress
   `);
 
@@ -57,7 +61,7 @@ test('live/no-send health contract rejects every customer-send or approval-polle
     safe: true,
     autoSend: false,
     poller: false,
-    noCards: false
+    cards: false
   });
 });
 
@@ -95,6 +99,7 @@ test('no-send transition forcibly disables customer send and approval polling', 
     $env:SLACK_ACTION_POLL_ENABLED = '1'
     $env:SLACK_AGENT_CARD_DELIVERY_ENABLED = '0'
     $env:VILLAGE_WINDOWS_WRITES_ENABLED = '0'
+    $env:KAKAO_HERMES_TRANSPORT = 'cli'
     Set-KakaoLiveNoSendEnvironment
     [pscustomobject]@{
       workerLive = $env:AI_WORKER_LIVE
@@ -103,16 +108,18 @@ test('no-send transition forcibly disables customer send and approval polling', 
       actionPoll = $env:SLACK_ACTION_POLL_ENABLED
       slackCards = $env:SLACK_AGENT_CARD_DELIVERY_ENABLED
       windowsWrites = $env:VILLAGE_WINDOWS_WRITES_ENABLED
+      hermesTransport = $env:KAKAO_HERMES_TRANSPORT
     } | ConvertTo-Json -Compress
   `);
 
   assert.deepEqual(parseJson(result), {
     workerLive: '1',
     autoSend: '0',
-    dryRun: '0',
+    dryRun: '1',
     actionPoll: '0',
-    slackCards: '1',
-    windowsWrites: '1'
+    slackCards: '0',
+    windowsWrites: '0',
+    hermesTransport: 'gateway_no_send'
   });
 });
 
@@ -175,17 +182,20 @@ test('live/no-send startup plan promotes staging ownership without enabling cust
     assert.deepEqual(plan.runtime, {
       AI_WORKER_LIVE: '1',
       AI_WORKER_AUTO_SEND: '0',
-      AI_WORKER_DRY_RUN: '0',
+      AI_WORKER_DRY_RUN: '1',
       SLACK_ACTION_POLL_ENABLED: '0',
-      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
-      VILLAGE_WINDOWS_WRITES_ENABLED: '1',
-      HERMES_WORKER_COMMAND_MODE: 'python_module'
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+      VILLAGE_WINDOWS_WRITES_ENABLED: '0',
+      HERMES_WORKER_COMMAND_MODE: 'python_module',
+      KAKAO_HERMES_TRANSPORT: 'gateway_no_send'
     });
     assert.deepEqual(plan.steps, [
       'accept-already-healthy-live-nosend',
       'stop-owned-remnants-if-unhealthy',
       'start-owned-staging-with-writes',
       'promote-bridge-to-live-nosend',
+      'verify-kakaoworker-plugin-hash',
+      'verify-gateway-consumer-heartbeat',
       'verify-live-nosend-health'
     ]);
   } finally {
@@ -262,6 +272,7 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
       SUPABASE_RECOVERY_ENABLED: '1',
       KAKAO_TAB_CLEANUP_ENABLED: '1',
       HERMES_WORKER_COMMAND_MODE: 'python_module',
+      KAKAO_HERMES_TRANSPORT: 'cli',
       HERMES_HOME: canonicalHermesHome,
       DEBOUNCE_MS: '15000',
       MAX_WAIT_MS: '45000',
