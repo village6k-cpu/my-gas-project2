@@ -24,6 +24,9 @@ import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { buildGatewayHealthReadback, createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
 import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
+import { loadWorkOrchestratorConfig } from '../work-orchestrator-v2/contracts.mjs';
+import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shadow-receipts.mjs';
+import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
 
 export { buildGatewayHealthReadback } from './hermes-gateway-http.mjs';
 
@@ -81,6 +84,8 @@ export function configForHermesTransport(config = {}, transport = 'cli') {
     : config;
 }
 
+const WORK_ORCHESTRATOR_CONFIG = loadWorkOrchestratorConfig(process.env);
+
 const CONFIG = {
   port: Number(process.env.PORT || 8787),
   debounceMs: Number(process.env.DEBOUNCE_MS || 90_000),
@@ -96,6 +101,7 @@ const CONFIG = {
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   supabaseTable: process.env.SUPABASE_TABLE || '',
+  workOrchestrator: WORK_ORCHESTRATOR_CONFIG,
   processInitialScan: process.env.PROCESS_INITIAL_SCAN !== 'false',
   ignoreShiftedRows: process.env.IGNORE_SHIFTED_ROWS === 'true',
   workerCommand: process.env.VILLAGE_AI_WORKER_CMD || '',
@@ -161,12 +167,126 @@ const CONFIG = {
 };
 
 export function buildHealthConfig(config = {}) {
-  return {
+  const health = {
     workerLive: Boolean(config.workerLive),
     autoSendEnabled: Boolean(config.autoSendEnabled),
     workerDryRun: Boolean(config.workerDryRun),
     windowsWritesEnabled: Boolean(config.windowsWritesEnabled),
     startupCatchupSupported: Boolean(config.startupCatchupSupported)
+  };
+  if (config.workOrchestrator) {
+    health.workOrchestrator = {
+      shadowWrites: Boolean(config.workOrchestrator.shadowWrites),
+      immediateEnabled: Boolean(config.workOrchestrator.immediateEnabled),
+      workItemsEnabled: Boolean(config.workOrchestrator.workItemsEnabled),
+      digestEnabled: Boolean(config.workOrchestrator.digestEnabled),
+      cleanupEnabled: Boolean(config.workOrchestrator.cleanupEnabled),
+      storeConfigured: Boolean(config.workOrchestratorStoreConfigured),
+      shadowReady: Boolean(config.workOrchestratorShadowReady)
+    };
+  }
+  return health;
+}
+
+function genericShadowError(value) {
+  if (value === 'shadow_receipt_store_failed') return 'shadow_receipt_store_failed';
+  if (value === 'shadow_store_unavailable') return 'shadow_store_unavailable';
+  return 'shadow_receipt_failed';
+}
+
+function safeShadowTimestamp(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
+}
+
+function safeShadowOutcome(value) {
+  return ['created', 'duplicate', 'error', 'configuration_error'].includes(value)
+    ? value
+    : 'error';
+}
+
+export function buildWorkOrchestratorHealthState(value = {}) {
+  const receipt = value.lastShadowReceipt;
+  return {
+    shadowClaims: Math.max(0, Number(value.shadowClaims || 0)),
+    shadowDuplicates: Math.max(0, Number(value.shadowDuplicates || 0)),
+    shadowErrors: Math.max(0, Number(value.shadowErrors || 0)),
+    lastShadowReceipt: receipt && typeof receipt === 'object'
+      ? {
+          at: safeShadowTimestamp(receipt.at),
+          outcome: safeShadowOutcome(receipt.outcome),
+          ...(receipt.error ? { error: genericShadowError(receipt.error) } : {})
+        }
+      : null
+  };
+}
+
+export function createWorkOrchestratorShadowRuntime({
+  config = {},
+  store = null,
+  record = recordShadowNotificationObligation,
+  now = () => new Date().toISOString()
+} = {}) {
+  const state = {
+    shadowClaims: 0,
+    shadowDuplicates: 0,
+    shadowErrors: 0,
+    lastShadowReceipt: null
+  };
+  const active = new Set();
+
+  if (config.shadowWrites && !store) {
+    state.shadowErrors = 1;
+    state.lastShadowReceipt = {
+      at: String(now()).slice(0, 40),
+      outcome: 'configuration_error',
+      error: 'shadow_store_unavailable'
+    };
+  }
+
+  return {
+    state,
+    recordAccepted(event, roomVersion = {}) {
+      if (roomVersion.changed !== true) return null;
+
+      let claim;
+      try {
+        claim = Promise.resolve(record({ event, config, store }));
+      } catch {
+        claim = Promise.resolve({ skipped: false, created: false, error: 'shadow_receipt_failed' });
+      }
+      const observed = claim.then((result) => {
+        if (result?.skipped === true) return result;
+        const at = String(now()).slice(0, 40);
+        if (result?.created === true) {
+          state.shadowClaims += 1;
+          state.lastShadowReceipt = { at, outcome: 'created' };
+        } else if (!result?.error && result?.created === false) {
+          state.shadowDuplicates += 1;
+          state.lastShadowReceipt = { at, outcome: 'duplicate' };
+        } else {
+          state.shadowErrors += 1;
+          state.lastShadowReceipt = {
+            at,
+            outcome: 'error',
+            error: genericShadowError(result?.error)
+          };
+        }
+        return result;
+      }, () => {
+        state.shadowErrors += 1;
+        state.lastShadowReceipt = {
+          at: String(now()).slice(0, 40),
+          outcome: 'error',
+          error: 'shadow_receipt_failed'
+        };
+      }).finally(() => active.delete(observed));
+      active.add(observed);
+      return observed;
+    },
+    settled() {
+      return Promise.allSettled([...active]);
+    }
   };
 }
 
@@ -421,6 +541,27 @@ async function fetchWithDnsFallback(endpoint, init = {}) {
   });
 }
 
+const workOrchestratorCredentialsPresent = Boolean(
+  CONFIG.supabaseUrl.trim() && CONFIG.supabaseServiceRoleKey.trim()
+);
+let workOrchestratorStore = null;
+if (workOrchestratorCredentialsPresent) {
+  try {
+    workOrchestratorStore = createWorkOrchestratorStore({
+      supabaseUrl: CONFIG.supabaseUrl,
+      serviceRoleKey: CONFIG.supabaseServiceRoleKey
+    });
+  } catch {
+    workOrchestratorStore = null;
+  }
+}
+CONFIG.workOrchestratorStoreConfigured = Boolean(workOrchestratorStore);
+CONFIG.workOrchestratorShadowReady = !CONFIG.workOrchestrator.shadowWrites || Boolean(workOrchestratorStore);
+const workOrchestratorShadowRuntime = createWorkOrchestratorShadowRuntime({
+  config: CONFIG.workOrchestrator,
+  store: workOrchestratorStore
+});
+
 const state = {
   startedAt: new Date().toISOString(),
   received: 0,
@@ -448,7 +589,8 @@ const state = {
   roomVersions: new Map(),
   activeWorkerJobIds: new Set(),
   seenGroupingTexts: new Set(),
-  lastContentScriptStartedAtMs: 0
+  lastContentScriptStartedAtMs: 0,
+  workOrchestrator: workOrchestratorShadowRuntime.state
 };
 
 const gatewayTransportSelected = ['gateway', 'gateway_no_send'].includes(CONFIG.hermesTransport);
@@ -3900,34 +4042,38 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
   }
 }
 
-async function handleEvent(req, res) {
+export async function handleEvent(req, res, dependencies = {}) {
+  const appendEvent = dependencies.appendNdjson || appendNdjson;
+  const writeEvent = dependencies.writeSupabaseEvent || writeSupabaseEvent;
+  const scheduleEvent = dependencies.scheduleDebouncedJob || scheduleDebouncedJob;
+  const shadowRuntime = dependencies.shadowRuntime || workOrchestratorShadowRuntime;
   const body = await readRequestBody(req);
   const raw = JSON.parse(body || '{}');
   let event = normalizeEvent(raw);
 
   state.received += 1;
-  appendNdjson('events.ndjson', event);
+  appendEvent('events.ndjson', event);
 
   if (event.status === 'watcher_heartbeat' || event.reason === 'heartbeat' || event.reason === 'content_script_started') {
     if (event.reason === 'content_script_started') {
       state.lastContentScriptStartedAtMs = Date.now();
     }
-    appendNdjson('heartbeats.ndjson', event);
+    appendEvent('heartbeats.ndjson', event);
     return json(res, 202, { ok: true, heartbeat: true });
   }
 
   if (event.status === 'popup_bridge_test' || event.reason === 'popup_bridge_test') {
-    appendNdjson('diagnostics.ndjson', event);
+    appendEvent('diagnostics.ndjson', event);
     return json(res, 202, { ok: true, diagnostic: true });
   }
 
   if (event.status === 'dom_diagnostic' || event.reason === 'top_rows_snapshot') {
-    appendNdjson('diagnostics.ndjson', event);
+    appendEvent('diagnostics.ndjson', event);
     return json(res, 202, { ok: true, diagnostic: true, queuedForAi: false });
   }
 
   if ((event.reason === 'top_rows_backstop' || event.reason === 'top_row_changed') && !shouldQueueTopRowEvent(event)) {
-    appendNdjson('backstop-events.ndjson', {
+    appendEvent('backstop-events.ndjson', {
       ...event,
       backstopReason: event.reason === 'top_rows_backstop' ? 'read_backstop_row' : 'non_live_top_row_change'
     });
@@ -3940,7 +4086,7 @@ async function handleEvent(req, res) {
   }
 
   if (isStaleDatedMutation(event)) {
-    appendNdjson('ignored-stale-dated-mutation-events.ndjson', event);
+    appendEvent('ignored-stale-dated-mutation-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'stale_dated_mutation', queuedForAi: false });
   }
 
@@ -3949,13 +4095,13 @@ async function handleEvent(req, res) {
     && state.lastContentScriptStartedAtMs
     && Date.now() - state.lastContentScriptStartedAtMs < CONFIG.startupMutationIgnoreMs
   ) {
-    appendNdjson('ignored-startup-mutation-events.ndjson', event);
+    appendEvent('ignored-startup-mutation-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'startup_mutation', queuedForAi: false });
   }
 
   const initialScanIngress = classifyInitialScanIngress(event, CONFIG);
   if (initialScanIngress.action === 'ignore') {
-    appendNdjson('initial-scans.ndjson', { ...event, ignored: initialScanIngress.reason });
+    appendEvent('initial-scans.ndjson', { ...event, ignored: initialScanIngress.reason });
     return json(res, 202, {
       ok: true,
       initialScan: true,
@@ -3964,28 +4110,28 @@ async function handleEvent(req, res) {
     });
   }
   if (initialScanIngress.action === 'queue') {
-    appendNdjson('initial-scans.ndjson', initialScanIngress.event);
+    appendEvent('initial-scans.ndjson', initialScanIngress.event);
     event = initialScanIngress.event;
   }
 
   if (isPageContainerPreview(event.previewText, event.roomKey)) {
-    appendNdjson('ignored-container-events.ndjson', event);
+    appendEvent('ignored-container-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'page_container', queuedForAi: false });
   }
 
   if (isActionChromePreview(event.previewText)) {
-    appendNdjson('ignored-chrome-events.ndjson', event);
+    appendEvent('ignored-chrome-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'action_chrome', queuedForAi: false });
   }
 
   const skipWorkerReason = shouldSkipWorkerForPreview(event);
   if (skipWorkerReason) {
-    appendNdjson('ignored-low-value-events.ndjson', { ...event, ignored: skipWorkerReason });
+    appendEvent('ignored-low-value-events.ndjson', { ...event, ignored: skipWorkerReason });
     return json(res, 202, { ok: true, ignored: skipWorkerReason, queuedForAi: false });
   }
 
   if (isLikelyShiftedExistingRow(event)) {
-    appendNdjson('ignored-shifted-row-events.ndjson', event);
+    appendEvent('ignored-shifted-row-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'shifted_existing_row', queuedForAi: false });
   }
 
@@ -4004,15 +4150,26 @@ async function handleEvent(req, res) {
   );
   event.roomRevision = roomVersion.revision;
 
+  if (roomVersion.changed) {
+    try {
+      const shadowObservation = shadowRuntime?.recordAccepted?.(event, roomVersion);
+      if (shadowObservation && typeof shadowObservation.catch === 'function') {
+        shadowObservation.catch(() => {});
+      }
+    } catch {
+      // Shadow observation is never allowed to suppress the legacy event path.
+    }
+  }
+
   try {
-    await writeSupabaseEvent(event, 'event');
+    await writeEvent(event, 'event');
   } catch (error) {
     state.failedSupabaseWrites += 1;
-    appendNdjson('errors.ndjson', { at: nowIso(), type: 'supabase_event', message: error.message, event });
+    appendEvent('errors.ndjson', { at: nowIso(), type: 'supabase_event', message: error.message, event });
     console.warn('[dom-bridge] supabase event insert failed:', error.message);
   }
 
-  scheduleDebouncedJob(event);
+  scheduleEvent(event);
   return json(res, 202, { ok: true, roomKey: event.roomKey, eventHash: event.eventHash });
 }
 
@@ -4108,7 +4265,8 @@ const server = http.createServer(async (req, res) => {
           tabCleanupRunning: state.tabCleanupRunning,
           lastTabCleanup: state.lastTabCleanup,
           openRooms: state.rooms.size,
-          phaseScheduler: kakaoPhaseScheduler?.status?.() || null
+          phaseScheduler: kakaoPhaseScheduler?.status?.() || null,
+          workOrchestrator: buildWorkOrchestratorHealthState(state.workOrchestrator)
         }
       });
     }

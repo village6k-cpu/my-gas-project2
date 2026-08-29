@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
+import { Readable } from 'node:stream';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
@@ -11,6 +12,7 @@ process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
 const {
   buildCorsHeaders,
   buildHealthConfig,
+  buildWorkOrchestratorHealthState,
   buildGatewayHealthReadback,
   assertGatewayFailureNotificationDelivered,
   buildWorkerResultAudit,
@@ -30,6 +32,7 @@ const {
   createGatewayFailureNotificationCoordinator,
   createGatewayResultApplicationCoordinator,
   createAiJobDispatcher,
+  createWorkOrchestratorShadowRuntime,
   configForHermesTransport,
   classifyInitialScanIngress,
   gatewayDispatchFailurePolicy,
@@ -37,6 +40,7 @@ const {
   registerAcceptedRoomEvent,
   semanticRoomEventIdentity,
   hasUnreadCount,
+  handleEvent,
   mergeQueuedRoomJobs,
   kakaoSendAllowedForTransport,
   mapWorkerPayloadToSupabaseStatus,
@@ -50,6 +54,39 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+function shadowEventRequest(event) {
+  const req = Readable.from([JSON.stringify(event)]);
+  req.method = 'POST';
+  req.url = '/events';
+  req.headers = { host: '127.0.0.1' };
+  return req;
+}
+
+function shadowEventResponse() {
+  let resolve;
+  const completed = new Promise((done) => { resolve = done; });
+  return {
+    completed,
+    response: {
+      writeHead(status, headers) {
+        this.status = status;
+        this.headers = headers;
+      },
+      end(body) {
+        this.body = JSON.parse(body);
+        resolve(this);
+      }
+    }
+  };
+}
+
+async function postShadowEvent(event, dependencies) {
+  const { response, completed } = shadowEventResponse();
+  await handleEvent(shadowEventRequest(event), response, dependencies);
+  await completed;
+  return response;
+}
 
 const TASK7_NEUTRAL_INCIDENT_URL = new URL(
   '../../test/fixtures/kakao-staff-confirmed-mutations/incident-registered-replacement-001.json',
@@ -2128,6 +2165,218 @@ test('room revisions continue after the durable Gateway revision when the bridge
   assert.equal(newer.revision, 9);
 });
 
+test('Work Orchestrator shadow ignores heartbeat, diagnostic, container, non-message, ignored-room, and stale events', async () => {
+  const calls = [];
+  const shadowRuntime = { recordAccepted: () => calls.push('shadow') };
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime,
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  };
+  const ignoredEvents = [
+    { status: 'watcher_heartbeat', reason: 'heartbeat', roomKey: 'watcher', previewText: 'heartbeat' },
+    { status: 'dom_diagnostic', reason: 'top_rows_snapshot', roomKey: 'diagnostic', previewText: 'snapshot' },
+    { status: 'pending_ai_review', reason: 'dom_event', roomKey: 'attr:kakaoWrap', previewText: '전체 채팅목록' },
+    { status: 'pending_ai_review', reason: 'dom_event', roomKey: 'chrome-control', previewText: '저장하기' },
+    { status: 'pending_ai_review', reason: 'initial_scan', roomKey: 'chat:ignored-room', previewText: 'already read room' },
+    { status: 'pending_ai_review', reason: 'mutation', roomKey: 'chat:stale', previewText: 'old room 2025. 1. 1' }
+  ];
+
+  for (const event of ignoredEvents) {
+    const response = await postShadowEvent(event, dependencies);
+    assert.equal(response.status, 202);
+  }
+
+  assert.deepEqual(calls, []);
+});
+
+test('Work Orchestrator shadow starts after revision acceptance and does not block the legacy queue', async () => {
+  const calls = [];
+  let settleShadow;
+  const shadowPending = new Promise((resolve) => { settleShadow = resolve; });
+  const shadowRuntime = {
+    recordAccepted(event, roomVersion) {
+      calls.push(`shadow:${event.roomRevision}:${roomVersion.changed}`);
+      return shadowPending;
+    }
+  };
+
+  const response = await postShadowEvent({
+    reason: 'dom_event',
+    roomKey: 'chat:work-orchestrator-order',
+    previewText: 'new camera question',
+    displayTime: '오후 1:00',
+    eventHash: 'work-orchestrator-order-1',
+    detectedAt: '2026-08-29T04:00:00.000Z'
+  }, {
+    appendNdjson: () => {},
+    shadowRuntime,
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  });
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(calls, ['shadow:1:true', 'legacy-write', 'legacy-queue']);
+  settleShadow({ created: true });
+  await shadowPending;
+});
+
+test('Work Orchestrator shadow failure increments bounded health state and still queues legacy work', async () => {
+  const calls = [];
+  const privateValue = 'private-customer-payload';
+  const runtime = createWorkOrchestratorShadowRuntime({
+    config: { shadowWrites: true },
+    store: { claimNotificationReceipt: async () => { throw new Error(privateValue); } },
+    now: () => '2026-08-29T04:00:01.000Z'
+  });
+
+  const response = await postShadowEvent({
+    reason: 'dom_event',
+    roomKey: 'chat:work-orchestrator-failure',
+    previewText: privateValue,
+    eventHash: 'work-orchestrator-failure-1',
+    detectedAt: '2026-08-29T04:00:00.000Z'
+  }, {
+    appendNdjson: () => {},
+    shadowRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  });
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(calls, ['legacy-write', 'legacy-queue']);
+  await runtime.settled();
+  assert.deepEqual(buildWorkOrchestratorHealthState(runtime.state), {
+    shadowClaims: 0,
+    shadowDuplicates: 0,
+    shadowErrors: 1,
+    lastShadowReceipt: {
+      at: '2026-08-29T04:00:01.000Z',
+      outcome: 'error',
+      error: 'shadow_receipt_store_failed'
+    }
+  });
+  assert.doesNotMatch(JSON.stringify(buildWorkOrchestratorHealthState(runtime.state)), /private-customer-payload/);
+});
+
+test('Work Orchestrator shadow skips a rejected duplicate revision without suppressing legacy scheduling', async () => {
+  const calls = [];
+  const runtime = createWorkOrchestratorShadowRuntime({
+    config: { shadowWrites: true },
+    store: {
+      async claimNotificationReceipt() {
+        calls.push('shadow');
+        return { created: false, row: { id: 'private-row-id' } };
+      }
+    },
+    now: () => '2026-08-29T04:02:01.000Z'
+  });
+  const event = {
+    reason: 'dom_event', roomKey: 'chat:work-orchestrator-duplicate',
+    previewText: 'same semantic event', displayTime: '오후 1:02',
+    eventHash: 'work-orchestrator-duplicate-1', detectedAt: '2026-08-29T04:02:00.000Z'
+  };
+  const dependencies = {
+    appendNdjson: () => {}, shadowRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  };
+
+  await postShadowEvent(event, dependencies);
+  await postShadowEvent(event, dependencies);
+  await runtime.settled();
+
+  assert.deepEqual(calls, ['shadow', 'legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
+  assert.deepEqual(buildWorkOrchestratorHealthState(runtime.state), {
+    shadowClaims: 0,
+    shadowDuplicates: 1,
+    shadowErrors: 0,
+    lastShadowReceipt: {
+      at: '2026-08-29T04:02:01.000Z',
+      outcome: 'duplicate'
+    }
+  });
+  assert.doesNotMatch(JSON.stringify(runtime.state.lastShadowReceipt), /private-row-id/);
+});
+
+test('Work Orchestrator shadow health exposes only flags, readiness, counters, timestamps, and generic errors', () => {
+  const configHealth = buildHealthConfig({
+    workOrchestrator: {
+      shadowWrites: true,
+      immediateEnabled: false,
+      workItemsEnabled: false,
+      digestEnabled: false,
+      cleanupEnabled: false
+    },
+    workOrchestratorStoreConfigured: false,
+    workOrchestratorShadowReady: false
+  });
+  const runtime = createWorkOrchestratorShadowRuntime({
+    config: { shadowWrites: true },
+    store: null,
+    now: () => '2026-08-29T04:00:00.000Z'
+  });
+  const health = {
+    config: configHealth.workOrchestrator,
+    state: buildWorkOrchestratorHealthState(runtime.state)
+  };
+
+  assert.deepEqual(health, {
+    config: {
+      shadowWrites: true,
+      immediateEnabled: false,
+      workItemsEnabled: false,
+      digestEnabled: false,
+      cleanupEnabled: false,
+      storeConfigured: false,
+      shadowReady: false
+    },
+    state: {
+      shadowClaims: 0,
+      shadowDuplicates: 0,
+      shadowErrors: 1,
+      lastShadowReceipt: {
+        at: '2026-08-29T04:00:00.000Z',
+        outcome: 'configuration_error',
+        error: 'shadow_store_unavailable'
+      }
+    }
+  });
+  assert.doesNotMatch(
+    JSON.stringify(health),
+    /sourceEventKey|roomKey|preview|customer|payload|supabase\.co|service-role|private-row-id/i
+  );
+});
+
+test('Work Orchestrator shadow health fails closed on arbitrary internal receipt metadata', () => {
+  const privateValue = 'private-customer-payload';
+
+  const health = buildWorkOrchestratorHealthState({
+    shadowClaims: 1,
+    shadowDuplicates: 2,
+    shadowErrors: 3,
+    lastShadowReceipt: {
+      at: privateValue,
+      outcome: privateValue,
+      error: privateValue,
+      row: { sourceEventKey: privateValue, roomKey: privateValue }
+    }
+  });
+
+  assert.deepEqual(health, {
+    shadowClaims: 1,
+    shadowDuplicates: 2,
+    shadowErrors: 3,
+    lastShadowReceipt: {
+      at: '',
+      outcome: 'error',
+      error: 'shadow_receipt_failed'
+    }
+  });
+  assert.doesNotMatch(JSON.stringify(health), /private-customer-payload|sourceEventKey|roomKey/);
+});
+
 test('identical reply text at a later displayed time is a new room revision', () => {
   const earlier = semanticRoomEventIdentity({ previewText: '홍길동 네', displayTime: '오전 9:10' });
   const unreadMutation = semanticRoomEventIdentity({ previewText: '홍길동 2 네', displayTime: '오전 9:10' });
@@ -2155,9 +2404,11 @@ test('production queue uses the phase scheduler and publishes freshness before d
   assert.match(source, /url\.pathname === '\/worker\/freshness'/);
   const revisionIndex = source.indexOf('const roomVersion = registerAcceptedRoomEvent(');
   const durableRevisionIndex = source.lastIndexOf('gatewayChannel.latestRoomRevision', revisionIndex);
-  const supabaseIndex = source.indexOf("await writeSupabaseEvent(event, 'event')", revisionIndex);
+  const shadowIndex = source.indexOf('shadowRuntime?.recordAccepted?.(event, roomVersion)', revisionIndex);
+  const supabaseIndex = source.indexOf("await writeEvent(event, 'event')", revisionIndex);
   assert.ok(durableRevisionIndex >= 0 && durableRevisionIndex < revisionIndex, 'durable Gateway revision must seed the in-memory revision');
   assert.ok(revisionIndex >= 0 && supabaseIndex > revisionIndex, 'freshness revision must advance before Supabase latency');
+  assert.ok(shadowIndex > revisionIndex && shadowIndex < supabaseIndex, 'shadow starts after accepted revision and before legacy Supabase');
   assert.match(source, /readBooleanEnvironment\(process\.env\.KAKAO_AI_DOM_SPLIT_ENABLED, false\)/);
   assert.match(source, /getKakaoPhaseScheduler\(\)\.runManual\(\{[\s\S]*?cleanupIdleKakaoConversationTabs\('worker_finished'/);
 });
