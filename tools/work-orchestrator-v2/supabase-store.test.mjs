@@ -87,6 +87,40 @@ test('transitionNotification PATCHes only the requested id and source states', a
   assert.deepEqual(JSON.parse(fetch.requests[0].init.body), { delivery_attempts: 1, notification_state: 'delivering' });
 });
 
+test('transitionNotification permits a delivery retry only when every source state can reach the target', async () => {
+  const fetch = createFetch([response({ data: [{ id: 'receipt-1', notification_state: 'delivering' }] })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  const result = await store.transitionNotification({
+    id: 'receipt-1',
+    fromStates: ['pending', 'failed'],
+    toState: 'delivering'
+  });
+
+  assert.equal(result.applied, true);
+  assert.equal(fetch.requests.length, 1);
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/message_notification_receipts?id=eq.receipt-1&notification_state=in.%28pending%2Cfailed%29&select=*');
+});
+
+test('transitionNotification rejects illegal and mixed source edges before any request', async () => {
+  const fetch = createFetch();
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  await assert.rejects(
+    store.transitionNotification({ id: 'receipt-1', fromStates: ['deleted'], toState: 'delivering' }),
+    { message: 'Work Orchestrator Supabase transition input is invalid' }
+  );
+  await assert.rejects(
+    store.transitionNotification({ id: 'receipt-1', fromStates: ['pending', 'delivering'], toState: 'delivering' }),
+    { message: 'Work Orchestrator Supabase transition input is invalid' }
+  );
+  await assert.rejects(
+    store.transitionNotification({ id: 'receipt-1', fromStates: ['unknown'], toState: 'delivering' }),
+    { message: 'Work Orchestrator Supabase transition input is invalid' }
+  );
+  assert.equal(fetch.requests.length, 0);
+});
+
 test('transitionNotification reports no application for an empty representation', async () => {
   const fetch = createFetch([response({ data: [] })]);
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });

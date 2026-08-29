@@ -51,6 +51,12 @@ test('assertNotificationTransition accepts valid transitions and rejects invalid
   assert.throws(() => assertNotificationTransition('deleted', 'delivering'), /invalid notification transition/i);
 });
 
+test('notification cleanup failure stays outside the delivery lifecycle', () => {
+  assert.throws(() => assertNotificationTransition('cleanup_pending', 'failed'), /invalid notification transition/i);
+  assert.doesNotThrow(() => assertNotificationTransition('cleanup_pending', 'deleted'));
+  assert.doesNotThrow(() => assertNotificationTransition('failed', 'delivering'));
+});
+
 test('loadWorkOrchestratorConfig defaults rollout flags off and enables shadow writes explicitly', () => {
   assert.equal(loadWorkOrchestratorConfig({ WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1' }).shadowWrites, true);
   assert.equal(loadWorkOrchestratorConfig({}).immediateEnabled, false);

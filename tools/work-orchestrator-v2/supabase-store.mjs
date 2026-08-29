@@ -1,3 +1,5 @@
+import { assertNotificationTransition } from './contracts.mjs';
+
 const REQUEST_ERROR_PREFIX = 'Work Orchestrator Supabase request failed';
 const MAX_EVENT_KEY_LENGTH = 500;
 
@@ -188,6 +190,9 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       let transition;
       try {
         transition = normalizeTransition(input);
+        for (const fromState of transition.fromStates) {
+          assertNotificationTransition(fromState, transition.toState);
+        }
       } catch {
         throw new Error('Work Orchestrator Supabase transition input is invalid');
       }

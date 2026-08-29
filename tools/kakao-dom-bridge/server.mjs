@@ -182,6 +182,7 @@ export function buildHealthConfig(config = {}) {
       digestEnabled: Boolean(config.workOrchestrator.digestEnabled),
       cleanupEnabled: Boolean(config.workOrchestrator.cleanupEnabled),
       storeConfigured: Boolean(config.workOrchestratorStoreConfigured),
+      // True means shadow writes are disabled or the local store client was constructed; it does not prove Supabase connectivity.
       shadowReady: Boolean(config.workOrchestratorShadowReady)
     };
   }

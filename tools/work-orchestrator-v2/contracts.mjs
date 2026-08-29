@@ -22,7 +22,7 @@ const NOTIFICATION_TRANSITIONS = Object.freeze({
   delivering: new Set(['delivered', 'failed']),
   failed: new Set(['delivering']),
   delivered: new Set(['cleanup_pending']),
-  cleanup_pending: new Set(['deleted', 'failed']),
+  cleanup_pending: new Set(['deleted']),
   deleted: new Set()
 });
 

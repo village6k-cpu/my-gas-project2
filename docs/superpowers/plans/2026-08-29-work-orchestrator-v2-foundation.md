@@ -362,7 +362,7 @@ const NOTIFICATION_TRANSITIONS = Object.freeze({
   delivering: new Set(['delivered', 'failed']),
   failed: new Set(['delivering']),
   delivered: new Set(['cleanup_pending']),
-  cleanup_pending: new Set(['deleted', 'failed']),
+  cleanup_pending: new Set(['deleted']),
   deleted: new Set()
 });
 
@@ -695,13 +695,15 @@ git commit -m "feat: shadow work orchestrator notification receipts"
 
 ## Foundation completion gate
 
-Do not start the immediate-notification plan until:
+Offline next-phase code work may start when all of the following bounded checks pass:
 
-- local migration reset passes;
+- the foundation migration executes in PGlite and its PostgreSQL catalog, role grants, ACLs, functions, constraints, and indexes match the static security contract;
+- one duplicate accepted event yields one receipt in PGlite, proving the bounded database idempotency path;
 - static schema security tests pass;
-- one duplicate accepted event yields one receipt in an isolated database;
 - shadow failures do not suppress the existing worker path;
 - no Slack/Kakao/GAS call occurs from v2;
 - `git status --short` is clean after task commits.
 
-Do not apply the migration to production in this plan. Production migration and feature activation remain cutover actions after all dependent code has passed review.
+PGlite proves only the bounded PostgreSQL foundation needed for offline next-phase code work. Before any production migration, remote feature activation, deployment, or cutover, a real Supabase stack must additionally pass a clean reset, exercise the PostgREST table and RPC paths, prove the effective service-role-only ACL behavior, and show consistent local and linked migration history for owner review.
+
+Do not apply the migration to production in this plan. Production migration and feature activation remain prohibited here and are separate cutover actions after the real Supabase proof and all dependent code have passed review.
