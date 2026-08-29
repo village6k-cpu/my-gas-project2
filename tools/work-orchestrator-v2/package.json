@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test *.test.mjs",
-    "check": "node --check schema.test.mjs && node --check pglite-schema.test.mjs && node --check bridge-shadow-pglite.test.mjs && node --check contracts.mjs && node --check contracts.test.mjs && node --check supabase-store.mjs && node --check supabase-store.test.mjs && node --check shadow-receipts.mjs && node --check shadow-receipts.test.mjs"
+    "check": "node --check schema.test.mjs && node --check pglite-schema.test.mjs && node --check bridge-shadow-pglite.test.mjs && node --check contracts.mjs && node --check contracts.test.mjs && node --check supabase-store.mjs && node --check supabase-store.test.mjs && node --check shadow-receipts.mjs && node --check shadow-receipts.test.mjs && node --check slack-client.mjs && node --check slack-client.test.mjs"
   },
   "engines": { "node": ">=24" },
   "devDependencies": {
