@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "test": "node --test *.test.mjs",
-    "check": "node --check schema.test.mjs"
+    "check": "node --check schema.test.mjs && node --check pglite-schema.test.mjs"
   },
-  "engines": { "node": ">=24" }
+  "engines": { "node": ">=24" },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8"
+  }
 }
