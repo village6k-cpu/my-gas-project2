@@ -3,6 +3,8 @@ const MAX_RETRY_AFTER_SECONDS = 86_400;
 const MAX_CURSOR_LENGTH = 2_000;
 const MAX_HISTORY_PAGES = 10;
 const SAFE_SLACK_CODE = /^[a-z0-9_]{1,64}$/;
+const SAFE_SLACK_CHANNEL = /^[A-Z0-9][A-Z0-9_-]{0,79}$/;
+const SLACK_TIMESTAMP = /^\d{1,16}\.\d{1,10}$/;
 const INDETERMINATE_POST_CODES = new Set(['fatal_error', 'internal_error']);
 
 export class SlackApiError extends Error {
@@ -17,9 +19,17 @@ function safeCode(value) {
 }
 
 function parseRetryAfter(value) {
-  if (typeof value !== 'string' || !/^[1-9]\d{0,4}$/.test(value)) return null;
+  if (typeof value !== 'string' || !/^\d{1,5}$/.test(value)) return null;
   const seconds = Number(value);
   return seconds <= MAX_RETRY_AFTER_SECONDS ? seconds : null;
+}
+
+function normalizedPostResult(payload) {
+  if (typeof payload.channel !== 'string' || !SAFE_SLACK_CHANNEL.test(payload.channel)) return null;
+  if (typeof payload.ts !== 'string' || !SLACK_TIMESTAMP.test(payload.ts)) return null;
+  const message = payload.message ?? {};
+  if (Array.isArray(message) || typeof message !== 'object') return null;
+  return { ok: true, channel: payload.channel, ts: payload.ts, message };
 }
 
 function requiredString(value, name) {
@@ -123,7 +133,15 @@ export function createSlackClient({ token, fetchImpl = fetch, timeoutMs = 7_000 
         unfurl_links: false,
         unfurl_media: false
       });
-      return { ok: true, channel: payload.channel, ts: payload.ts, message: payload.message || {} };
+      const result = normalizedPostResult(payload);
+      if (!result) {
+        throw errorFor('chat.postMessage', {
+          kind: 'response',
+          code: 'malformed_response',
+          ambiguous: true
+        });
+      }
+      return result;
     },
 
     async findMessageByClientId({ channel, clientMsgId, oldest, latest } = {}) {

@@ -34,6 +34,39 @@ test('postMessage sends the deterministic client ID and safe Slack options', asy
   });
 });
 
+test('postMessage rejects malformed successful result coordinates and messages after one call', async (t) => {
+  const valid = { ok: true, channel: 'CINBOX', ts: '100.1', message: {} };
+  const cases = [
+    ['missing channel', { ...valid, channel: undefined }],
+    ['missing ts', { ...valid, ts: undefined }],
+    ['invalid ts', { ...valid, ts: 'not-a-slack-timestamp' }],
+    ['array message', { ...valid, message: [] }],
+    ['scalar message', { ...valid, message: 'not-an-object' }]
+  ];
+
+  for (const [name, payload] of cases) {
+    await t.test(name, async () => {
+      let calls = 0;
+      const client = createSlackClient({
+        token,
+        fetchImpl: async () => {
+          calls += 1;
+          return jsonResponse(200, payload);
+        }
+      });
+      await assert.rejects(
+        () => client.postMessage({ channel: 'CINBOX', text: 'x', clientMsgId: `malformed-${name}` }),
+        (error) => error instanceof SlackApiError
+          && error.kind === 'response'
+          && error.code === 'malformed_response'
+          && error.ambiguous === true
+          && !error.message.includes(token)
+      );
+      assert.equal(calls, 1);
+    });
+  }
+});
+
 test('postMessage treats a transport failure as ambiguous without leaking the token', async () => {
   const client = createSlackClient({ token, fetchImpl: async () => { throw new Error(`network failed for ${token}`); } });
 
@@ -100,6 +133,21 @@ test('postMessage treats HTTP 429 as non-ambiguous and bounds Retry-After', asyn
       && error.ambiguous === false
       && !error.message.includes(token)
   );
+});
+
+test('postMessage preserves Retry-After zero and rejects unsafe retry bounds', async (t) => {
+  for (const [header, expected] of [['0', 0], ['-1', null], ['1.5', null], ['not-a-number', null], ['999999', null]]) {
+    await t.test(`Retry-After ${header}`, async () => {
+      const client = createSlackClient({
+        token,
+        fetchImpl: async () => jsonResponse(429, { ok: false, error: 'ratelimited' }, { 'retry-after': header })
+      });
+      await assert.rejects(
+        () => client.postMessage({ channel: 'CINBOX', text: 'x', clientMsgId: `retry-after-${header}` }),
+        (error) => error.retryAfterSeconds === expected && error.ambiguous === false
+      );
+    });
+  }
 });
 
 test('postMessage keeps HTTP 429 non-ambiguous when Slack returns a malformed body', async () => {
