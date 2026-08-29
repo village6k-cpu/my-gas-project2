@@ -143,6 +143,29 @@ test('non-2xx errors include status and safe response code without secrets or bo
   );
 });
 
+test('non-2xx errors replace oversized PostgREST codes with unknown', async () => {
+  const oversizedCode = `PGRST${'9'.repeat(400)}`;
+  const fetch = createFetch([response({ ok: false, status: 500, data: { code: oversizedCode, detail: serviceRoleKey } })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  await assert.rejects(
+    store.getNotificationByEventKey('event-1'),
+    (error) => /HTTP 500, code unknown/.test(error.message)
+      && !error.message.includes(oversizedCode)
+      && !error.message.includes(serviceRoleKey)
+  );
+});
+
+test('non-2xx errors preserve a fixed-width PostgreSQL SQLSTATE without secrets', async () => {
+  const fetch = createFetch([response({ ok: false, status: 400, data: { code: '42P01', detail: serviceRoleKey } })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  await assert.rejects(
+    store.getNotificationByEventKey('event-1'),
+    (error) => /HTTP 400, code 42P01/.test(error.message) && !error.message.includes(serviceRoleKey)
+  );
+});
+
 test('thrown fetch errors are bounded and never reveal the service role key', async () => {
   const store = createWorkOrchestratorStore({
     supabaseUrl: 'https://supabase.example',

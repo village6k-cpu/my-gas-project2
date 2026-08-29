@@ -28,8 +28,12 @@ function safeJson(value) {
 function safeResponseCode(raw, serviceRoleKey) {
   try {
     const code = JSON.parse(raw)?.code;
-    if (typeof code === 'string' && /^(?:PGRST\d+|\d{5})$/.test(code) && !code.includes(serviceRoleKey)) {
-      return code;
+    const normalizedCode = typeof code === 'string' ? code.toUpperCase() : '';
+    if (
+      /^(?:PGRST\d{3}|[0-9A-Z]{5})$/.test(normalizedCode)
+      && !normalizedCode.includes(serviceRoleKey.toUpperCase())
+    ) {
+      return normalizedCode;
     }
   } catch {
     // A non-JSON response cannot safely contribute to an error message.
