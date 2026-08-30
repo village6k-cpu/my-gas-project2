@@ -1741,45 +1741,58 @@ export function compactQueueAuditRecord(filename, object = {}) {
     };
   }
   if (filename === 'errors.ndjson') {
+    const correlation = typeof object.eventCorrelationSha256 === 'string'
+      && /^[0-9a-f]{64}$/.test(object.eventCorrelationSha256)
+      ? { eventCorrelationSha256: object.eventCorrelationSha256 }
+      : {};
+    if (object.type === 'immediate_notification') {
+      return {
+        at: object.at || '',
+        type: 'immediate_notification',
+        ...correlation
+      };
+    }
     return {
       ...base,
       type: object.type || '',
       message: compactQueueAuditText(object.message || object.error || '', 1600),
-      ...(typeof object.eventCorrelationSha256 === 'string'
-        && /^[0-9a-f]{64}$/.test(object.eventCorrelationSha256)
-        ? { eventCorrelationSha256: object.eventCorrelationSha256 }
-        : {})
+      ...correlation
     };
   }
   return base;
 }
 
-function rotateQueueLogIfNeeded(filename, incomingBytes) {
-  const filePath = path.join(CONFIG.queueDir, filename);
+function rotateQueueLogIfNeeded(filename, incomingBytes, queueDir = CONFIG.queueDir) {
+  const filePath = path.join(queueDir, filename);
   try {
     const stat = fs.statSync(filePath);
     if (stat.size + incomingBytes <= CONFIG.queueLogMaxBytes) return;
     const archivePath = `${filePath}.${Date.now()}.${process.pid}`;
     fs.renameSync(filePath, archivePath);
     const prefix = `${filename}.`;
-    const archives = fs.readdirSync(CONFIG.queueDir)
+    const archives = fs.readdirSync(queueDir)
       .filter((entry) => entry.startsWith(prefix))
-      .map((entry) => ({ entry, mtimeMs: fs.statSync(path.join(CONFIG.queueDir, entry)).mtimeMs }))
+      .map((entry) => ({ entry, mtimeMs: fs.statSync(path.join(queueDir, entry)).mtimeMs }))
       .sort((a, b) => b.mtimeMs - a.mtimeMs);
     archives.slice(CONFIG.queueLogArchiveCount).forEach(({ entry }) => {
-      try { fs.unlinkSync(path.join(CONFIG.queueDir, entry)); } catch (_) {}
+      try { fs.unlinkSync(path.join(queueDir, entry)); } catch (_) {}
     });
   } catch (error) {
     if (error?.code !== 'ENOENT') console.warn(`[kakao-dom-bridge] queue log rotation failed for ${filename}: ${error.message}`);
   }
 }
 
-function appendNdjson(filename, object) {
-  ensureQueueDir();
+function appendNdjson(filename, object, queueDir = CONFIG.queueDir) {
+  fs.mkdirSync(queueDir, { recursive: true });
   const record = compactQueueAuditRecord(filename, object);
   const line = `${JSON.stringify(record)}\n`;
-  rotateQueueLogIfNeeded(filename, Buffer.byteLength(line));
-  fs.appendFileSync(path.join(CONFIG.queueDir, filename), line, 'utf8');
+  rotateQueueLogIfNeeded(filename, Buffer.byteLength(line), queueDir);
+  fs.appendFileSync(path.join(queueDir, filename), line, 'utf8');
+}
+
+export function createErrorsAuditAppender({ queueDir = CONFIG.queueDir } = {}) {
+  const resolvedQueueDir = path.resolve(queueDir);
+  return (object) => appendNdjson('errors.ndjson', object, resolvedQueueDir);
 }
 
 // Node 22+는 unhandledRejection 기본 동작이 프로세스 즉시 종료다. 이 브리지는 Supabase/Slack/

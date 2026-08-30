@@ -32,6 +32,7 @@ const {
   createGatewayFailureNotificationCoordinator,
   createGatewayResultApplicationCoordinator,
   createAiJobDispatcher,
+  createErrorsAuditAppender,
   createWorkOrchestratorImmediateRuntime,
   createWorkOrchestratorShadowRuntime,
   configForHermesTransport,
@@ -2158,6 +2159,67 @@ test('error audit persists only a valid content-free event correlation digest', 
     assert.equal(Object.hasOwn(invalidRecord, 'eventCorrelationSha256'), false);
     assert.doesNotMatch(JSON.stringify(invalidRecord), /private-secret/);
   }
+});
+
+test('production errors appender persists only content-free immediate correlation metadata', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-immediate-error-audit-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const appendError = createErrorsAuditAppender({ queueDir: directory });
+  const validDigest = 'fb6c3ebcef1e697091ac9bd41203f918504979c64268d5ee44060340c8adb4e3';
+  const privateFields = {
+    eventHash: 'raw-event-hash-private',
+    customer: 'private-customer',
+    customerName: 'private-customer-name',
+    message: 'private-message',
+    secret: 'xoxb-private-secret',
+    payload: { message: 'nested-private-message', token: 'nested-private-token' }
+  };
+
+  appendError({
+    at: '2026-08-30T00:00:00.000Z',
+    type: 'immediate_notification',
+    eventCorrelationSha256: validDigest,
+    ...privateFields
+  });
+  for (const invalidDigest of [
+    validDigest.toUpperCase(),
+    ` ${validDigest}`,
+    'not-a-valid-private-message-secret-digest'
+  ]) {
+    appendError({
+      at: '2026-08-30T00:00:01.000Z',
+      type: 'immediate_notification',
+      eventCorrelationSha256: invalidDigest,
+      ...privateFields
+    });
+  }
+  appendError({
+    at: '2026-08-30T00:00:02.000Z',
+    type: 'worker',
+    message: 'existing generic error audit'
+  });
+
+  const records = (await readFile(path.join(directory, 'errors.ndjson'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.equal(records.length, 5);
+  assert.deepEqual(records[0], {
+    at: '2026-08-30T00:00:00.000Z',
+    type: 'immediate_notification',
+    eventCorrelationSha256: validDigest
+  });
+  for (const record of records.slice(1, 4)) {
+    assert.deepEqual(record, {
+      at: '2026-08-30T00:00:01.000Z',
+      type: 'immediate_notification'
+    });
+  }
+  assert.equal(records[4].message, 'existing generic error audit');
+  assert.doesNotMatch(
+    JSON.stringify(records.slice(0, 4)),
+    /raw-event-hash|private-customer|private-message|xoxb-private-secret|nested-private-message|nested-private-token|eventHash|customer|message|secret|payload/i
+  );
 });
 
 test('room revisions ignore unread-badge duplicates and supersede older semantic turns', () => {
