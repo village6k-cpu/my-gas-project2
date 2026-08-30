@@ -2303,6 +2303,8 @@ test('immediate notification responds after delivery without awaiting a slow Her
 test('immediate notification failure returns typed 503 with content-free metadata and no legacy queue', async () => {
   const calls = [];
   const privateValue = 'private-customer-room-preview-token-channel';
+  const maliciousEventHash = 'evt|customer=홍길동|preview=secret-message|token=xoxb-super-secret|channel=CSECRET|'
+    + 'Z'.repeat(600);
   const runtime = immediateNotificationRuntime({
     ensure: async () => {
       const error = new Error(privateValue);
@@ -2315,7 +2317,7 @@ test('immediate notification failure returns typed 503 with content-free metadat
     roomKey: `chat:${privateValue}`,
     previewText: privateValue,
     customerName: privateValue,
-    eventHash: 'immediate-failure-1'
+    eventHash: maliciousEventHash
   }), {
     appendNdjson: (file, value) => calls.push({ file, value }),
     shadowRuntime: { recordAccepted: () => null },
@@ -2328,13 +2330,21 @@ test('immediate notification failure returns typed 503 with content-free metadat
   assert.deepEqual(response.body, {
     ok: false,
     error: 'immediate_notification_unconfirmed',
-    eventHash: 'immediate-failure-1'
+    eventHash: maliciousEventHash
   });
   assert.equal(calls.some(({ file }) => ['legacy-write', 'legacy-queue'].includes(file)), false);
   const failureLog = calls.find(({ file, value }) => file === 'errors.ndjson' && value.type === 'immediate_notification');
   assert.ok(failureLog);
-  assert.deepEqual(Object.keys(failureLog.value).sort(), ['at', 'code', 'eventHash', 'type']);
-  assert.doesNotMatch(JSON.stringify(failureLog), new RegExp(privateValue));
+  assert.deepEqual(Object.keys(failureLog.value).sort(), ['at', 'code', 'eventCorrelationSha256', 'type']);
+  assert.equal(failureLog.value.eventCorrelationSha256, 'fb6c3ebcef1e697091ac9bd41203f918504979c64268d5ee44060340c8adb4e3');
+  assert.doesNotMatch(
+    JSON.stringify(failureLog),
+    /private-customer|홍길동|secret-message|xoxb-super-secret|CSECRET|eventHash|roomKey|preview|customer|client|channel|token/i
+  );
+  assert.doesNotMatch(
+    JSON.stringify(buildWorkOrchestratorHealthState(runtime.state)),
+    /private-customer|홍길동|secret-message|xoxb-super-secret|CSECRET|eventHash|roomKey|preview|customer|client|channel|token/i
+  );
   assert.equal(runtime.state.immediateFailed, 1);
 });
 
@@ -2441,9 +2451,10 @@ test('immediate notification exact retry resumes an existing receipt, delivers o
   }, { delivered: 1, duplicates: 1, failed: 1 });
 });
 
-test('immediate notification changed-false event with a different hash and no receipt posts zero', async () => {
+test('immediate notification changed-false event with a different hash and no receipt fails closed without posting', async () => {
   const ensuredHashes = [];
   const lookedUpHashes = [];
+  const legacyCalls = [];
   const runtime = immediateNotificationRuntime({
     store: {
       getNotificationByEventKey: async (eventKey) => {
@@ -2463,8 +2474,8 @@ test('immediate notification changed-false event with a different hash and no re
     appendNdjson: () => {},
     shadowRuntime: { recordAccepted: () => null },
     immediateRuntime: runtime,
-    writeSupabaseEvent: async () => ({ ok: true }),
-    scheduleDebouncedJob: () => {}
+    writeSupabaseEvent: async () => legacyCalls.push('legacy-write'),
+    scheduleDebouncedJob: () => legacyCalls.push('legacy-queue')
   };
   const first = immediateNotificationEvent({
     roomKey: 'chat:immediate-different-hash',
@@ -2475,10 +2486,92 @@ test('immediate notification changed-false event with a different hash and no re
   await postShadowEvent(first, dependencies);
   const response = await postShadowEvent(staleDuplicate, dependencies);
 
-  assert.equal(response.status, 202);
+  assert.equal(response.status, 503);
+  assert.deepEqual(response.body, {
+    ok: false,
+    error: 'immediate_notification_unconfirmed',
+    eventHash: 'immediate-different-hash-b'
+  });
   assert.deepEqual(ensuredHashes, ['immediate-different-hash-a']);
   assert.deepEqual(lookedUpHashes, ['immediate-different-hash-b']);
-  assert.equal('immediateNotification' in response.body, false);
+  assert.deepEqual(legacyCalls, ['legacy-write', 'legacy-queue']);
+  assert.equal(runtime.state.immediateFailed, 1);
+});
+
+test('immediate notification concurrent duplicate fails closed while the first exact receipt is not visible', async () => {
+  let enterFirst;
+  let releaseFirst;
+  const firstEntered = new Promise((resolve) => { enterFirst = resolve; });
+  const firstDelivery = new Promise((resolve) => { releaseFirst = resolve; });
+  const exactLookups = [];
+  const legacyCalls = [];
+  let ensureCalls = 0;
+  let slackPosts = 0;
+  const runtime = immediateNotificationRuntime({
+    store: {
+      getNotificationByEventKey: async (eventKey) => {
+        exactLookups.push(eventKey);
+        return null;
+      }
+    },
+    ensure: async () => {
+      ensureCalls += 1;
+      enterFirst();
+      await firstDelivery;
+      slackPosts += 1;
+      return {
+        status: 'delivered', receipt: { id: 'receipt-concurrent-first' },
+        delivery: { channel: 'CINBOX', ts: '104.1' }, reconciled: false
+      };
+    }
+  });
+  const event = immediateNotificationEvent({
+    roomKey: 'chat:immediate-concurrent-visibility',
+    eventHash: 'immediate-concurrent-visibility-1'
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => legacyCalls.push('legacy-write'),
+    scheduleDebouncedJob: () => legacyCalls.push('legacy-queue')
+  };
+
+  const firstResponsePromise = postShadowEvent(event, dependencies);
+  await firstEntered;
+  const concurrentResponse = await postShadowEvent(event, dependencies);
+  releaseFirst();
+  const firstResponse = await firstResponsePromise;
+
+  assert.equal(concurrentResponse.status, 503);
+  assert.equal(firstResponse.status, 202);
+  assert.equal(ensureCalls, 1);
+  assert.equal(slackPosts, 1);
+  assert.deepEqual(exactLookups, ['immediate-concurrent-visibility-1']);
+  assert.deepEqual(legacyCalls, ['legacy-write', 'legacy-queue']);
+});
+
+test('immediate notification gate rejects every non-delivered runtime result before legacy work', async () => {
+  const outcomes = [undefined, null, {}, { status: 'skipped' }, { status: 'busy' }, { status: 'unconfirmed' }];
+  for (const [index, outcome] of outcomes.entries()) {
+    const legacyCalls = [];
+    const eventHash = `immediate-unconfirmed-result-${index}`;
+    const response = await postShadowEvent(immediateNotificationEvent({
+      roomKey: `chat:immediate-unconfirmed-result-${index}`,
+      eventHash
+    }), {
+      appendNdjson: () => {},
+      shadowRuntime: { recordAccepted: () => null },
+      immediateRuntime: { enabled: true, deliverAccepted: async () => outcome },
+      writeSupabaseEvent: async () => legacyCalls.push('legacy-write'),
+      scheduleDebouncedJob: () => legacyCalls.push('legacy-queue')
+    });
+
+    assert.equal(response.status, 503);
+    assert.equal(response.body.error, 'immediate_notification_unconfirmed');
+    assert.equal(response.body.eventHash, eventHash);
+    assert.deepEqual(legacyCalls, []);
+  }
 });
 
 test('immediate notification OFF makes zero store or Slack calls and preserves legacy duplicate behavior', async () => {

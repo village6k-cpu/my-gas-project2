@@ -396,7 +396,11 @@ export function createWorkOrchestratorImmediateRuntime({
           lookupError.code = 'delivery_persistence_failed';
           throw lookupError;
         }
-        if (!existing) return { status: 'skipped', reason: 'duplicate_without_receipt' };
+        if (!existing) {
+          const missingReceipt = new Error('Exact notification receipt is unavailable');
+          missingReceipt.code = 'receipt_unavailable';
+          throw missingReceipt;
+        }
       }
 
       const result = await ensure({
@@ -4357,12 +4361,17 @@ export async function handleEvent(req, res, dependencies = {}) {
   if (immediateRuntime?.enabled === true) {
     try {
       immediateNotification = await immediateRuntime.deliverAccepted(event, roomVersion);
+      if (immediateNotification?.status !== 'delivered') {
+        const unconfirmedResult = new Error('Immediate notification result is unconfirmed');
+        unconfirmedResult.code = 'delivery_persistence_failed';
+        throw unconfirmedResult;
+      }
     } catch (error) {
       appendEvent('errors.ndjson', {
         at: nowIso(),
         type: 'immediate_notification',
         code: genericImmediateFailureCode(error?.code),
-        eventHash: String(event.eventHash || '').slice(0, 500)
+        eventCorrelationSha256: sha256(String(event.eventHash || '').slice(0, 500))
       });
       return json(res, 503, {
         ok: false,

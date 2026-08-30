@@ -298,7 +298,7 @@ assert.equal(response.statusCode, 202);
 
 Add a worker-slow test where the response includes the delivered notification before any Hermes promise resolves, a duplicate event test with one Slack post, and a failed-delivery test expecting HTTP 503 plus no worker scheduling. The 503 is intentional: accepting an event without the mandatory notice would violate the first-notification invariant.
 
-Add the exact-retry recovery cases required by Ruling 4: `503` on a new revision, the same exact source event retry finding its existing receipt and completing delivery before legacy scheduling, an already-delivered duplicate posting zero times, and a `changed=false` event with a different event hash and no exact receipt posting zero times. A `503` response alone does not schedule a retry; recovery depends on the watcher/source retrying the exact event key.
+Add the exact-retry recovery cases required by Ruling 4: `503` on a new revision, the same exact source event retry finding its existing receipt and completing delivery before legacy scheduling, an already-delivered duplicate posting zero times, and a `changed=false` event with a different event hash and no exact receipt posting zero times while returning `503` with zero legacy write/schedule. Add the concurrent visibility gap where the first exact receipt is not query-visible yet; the concurrent duplicate also returns `503` and cannot create or notify. A `503` response alone does not schedule a retry; recovery depends on the watcher/source retrying the exact event key.
 
 Add a store RED test for a bounded oldest-backlog query that selects only `created_at` from at most one `pending|delivering|failed` receipt. Health age must come from this durable readback, not process memory.
 
@@ -317,10 +317,12 @@ When `WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=1`:
 1. require a locally constructed store client and Slack client plus non-empty `WORK_ORCHESTRATOR_V2_INBOX_CHANNEL_ID` and Slack token at startup; construction proves local configuration only, never connectivity;
 2. call `ensureImmediateNotification` after event acceptance and before `writeSupabaseEvent`;
 3. return 503 with `{ok:false,error:'immediate_notification_unconfirmed',eventHash}` if it is not delivered;
-4. append a bounded error record without message content;
+4. append a bounded error record without message content; derive a SHA-256 correlation from the bounded event identifier and never copy caller-controlled `eventHash` into the persistent error log;
 5. leave `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED`, `KAKAO_FOLLOW_UP_ITEMS_ENABLED`, and `SLACK_AGENT_CARD_DELIVERY_ENABLED` untouched.
-6. on `changed=false`, look up the receipt by this exact normalized source event key before calling the state machine; resume only when that receipt already exists, and never create or notify for an arbitrary stale/different event;
+6. on `changed=false`, look up the receipt by this exact normalized source event key before calling the state machine; resume only when that receipt already exists, and never create or notify for an arbitrary stale/different event; a missing exact receipt is unconfirmed and returns `503` with zero legacy write/schedule;
 7. after confirmed exact-retry recovery, continue the unchanged legacy Supabase write and worker scheduling path.
+
+The handler gate is positive: only an explicit `{status:'delivered'}` result may reach the legacy write/schedule path. Skipped, missing, busy, unconfirmed, exhausted, malformed, unknown, and thrown outcomes all return the same generic `503` contract.
 
 Parse mention IDs only from the existing server-owned `SLACK_CARD_MENTION_USER_IDS`; the immediate notice builder remains the strict validator. Construction and tests perform no network calls.
 
