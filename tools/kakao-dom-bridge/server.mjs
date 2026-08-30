@@ -1744,7 +1744,11 @@ export function compactQueueAuditRecord(filename, object = {}) {
     return {
       ...base,
       type: object.type || '',
-      message: compactQueueAuditText(object.message || object.error || '', 1600)
+      message: compactQueueAuditText(object.message || object.error || '', 1600),
+      ...(typeof object.eventCorrelationSha256 === 'string'
+        && /^[0-9a-f]{64}$/.test(object.eventCorrelationSha256)
+        ? { eventCorrelationSha256: object.eventCorrelationSha256 }
+        : {})
     };
   }
   return base;

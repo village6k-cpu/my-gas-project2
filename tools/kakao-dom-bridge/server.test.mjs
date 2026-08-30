@@ -2126,6 +2126,40 @@ test('worker result audit keeps phase timings and AI attempt counts without cust
   assert.doesNotMatch(JSON.stringify(record.result.audit), /private|customer|chat/);
 });
 
+test('error audit persists only a valid content-free event correlation digest', () => {
+  const validDigest = 'fb6c3ebcef1e697091ac9bd41203f918504979c64268d5ee44060340c8adb4e3';
+  const record = compactQueueAuditRecord('errors.ndjson', {
+    at: '2026-08-30T00:00:00.000Z',
+    type: 'immediate_notification',
+    eventCorrelationSha256: validDigest,
+    eventHash: 'raw-event-hash-message-secret',
+    event: { message: 'private-message', secret: 'xoxb-private-secret' },
+    secret: 'top-level-private-secret'
+  });
+
+  assert.equal(record.eventCorrelationSha256, validDigest);
+  assert.equal(Object.hasOwn(record, 'eventHash'), false);
+  assert.equal(Object.hasOwn(record, 'event'), false);
+  assert.equal(Object.hasOwn(record, 'secret'), false);
+  assert.doesNotMatch(JSON.stringify(record), /raw-event-hash|private-message|xoxb-private-secret|top-level-private-secret/);
+
+  for (const invalidDigest of [
+    validDigest.toUpperCase(),
+    validDigest.slice(1),
+    `${validDigest}0`,
+    'g'.repeat(64),
+    ` ${validDigest}`,
+    'message=private-secret'
+  ]) {
+    const invalidRecord = compactQueueAuditRecord('errors.ndjson', {
+      type: 'immediate_notification',
+      eventCorrelationSha256: invalidDigest
+    });
+    assert.equal(Object.hasOwn(invalidRecord, 'eventCorrelationSha256'), false);
+    assert.doesNotMatch(JSON.stringify(invalidRecord), /private-secret/);
+  }
+});
+
 test('room revisions ignore unread-badge duplicates and supersede older semantic turns', () => {
   const versions = new Map();
   const first = registerAcceptedRoomEvent(versions, 'chat:1', '홍길동 문의 오후 1:00');
