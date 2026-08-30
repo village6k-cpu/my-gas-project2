@@ -798,6 +798,36 @@ test('listActionableWork keeps missing or malformed P0 acknowledgements visible'
   assert.deepEqual(rows.map((row) => row.id), [missingId, malformedId]);
 });
 
+test('listActionableWork uses the supplied cutoff for future and boundary P0 acknowledgements', async () => {
+  const futureId = '88888888-8888-4888-8888-888888888888';
+  const fetch = createFetch([
+    response({ data: [workRow({
+      id: futureId, priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z',
+      payload: {
+        requires_human_action: true,
+        p0_acknowledged_at: '2026-08-29T03:00:00.001Z'
+      }
+    })] }),
+    response({ data: [workRow({
+      priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z',
+      payload: {
+        requires_human_action: true,
+        p0_acknowledged_at: '2026-08-29T03:00:00.000Z'
+      }
+    })] })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const futureRows = await store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 50 });
+  assert.deepEqual(futureRows.map((row) => row.id), [futureId]);
+  await assert.rejects(
+    store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 50 }),
+    { message: 'Work Orchestrator Supabase request failed: response invalid' }
+  );
+});
+
 test('recordDigestCleanup sends exact replacement evidence without touching Slack', async () => {
   const cleanedRow = digestRow({
     state: 'delivered', lease_owner: null, lease_token: null, lease_expires_at: null,

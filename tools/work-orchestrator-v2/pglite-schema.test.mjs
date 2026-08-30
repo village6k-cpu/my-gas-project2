@@ -101,6 +101,7 @@ test('foundation migration executes and exposes only service-role access in Post
         and p.proname in (
           'touch_work_orchestrator_v2_updated_at',
           'claim_message_notification_receipt',
+          'is_effective_p0_ack_v2',
           'upsert_work_item_v2',
           'request_work_item_action_v2',
           'list_actionable_work_v2',
@@ -116,6 +117,7 @@ test('foundation migration executes and exposes only service-role access in Post
       'claim_message_notification_receipt',
       'fail_digest_run_v2',
       'finalize_digest_run_v2',
+      'is_effective_p0_ack_v2',
       'list_actionable_work_v2',
       'record_digest_cleanup_v2',
       'request_work_item_action_v2',
@@ -137,6 +139,7 @@ test('foundation migration executes and exposes only service-role access in Post
         and p.proname in (
           'touch_work_orchestrator_v2_updated_at',
           'claim_message_notification_receipt',
+          'is_effective_p0_ack_v2',
           'upsert_work_item_v2',
           'request_work_item_action_v2',
           'list_actionable_work_v2',
@@ -427,10 +430,11 @@ test('foundation migration executes and exposes only service-role access in Post
 
     const p0ListRows = [];
     for (const [suffix, acknowledgement, actionableAt] of [
-      ['ack-one', '2026-08-28T00:00:00.000Z', '2026-01-01T00:00:00.000Z'],
-      ['ack-two', '2026-08-28T00:00:00.000Z', '2026-01-02T00:00:00.000Z'],
-      ['missing', null, '2026-02-01T00:00:00.000Z'],
-      ['malformed', 'not-a-timestamp', '2026-02-02T00:00:00.000Z']
+      ['past', '1999-12-31T00:00:00.000Z', '2099-01-01T00:00:00.000Z'],
+      ['boundary', '2000-01-01T00:00:00.000Z', '2099-01-02T00:00:00.000Z'],
+      ['future', '2000-01-01T00:00:00.001Z', '2099-01-03T00:00:00.000Z'],
+      ['missing', null, '2099-01-04T00:00:00.000Z'],
+      ['malformed', 'not-a-timestamp', '2099-01-05T00:00:00.000Z']
     ]) {
       const inserted = await db.query(upsertSql, [JSON.stringify({
         ...candidate,
@@ -446,14 +450,52 @@ test('foundation migration executes and exposes only service-role access in Post
       `, [inserted.rows[0].result.row.id, actionableAt, acknowledgement]);
       p0ListRows.push({ suffix, id: inserted.rows[0].result.row.id });
     }
+    await db.query(`
+      update public.work_items_v2 set priority = 'normal'
+      where id <> all($1::uuid[])
+    `, [p0ListRows.map((row) => row.id)]);
     const { rows: failClosedP0 } = await db.query(`
       select id from public.list_actionable_work_v2($1::timestamptz, $2::integer)
-    `, ['2000-01-01T00:00:00.000Z', 2]);
-    assert.deepEqual(
-      failClosedP0.map((row) => row.id),
-      p0ListRows.slice(2).map((row) => row.id),
-      'valid acknowledgements cannot crowd missing or malformed P0 acknowledgements out before limit'
-    );
+    `, ['2000-01-01T00:00:00.000Z', 3]);
+
+    const futureAckCandidate = {
+      ...candidate,
+      work_key: 'room:pglite:p0-future-ack',
+      source_event_keys: ['event-p0-future-ack'],
+      priority: 'p0'
+    };
+    const boundaryAckCandidate = {
+      ...candidate,
+      work_key: 'room:pglite:p0-boundary-ack',
+      source_event_keys: ['event-p0-boundary-ack'],
+      priority: 'p0'
+    };
+    const futureAckWork = await db.query(upsertSql, [JSON.stringify(futureAckCandidate)]);
+    const boundaryAckWork = await db.query(upsertSql, [JSON.stringify(boundaryAckCandidate)]);
+    await db.query(`
+      update public.work_items_v2
+      set state = 'snoozed', snoozed_until = now() + interval '2 days',
+          actionable_at = now() + interval '2 days',
+          payload = payload || jsonb_build_object(
+            'p0_acknowledged_at',
+            to_char((now() + interval '1 day') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+          )
+      where id = $1::uuid
+    `, [futureAckWork.rows[0].result.row.id]);
+    await db.query(`
+      update public.work_items_v2
+      set state = 'snoozed', snoozed_until = now() + interval '2 days',
+          actionable_at = now() + interval '2 days',
+          payload = payload || jsonb_build_object(
+            'p0_acknowledged_at',
+            to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+          )
+      where id = $1::uuid
+    `, [boundaryAckWork.rows[0].result.row.id]);
+    const [futureAckMerge, boundaryAckMerge] = await Promise.all([
+      db.query(upsertSql, [JSON.stringify(futureAckCandidate)]),
+      db.query(upsertSql, [JSON.stringify(boundaryAckCandidate)])
+    ]);
 
     const claimDigestSql = `
       select public.claim_digest_run_v2(
@@ -614,9 +656,22 @@ test('foundation migration executes and exposes only service-role access in Post
       set priority = 'p0', state = 'snoozed',
           actionable_at = '2099-01-01T00:00:00.000Z',
           snoozed_until = '2099-01-01T00:00:00.000Z',
-          payload = payload || '{"p0_acknowledged_at":"2026-08-29T00:00:00.000Z"}'::jsonb
+          payload = payload || '{"p0_acknowledged_at":"2026-08-29T11:00:05.000Z"}'::jsonb
       where id = $1::uuid
     `, [hiddenWork.rows[0].result.row.id]);
+    const futureHiddenWork = await db.query(upsertSql, [JSON.stringify({
+      ...candidate,
+      work_key: 'room:pglite:hidden-future-ack-p0',
+      source_event_keys: ['event-hidden-future-ack-p0']
+    })]);
+    await db.query(`
+      update public.work_items_v2
+      set priority = 'p0', state = 'snoozed',
+          actionable_at = '2099-01-01T00:00:00.000Z',
+          snoozed_until = '2099-01-01T00:00:00.000Z',
+          payload = payload || '{"p0_acknowledged_at":"2026-08-29T11:30:05.001Z"}'::jsonb
+      where id = $1::uuid
+    `, [futureHiddenWork.rows[0].result.row.id]);
     const carryDigest = await db.query(claimDigestSql, [
       'slack:CINBOX', '2026-08-29T10:00:00.000Z', '2026-08-29T09:00:00.000Z',
       '2026-08-29T10:00:00.000Z', 'bridge:pglite', 120
@@ -624,6 +679,10 @@ test('foundation migration executes and exposes only service-role access in Post
     const hiddenDigest = await db.query(claimDigestSql, [
       'slack:CINBOX', '2026-08-29T11:00:00.000Z', '2026-08-29T10:00:00.000Z',
       '2026-08-29T11:00:00.000Z', 'bridge:pglite', 120
+    ]);
+    const futureHiddenDigest = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T11:30:00.000Z', '2026-08-29T11:00:00.000Z',
+      '2026-08-29T11:30:00.000Z', 'bridge:pglite', 120
     ]);
     const semanticGuards = await Promise.allSettled([
       db.query(finalizeSql, [
@@ -639,21 +698,40 @@ test('foundation migration executes and exposes only service-role access in Post
           id: hiddenWork.rows[0].result.row.id, version: 1,
           inclusionReason: 'p0', priority: 'p0'
         }]), 'CINBOX', '811.01', '2026-08-29T11:00:05.000Z'
+      ]),
+      db.query(finalizeSql, [
+        futureHiddenDigest.rows[0].result.row.id, 'bridge:pglite',
+        futureHiddenDigest.rows[0].result.row.lease_token,
+        JSON.stringify([{
+          id: futureHiddenWork.rows[0].result.row.id, version: 1,
+          inclusionReason: 'p0', priority: 'p0'
+        }]), 'CINBOX', '812.01', '2026-08-29T11:30:05.000Z'
       ])
     ]);
-    assert.deepEqual(
-      semanticGuards.map((result) => result.status),
-      ['rejected', 'rejected'],
-      'carry-over threshold and current actionable eligibility are both enforced before finalization'
-    );
-    assert.ok(semanticGuards.every((result) => /snapshot semantics/i.test(result.reason?.message)));
+    assert.deepEqual({
+      listedIds: failClosedP0.map((row) => row.id),
+      mergeStates: [futureAckMerge.rows[0].result.row.state, boundaryAckMerge.rows[0].result.row.state],
+      finalizeStates: semanticGuards.map((result) => result.status)
+    }, {
+      listedIds: p0ListRows.slice(2).map((row) => row.id),
+      mergeStates: ['open', 'snoozed'],
+      finalizeStates: ['rejected', 'rejected', 'fulfilled']
+    }, 'SQL uses each operation cutoff for list, upsert wake, and finalization eligibility');
+    assert.ok(semanticGuards.slice(0, 2).every((result) => /snapshot semantics/i.test(result.reason?.message)));
+    assert.equal(semanticGuards[2].value.rows[0].result.updated_count, 1);
     const { rows: guardedCounters } = await db.query(`
       select id, digest_inclusion_count, consecutive_unhandled_digests, last_digest_at
-      from public.work_items_v2 where id in ($1::uuid, $2::uuid) order by id
-    `, [carryWork.rows[0].result.row.id, hiddenWork.rows[0].result.row.id]);
+      from public.work_items_v2 where id in ($1::uuid, $2::uuid, $3::uuid) order by id
+    `, [
+      carryWork.rows[0].result.row.id,
+      hiddenWork.rows[0].result.row.id,
+      futureHiddenWork.rows[0].result.row.id
+    ]);
     assert.equal(guardedCounters.find((row) => row.id === carryWork.rows[0].result.row.id).digest_inclusion_count, 99);
     assert.equal(guardedCounters.find((row) => row.id === hiddenWork.rows[0].result.row.id).digest_inclusion_count, 0);
-    assert.ok(guardedCounters.every((row) => row.last_digest_at === null));
+    const futureGuarded = guardedCounters.find((row) => row.id === futureHiddenWork.rows[0].result.row.id);
+    assert.equal(futureGuarded.digest_inclusion_count, 1);
+    assert.ok(futureGuarded.last_digest_at);
 
     const failedDigest = await db.query(claimDigestSql, [
       'slack:CINBOX', '2026-08-29T09:00:00.000Z', '2026-08-29T06:00:00.000Z',

@@ -30,6 +30,7 @@ test('foundation migration defines private atomic work and digest RPC contracts'
   assert.equal(migrationFiles.length, 1, 'exactly one foundation migration must exist');
   const sql = readFileSync(join(migrationsDirectory, migrationFiles[0]), 'utf8');
   const functions = [
+    'is_effective_p0_ack_v2',
     'upsert_work_item_v2',
     'request_work_item_action_v2',
     'list_actionable_work_v2',

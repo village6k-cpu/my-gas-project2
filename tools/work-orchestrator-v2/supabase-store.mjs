@@ -70,11 +70,15 @@ function sameJsonValue(left, right) {
       && sameJsonValue(left[key], right[key]));
 }
 
-function hasCanonicalP0Acknowledgement(payload) {
+function hasCanonicalP0Acknowledgement(payload, cutoff) {
   const value = isRecord(payload) ? payload.p0_acknowledged_at : undefined;
   if (typeof value !== 'string' || !value || value.length > 40) return false;
   const parsed = new Date(value);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+  const cutoffDate = new Date(cutoff);
+  return !Number.isNaN(parsed.getTime())
+    && parsed.toISOString() === value
+    && !Number.isNaN(cutoffDate.getTime())
+    && parsed.getTime() <= cutoffDate.getTime();
 }
 
 function exactText(value, maxLength) {
@@ -382,7 +386,7 @@ function actionableResponse(data, now) {
     responseTimestamp(row.last_digest_at, { nullable: true });
     responseTimestamp(row.next_reminder_at, { nullable: true });
     const due = Date.parse(row.actionable_at) <= Date.parse(now);
-    const unacknowledgedP0 = row.priority === 'p0' && !hasCanonicalP0Acknowledgement(row.payload);
+    const unacknowledgedP0 = row.priority === 'p0' && !hasCanonicalP0Acknowledgement(row.payload, now);
     if (!due && !unacknowledgedP0) throw responseInvalid();
   }
   return data;

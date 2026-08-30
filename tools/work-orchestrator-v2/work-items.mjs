@@ -333,7 +333,7 @@ export function mergeWorkItem(existing, incoming, now = new Date()) {
     && existing.snoozed_until
     && new Date(existing.snoozed_until).getTime() <= new Date(changedAt).getTime();
   const p0Escalation = !stale && existingPriority !== 'p0' && incomingPriority === 'p0';
-  const unacknowledgedP0 = existingPriority === 'p0' && !p0Acknowledged(existing);
+  const unacknowledgedP0 = existingPriority === 'p0' && !p0Acknowledged(existing, changedAt);
   const wakeSnooze = expiredSnooze
     || (state === 'snoozed' && (p0Escalation || unacknowledgedP0));
   const priority = !stale && PRIORITY_RANK[incomingPriority] > PRIORITY_RANK[existingPriority]
@@ -376,11 +376,15 @@ function actionType(action) {
   return type;
 }
 
-function p0Acknowledged(item) {
+function p0Acknowledged(item, cutoff) {
   const value = isRecord(item?.payload) ? item.payload.p0_acknowledged_at : null;
   if (typeof value !== 'string' || !value || value.length > 40) return false;
   const date = new Date(value);
-  return !Number.isNaN(date.getTime()) && date.toISOString() === value;
+  const cutoffDate = new Date(cutoff);
+  return !Number.isNaN(date.getTime())
+    && date.toISOString() === value
+    && !Number.isNaN(cutoffDate.getTime())
+    && date.getTime() <= cutoffDate.getTime();
 }
 
 export function applyWorkAction(item, action, now = new Date()) {
@@ -394,7 +398,7 @@ export function applyWorkAction(item, action, now = new Date()) {
   const changedAt = isoDate(now, 'work action clock');
   const priority = normalizedPriority(item.priority);
   if (type === 'ack_p0' && priority !== 'p0') throw new Error('acknowledgement requires a P0 work item');
-  if (priority === 'p0' && !p0Acknowledged(item) && (type === 'snooze' || type === 'dismiss')) {
+  if (priority === 'p0' && !p0Acknowledged(item, changedAt) && (type === 'snooze' || type === 'dismiss')) {
     throw new Error('acknowledge P0 before hiding work');
   }
 
@@ -427,7 +431,7 @@ export function applyWorkAction(item, action, now = new Date()) {
     next.actionable_at = snoozedUntil.toISOString();
   }
   if (type === 'ack_p0') {
-    if (!p0Acknowledged(item)) next.payload.p0_acknowledged_at = changedAt;
+    if (!p0Acknowledged(item, changedAt)) next.payload.p0_acknowledged_at = changedAt;
   }
   if (type === 'request_resolve') {
     const requestedBy = boundedText(action.requestedBy, 200) || null;

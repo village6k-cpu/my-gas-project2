@@ -461,7 +461,7 @@ test('a fresh non-P0 to P0 escalation wakes a future snooze immediately', () => 
   assert.equal(merged.first_opened_at, EARLIER);
 });
 
-test('an already-P0 acknowledged item is not broadly woken without a new escalation', () => {
+test('an at-cutoff P0 acknowledgement is effective and does not broadly wake a snooze', () => {
   const existing = activeItem({
     state: 'snoozed',
     priority: 'p0',
@@ -469,7 +469,7 @@ test('an already-P0 acknowledged item is not broadly woken without a new escalat
     actionable_at: '2026-08-29T09:00:00.000Z',
     payload: {
       requires_human_action: true,
-      p0_acknowledged_at: '2026-08-29T04:00:00.000Z'
+      p0_acknowledged_at: '2026-08-29T06:00:00.000Z'
     }
   });
 
@@ -478,6 +478,25 @@ test('an already-P0 acknowledged item is not broadly woken without a new escalat
   assert.equal(merged.state, 'snoozed');
   assert.equal(merged.snoozed_until, '2026-08-29T09:00:00.000Z');
   assert.equal(merged.actionable_at, '2026-08-29T09:00:00.000Z');
+});
+
+test('a future P0 acknowledgement is ineffective and cannot suppress snooze wake', () => {
+  const existing = activeItem({
+    state: 'snoozed',
+    priority: 'p0',
+    snoozed_until: '2026-08-29T09:00:00.000Z',
+    actionable_at: '2026-08-29T09:00:00.000Z',
+    payload: {
+      requires_human_action: true,
+      p0_acknowledged_at: '2026-08-29T06:00:00.001Z'
+    }
+  });
+
+  const merged = mergeWorkItem(existing, activeItem({ priority: 'p0' }), NOW);
+
+  assert.equal(merged.state, 'open');
+  assert.equal(merged.snoozed_until, null);
+  assert.equal(merged.actionable_at, '2026-08-29T06:00:00.000Z');
 });
 
 test('an unacknowledged existing P0 cannot remain hidden by a future snooze', () => {
@@ -572,13 +591,42 @@ test('repeated P0 acknowledgement preserves the first acknowledgement timestamp'
     priority: 'p0',
     payload: {
       requires_human_action: true,
-      p0_acknowledged_at: '2026-08-29T05:00:00.000Z'
+      p0_acknowledged_at: '2026-08-29T06:00:00.000Z'
     }
   }), { type: 'ack_p0', expectedVersion: 4 }, NOW);
 
-  assert.equal(result.item.payload.p0_acknowledged_at, '2026-08-29T05:00:00.000Z');
+  assert.equal(result.item.payload.p0_acknowledged_at, '2026-08-29T06:00:00.000Z');
   assert.equal(result.item.version, 5);
   assert.equal(result.item.state, 'open');
+});
+
+test('future P0 acknowledgement metadata cannot authorize snooze or dismissal', () => {
+  const item = activeItem({
+    priority: 'p0',
+    payload: {
+      requires_human_action: true,
+      p0_acknowledged_at: '2026-08-29T06:00:00.001Z'
+    }
+  });
+  assert.throws(() => applyWorkAction(item, {
+    type: 'snooze', expectedVersion: 4, snoozedUntil: '2026-08-29T09:00:00.000Z'
+  }, NOW), /acknowledge P0/i);
+  assert.throws(
+    () => applyWorkAction(item, { type: 'dismiss', expectedVersion: 4, requestedBy: 'UOWNER' }, NOW),
+    /acknowledge P0/i
+  );
+});
+
+test('ack_p0 replaces a future acknowledgement with the supplied action time', () => {
+  const result = applyWorkAction(activeItem({
+    priority: 'p0',
+    payload: {
+      requires_human_action: true,
+      p0_acknowledged_at: '2026-08-29T06:00:00.001Z'
+    }
+  }), { type: 'ack_p0', expectedVersion: 4 }, NOW);
+
+  assert.equal(result.item.payload.p0_acknowledged_at, '2026-08-29T06:00:00.000Z');
 });
 
 test('malformed P0 acknowledgement metadata does not unlock hide actions', () => {

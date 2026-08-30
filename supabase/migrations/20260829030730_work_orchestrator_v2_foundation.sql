@@ -165,6 +165,35 @@ begin
 end;
 $$;
 
+create function public.is_effective_p0_ack_v2(
+  p_payload jsonb,
+  p_cutoff timestamptz
+) returns boolean language plpgsql stable security invoker set search_path = '' as $$
+declare
+  v_acknowledged_at timestamptz;
+begin
+  if p_cutoff is null
+    or not isfinite(p_cutoff)
+    or p_payload is null
+    or jsonb_typeof(p_payload) <> 'object'
+    or not (
+      p_payload @? '$.p0_acknowledged_at ? (
+        @.type() == "string"
+        && @ like_regex "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$"
+        && @.datetime("YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"") != null
+      )'
+    ) then
+    return false;
+  end if;
+  begin
+    v_acknowledged_at := (p_payload->>'p0_acknowledged_at')::timestamptz;
+  exception when others then
+    return false;
+  end;
+  return isfinite(v_acknowledged_at) and v_acknowledged_at <= p_cutoff;
+end;
+$$;
+
 create function public.upsert_work_item_v2(
   p_candidate jsonb
 ) returns jsonb language plpgsql security invoker set search_path = '' as $$
@@ -318,12 +347,7 @@ begin
         or (v_incoming_is_fresh and v_priority = 'p0' and v_row.priority <> 'p0')
         or (
           v_row.priority = 'p0'
-          and not coalesce((
-            jsonb_typeof(v_row.payload->'p0_acknowledged_at') = 'string'
-            and length(v_row.payload->>'p0_acknowledged_at') <= 40
-            and (v_row.payload->>'p0_acknowledged_at') ~
-              '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'
-          ), false)
+          and not public.is_effective_p0_ack_v2(v_row.payload, now())
         )
       );
       update public.work_items_v2
@@ -506,13 +530,7 @@ begin
       w.actionable_at <= p_now
       or (
         w.priority = 'p0'
-        and not (
-          w.payload @? '$.p0_acknowledged_at ? (
-            @.type() == "string"
-            && @ like_regex "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$"
-            && @.datetime("YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"") != null
-          )'
-        )
+        and not public.is_effective_p0_ack_v2(w.payload, p_now)
       )
     )
   order by w.actionable_at, w.first_opened_at, w.id
@@ -710,13 +728,7 @@ begin
           w.actionable_at <= p_delivered_at
           or (
             w.priority = 'p0'
-            and not (
-              w.payload @? '$.p0_acknowledged_at ? (
-                @.type() == "string"
-                && @ like_regex "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$"
-                && @.datetime("YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"") != null
-              )'
-            )
+            and not public.is_effective_p0_ack_v2(w.payload, p_delivered_at)
           )
         )
         or (s.entry->>'inclusionReason' = 'p0' and w.priority <> 'p0')
@@ -876,6 +888,7 @@ grant select, insert, update, delete on table public.digest_runs to service_role
 
 revoke execute on function public.touch_work_orchestrator_v2_updated_at() from public, anon, authenticated;
 revoke execute on function public.claim_message_notification_receipt(text,text,text,text,timestamptz,uuid,jsonb) from public, anon, authenticated;
+revoke execute on function public.is_effective_p0_ack_v2(jsonb,timestamptz) from public, anon, authenticated;
 revoke execute on function public.upsert_work_item_v2(jsonb) from public, anon, authenticated;
 revoke execute on function public.request_work_item_action_v2(uuid,integer,jsonb,text) from public, anon, authenticated;
 revoke execute on function public.list_actionable_work_v2(timestamptz,integer) from public, anon, authenticated;
@@ -885,6 +898,7 @@ revoke execute on function public.fail_digest_run_v2(uuid,text,uuid,text) from p
 revoke execute on function public.record_digest_cleanup_v2(uuid,uuid,text,text) from public, anon, authenticated;
 grant execute on function public.touch_work_orchestrator_v2_updated_at() to service_role;
 grant execute on function public.claim_message_notification_receipt(text,text,text,text,timestamptz,uuid,jsonb) to service_role;
+grant execute on function public.is_effective_p0_ack_v2(jsonb,timestamptz) to service_role;
 grant execute on function public.upsert_work_item_v2(jsonb) to service_role;
 grant execute on function public.request_work_item_action_v2(uuid,integer,jsonb,text) to service_role;
 grant execute on function public.list_actionable_work_v2(timestamptz,integer) to service_role;
