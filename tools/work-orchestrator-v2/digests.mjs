@@ -15,6 +15,10 @@ const SELECTED_KEYS = Object.freeze([
 const MAX_INPUT_ITEMS = 500;
 const MAX_ROWS_PER_PART = 24;
 const MAX_INTERVAL_MINUTES = 7 * 24 * 60;
+const MAX_RENDERED_TITLE = 500;
+const MAX_RENDERED_SUMMARY = 1500;
+const MAX_RENDERED_ROOM = 500;
+const MAX_SLACK_SECTION_TEXT = 3000;
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const KST_OFFSET_MS = 9 * HOUR_MS;
@@ -100,12 +104,14 @@ function nonnegativeCounter(value) {
   return value;
 }
 
-function validAcknowledgement(payload) {
-  if (!isRecord(payload)) throw invalidInput();
+function validAcknowledgement(payload, nowMs) {
+  if (!isRecord(payload)) return false;
   const value = payload.p0_acknowledged_at;
   if (typeof value !== 'string' || !value || value.length > 40) return false;
   const parsed = new Date(value);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+  return !Number.isNaN(parsed.getTime())
+    && parsed.toISOString() === value
+    && parsed.getTime() <= nowMs;
 }
 
 function selectedSection(row, nowMs) {
@@ -116,7 +122,7 @@ function selectedSection(row, nowMs) {
   return 'actionable';
 }
 
-function validateActiveRow(row) {
+function validateActiveRow(row, nowMs) {
   if (!isRecord(row)) throw invalidInput();
   const state = row.state;
   if (!ACTIVE_STATES.has(state)) throw invalidInput();
@@ -143,7 +149,7 @@ function validateActiveRow(row) {
     nextReminderAt: canonicalIso(row.next_reminder_at, { nullable: true }),
     digestInclusionCount: nonnegativeCounter(row.digest_inclusion_count),
     consecutiveUnhandledDigests: nonnegativeCounter(row.consecutive_unhandled_digests),
-    p0Acknowledged: validAcknowledgement(row.payload)
+    p0Acknowledged: validAcknowledgement(row.payload, nowMs)
   };
   if (state === 'snoozed' && normalized.snoozedUntil === null) throw invalidInput();
   return normalized;
@@ -221,7 +227,7 @@ export function selectDigestItems(items, now) {
 
     for (const row of items) {
       if (isRecord(row) && TERMINAL_STATES.has(row.state)) continue;
-      const item = validateActiveRow(row);
+      const item = validateActiveRow(row, nowMs);
       if (seen.has(item.id)) throw invalidInput();
       seen.add(item.id);
       if (Date.parse(item.actionableAt) > nowMs) continue;
@@ -269,15 +275,26 @@ export function buildDigestSnapshot(selected) {
   }
 }
 
-function escapeSlackText(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('*', '＊')
-    .replaceAll('_', '＿')
-    .replaceAll('~', '～')
-    .replaceAll('`', '｀');
+function escapeSlackText(value, maxLength) {
+  const source = [...String(value)];
+  let result = '';
+  for (let index = 0; index < source.length; index += 1) {
+    const token = ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '*': '＊',
+      '_': '＿',
+      '~': '～',
+      '`': '｀'
+    })[source[index]] ?? source[index];
+    const needsEllipsis = index < source.length - 1;
+    if (result.length + token.length + (needsEllipsis ? 1 : 0) > maxLength) {
+      return `${result}…`;
+    }
+    result += token;
+  }
+  return result;
 }
 
 function addMillisecondsIso(timestamp, milliseconds) {
@@ -292,26 +309,30 @@ function kstPresetTimes(now) {
   const year = kst.getUTCFullYear();
   const month = kst.getUTCMonth();
   const day = kst.getUTCDate();
-  let eveningMs = Date.UTC(year, month, day, 18) - KST_OFFSET_MS;
-  if (eveningMs <= nowMs) eveningMs += DAY_MS;
+  const eveningMs = Date.UTC(year, month, day, 18) - KST_OFFSET_MS;
   const tomorrowMorningMs = Date.UTC(year, month, day + 1, 9) - KST_OFFSET_MS;
-  return [
+  const presets = [
     {
       actionId: 'village_work_v2_snooze_3h',
       label: '3시간 미루기',
       snoozedUntil: addMillisecondsIso(now, 3 * HOUR_MS)
-    },
-    {
+    }
+  ];
+  if (eveningMs > nowMs) {
+    presets.push({
       actionId: 'village_work_v2_snooze_evening',
       label: '오늘 저녁',
       snoozedUntil: new Date(eveningMs).toISOString()
-    },
+    });
+  }
+  presets.push(
     {
       actionId: 'village_work_v2_snooze_tomorrow',
       label: '내일 오전',
       snoozedUntil: new Date(tomorrowMorningMs).toISOString()
     }
-  ];
+  );
+  return presets;
 }
 
 function button(item, actionId, label, action, style) {
@@ -332,9 +353,6 @@ function itemActions(item, presets) {
       type: 'snooze', snoozedUntil: preset.snoozedUntil
     }))
   ];
-  if (item.priority === 'p0') {
-    actions.push(button(item, 'village_work_v2_ack_p0', 'P0 확인', { type: 'ack_p0' }));
-  }
   actions.push(
     button(item, 'village_work_v2_request_resolve', '해결 요청', { type: 'request_resolve' }),
     button(item, 'village_work_v2_dismiss', '닫기', { type: 'dismiss' }, 'danger')
@@ -353,16 +371,18 @@ function configuredOwnerMention(item, config) {
 
 function workBlock(item, config, presets, reminder) {
   const owner = configuredOwnerMention(item, config);
-  const due = item.dueAt ? ` · 기한 ${escapeSlackText(item.dueAt)}` : '';
+  const due = item.dueAt ? ` · 기한 ${escapeSlackText(item.dueAt, 40)}` : '';
   const reminderLabel = reminder ? ' · 매일 알림' : '';
   const lines = [
-    `${owner ? `${owner} ` : ''}*[${item.section}${reminderLabel}] ${escapeSlackText(item.title)}*`,
-    `${escapeSlackText(item.summary)}\n방 ${escapeSlackText(item.roomKey)}${due}`
+    `${owner ? `${owner} ` : ''}*[${item.section}${reminderLabel}] ${escapeSlackText(item.title, MAX_RENDERED_TITLE)}*`,
+    `${escapeSlackText(item.summary, MAX_RENDERED_SUMMARY)}\n방 ${escapeSlackText(item.roomKey, MAX_RENDERED_ROOM)}${due}`
   ];
+  const text = lines.join('\n');
+  if (text.length > MAX_SLACK_SECTION_TEXT) throw invalidInput();
   return [
     {
       type: 'section',
-      text: { type: 'mrkdwn', text: lines.join('\n').slice(0, 2900) }
+      text: { type: 'mrkdwn', text }
     },
     {
       type: 'actions',

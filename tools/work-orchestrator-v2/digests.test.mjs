@@ -133,6 +133,25 @@ test('terminal and unacknowledged P0 rows are omitted while malformed active row
   );
 });
 
+test('P0 acknowledgement is canonical, present, and not later than the supplied selection clock', async (t) => {
+  const cases = [
+    ['missing payload', undefined, []],
+    ['null payload', null, []],
+    ['non-record payload', [], []],
+    ['missing acknowledgement', { requires_human_action: true }, []],
+    ['malformed acknowledgement', { p0_acknowledged_at: 'not-a-time' }, []],
+    ['future acknowledgement', { p0_acknowledged_at: '2026-08-29T06:00:00.001Z' }, []],
+    ['acknowledgement at boundary', { p0_acknowledged_at: NOW }, [UUIDS[0]]]
+  ];
+
+  for (const [name, payload, expectedIds] of cases) {
+    await t.test(name, () => {
+      const selected = selectDigestItems([workItem({ priority: 'p0', payload })], NOW);
+      assert.deepEqual(selected.map(({ id }) => id), expectedIds);
+    });
+  }
+});
+
 test('selection returns the exact render allowlist and no caller object aliases', () => {
   const input = workItem({
     customer_name: 'PRIVATE CUSTOMER',
@@ -249,6 +268,14 @@ test('snapshot is an exact ordered content-free allowlist with daily reminder pr
   assert.throws(() => buildDigestSlackMessage(snapshot, renderConfig), /invalid digest input/);
 });
 
+test('duplicate selected IDs fail closed for snapshots and rendering', () => {
+  const selected = selectedItem();
+  const duplicate = [{ ...selected }, { ...selected }];
+
+  assert.throws(() => buildDigestSnapshot(duplicate), { message: 'invalid digest input' });
+  assert.throws(() => buildDigestSlackMessage(duplicate, renderConfig), { message: 'invalid digest input' });
+});
+
 test('an empty selection has the exact no-send structured result shape', () => {
   assert.deepEqual(buildDigestSlackMessage([], renderConfig), {
     selectedCount: 0,
@@ -273,14 +300,13 @@ test('ordinary actions reuse the versioned codec without inventing a newer versi
     'village_work_v2_snooze_3h',
     'village_work_v2_snooze_evening',
     'village_work_v2_snooze_tomorrow',
-    'village_work_v2_ack_p0',
     'village_work_v2_request_resolve',
     'village_work_v2_dismiss'
   ]);
   assert.deepEqual(actions.map(({ decoded }) => decoded.id), Array(actions.length).fill(UUIDS[0]));
   assert.deepEqual(actions.map(({ decoded }) => decoded.version), Array(actions.length).fill(17));
   assert.deepEqual(actions.map(({ decoded }) => decoded.action.type), [
-    'progress', 'snooze', 'snooze', 'snooze', 'ack_p0', 'request_resolve', 'dismiss'
+    'progress', 'snooze', 'snooze', 'snooze', 'request_resolve', 'dismiss'
   ]);
   assert.deepEqual(actions.filter(({ decoded }) => decoded.action.type === 'snooze').map(({ decoded }) => decoded.action.snoozedUntil), [
     '2026-08-29T09:00:00.000Z',
@@ -289,17 +315,52 @@ test('ordinary actions reuse the versioned codec without inventing a newer versi
   ]);
   for (const block of actionBlocks(result)) {
     assert.ok(block.elements.length <= 25);
+    const actionIds = block.elements.map(({ action_id: actionId }) => actionId);
+    assert.equal(new Set(actionIds).size, actionIds.length);
     for (const element of block.elements) {
       assert.equal(element.type, 'button');
+      assert.ok(element.action_id.length >= 1 && element.action_id.length <= 255);
       assert.ok(element.text.text.length <= 75);
       assert.ok(element.value.length <= 1000);
     }
   }
 });
 
-test('non-P0 rows do not render P0 acknowledgement', () => {
-  const result = buildDigestSlackMessage([selectedItem()], renderConfig);
-  assert.equal(decodedActions(actionBlocks(result)[0]).some(({ decoded }) => decoded.action.type === 'ack_p0'), false);
+test('ordinary digest actions never render acknowledgement, including for an acknowledged P0', () => {
+  const selected = selectDigestItems([
+    workItem({ id: UUIDS[0] }),
+    workItem({
+      id: UUIDS[1],
+      priority: 'p0',
+      payload: { p0_acknowledged_at: NOW }
+    })
+  ], NOW);
+  const result = buildDigestSlackMessage(selected, renderConfig);
+
+  for (const block of actionBlocks(result)) {
+    assert.equal(decodedActions(block).some(({ decoded }) => decoded.action.type === 'ack_p0'), false);
+  }
+});
+
+test('today-evening snooze is offered only while the current KST 18:00 boundary is future', async (t) => {
+  const cases = [
+    ['before', '2026-08-29T08:59:59.999Z', true, '2026-08-29T09:00:00.000Z'],
+    ['at', '2026-08-29T09:00:00.000Z', false, null],
+    ['after', '2026-08-29T09:00:00.001Z', false, null]
+  ];
+
+  for (const [name, now, expectsEvening, expectedUntil] of cases) {
+    await t.test(name, () => {
+      const rendered = buildDigestSlackMessage([selectedItem()], { ...renderConfig, now });
+      const actions = decodedActions(actionBlocks(rendered)[0]);
+      const evening = actions.find(({ actionId }) => actionId === 'village_work_v2_snooze_evening');
+
+      assert.equal(Boolean(evening), expectsEvening);
+      if (evening) assert.equal(evening.decoded.action.snoozedUntil, expectedUntil);
+      assert.ok(actions.some(({ actionId }) => actionId === 'village_work_v2_snooze_3h'));
+      assert.ok(actions.some(({ actionId }) => actionId === 'village_work_v2_snooze_tomorrow'));
+    });
+  }
 });
 
 test('carry-over renders only validated owner mentions and otherwise uses a neutral unassigned marker', () => {
@@ -356,6 +417,33 @@ test('untrusted text is escaped, mention injection is neutralized, and Slack fie
     new Set(['header', 'section', 'actions']));
 });
 
+test('worst-case bounded text truncates per field with ellipses while preserving room and due metadata', () => {
+  const selected = [selectedItem({
+    title: '<&>'.repeat(100),
+    summary: '&'.repeat(2000),
+    room_key: '<'.repeat(500),
+    due_at: '2026-08-30T09:00:00.000Z',
+    first_opened_at: '2026-08-26T06:00:00.000Z',
+    consecutive_unhandled_digests: 2
+  })];
+
+  const result = buildDigestSlackMessage(selected, renderConfig);
+  const texts = [
+    result.ordinaryParts[0].blocks.find(({ type }) => type === 'section').text.text,
+    result.dailyReminderParts[0].blocks.find(({ type }) => type === 'section').text.text
+  ];
+
+  for (const text of texts) {
+    assert.ok(text.length <= 3000);
+    assert.ok((text.match(/…/g) || []).length >= 3);
+    assert.ok(text.includes('<@UOWNER1>'));
+    assert.ok(text.includes('\n방 &lt;&lt;'));
+    assert.ok(text.includes(' · 기한 2026-08-30T09:00:00.000Z'));
+    assert.doesNotMatch(text, /&(?!amp;|lt;|gt;)/);
+    assert.doesNotMatch(text, /&(?:a|am|l|g|gt|lt)…/);
+  }
+});
+
 test('24/25 ordinary pagination preserves valid Block Kit limits and never truncates', async (t) => {
   for (const count of [24, 25]) {
     await t.test(String(count), () => {
@@ -383,6 +471,11 @@ test('24/25 ordinary pagination preserves valid Block Kit limits and never trunc
         assert.equal(part.blocks.length, 1 + (2 * part.itemIds.length));
         assert.equal(part.blocks.filter(({ type }) => type === 'section').length, part.itemIds.length);
         assert.equal(part.blocks.filter(({ type }) => type === 'actions').length, part.itemIds.length);
+        for (const block of part.blocks.filter(({ type }) => type === 'actions')) {
+          const actionIds = block.elements.map(({ action_id: actionId }) => actionId);
+          assert.equal(new Set(actionIds).size, actionIds.length);
+          assert.ok(actionIds.every((actionId) => actionId.length >= 1 && actionId.length <= 255));
+        }
       }
     });
   }
