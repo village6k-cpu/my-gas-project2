@@ -358,7 +358,8 @@ function createMemoryImmediateNotificationAttemptGuard(maxEntries = 10_000) {
 
 export function createImmediateNotificationAttemptGuard({
   queueDir = CONFIG.queueDir,
-  maxEntries = 10_000
+  maxEntries = 10_000,
+  fileSystem = fs
 } = {}) {
   if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 100_000) {
     throw new Error('Immediate notification attempt guard configuration is invalid');
@@ -367,41 +368,83 @@ export function createImmediateNotificationAttemptGuard({
   const filePath = path.join(resolvedQueueDir, IMMEDIATE_ATTEMPT_FILENAME);
   const entries = new Map();
 
-  try {
-    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean);
-    for (const line of lines) {
-      let digest = '';
-      try { digest = JSON.parse(line)?.source_event_key_sha256 || ''; } catch {}
-      if (!IMMEDIATE_ATTEMPT_DIGEST.test(digest)) continue;
-      entries.delete(digest);
-      entries.set(digest, true);
+  const serialized = (source) => [...source.keys()]
+    .map((digest) => `${JSON.stringify({ source_event_key_sha256: digest })}\n`)
+    .join('');
+
+  const atomicReplace = (nextEntries) => {
+    fileSystem.mkdirSync(resolvedQueueDir, { recursive: true });
+    const temporaryPath = path.join(
+      resolvedQueueDir,
+      `.${IMMEDIATE_ATTEMPT_FILENAME}.${process.pid}.${crypto.randomUUID()}.tmp`
+    );
+    let descriptor = null;
+    try {
+      descriptor = fileSystem.openSync(temporaryPath, 'wx');
+      fileSystem.writeFileSync(descriptor, serialized(nextEntries), 'utf8');
+      if (typeof fileSystem.fsyncSync === 'function') fileSystem.fsyncSync(descriptor);
+      fileSystem.closeSync(descriptor);
+      descriptor = null;
+      fileSystem.renameSync(temporaryPath, filePath);
+    } catch {
+      if (descriptor !== null) {
+        try { fileSystem.closeSync(descriptor); } catch {}
+      }
+      try { fileSystem.unlinkSync(temporaryPath); } catch {}
+      throw new Error('Immediate notification attempt guard is unavailable');
     }
-    while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+  };
+
+  try {
+    const lines = fileSystem.readFileSync(filePath, 'utf8').split(/\r?\n/);
+    const loadedEntries = new Map();
+    for (const [index, line] of lines.entries()) {
+      if (line === '' && index === lines.length - 1) continue;
+      if (!line) throw new Error('invalid attempt guard record');
+      const record = JSON.parse(line);
+      if (
+        !record
+        || typeof record !== 'object'
+        || Array.isArray(record)
+        || Object.keys(record).length !== 1
+        || !IMMEDIATE_ATTEMPT_DIGEST.test(record.source_event_key_sha256)
+      ) throw new Error('invalid attempt guard record');
+      loadedEntries.delete(record.source_event_key_sha256);
+      loadedEntries.set(record.source_event_key_sha256, true);
+    }
+    if (loadedEntries.size > maxEntries) {
+      const boundedEntries = new Map([...loadedEntries.entries()].slice(-maxEntries));
+      atomicReplace(boundedEntries);
+      for (const [digest] of boundedEntries) entries.set(digest, true);
+    } else {
+      for (const [digest] of loadedEntries) entries.set(digest, true);
+    }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw new Error('Immediate notification attempt guard is unavailable');
   }
-
-  const rewrite = () => {
-    fs.mkdirSync(resolvedQueueDir, { recursive: true });
-    const contents = [...entries.keys()]
-      .map((digest) => `${JSON.stringify({ source_event_key_sha256: digest })}\n`)
-      .join('');
-    fs.writeFileSync(filePath, contents, 'utf8');
-  };
 
   return {
     claim(sourceEventKey) {
       const digest = immediateAttemptDigest(sourceEventKey);
       if (entries.has(digest)) return false;
+      if (entries.size >= maxEntries) {
+        const nextEntries = new Map(entries);
+        nextEntries.set(digest, true);
+        while (nextEntries.size > maxEntries) nextEntries.delete(nextEntries.keys().next().value);
+        atomicReplace(nextEntries);
+        entries.clear();
+        for (const [nextDigest] of nextEntries) entries.set(nextDigest, true);
+        return true;
+      }
+
       entries.set(digest, true);
       try {
-        fs.mkdirSync(resolvedQueueDir, { recursive: true });
-        if (entries.size > maxEntries) {
-          while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
-          rewrite();
-        } else {
-          fs.appendFileSync(filePath, `${JSON.stringify({ source_event_key_sha256: digest })}\n`, 'utf8');
-        }
+        fileSystem.mkdirSync(resolvedQueueDir, { recursive: true });
+        fileSystem.appendFileSync(
+          filePath,
+          `${JSON.stringify({ source_event_key_sha256: digest })}\n`,
+          'utf8'
+        );
       } catch {
         throw new Error('Immediate notification attempt guard is unavailable');
       }

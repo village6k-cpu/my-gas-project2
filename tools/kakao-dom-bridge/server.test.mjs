@@ -4,7 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { Readable } from 'node:stream';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 import { notificationReceiptInput } from '../work-orchestrator-v2/contracts.mjs';
@@ -2339,8 +2339,77 @@ test('immediate notification attempt guard is exact, bounded, private, and survi
   assert.equal(restarted.claim('source-event-C'), true);
   assert.equal(restarted.claim('source-event-B'), false);
   const persisted = await readFile(path.join(directory, 'immediate-notification-attempts.ndjson'), 'utf8');
+  const records = persisted.trim().split('\n').map((line) => JSON.parse(line));
   assert.doesNotMatch(persisted, /private-source-event-key|source-event-B|source-event-C/);
-  assert.equal(persisted.trim().split('\n').length <= 2, true);
+  assert.equal(records.length, 2);
+  assert.equal(records.every((record) => (
+    Object.keys(record).length === 1
+    && /^[0-9a-f]{64}$/.test(record.source_event_key_sha256)
+  )), true);
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+});
+
+test('immediate notification attempt guard fails closed on every corrupt non-empty startup record', async (t) => {
+  const privateContent = 'private-corrupt-event-content';
+  const corruptRecords = [
+    `{"source_event_key_sha256":"${privateContent}`,
+    JSON.stringify({ source_event_key_sha256: privateContent }),
+    JSON.stringify({ source_event_key_sha256: 'a'.repeat(64), unexpected: true })
+  ];
+
+  for (const [index, record] of corruptRecords.entries()) {
+    const directory = await mkdtemp(path.join(tmpdir(), `kakao-immediate-attempt-corrupt-${index}-`));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    await writeFile(
+      path.join(directory, 'immediate-notification-attempts.ndjson'),
+      `${record}\n`,
+      'utf8'
+    );
+
+    assert.throws(
+      () => createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 }),
+      (error) => error.message === 'Immediate notification attempt guard is unavailable'
+        && !error.message.includes(privateContent)
+        && error.cause === undefined
+    );
+  }
+});
+
+test('attempt guard compaction atomically preserves the live file and memory when replacement fails', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-immediate-attempt-atomic-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const livePath = path.join(directory, 'immediate-notification-attempts.ndjson');
+  const seeded = createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 });
+  assert.equal(seeded.claim('atomic-A'), true);
+  assert.equal(seeded.claim('atomic-B'), true);
+  const original = await readFile(livePath, 'utf8');
+  let renameAttempts = 0;
+  const failingFs = Object.create((await import('node:fs')).default);
+  failingFs.renameSync = () => {
+    renameAttempts += 1;
+    throw new Error('private atomic replacement failure');
+  };
+  const guard = createImmediateNotificationAttemptGuard({
+    queueDir: directory,
+    maxEntries: 2,
+    fileSystem: failingFs
+  });
+
+  assert.throws(
+    () => guard.claim('atomic-C'),
+    (error) => error.message === 'Immediate notification attempt guard is unavailable'
+      && !error.message.includes('private atomic replacement failure')
+  );
+  assert.equal(await readFile(livePath, 'utf8'), original);
+  assert.equal(guard.claim('atomic-A'), false);
+  assert.equal(guard.claim('atomic-B'), false);
+  assert.throws(() => guard.claim('atomic-C'), /attempt guard is unavailable/i);
+  assert.equal(renameAttempts, 2, 'failed replacement must not admit the new digest into memory');
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+
+  const restarted = createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 });
+  assert.equal(restarted.claim('atomic-A'), false);
+  assert.equal(restarted.claim('atomic-B'), false);
 });
 
 test('immediate notification follows acceptance, precedes legacy persistence, and gates HTTP 202', async () => {
