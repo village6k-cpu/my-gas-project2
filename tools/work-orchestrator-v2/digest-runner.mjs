@@ -225,11 +225,22 @@ function reconciliationWindow(part, seconds) {
   };
 }
 
-function deliveryFailureCode(error, ambiguous) {
-  if (ambiguous) return 'delivery_unconfirmed';
-  if (error?.code === 'ratelimited' || error?.kind === 'rate_limit') return 'rate_limited';
-  if (typeof error?.code === 'string' && /^[a-z0-9_]{1,64}$/.test(error.code)) return 'post_rejected';
-  return 'slack_api_error';
+function deliveryFailure(error, ambiguous, now) {
+  if (ambiguous) return { code: 'delivery_unconfirmed', retryAt: null };
+  if (error?.code === 'ratelimited' || error?.kind === 'rate_limit') {
+    const seconds = error?.retryAfterSeconds;
+    if (Number.isSafeInteger(seconds) && seconds >= 0 && seconds <= 86_400) {
+      return {
+        code: 'rate_limited',
+        retryAt: new Date(Date.parse(now) + (seconds * 1000)).toISOString()
+      };
+    }
+    return { code: 'slack_api_error', retryAt: null };
+  }
+  if (typeof error?.code === 'string' && /^[a-z0-9_]{1,64}$/.test(error.code)) {
+    return { code: 'post_rejected', retryAt: null };
+  }
+  return { code: 'slack_api_error', retryAt: null };
 }
 
 async function reconcilePart(slack, part, channelId, reconcileWindowSeconds) {
@@ -271,7 +282,7 @@ async function settleDelivered({ store, run, part, coordinate, config, now, leas
   return { ...part, delivery_state: 'delivered', slack_channel_id: config.channelId, slack_message_ts: coordinate.ts };
 }
 
-async function settleFailed({ store, run, part, code, leaseOwner }) {
+async function settleFailed({ store, run, part, code, retryAt, now, leaseOwner }) {
   try {
     await store.markDigestPartFailed({
       id: run.id,
@@ -279,7 +290,9 @@ async function settleFailed({ store, run, part, code, leaseOwner }) {
       leaseOwner,
       leaseToken: run.lease_token,
       expectedDeliveryAttempts: part.delivery_attempts,
-      error: code
+      error: code,
+      failedAt: now,
+      retryAt
     });
   } catch {
     // A later lease holder reconciles the same stable client ID. Never expose the underlying error.
@@ -321,6 +334,14 @@ async function deliverPart({ store, slack, run, persisted, local, config, now, l
         }
         return part;
       }
+      if (part.delivery_state === 'failed' && part.delivery_error === 'rate_limited'
+        && typeof part.delivery_retry_at === 'string'
+        && Number.isFinite(Date.parse(part.delivery_retry_at))
+        && Date.parse(part.delivery_retry_at) > Date.parse(now)) {
+        const error = new Error('digest_delivery_deferred');
+        error.code = 'digest_delivery_deferred';
+        throw error;
+      }
       if (part.delivery_state !== 'delivering') throw new Error('delivery_unconfirmed');
     } else {
       newlyClaimed = true;
@@ -354,9 +375,9 @@ async function deliverPart({ store, slack, run, persisted, local, config, now, l
       return settleDelivered({ store, run, part, coordinate, config, now, leaseOwner });
     }
     {
-      const code = deliveryFailureCode(postError, postError?.ambiguous === true);
-      await settleFailed({ store, run, part, code, leaseOwner });
-      throw new Error(code);
+      const failure = deliveryFailure(postError, postError?.ambiguous === true, now);
+      await settleFailed({ store, run, part, ...failure, now, leaseOwner });
+      throw new Error(failure.code);
     }
   }
 
@@ -371,7 +392,9 @@ async function deliverPart({ store, slack, run, persisted, local, config, now, l
     if (coordinate) {
       return settleDelivered({ store, run, part, coordinate, config, now, leaseOwner });
     }
-    await settleFailed({ store, run, part, code: 'delivery_unconfirmed', leaseOwner });
+    await settleFailed({
+      store, run, part, code: 'delivery_unconfirmed', retryAt: null, now, leaseOwner
+    });
     throw new Error('delivery_unconfirmed');
   }
   throw new Error('delivery_unconfirmed');
@@ -412,7 +435,7 @@ function validateCleanupBacklogEntry(value) {
     || typeof value.successor_digest_id !== 'string' || !UUID.test(value.successor_digest_id)
     || typeof value.previous_digest_id !== 'string' || !UUID.test(value.previous_digest_id)
     || value.successor_digest_id === value.previous_digest_id
-    || !['idle', 'deleting', 'failed'].includes(value.previous_cleanup_state)
+    || !['idle', 'deleting', 'failed', 'deleted', 'already_absent'].includes(value.previous_cleanup_state)
     || !Array.isArray(value.parts) || value.parts.length < 1 || value.parts.length > 50) {
     throw new Error('cleanup_unconfirmed');
   }
@@ -422,7 +445,7 @@ function validateCleanupBacklogEntry(value) {
       || Object.keys(part).sort().join(',') !== CLEANUP_BACKLOG_PART_KEYS.join(',')
       || typeof part.previous_part_id !== 'string' || !UUID.test(part.previous_part_id)
       || seen.has(part.previous_part_id)
-      || !['idle', 'deleting', 'failed'].includes(part.cleanup_state)
+      || !['idle', 'deleting', 'failed', 'deleted', 'already_absent'].includes(part.cleanup_state)
       || !PART_KINDS.has(part.part_kind) || !Number.isSafeInteger(part.part_number)
       || part.part_number < 1 || !Number.isSafeInteger(part.part_count)
       || part.part_count < part.part_number || part.part_count > 50
@@ -466,8 +489,9 @@ async function cleanupBacklog({ store, slack, config, leaseOwner }) {
     }
   }
   for (const target of targets) {
-    if (seenTargets.has(target.previous_part_id)) continue;
-    seenTargets.add(target.previous_part_id);
+    const targetKey = `${target.successor_digest_id}:${target.previous_part_id}`;
+    if (seenTargets.has(targetKey)) continue;
+    seenTargets.add(targetKey);
     let claim;
     try {
       claim = await store.claimDigestPartCleanup({
@@ -669,6 +693,14 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
     if (error?.code === 'digest_delivery_unconfirmed') {
       return finish({
         status: 'failed', error: 'digest_delivery_unconfirmed', retryable: true,
+        scheduledAt: window.scheduledAt, runId: run.id, selectedCount, renderedCount,
+        partCount: persistedParts.length,
+        deliveredPartCount: delivered.filter(({ delivery_state }) => delivery_state === 'delivered').length
+      });
+    }
+    if (error?.code === 'digest_delivery_deferred') {
+      return finish({
+        status: 'failed', error: 'digest_delivery_failed', retryable: true,
         scheduledAt: window.scheduledAt, runId: run.id, selectedCount, renderedCount,
         partCount: persistedParts.length,
         deliveredPartCount: delivered.filter(({ delivery_state }) => delivery_state === 'delivered').length

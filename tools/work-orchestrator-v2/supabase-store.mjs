@@ -43,7 +43,7 @@ const DIGEST_PART_RESPONSE_KEYS = [
   'id', 'digest_run_id', 'part_kind', 'part_number', 'part_count', 'item_ids',
   'payload_hash', 'client_message_id', 'delivery_state', 'delivery_attempts',
   'delivery_claimed_at', 'slack_channel_id', 'slack_message_ts', 'delivered_at',
-  'delivery_error', 'cleanup_state', 'cleanup_attempts', 'cleanup_owner',
+  'delivery_error', 'delivery_retry_at', 'cleanup_state', 'cleanup_attempts', 'cleanup_owner',
   'cleanup_token', 'cleanup_expires_at', 'cleanup_attempted_at', 'cleaned_at',
   'cleanup_error', 'created_at', 'updated_at'
 ];
@@ -379,18 +379,24 @@ function responseDigestPartRow(row) {
   responseTimestamp(row.updated_at);
   const claimedAt = responseTimestamp(row.delivery_claimed_at, { nullable: true });
   const deliveredAt = responseTimestamp(row.delivered_at, { nullable: true });
+  const retryAt = responseTimestamp(row.delivery_retry_at, { nullable: true });
   if (row.delivery_state === 'planned') {
     if (row.delivery_attempts !== 0 || claimedAt !== null || deliveredAt !== null
-      || row.slack_channel_id !== null || row.slack_message_ts !== null || row.delivery_error !== null) throw responseInvalid();
+      || retryAt !== null || row.slack_channel_id !== null || row.slack_message_ts !== null
+      || row.delivery_error !== null) throw responseInvalid();
   } else if (row.delivery_state === 'delivering') {
     if (row.delivery_attempts < 1 || claimedAt === null || deliveredAt !== null
-      || row.slack_channel_id !== null || row.slack_message_ts !== null || row.delivery_error !== null) throw responseInvalid();
+      || retryAt !== null || row.slack_channel_id !== null || row.slack_message_ts !== null
+      || row.delivery_error !== null) throw responseInvalid();
   } else if (row.delivery_state === 'failed') {
     if (row.delivery_attempts < 1 || claimedAt === null || deliveredAt !== null
       || row.slack_channel_id !== null || row.slack_message_ts !== null
-      || !DIGEST_PART_DELIVERY_FAILURE_CODES.has(row.delivery_error)) throw responseInvalid();
+      || !DIGEST_PART_DELIVERY_FAILURE_CODES.has(row.delivery_error)
+      || row.delivery_error === 'rate_limited' && retryAt === null
+      || row.delivery_error !== 'rate_limited' && retryAt !== null) throw responseInvalid();
   } else if (row.delivery_state === 'delivered') {
-    if (row.delivery_attempts < 1 || claimedAt === null || deliveredAt === null || row.delivery_error !== null) throw responseInvalid();
+    if (row.delivery_attempts < 1 || claimedAt === null || deliveredAt === null
+      || retryAt !== null || row.delivery_error !== null) throw responseInvalid();
     responseText(row.slack_channel_id, 500);
     if (typeof row.slack_message_ts !== 'string' || !SLACK_MESSAGE_TS.test(row.slack_message_ts)) throw responseInvalid();
   } else {
@@ -515,7 +521,10 @@ function partTerminalResponse(data, input, expectedState) {
   if (expectedState === 'delivered' && (row.slack_channel_id !== input.channelId
     || row.slack_message_ts !== input.messageTs
     || Date.parse(row.delivered_at) !== Date.parse(input.deliveredAt))) throw responseInvalid();
-  if (expectedState === 'failed' && row.delivery_error !== input.error) throw responseInvalid();
+  if (expectedState === 'failed' && (row.delivery_error !== input.error
+    || (input.retryAt === null
+      ? row.delivery_retry_at !== null
+      : Date.parse(row.delivery_retry_at) !== Date.parse(input.retryAt)))) throw responseInvalid();
   return data;
 }
 
@@ -586,7 +595,7 @@ function cleanupBacklogResponse(data, limit) {
     const previousId = responseUuid(entry.previous_digest_id);
     const identity = `${successorId}:${previousId}`;
     if (successorId === previousId || seenEntries.has(identity)
-      || !['idle', 'deleting', 'failed'].includes(entry.previous_cleanup_state)) {
+      || !DIGEST_CLEANUP_STATES.has(entry.previous_cleanup_state)) {
       throw responseInvalid();
     }
     seenEntries.add(identity);
@@ -594,7 +603,7 @@ function cleanupBacklogResponse(data, limit) {
     for (const part of entry.parts) {
       if (!exactKeys(part, partKeys)) throw responseInvalid();
       const partId = responseUuid(part.previous_part_id);
-      if (seenParts.has(partId) || !['idle', 'deleting', 'failed'].includes(part.cleanup_state)
+      if (seenParts.has(partId) || !DIGEST_CLEANUP_STATES.has(part.cleanup_state)
         || !DIGEST_PART_KINDS.has(part.part_kind)
         || !Number.isSafeInteger(part.part_number) || part.part_number < 1
         || !Number.isSafeInteger(part.part_count) || part.part_count < part.part_number
@@ -1144,15 +1153,26 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       let body;
       try {
         if (!exactKeys(input, [
-          'id', 'partId', 'leaseOwner', 'leaseToken', 'expectedDeliveryAttempts', 'error'
+          'id', 'partId', 'leaseOwner', 'leaseToken', 'expectedDeliveryAttempts', 'error',
+          'failedAt', 'retryAt'
         ])) throw invalidInput();
         const error = exactText(input.error, 50);
         const expectedAttempts = positiveVersion(input.expectedDeliveryAttempts);
         if (expectedAttempts > 3 || !DIGEST_PART_DELIVERY_FAILURE_CODES.has(error)) throw invalidInput();
+        const failedAt = isoTimestamp(input.failedAt);
+        if (error !== 'rate_limited' && input.retryAt !== null) throw invalidInput();
+        const retryAt = isoTimestamp(input.retryAt, { nullable: true });
+        if (error === 'rate_limited') {
+          const retryDelayMs = Date.parse(retryAt) - Date.parse(failedAt);
+          if (!Number.isFinite(retryDelayMs) || retryDelayMs < 0 || retryDelayMs > 86_400_000) {
+            throw invalidInput();
+          }
+        }
         body = {
           p_id: uuid(input.id), p_part_id: uuid(input.partId),
           p_lease_owner: exactText(input.leaseOwner, 200), p_lease_token: uuid(input.leaseToken),
-          p_expected_delivery_attempts: expectedAttempts, p_error: error
+          p_expected_delivery_attempts: expectedAttempts, p_error: error,
+          p_failed_at: failedAt, p_retry_at: retryAt
         };
       } catch {
         throw invalidInput();
@@ -1162,7 +1182,8 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       });
       return partTerminalResponse(data, {
         id: body.p_id, partId: body.p_part_id,
-        expectedDeliveryAttempts: body.p_expected_delivery_attempts, error: body.p_error
+        expectedDeliveryAttempts: body.p_expected_delivery_attempts,
+        error: body.p_error, retryAt: body.p_retry_at
       }, 'failed');
     },
     finalizeDigestRun: async (input = {}) => {

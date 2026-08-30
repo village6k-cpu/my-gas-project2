@@ -103,6 +103,7 @@ function digestPartRow(overrides = {}) {
     delivery_state: 'planned',
     delivery_attempts: 0,
     delivery_claimed_at: null,
+    delivery_retry_at: null,
     slack_channel_id: null,
     slack_message_ts: null,
     delivered_at: null,
@@ -587,7 +588,8 @@ test('part delivery methods preserve exact run lease and attempt generation fenc
   });
   const failedPart = digestPartRow({
     delivery_state: 'failed', delivery_attempts: 1,
-    delivery_claimed_at: '2026-08-29T03:00:01.000Z', delivery_error: 'rate_limited'
+    delivery_claimed_at: '2026-08-29T03:00:01.000Z', delivery_error: 'rate_limited',
+    delivery_retry_at: '2026-08-29T03:05:00.000Z'
   });
   const fetch = createFetch([
     response({ data: { claimed: true, row: deliveringPart } }),
@@ -606,13 +608,40 @@ test('part delivery methods preserve exact run lease and attempt generation fenc
   })).applied, true);
   assert.equal((await store.markDigestPartFailed({
     id: DIGEST_ID, partId: PART_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
-    expectedDeliveryAttempts: 1, error: 'rate_limited'
+    expectedDeliveryAttempts: 1, error: 'rate_limited',
+    failedAt: '2026-08-29T03:00:00.000Z', retryAt: '2026-08-29T03:05:00.000Z'
   })).applied, true);
   assert.deepEqual(fetch.requests.map(({ url }) => url), [
     'https://supabase.example/rest/v1/rpc/claim_digest_part_delivery_v2',
     'https://supabase.example/rest/v1/rpc/mark_digest_part_delivered_v2',
     'https://supabase.example/rest/v1/rpc/mark_digest_part_failed_v2'
   ]);
+  assert.deepEqual(JSON.parse(fetch.requests[2].init.body), {
+    p_id: DIGEST_ID, p_part_id: PART_ID,
+    p_lease_owner: 'bridge:test', p_lease_token: LEASE_TOKEN,
+    p_expected_delivery_attempts: 1, p_error: 'rate_limited',
+    p_failed_at: '2026-08-29T03:00:00.000Z', p_retry_at: '2026-08-29T03:05:00.000Z'
+  });
+});
+
+test('markDigestPartFailed requires an exact bounded retryAt only for rate limits', async () => {
+  const fetch = createFetch();
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+  const base = {
+    id: DIGEST_ID, partId: PART_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
+    expectedDeliveryAttempts: 1, failedAt: '2026-08-29T03:00:00.000Z'
+  };
+  for (const input of [
+    { ...base, error: 'rate_limited', retryAt: null },
+    { ...base, error: 'rate_limited', retryAt: '2026-08-30T03:00:00.001Z' },
+    { ...base, error: 'slack_api_error', retryAt: '2026-08-29T03:00:01.000Z' },
+    { ...base, error: 'slack_api_error' }
+  ]) {
+    await assert.rejects(store.markDigestPartFailed(input), /input is invalid/i);
+  }
+  assert.equal(fetch.requests.length, 0);
 });
 
 test('finalizeDigestRun sends only run lease generation and delivered time', async () => {
@@ -1039,8 +1068,14 @@ test('listDigestCleanupBacklog requests one finite destination and accepts only 
       cleanup_state: 'failed'
     }]
   };
+  const terminalRow = {
+    ...row,
+    previous_cleanup_state: 'idle',
+    parts: [{ ...row.parts[0], cleanup_state: 'deleted' }]
+  };
   const fetch = createFetch([
     response({ data: [row] }),
+    response({ data: [terminalRow] }),
     response({ data: [{ ...row, payload: serviceRoleKey }] }),
     response({ data: [{ ...row, parts: Array.from({ length: 51 }, () => row.parts[0]) }] })
   ]);
@@ -1053,6 +1088,11 @@ test('listDigestCleanupBacklog requests one finite destination and accepts only 
   assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
     p_destination_key: 'slack:CINBOX', p_limit: 10
   });
+  assert.deepEqual(
+    await store.listDigestCleanupBacklog({ destinationKey: 'slack:CINBOX', limit: 10 }),
+    [terminalRow],
+    'a terminal prior part remains content-free backlog input while a successor aggregate needs reconciliation'
+  );
   await assert.rejects(
     store.listDigestCleanupBacklog({ destinationKey: 'slack:CINBOX', limit: 10 }),
     (error) => /response invalid/i.test(error.message) && !error.message.includes(serviceRoleKey)

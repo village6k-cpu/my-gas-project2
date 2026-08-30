@@ -566,7 +566,8 @@ test('foundation migration executes and exposes only service-role access in Post
     `;
     const failPartSql = `
       select public.mark_digest_part_failed_v2(
-        $1::uuid, $2::uuid, $3::text, $4::uuid, $5::integer, $6::text
+        $1::uuid, $2::uuid, $3::text, $4::uuid, $5::integer, $6::text,
+        $7::timestamptz, $8::timestamptz
       ) as result
     `;
     const finalizeSql = `
@@ -682,6 +683,7 @@ test('foundation migration executes and exposes only service-role access in Post
       'CINBOX', '100.01', '2026-08-29T03:00:01.000Z'
     ]);
     assert.equal(firstPartDelivery.rows[0].result.applied, true);
+    assert.equal(firstPartDelivery.rows[0].result.row.delivery_retry_at, null);
     const partialFinalize = await db.query(finalizeSql, [
       digestId, 'bridge:pglite', originalLeaseToken, '2026-08-29T03:00:02.000Z'
     ]);
@@ -774,13 +776,92 @@ test('foundation migration executes and exposes only service-role access in Post
       assert.equal(claim.rows[0].result.claimed, true);
       assert.equal(claim.rows[0].result.row.delivery_attempts, attempt);
       const failed = await db.query(failPartSql, [
-        capId, capPartId, 'bridge:cap', capToken, attempt, 'rate_limited'
+        capId, capPartId, 'bridge:cap', capToken, attempt, 'slack_api_error',
+        '2026-08-29T05:00:00.000Z', null
       ]);
       assert.equal(failed.rows[0].result.applied, true);
+      assert.equal(failed.rows[0].result.row.delivery_retry_at, null);
     }
     const cappedClaim = await db.query(claimPartSql, [capId, capPartId, 'bridge:cap', capToken]);
     assert.equal(cappedClaim.rows[0].result.claimed, false);
     assert.equal(cappedClaim.rows[0].result.row.delivery_attempts, 3);
+
+    const retryDigest = await db.query(claimDigestSql, [
+      'slack:CRETRY', '2026-08-29T05:30:00.000Z', '2026-08-29T02:30:00.000Z',
+      '2026-08-29T05:30:00.000Z', 'bridge:retry', 120
+    ]);
+    const retryId = retryDigest.rows[0].result.row.id;
+    const retryToken = retryDigest.rows[0].result.row.lease_token;
+    const retryPrepared = await db.query(prepareSql, [
+      retryId, 'bridge:retry', retryToken,
+      JSON.stringify([{ id: actionId, version: 999, inclusionReason: 'actionable', priority: 'normal' }]),
+      JSON.stringify([{
+        kind: 'ordinary', partNumber: 1, partCount: 1,
+        itemIds: [actionId], payloadHash: '9'.repeat(64)
+      }])
+    ]);
+    const retryPartId = retryPrepared.rows[0].result.parts[0].id;
+    const retryClientMessageId = retryPrepared.rows[0].result.parts[0].client_message_id;
+    const firstRetryClaim = await db.query(claimPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken
+    ]);
+    assert.equal(firstRetryClaim.rows[0].result.row.delivery_attempts, 1);
+    const { rows: clockRows } = await db.query(`select now() as current_now`);
+    const failedAt = new Date(clockRows[0].current_now).toISOString();
+    const retryAt = new Date(Date.parse(failedAt) + 60 * 60 * 1000).toISOString();
+    const tooLateRetryAt = new Date(Date.parse(failedAt) + (24 * 60 * 60 * 1000) + 1).toISOString();
+    await assert.rejects(db.query(failPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken, 1, 'rate_limited', failedAt, null
+    ]), /invalid digest part failure/i);
+    await assert.rejects(db.query(failPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken, 1, 'slack_api_error', failedAt, retryAt
+    ]), /invalid digest part failure/i);
+    await assert.rejects(db.query(failPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken, 1, 'rate_limited', failedAt, tooLateRetryAt
+    ]), /invalid digest part failure/i);
+    await assert.rejects(db.query(failPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken, 1, 'rate_limited', failedAt, 'infinity'
+    ]), /invalid digest part failure/i);
+    const deferredFailure = await db.query(failPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken, 1, 'rate_limited', failedAt, retryAt
+    ]);
+    assert.equal(deferredFailure.rows[0].result.applied, true);
+    assert.equal(new Date(deferredFailure.rows[0].result.row.delivery_retry_at).toISOString(), retryAt);
+    const beforeRetryClaim = await db.query(claimPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken
+    ]);
+    assert.equal(beforeRetryClaim.rows[0].result.claimed, false);
+    assert.equal(beforeRetryClaim.rows[0].result.row.delivery_attempts, 1);
+    assert.equal(beforeRetryClaim.rows[0].result.row.client_message_id, retryClientMessageId);
+    await db.query(`
+      update public.digest_message_parts set delivery_retry_at = now()
+      where id = $1::uuid
+    `, [retryPartId]);
+    const dueRetryClaim = await db.query(claimPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken
+    ]);
+    assert.equal(dueRetryClaim.rows[0].result.claimed, true);
+    assert.equal(dueRetryClaim.rows[0].result.row.delivery_attempts, 2);
+    assert.equal(dueRetryClaim.rows[0].result.row.delivery_retry_at, null);
+    assert.equal(dueRetryClaim.rows[0].result.row.client_message_id, retryClientMessageId);
+    const zeroRetryFailure = await db.query(failPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken, 2, 'rate_limited', failedAt, failedAt
+    ]);
+    assert.equal(zeroRetryFailure.rows[0].result.applied, true, 'Retry-After zero is an exact due boundary');
+    const zeroRetryClaim = await db.query(claimPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken
+    ]);
+    assert.equal(zeroRetryClaim.rows[0].result.claimed, true);
+    assert.equal(zeroRetryClaim.rows[0].result.row.delivery_attempts, 3);
+    const maximumRetryAt = new Date(Date.parse(failedAt) + (24 * 60 * 60 * 1000)).toISOString();
+    const maximumRetryFailure = await db.query(failPartSql, [
+      retryId, retryPartId, 'bridge:retry', retryToken, 3, 'rate_limited', failedAt, maximumRetryAt
+    ]);
+    assert.equal(maximumRetryFailure.rows[0].result.applied, true, 'Retry-After 86400 is the inclusive bound');
+    assert.equal(
+      new Date(maximumRetryFailure.rows[0].result.row.delivery_retry_at).toISOString(),
+      maximumRetryAt
+    );
 
     const emptyDigest = await db.query(claimDigestSql, [
       'slack:CINBOX', '2026-08-29T06:00:00.000Z', '2026-08-29T05:00:00.000Z',
@@ -991,6 +1072,82 @@ test('foundation migration executes and exposes only service-role access in Post
     ]);
     assert.equal(replacedRecord.rows[0].result.applied, true);
     assert.equal(replacedRecord.rows[0].result.row.state, 'replaced');
+
+    const sharedPriorId = '82000000-0000-4000-8000-000000000001';
+    const sharedSuccessorBId = '82000000-0000-4000-8000-000000000002';
+    const sharedSuccessorCId = '82000000-0000-4000-8000-000000000003';
+    const sharedPartId = '82000000-0000-4000-8000-000000000004';
+    await db.query(`
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, delivered_at, previous_digest_id,
+        previous_cleanup_state, previous_cleanup_error, previous_deleted_at,
+        lease_owner, lease_token, lease_expires_at
+      ) values
+        ($1::uuid, '2026-08-29T11:00:00Z', '2026-08-29T12:00:00Z', '2026-08-29T12:00:00Z',
+          'delivered', 'slack:CSHARED', '[]'::jsonb, '2026-08-29T12:00:01Z', '2026-08-29T12:00:02Z',
+          null, 'idle', null, null, null, null, null),
+        ($2::uuid, '2026-08-29T12:00:00Z', '2026-08-29T13:00:00Z', '2026-08-29T13:00:00Z',
+          'delivered', 'slack:CSHARED', '[]'::jsonb, '2026-08-29T13:00:01Z', '2026-08-29T13:00:02Z',
+          $1::uuid, 'idle', null, null, null, null, null),
+        ($3::uuid, '2026-08-29T13:00:00Z', '2026-08-29T14:00:00Z', '2026-08-29T14:00:00Z',
+          'replaced', 'slack:CSHARED', '[]'::jsonb, '2026-08-29T14:00:01Z', '2026-08-29T14:00:02Z',
+          $1::uuid, 'idle', null, null, null, null, null)
+    `, [sharedPriorId, sharedSuccessorBId, sharedSuccessorCId]);
+    await db.query(`
+      insert into public.digest_message_parts (
+        id, digest_run_id, part_kind, part_number, part_count, item_ids, payload_hash,
+        client_message_id, delivery_state, delivery_attempts, delivery_claimed_at,
+        slack_channel_id, slack_message_ts, delivered_at, cleanup_state,
+        cleanup_attempts, cleanup_attempted_at, cleanup_error
+      ) values (
+        $1::uuid, $2::uuid, 'ordinary', 1, 1,
+        array['82000000-0000-4000-8000-000000000005'::uuid], repeat('8', 64),
+        '82000000-0000-4000-8000-000000000006'::uuid, 'delivered', 1,
+        '2026-08-29T12:00:01Z', 'CSHARED', '1200.01', '2026-08-29T12:00:02Z',
+        'idle', 0, null, null
+      )
+    `, [sharedPartId, sharedPriorId]);
+    const sharedInitialBacklog = await db.query(listCleanupBacklogSql, ['slack:CSHARED', 10]);
+    assert.deepEqual(
+      sharedInitialBacklog.rows[0].result.map((entry) => entry.successor_digest_id),
+      [sharedSuccessorBId, sharedSuccessorCId],
+      'shared-prior successors are ordered by their own oldest scheduled boundary'
+    );
+    const sharedBClaim = await db.query(claimCleanupSql, [
+      sharedSuccessorBId, sharedPriorId, sharedPartId, 'bridge:shared-b', 120
+    ]);
+    assert.equal(sharedBClaim.rows[0].result.claimed, true);
+    const sharedBRecord = await db.query(recordCleanupSql, [
+      sharedSuccessorBId, sharedPriorId, sharedPartId, 'bridge:shared-b',
+      sharedBClaim.rows[0].result.part.cleanup_token, 1, 'deleted', null
+    ]);
+    assert.equal(sharedBRecord.rows[0].result.row.previous_cleanup_state, 'deleted');
+    const attemptsAfterDelete = sharedBRecord.rows[0].result.part.cleanup_attempts;
+    assert.equal(sharedBRecord.rows[0].result.part.cleanup_token, null);
+    const sharedRepairBacklog = await db.query(listCleanupBacklogSql, ['slack:CSHARED', 10]);
+    assert.deepEqual(sharedRepairBacklog.rows[0].result, [{
+      successor_digest_id: sharedSuccessorCId,
+      previous_digest_id: sharedPriorId,
+      previous_cleanup_state: 'idle',
+      parts: [{
+        previous_part_id: sharedPartId,
+        part_kind: 'ordinary',
+        part_number: 1,
+        part_count: 1,
+        slack_channel_id: 'CSHARED',
+        slack_message_ts: '1200.01',
+        cleanup_state: 'deleted'
+      }]
+    }]);
+    const sharedCRepair = await db.query(claimCleanupSql, [
+      sharedSuccessorCId, sharedPriorId, sharedPartId, 'bridge:shared-c', 120
+    ]);
+    assert.equal(sharedCRepair.rows[0].result.claimed, false);
+    assert.equal(sharedCRepair.rows[0].result.row.previous_cleanup_state, 'deleted');
+    assert.equal(sharedCRepair.rows[0].result.part.cleanup_attempts, attemptsAfterDelete);
+    assert.equal(sharedCRepair.rows[0].result.part.cleanup_token, null);
+    assert.deepEqual((await db.query(listCleanupBacklogSql, ['slack:CSHARED', 10])).rows[0].result, []);
 
     assert.deepEqual({
       listedIds: failClosedP0.map((row) => row.id),

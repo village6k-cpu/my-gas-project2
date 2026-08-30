@@ -22,6 +22,12 @@ test('foundation migration enforces the private service-role schema contract', (
   assert.match(sql, /state in \('open','in_progress','snoozed','resolved','dismissed'\)/i);
   assert.match(sql, /part_kind in \('ordinary','daily_reminder'\)/i);
   assert.match(sql, /delivery_state in \('planned','delivering','delivered','failed'\)/i);
+  assert.match(sql, /delivery_retry_at timestamptz/i);
+  assert.match(
+    sql,
+    /delivery_error\s*=\s*'rate_limited'[\s\S]*?delivery_retry_at is not null[\s\S]*?isfinite\s*\(\s*delivery_retry_at\s*\)[\s\S]*?delivery_error\s*<>\s*'rate_limited'[\s\S]*?delivery_retry_at is null/i,
+    'only rate-limited failed parts carry a finite durable retry timestamp'
+  );
   assert.match(sql, /cleanup_state in \('idle','deleting','deleted','already_absent','failed'\)/i);
   assert.match(sql, /payload_hash.*\^\[0-9a-f\]\{64\}\$/i);
   assert.match(sql, /unique\s*\(digest_run_id,\s*part_kind,\s*part_number\)/i);
@@ -97,6 +103,16 @@ test('foundation migration defines private atomic work and digest RPC contracts'
   );
   assert.match(sql, /manifest_prepared_at/i);
   assert.match(sql, /delivery_attempts.*between 0 and 3/is);
+  assert.match(
+    sql,
+    /create function public\.claim_digest_part_delivery_v2\([\s\S]*?delivery_retry_at\s*>\s*now\(\)[\s\S]*?return jsonb_build_object\('claimed', false[\s\S]*?delivery_retry_at\s*=\s*null/i,
+    'delivery claims preserve attempts before Retry-After and clear the gate only on a real claim'
+  );
+  assert.match(
+    sql,
+    /create function public\.mark_digest_part_failed_v2\([\s\S]*?p_failed_at timestamptz[\s\S]*?p_retry_at timestamptz[\s\S]*?p_error = 'rate_limited'[\s\S]*?p_retry_at is null[\s\S]*?interval '1 day'[\s\S]*?p_retry_at is not null/i,
+    'failure settlement validates exact bounded Retry-After input and forbids it for other errors'
+  );
   assert.match(sql, /cleanup_token uuid/i);
   assert.match(sql, /cleanup_expires_at timestamptz/i);
   assert.match(sql, /state in \('building','delivering','failed'\)/i, 'expired delivering runs are reclaimable');

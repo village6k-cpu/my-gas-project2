@@ -251,7 +251,7 @@ export function buildWorkOrchestratorHealthState(value = {}) {
   if (!hasDigestState) return health;
 
   const count = (input, maximum) => {
-    const numeric = Number(input);
+    const numeric = input;
     return Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= maximum ? numeric : 0;
   };
   const safeLastRun = (run) => {
@@ -268,7 +268,7 @@ export function buildWorkOrchestratorHealthState(value = {}) {
       omittedEligibleCount: count(run.omittedEligibleCount, 500),
       partCount: count(run.partCount, 50),
       deliveredPartCount: count(run.deliveredPartCount, 50),
-      cleanupFailed: count(run.cleanupFailed, 50)
+      cleanupFailed: count(run.cleanupFailed, 500)
     };
     if (run.error) {
       result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed',
@@ -663,7 +663,7 @@ function digestRuntimeIso(now) {
 }
 
 function digestRuntimeCount(value, maximum) {
-  const numeric = Number(value);
+  const numeric = value;
   if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > maximum) {
     throw new Error('Work Orchestrator digest result is invalid');
   }
@@ -687,9 +687,9 @@ function safeDigestRuntimeResult(value, scheduledAt) {
     throw new Error('Work Orchestrator digest result is invalid');
   }
   const safeCleanup = {
-    attempted: digestRuntimeCount(cleanup.attempted, 50),
-    settled: digestRuntimeCount(cleanup.settled, 50),
-    failed: digestRuntimeCount(cleanup.failed, 50)
+    attempted: digestRuntimeCount(cleanup.attempted, 500),
+    settled: digestRuntimeCount(cleanup.settled, 500),
+    failed: digestRuntimeCount(cleanup.failed, 500)
   };
   const exactOmission = selectedCount - renderedCount;
   const resultScheduledAt = safeShadowTimestamp(value.scheduledAt);
@@ -927,8 +927,11 @@ function safeMaintenanceDigestResult(value) {
   if (value.cleanup && typeof value.cleanup === 'object' && !Array.isArray(value.cleanup)) {
     result.cleanup = {};
     for (const key of ['attempted', 'settled', 'failed']) {
-      const numeric = Number(value.cleanup[key]);
-      result.cleanup[key] = Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= 50 ? numeric : 0;
+      const numeric = value.cleanup[key];
+      if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > 500) {
+        return { status: 'failed', error: 'digest_cycle_failed' };
+      }
+      result.cleanup[key] = numeric;
     }
   }
   if (result.status === 'failed') {

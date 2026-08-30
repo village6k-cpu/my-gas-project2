@@ -3305,6 +3305,47 @@ test('minute checks retry an unfinished not-claimed run after its database lease
   ]);
 });
 
+test('minute checks respect a durable delivery Retry-After without burning an in-cycle attempt', async () => {
+  let callback;
+  let currentNow = '2026-08-29T06:25:00.000Z';
+  let actualAttempts = 0;
+  const clientMessageId = '10000000-0000-4000-8000-000000000011';
+  const observations = [];
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {} },
+    now: () => currentNow,
+    run: async ({ now }) => {
+      const due = Date.parse(now) >= Date.parse('2026-08-29T06:30:00.000Z');
+      if (now === '2026-08-29T06:25:00.000Z' || due) actualAttempts += 1;
+      observations.push({ now, actualAttempts, clientMessageId });
+      return {
+        status: due ? 'delivered' : 'failed',
+        error: due ? undefined : 'digest_delivery_failed',
+        retryable: !due,
+        scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 1, renderedCount: 1, omittedEligibleCount: 0,
+        partCount: 1, deliveredPartCount: due ? 1 : 0,
+        cleanup: { attempted: 0, settled: 0, failed: 0 }
+      };
+    },
+    setIntervalImpl(fn) { callback = fn; return {}; }
+  });
+
+  await runtime.start();
+  assert.equal(actualAttempts, 1);
+  currentNow = '2026-08-29T06:26:00.000Z';
+  await callback();
+  assert.equal(actualAttempts, 1, 'a pre-due minute check does not represent another transport attempt');
+  currentNow = '2026-08-29T06:30:00.000Z';
+  await callback();
+  assert.equal(actualAttempts, 2);
+  assert.equal(runtime.state.lastDigestRun.status, 'delivered');
+  assert.deepEqual(new Set(observations.map((entry) => entry.clientMessageId)), new Set([clientMessageId]));
+});
+
 test('cleanup-enabled minute checks sweep durable backlog even after a successful same-boundary run', async () => {
   let callback;
   let runs = 0;
@@ -3443,6 +3484,84 @@ test('maintenance digest handler uses the injectable runtime and returns finite 
       }
     }
   });
+});
+
+test('digest runtime, maintenance, and health preserve bounded cleanup counts through 500', async () => {
+  for (const cleanupCount of [51, 500]) {
+    const sharedState = {};
+    const runtime = createWorkOrchestratorDigestRuntime({
+      config: { digestEnabled: true, digestChannelId: 'CFOCUS', cleanupEnabled: true },
+      store: digestStoreStub(),
+      slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+      state: sharedState,
+      now: () => '2026-08-29T06:01:00.000Z',
+      run: async () => ({
+        status: 'delivered', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+        partCount: 0, deliveredPartCount: 0,
+        cleanup: { attempted: cleanupCount, settled: cleanupCount, failed: 0 }
+      }),
+      setIntervalImpl: () => ({})
+    });
+    const result = await runtime.runNow('manual');
+    assert.deepEqual(result.cleanup, { attempted: cleanupCount, settled: cleanupCount, failed: 0 });
+
+    const maintenance = await handleWorkOrchestratorDigestMaintenance({
+      runNow: async () => result
+    });
+    assert.equal(maintenance.statusCode, 200);
+    assert.deepEqual(maintenance.body.result.cleanup, result.cleanup);
+
+    sharedState.lastDigestRun.cleanupFailed = cleanupCount;
+    assert.equal(buildWorkOrchestratorHealthState(sharedState).lastDigestRun.cleanupFailed, cleanupCount);
+  }
+});
+
+test('digest cleanup counts above 500 or malformed are rejected without leaking private fields', async () => {
+  const privateValue = 'private-cleanup-token';
+  for (const attempted of [501, '51', Number.NaN]) {
+    const runtime = createWorkOrchestratorDigestRuntime({
+      config: { digestEnabled: true, digestChannelId: 'CFOCUS', cleanupEnabled: true },
+      store: digestStoreStub(),
+      slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+      now: () => '2026-08-29T06:01:00.000Z',
+      run: async () => ({
+        status: 'delivered', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+        partCount: 0, deliveredPartCount: 0,
+        cleanup: { attempted, settled: 0, failed: 0 },
+        token: privateValue
+      }),
+      setIntervalImpl: () => ({})
+    });
+    const result = await runtime.runNow('manual');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error, 'digest_cycle_failed');
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(privateValue));
+
+    const maintenance = await handleWorkOrchestratorDigestMaintenance({
+      runNow: async () => ({
+        status: 'delivered', cleanup: { attempted, settled: 0, failed: 0 }, token: privateValue
+      })
+    });
+    assert.equal(maintenance.statusCode, 502);
+    assert.deepEqual(maintenance.body, {
+      ok: false, result: { status: 'failed', error: 'digest_cycle_failed' }
+    });
+    assert.doesNotMatch(JSON.stringify(maintenance), new RegExp(privateValue));
+  }
+
+  for (const cleanupFailed of [501, '51', Number.NaN]) {
+    const health = buildWorkOrchestratorHealthState({
+      lastDigestRun: {
+        at: '2026-08-29T06:01:00.000Z', trigger: 'manual', status: 'delivered',
+        scheduledAt: '2026-08-29T06:00:00.000Z', cleanupFailed
+      }
+    });
+    assert.equal(health.lastDigestRun.cleanupFailed, 0);
+  }
 });
 
 test('digest runtime work is independent from immediate notification delivery ordering', async () => {

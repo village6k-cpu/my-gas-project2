@@ -133,6 +133,7 @@ create table public.digest_message_parts (
     delivery_error is null
     or delivery_error in ('post_rejected','rate_limited','delivery_unconfirmed','slack_api_error')
   ),
+  delivery_retry_at timestamptz,
   cleanup_state text not null default 'idle'
     check (cleanup_state in ('idle','deleting','deleted','already_absent','failed')),
   cleanup_attempts integer not null default 0 check (cleanup_attempts >= 0),
@@ -151,21 +152,28 @@ create table public.digest_message_parts (
   unique (digest_run_id, client_message_id),
   check (delivery_claimed_at is null or isfinite(delivery_claimed_at)),
   check (delivered_at is null or isfinite(delivered_at)),
+  check (delivery_retry_at is null or isfinite(delivery_retry_at)),
   check (cleanup_expires_at is null or isfinite(cleanup_expires_at)),
   check (cleanup_attempted_at is null or isfinite(cleanup_attempted_at)),
   check (cleaned_at is null or isfinite(cleaned_at)),
   check (
     (delivery_state = 'planned' and delivery_attempts = 0 and delivery_claimed_at is null
-      and slack_channel_id is null and slack_message_ts is null and delivered_at is null and delivery_error is null)
+      and slack_channel_id is null and slack_message_ts is null and delivered_at is null
+      and delivery_error is null and delivery_retry_at is null)
     or (delivery_state = 'delivering' and delivery_attempts between 1 and 3 and delivery_claimed_at is not null
-      and slack_channel_id is null and slack_message_ts is null and delivered_at is null and delivery_error is null)
+      and slack_channel_id is null and slack_message_ts is null and delivered_at is null
+      and delivery_error is null and delivery_retry_at is null)
     or (delivery_state = 'failed' and delivery_attempts between 1 and 3 and delivery_claimed_at is not null
-      and slack_channel_id is null and slack_message_ts is null and delivered_at is null and delivery_error is not null)
+      and slack_channel_id is null and slack_message_ts is null and delivered_at is null and delivery_error is not null
+      and (
+        (delivery_error = 'rate_limited' and delivery_retry_at is not null and isfinite(delivery_retry_at))
+        or (delivery_error <> 'rate_limited' and delivery_retry_at is null)
+      ))
     or (delivery_state = 'delivered' and delivery_attempts between 1 and 3 and delivery_claimed_at is not null
       and slack_channel_id is not null and length(slack_channel_id) between 1 and 500
       and slack_channel_id = btrim(slack_channel_id)
       and slack_message_ts ~ '^[0-9]{1,20}\.[0-9]{1,20}$'
-      and delivered_at is not null and delivery_error is null)
+      and delivered_at is not null and delivery_error is null and delivery_retry_at is null)
   ),
   check (
     (cleanup_state = 'idle' and cleanup_attempts = 0 and cleanup_owner is null and cleanup_token is null
@@ -191,8 +199,7 @@ create index digest_runs_destination_state_idx
 create index digest_runs_cleanup_backlog_idx
   on public.digest_runs (destination_key, scheduled_at, id)
   where state in ('delivered','replaced')
-    and previous_digest_id is not null
-    and previous_cleanup_state in ('idle','deleting','failed');
+    and previous_digest_id is not null;
 create index digest_message_parts_run_delivery_idx
   on public.digest_message_parts (digest_run_id, delivery_state, part_kind, part_number);
 create index digest_message_parts_cleanup_idx
@@ -964,9 +971,13 @@ begin
   if v_part.delivery_state in ('delivering','delivered') or v_part.delivery_attempts >= 3 then
     return jsonb_build_object('claimed', false, 'row', to_jsonb(v_part));
   end if;
+  if v_part.delivery_state = 'failed' and v_part.delivery_error = 'rate_limited'
+    and v_part.delivery_retry_at > now() then
+    return jsonb_build_object('claimed', false, 'row', to_jsonb(v_part));
+  end if;
   update public.digest_message_parts
   set delivery_state = 'delivering', delivery_attempts = delivery_attempts + 1,
-      delivery_claimed_at = now(), delivery_error = null
+      delivery_claimed_at = now(), delivery_error = null, delivery_retry_at = null
   where id = v_part.id and delivery_state in ('planned','failed') and delivery_attempts < 3
   returning * into v_part;
   return jsonb_build_object('claimed', found, 'row', case when found then to_jsonb(v_part) else null end);
@@ -1004,7 +1015,8 @@ begin
   end if;
   update public.digest_message_parts
   set delivery_state = 'delivered', slack_channel_id = p_slack_channel_id,
-      slack_message_ts = p_slack_message_ts, delivered_at = p_delivered_at, delivery_error = null
+      slack_message_ts = p_slack_message_ts, delivered_at = p_delivered_at,
+      delivery_error = null, delivery_retry_at = null
   where id = p_part_id and digest_run_id = p_id and delivery_state = 'delivering'
     and delivery_attempts = p_expected_delivery_attempts
   returning * into v_part;
@@ -1018,7 +1030,9 @@ create function public.mark_digest_part_failed_v2(
   p_lease_owner text,
   p_lease_token uuid,
   p_expected_delivery_attempts integer,
-  p_error text
+  p_error text,
+  p_failed_at timestamptz,
+  p_retry_at timestamptz
 ) returns jsonb language plpgsql security invoker set search_path = '' as $$
 declare
   v_run public.digest_runs%rowtype;
@@ -1028,7 +1042,13 @@ begin
     or length(p_lease_owner) not between 1 and 200 or p_lease_owner <> btrim(p_lease_owner)
     or p_lease_token is null or p_expected_delivery_attempts not between 1 and 3
     or p_error is null
-    or p_error not in ('post_rejected','rate_limited','delivery_unconfirmed','slack_api_error') then
+    or p_error not in ('post_rejected','rate_limited','delivery_unconfirmed','slack_api_error')
+    or p_failed_at is null or not isfinite(p_failed_at)
+    or (p_error = 'rate_limited' and (
+      p_retry_at is null or not isfinite(p_retry_at)
+      or p_retry_at < p_failed_at or p_retry_at > p_failed_at + interval '1 day'
+    ))
+    or (p_error <> 'rate_limited' and p_retry_at is not null) then
     raise exception 'invalid digest part failure' using errcode = '22023';
   end if;
   select * into v_run from public.digest_runs where id = p_id for update;
@@ -1038,7 +1058,7 @@ begin
     return jsonb_build_object('applied', false, 'row', null);
   end if;
   update public.digest_message_parts
-  set delivery_state = 'failed', delivery_error = p_error
+  set delivery_state = 'failed', delivery_error = p_error, delivery_retry_at = p_retry_at
   where id = p_part_id and digest_run_id = p_id and delivery_state = 'delivering'
     and delivery_attempts = p_expected_delivery_attempts
   returning * into v_part;
@@ -1199,7 +1219,17 @@ begin
       and successor.delivered_at is not null
       and successor.manifest_prepared_at is not null
       and successor.id <> successor.previous_digest_id
-      and successor.previous_cleanup_state in ('idle','deleting','failed')
+      and (
+        successor.previous_cleanup_state in ('idle','deleting','failed')
+        or exists (
+          select 1 from public.digest_message_parts pending_part
+          where pending_part.digest_run_id = previous.id
+            and pending_part.delivery_state = 'delivered'
+            and pending_part.slack_channel_id is not null
+            and pending_part.slack_message_ts is not null
+            and pending_part.cleanup_state in ('idle','deleting','failed')
+        )
+      )
       and previous.destination_key = successor.destination_key
       and previous.state in ('delivered','replaced')
       and previous.delivered_at is not null
@@ -1211,7 +1241,6 @@ begin
           and pending_part.delivery_state = 'delivered'
           and pending_part.slack_channel_id is not null
           and pending_part.slack_message_ts is not null
-          and pending_part.cleanup_state in ('idle','deleting','failed')
       )
     order by successor.scheduled_at, successor.id
     limit p_limit
@@ -1240,8 +1269,8 @@ begin
           and part.delivery_state = 'delivered'
           and part.slack_channel_id is not null
           and part.slack_message_ts is not null
-          and part.cleanup_state in ('idle','deleting','failed')
-        order by case when part.part_kind = 'ordinary' then 0 else 1 end,
+        order by case when part.cleanup_state in ('idle','deleting','failed') then 0 else 1 end,
+          case when part.part_kind = 'ordinary' then 0 else 1 end,
           part.part_number, part.id
         limit 50
       ) bounded_part
@@ -1498,7 +1527,7 @@ revoke execute on function public.claim_digest_run_v2(text,timestamptz,timestamp
 revoke execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,jsonb) from public, anon, authenticated;
 revoke execute on function public.claim_digest_part_delivery_v2(uuid,uuid,text,uuid) from public, anon, authenticated;
 revoke execute on function public.mark_digest_part_delivered_v2(uuid,uuid,text,uuid,integer,text,text,timestamptz) from public, anon, authenticated;
-revoke execute on function public.mark_digest_part_failed_v2(uuid,uuid,text,uuid,integer,text) from public, anon, authenticated;
+revoke execute on function public.mark_digest_part_failed_v2(uuid,uuid,text,uuid,integer,text,timestamptz,timestamptz) from public, anon, authenticated;
 revoke execute on function public.finalize_digest_run_v2(uuid,text,uuid,timestamptz) from public, anon, authenticated;
 revoke execute on function public.fail_digest_run_v2(uuid,text,uuid,text) from public, anon, authenticated;
 revoke execute on function public.list_digest_cleanup_backlog_v2(text,integer) from public, anon, authenticated;
@@ -1514,7 +1543,7 @@ grant execute on function public.claim_digest_run_v2(text,timestamptz,timestampt
 grant execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,jsonb) to service_role;
 grant execute on function public.claim_digest_part_delivery_v2(uuid,uuid,text,uuid) to service_role;
 grant execute on function public.mark_digest_part_delivered_v2(uuid,uuid,text,uuid,integer,text,text,timestamptz) to service_role;
-grant execute on function public.mark_digest_part_failed_v2(uuid,uuid,text,uuid,integer,text) to service_role;
+grant execute on function public.mark_digest_part_failed_v2(uuid,uuid,text,uuid,integer,text,timestamptz,timestamptz) to service_role;
 grant execute on function public.finalize_digest_run_v2(uuid,text,uuid,timestamptz) to service_role;
 grant execute on function public.fail_digest_run_v2(uuid,text,uuid,text) to service_role;
 grant execute on function public.list_digest_cleanup_backlog_v2(text,integer) to service_role;

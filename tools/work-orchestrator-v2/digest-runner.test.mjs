@@ -132,6 +132,7 @@ class FakeStore {
         delivery_state: 'planned',
         delivery_attempts: 0,
         delivery_claimed_at: null,
+        delivery_retry_at: null,
         slack_channel_id: null,
         slack_message_ts: null,
         delivered_at: null
@@ -152,10 +153,16 @@ class FakeStore {
   async claimDigestPartDelivery(input) {
     this.calls.push(['claimDigestPartDelivery', structuredClone(input)]);
     const part = this.parts.find(({ id }) => id === input.partId);
+    if (part.delivery_state === 'failed' && part.delivery_error === 'rate_limited'
+      && Date.parse(part.delivery_retry_at) > Date.parse(this.claimNow || NOW)) {
+      return { claimed: false, row: structuredClone(part) };
+    }
     if (part.delivery_state === 'planned' || part.delivery_state === 'failed') {
       part.delivery_state = 'delivering';
       part.delivery_attempts += 1;
       part.delivery_claimed_at = SCHEDULED;
+      part.delivery_retry_at = null;
+      part.delivery_error = null;
       return { claimed: true, row: structuredClone(part) };
     }
     return { claimed: false, row: structuredClone(part) };
@@ -182,6 +189,7 @@ class FakeStore {
     }
     part.delivery_state = 'failed';
     part.delivery_error = input.error;
+    part.delivery_retry_at = input.retryAt;
     return { applied: true, row: structuredClone(part) };
   }
 
@@ -576,6 +584,7 @@ test('delivery failure preserves every previous coordinate and never starts clea
     post() {
       const error = new Error('private');
       error.code = 'ratelimited';
+      error.retryAfterSeconds = 60;
       error.ambiguous = false;
       throw error;
     }
@@ -591,6 +600,57 @@ test('delivery failure preserves every previous coordinate and never starts clea
   assert.deepEqual(store.previous.parts, previousParts);
   assert.equal(store.calls.some(([name]) => name === 'claimDigestPartCleanup'), false);
   assert.equal(slack.calls.some(([name]) => name === 'deleteMessage'), false);
+});
+
+test('durable Retry-After defers minute retries without burning attempts and resumes the same client ID when due', async () => {
+  const store = new FakeStore({ items: [workItem()] });
+  store.claimNow = NOW;
+  let posts = 0;
+  const postedClientIds = [];
+  const slack = slackFake({
+    post(input) {
+      posts += 1;
+      postedClientIds.push(input.clientMsgId);
+      if (posts === 1) {
+        const error = new Error('private-rate-limit-detail');
+        error.code = 'ratelimited';
+        error.kind = 'rate_limit';
+        error.retryAfterSeconds = 300;
+        error.ambiguous = false;
+        throw error;
+      }
+      return { ok: true, channel: input.channel, ts: '205.1', message: {} };
+    }
+  });
+
+  const first = await runDigestCycle({
+    store, slack, config: config(), now: NOW, leaseOwner: 'runner:rate-1'
+  });
+  assert.equal(first.retryable, true);
+  assert.equal(store.parts[0].delivery_attempts, 1);
+  assert.equal(store.parts[0].delivery_retry_at, '2026-08-29T06:30:00.000Z');
+  assert.equal(store.calls.find(([name]) => name === 'markDigestPartFailed')[1].failedAt, NOW);
+
+  store.claimNow = '2026-08-29T06:26:00.000Z';
+  const deferred = await runDigestCycle({
+    store, slack, config: config(), now: store.claimNow, leaseOwner: 'runner:rate-2'
+  });
+  assert.equal(deferred.retryable, true);
+  assert.equal(store.parts[0].delivery_attempts, 1);
+  assert.equal(posts, 1, 'a pre-due minute cycle neither posts nor burns an attempt');
+
+  store.claimNow = '2026-08-29T06:30:00.000Z';
+  store.claimAvailable = true; // the two-minute database run lease from 06:26 has expired
+  const delivered = await runDigestCycle({
+    store, slack, config: config(), now: store.claimNow, leaseOwner: 'runner:rate-3'
+  });
+  assert.equal(delivered.status, 'delivered');
+  assert.equal(store.parts[0].delivery_attempts, 2);
+  assert.equal(store.parts[0].delivery_retry_at, null);
+  assert.deepEqual(postedClientIds, [
+    '60000000-0000-4000-8000-000000000001',
+    '60000000-0000-4000-8000-000000000001'
+  ]);
 });
 
 test('after new finalization cleanup claims and deletes every exact prior part coordinate', async () => {
@@ -746,6 +806,85 @@ test('durable backlog still cleans A through replaced B after C has already clea
   assert.deepEqual(slack.calls.filter(([name]) => name === 'deleteMessage').map(([, input]) => input.ts), [
     '910.02', '910.01', '910.01'
   ]);
+});
+
+test('shared-prior successors each reconcile aggregate state while one exact Slack delete stays single', async () => {
+  const aId = '93000000-0000-4000-8000-000000000001';
+  const bId = '93000000-0000-4000-8000-000000000002';
+  const cId = '93000000-0000-4000-8000-000000000003';
+  const partId = '93000000-0000-4000-8000-000000000004';
+  const aggregate = new Map([[bId, 'idle'], [cId, 'idle']]);
+  const part = { state: 'idle', attempts: 0, token: null };
+  const calls = [];
+  const store = {
+    async claimDigestRun(input) {
+      return {
+        claimed: false, created: false, previous_digest: null,
+        row: { id: RUN_ID, state: 'delivered', scheduled_at: input.scheduledAt, item_snapshot: [] }
+      };
+    },
+    async listDigestCleanupBacklog() {
+      return [bId, cId].filter((id) => !['deleted', 'already_absent'].includes(aggregate.get(id)))
+        .map((id) => ({
+          successor_digest_id: id,
+          previous_digest_id: aId,
+          previous_cleanup_state: aggregate.get(id),
+          parts: [{
+            previous_part_id: partId, part_kind: 'ordinary', part_number: 1, part_count: 1,
+            slack_channel_id: 'CSHARED', slack_message_ts: '930.01', cleanup_state: part.state
+          }]
+        }));
+    },
+    async claimDigestPartCleanup(input) {
+      calls.push(['claim', structuredClone(input)]);
+      if (['deleted', 'already_absent'].includes(part.state)) {
+        aggregate.set(input.id, part.state);
+        return {
+          claimed: false, row: { state: input.id === bId ? 'delivered' : 'replaced' },
+          part: { cleanup_state: part.state, cleanup_attempts: part.attempts, cleanup_token: part.token }
+        };
+      }
+      part.attempts += 1;
+      part.state = 'deleting';
+      part.token = '94000000-0000-4000-8000-000000000001';
+      aggregate.set(input.id, 'deleting');
+      return {
+        claimed: true, row: { state: 'delivered' },
+        part: { cleanup_state: 'deleting', cleanup_attempts: part.attempts, cleanup_token: part.token }
+      };
+    },
+    async recordDigestPartCleanup(input) {
+      calls.push(['record', structuredClone(input)]);
+      part.state = input.outcome;
+      part.token = null;
+      aggregate.set(input.id, input.outcome);
+      return { applied: true, row: { state: 'delivered' }, part: { cleanup_state: input.outcome } };
+    },
+    async listActionableWork() { throw new Error('not called'); },
+    async prepareDigestParts() { throw new Error('not called'); },
+    async claimDigestPartDelivery() { throw new Error('not called'); },
+    async markDigestPartDelivered() { throw new Error('not called'); },
+    async markDigestPartFailed() { throw new Error('not called'); },
+    async finalizeDigestRun() { throw new Error('not called'); },
+    async failDigestRun() { throw new Error('not called'); }
+  };
+  const slack = slackFake();
+
+  const first = await runDigestCycle({
+    store, slack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:shared'
+  });
+  assert.deepEqual(first.cleanup, { attempted: 1, settled: 1, failed: 0 });
+  assert.deepEqual([...aggregate.entries()], [[bId, 'deleted'], [cId, 'deleted']]);
+  assert.equal(calls.filter(([name]) => name === 'claim').length, 2);
+  assert.equal(slack.calls.filter(([name]) => name === 'deleteMessage').length, 1);
+  assert.equal(part.attempts, 1, 'terminal aggregate repair does not rotate a part attempt');
+  assert.equal(part.token, null);
+
+  const finalSweep = await runDigestCycle({
+    store, slack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:shared-final'
+  });
+  assert.deepEqual(finalSweep.cleanup, { attempted: 0, settled: 0, failed: 0 });
+  assert.equal(calls.filter(([name]) => name === 'claim').length, 2);
 });
 
 test('invalid clocks, channels, lease bounds, and ambient time access fail before side effects', async () => {
