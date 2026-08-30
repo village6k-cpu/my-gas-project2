@@ -36,6 +36,7 @@ const DIGEST_CLEANUP_STATES = new Set(['idle', 'deleting', 'failed', 'deleted', 
 const WORK_STATES = new Set(['open', 'in_progress', 'snoozed', 'resolved', 'dismissed']);
 const ACTIVE_WORK_STATES = new Set(['open', 'in_progress', 'snoozed']);
 const DIGEST_STATES = new Set(['building', 'delivering', 'delivered', 'failed', 'replaced']);
+const SLACK_CHANNEL_ID = /^[A-Z0-9][A-Z0-9_-]{0,79}$/;
 const SLACK_MESSAGE_TS = /^[0-9]{1,20}\.[0-9]{1,20}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const DIGEST_PART_RESPONSE_KEYS = [
@@ -570,6 +571,44 @@ function responseCleanupAggregate(row) {
   return state;
 }
 
+function cleanupBacklogResponse(data, limit) {
+  if (!Array.isArray(data) || data.length > limit) throw responseInvalid();
+  const entryKeys = ['successor_digest_id', 'previous_digest_id', 'previous_cleanup_state', 'parts'];
+  const partKeys = [
+    'previous_part_id', 'part_kind', 'part_number', 'part_count',
+    'slack_channel_id', 'slack_message_ts', 'cleanup_state'
+  ];
+  const seenEntries = new Set();
+  for (const entry of data) {
+    if (!exactKeys(entry, entryKeys) || !Array.isArray(entry.parts)
+      || entry.parts.length < 1 || entry.parts.length > 50) throw responseInvalid();
+    const successorId = responseUuid(entry.successor_digest_id);
+    const previousId = responseUuid(entry.previous_digest_id);
+    const identity = `${successorId}:${previousId}`;
+    if (successorId === previousId || seenEntries.has(identity)
+      || !['idle', 'deleting', 'failed'].includes(entry.previous_cleanup_state)) {
+      throw responseInvalid();
+    }
+    seenEntries.add(identity);
+    const seenParts = new Set();
+    for (const part of entry.parts) {
+      if (!exactKeys(part, partKeys)) throw responseInvalid();
+      const partId = responseUuid(part.previous_part_id);
+      if (seenParts.has(partId) || !['idle', 'deleting', 'failed'].includes(part.cleanup_state)
+        || !DIGEST_PART_KINDS.has(part.part_kind)
+        || !Number.isSafeInteger(part.part_number) || part.part_number < 1
+        || !Number.isSafeInteger(part.part_count) || part.part_count < part.part_number
+        || part.part_count > 50
+        || typeof part.slack_channel_id !== 'string' || !SLACK_CHANNEL_ID.test(part.slack_channel_id)
+        || typeof part.slack_message_ts !== 'string' || !SLACK_MESSAGE_TS.test(part.slack_message_ts)) {
+        throw responseInvalid();
+      }
+      seenParts.add(partId);
+    }
+  }
+  return data;
+}
+
 function cleanupClaimResponse(data, input) {
   if (!exactKeys(data, ['claimed', 'part', 'row']) || typeof data.claimed !== 'boolean') throw responseInvalid();
   if (data.row === null || data.part === null) {
@@ -578,7 +617,8 @@ function cleanupClaimResponse(data, input) {
   }
   const { row } = responseDigestRow(data.row);
   const part = responseDigestPartRow(data.part);
-  if (row.id !== input.id || row.state !== 'delivered' || row.previous_digest_id !== input.previousDigestId
+  if (row.id !== input.id || !['delivered', 'replaced'].includes(row.state)
+    || row.previous_digest_id !== input.previousDigestId
     || part.id !== input.previousPartId || part.digest_run_id !== input.previousDigestId) throw responseInvalid();
   const aggregateState = responseCleanupAggregate(row);
   if (data.claimed && (part.cleanup_state !== 'deleting' || part.cleanup_owner !== input.cleanupOwner)) {
@@ -599,7 +639,8 @@ function cleanupTerminalResponse(data, input) {
   }
   const { row } = responseDigestRow(data.row);
   const part = responseDigestPartRow(data.part);
-  if (row.id !== input.id || row.state !== 'delivered' || row.previous_digest_id !== input.previousDigestId
+  if (row.id !== input.id || !['delivered', 'replaced'].includes(row.state)
+    || row.previous_digest_id !== input.previousDigestId
     || part.id !== input.previousPartId || part.digest_run_id !== input.previousDigestId
     || part.cleanup_attempts !== input.expectedCleanupAttempts || part.cleanup_state !== input.outcome) {
     throw responseInvalid();
@@ -1166,6 +1207,23 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         id: body.p_id, leaseOwner: body.p_lease_owner, leaseToken: body.p_lease_token,
         error: body.p_error
       });
+    },
+    listDigestCleanupBacklog: async (input = {}) => {
+      let body;
+      try {
+        if (!exactKeys(input, ['destinationKey', 'limit'])
+          || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 10) throw invalidInput();
+        body = {
+          p_destination_key: exactText(input.destinationKey, 500),
+          p_limit: input.limit
+        };
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/list_digest_cleanup_backlog_v2', {
+        method: 'POST', body: safeJson(body)
+      });
+      return cleanupBacklogResponse(data, body.p_limit);
     },
     claimDigestPartCleanup: async (input = {}) => {
       let body;

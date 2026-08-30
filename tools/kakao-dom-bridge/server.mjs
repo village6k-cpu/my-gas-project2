@@ -271,7 +271,8 @@ export function buildWorkOrchestratorHealthState(value = {}) {
       cleanupFailed: count(run.cleanupFailed, 50)
     };
     if (run.error) {
-      result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_cycle_failed',
+      result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed',
+        'digest_delivery_unconfirmed', 'digest_cycle_failed',
         'digest_omission_detected', 'digest_cleanup_failed'].includes(run.error)
         ? run.error
         : 'digest_cycle_failed';
@@ -646,7 +647,7 @@ export function createWorkOrchestratorImmediateRuntime({
 const DIGEST_STORE_METHODS = [
   'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
   'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
-  'claimDigestPartCleanup', 'recordDigestPartCleanup'
+  'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
 ];
 
 function digestRuntimeIso(now) {
@@ -690,9 +691,6 @@ function safeDigestRuntimeResult(value, scheduledAt) {
     settled: digestRuntimeCount(cleanup.settled, 50),
     failed: digestRuntimeCount(cleanup.failed, 50)
   };
-  if (safeCleanup.settled + safeCleanup.failed > safeCleanup.attempted) {
-    throw new Error('Work Orchestrator digest result is invalid');
-  }
   const exactOmission = selectedCount - renderedCount;
   const resultScheduledAt = safeShadowTimestamp(value.scheduledAt);
   if (!resultScheduledAt || resultScheduledAt !== scheduledAt) {
@@ -711,7 +709,9 @@ function safeDigestRuntimeResult(value, scheduledAt) {
   };
   if (value.retryable === true) result.retryable = true;
   if (value.status === 'failed') {
-    result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed'].includes(value.error)
+    result.error = [
+      'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed'
+    ].includes(value.error)
       ? value.error
       : 'digest_cycle_failed';
   }
@@ -770,8 +770,10 @@ export function createWorkOrchestratorDigestRuntime({
   let lastAttemptedScheduledAt = null;
 
   const recordFailure = (at, trigger, scheduledAt, error = 'digest_cycle_failed') => {
-    const safeError = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_omission_detected',
-      'digest_cleanup_failed'].includes(error) ? error : 'digest_cycle_failed';
+    const safeError = [
+      'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
+      'digest_omission_detected', 'digest_cleanup_failed'
+    ].includes(error) ? error : 'digest_cycle_failed';
     runtimeState.digestFailureCount += 1;
     runtimeState.lastDigestFailureAt = at;
     runtimeState.lastDigestRun = {
@@ -811,7 +813,8 @@ export function createWorkOrchestratorDigestRuntime({
     const cleanupRetryDue = (Number(runtimeState.lastDigestRun?.cleanupFailed || 0) > 0
       || runtimeState.lastDigestRun?.retryable === true)
       && window.scheduledAt === lastAttemptedScheduledAt;
-    if (!force && !cleanupRetryDue && lastAttemptedScheduledAt !== null
+    const cleanupSweepDue = cleanupEnabled && window.scheduledAt === lastAttemptedScheduledAt;
+    if (!force && !cleanupRetryDue && !cleanupSweepDue && lastAttemptedScheduledAt !== null
       && Date.parse(window.scheduledAt) <= Date.parse(lastAttemptedScheduledAt)) {
       return { status: 'not_due', scheduledAt: window.scheduledAt };
     }
@@ -832,6 +835,7 @@ export function createWorkOrchestratorDigestRuntime({
             leaseSeconds: 120,
             cleanupEnabled,
             cleanupLeaseSeconds: 120,
+            cleanupBacklogLimit: 10,
             reconcileWindowSeconds: 300,
             ownerSlackIds: config.ownerSlackIds || {}
           },
@@ -928,8 +932,10 @@ function safeMaintenanceDigestResult(value) {
     }
   }
   if (result.status === 'failed') {
-    result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_omission_detected',
-      'digest_cleanup_failed'].includes(value.error) ? value.error : 'digest_cycle_failed';
+    result.error = [
+      'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
+      'digest_omission_detected', 'digest_cleanup_failed'
+    ].includes(value.error) ? value.error : 'digest_cycle_failed';
   }
   return result;
 }

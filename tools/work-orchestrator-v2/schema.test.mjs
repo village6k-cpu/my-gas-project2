@@ -47,6 +47,7 @@ test('foundation migration defines private atomic work and digest RPC contracts'
     'mark_digest_part_failed_v2',
     'finalize_digest_run_v2',
     'fail_digest_run_v2',
+    'list_digest_cleanup_backlog_v2',
     'claim_digest_part_cleanup_v2',
     'record_digest_part_cleanup_v2'
   ];
@@ -74,6 +75,26 @@ test('foundation migration defines private atomic work and digest RPC contracts'
   assert.match(sql, /count\(distinct \(entry->>'id'\)::uuid\)/i, 'snapshot UUID duplicates use canonical UUID identity');
   assert.match(sql, /previous_digest_id/i);
   assert.match(sql, /previous_cleanup_state/i);
+  assert.match(
+    sql,
+    /create function public\.list_digest_cleanup_backlog_v2\([\s\S]*?p_limit[^;]*?between 1 and 10[\s\S]*?state in \('delivered','replaced'\)/i,
+    'cleanup backlog is finite and keeps confirmed replaced successors eligible'
+  );
+  assert.match(
+    sql,
+    /create function public\.list_digest_cleanup_backlog_v2\([\s\S]*?limit p_limit[\s\S]*?limit 50/i,
+    'cleanup backlog bounds both successor runs and exact parts per successor'
+  );
+  assert.match(
+    sql,
+    /create function public\.claim_digest_part_cleanup_v2\([\s\S]*?v_row\.state not in \('delivered','replaced'\)[\s\S]*?v_row\.delivered_at is null[\s\S]*?v_row\.manifest_prepared_at is null/i,
+    'cleanup claim accepts only confirmed delivered or replaced successors'
+  );
+  assert.match(
+    sql,
+    /create function public\.record_digest_part_cleanup_v2\([\s\S]*?v_row\.state not in \('delivered','replaced'\)[\s\S]*?v_row\.delivered_at is null[\s\S]*?v_row\.manifest_prepared_at is null/i,
+    'cleanup settlement uses the same confirmed-successor predicate'
+  );
   assert.match(sql, /manifest_prepared_at/i);
   assert.match(sql, /delivery_attempts.*between 0 and 3/is);
   assert.match(sql, /cleanup_token uuid/i);

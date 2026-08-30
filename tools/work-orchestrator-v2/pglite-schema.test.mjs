@@ -113,6 +113,7 @@ test('foundation migration executes and exposes only service-role access in Post
           'mark_digest_part_failed_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
+          'list_digest_cleanup_backlog_v2',
           'claim_digest_part_cleanup_v2',
           'record_digest_part_cleanup_v2'
         )
@@ -127,6 +128,7 @@ test('foundation migration executes and exposes only service-role access in Post
       'finalize_digest_run_v2',
       'is_effective_p0_ack_v2',
       'list_actionable_work_v2',
+      'list_digest_cleanup_backlog_v2',
       'mark_digest_part_delivered_v2',
       'mark_digest_part_failed_v2',
       'prepare_digest_parts_v2',
@@ -161,6 +163,7 @@ test('foundation migration executes and exposes only service-role access in Post
           'mark_digest_part_failed_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
+          'list_digest_cleanup_backlog_v2',
           'claim_digest_part_cleanup_v2',
           'record_digest_part_cleanup_v2'
         )
@@ -576,6 +579,9 @@ test('foundation migration executes and exposes only service-role access in Post
         $1::uuid, $2::uuid, $3::uuid, $4::text, $5::integer
       ) as result
     `;
+    const listCleanupBacklogSql = `
+      select public.list_digest_cleanup_backlog_v2($1::text, $2::integer) as result
+    `;
     const recordCleanupSql = `
       select public.record_digest_part_cleanup_v2(
         $1::uuid, $2::uuid, $3::uuid, $4::text, $5::uuid,
@@ -918,6 +924,73 @@ test('foundation migration executes and exposes only service-role access in Post
     assert.equal(terminalRecordRepair.rows[0].result.row.previous_cleanup_state, 'deleted');
     const { rows: repairedPrior } = await db.query(`select state from public.digest_runs where id = $1::uuid`, [digestId]);
     assert.equal(repairedPrior[0].state, 'replaced', 'terminal re-entry repairs concurrent-equivalent missed replacement');
+
+    const backlogPriorId = '81000000-0000-4000-8000-000000000001';
+    const replacedSuccessorId = '81000000-0000-4000-8000-000000000002';
+    const unconfirmedSuccessorId = '81000000-0000-4000-8000-000000000003';
+    const backlogPartId = '81000000-0000-4000-8000-000000000004';
+    await db.query(`
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, delivered_at, previous_digest_id,
+        previous_cleanup_state, previous_cleanup_error, previous_deleted_at,
+        lease_owner, lease_token, lease_expires_at
+      ) values
+        ($1::uuid, '2026-08-29T08:00:00Z', '2026-08-29T09:00:00Z', '2026-08-29T09:00:00Z',
+          'delivered', 'slack:CBACKLOG', '[]'::jsonb, '2026-08-29T09:00:01Z', '2026-08-29T09:00:02Z',
+          null, 'idle', null, null, null, null, null),
+        ($2::uuid, '2026-08-29T09:00:00Z', '2026-08-29T10:00:00Z', '2026-08-29T10:00:00Z',
+          'replaced', 'slack:CBACKLOG', '[]'::jsonb, '2026-08-29T10:00:01Z', '2026-08-29T10:00:02Z',
+          $1::uuid, 'failed', 'rate_limited', null, null, null, null),
+        ($3::uuid, '2026-08-29T10:00:00Z', '2026-08-29T11:00:00Z', '2026-08-29T11:00:00Z',
+          'failed', 'slack:CBACKLOG', '[]'::jsonb, null, null,
+          $1::uuid, 'idle', null, null, 'bridge:unconfirmed',
+          '81000000-0000-4000-8000-000000000005'::uuid, now() + interval '2 minutes')
+    `, [backlogPriorId, replacedSuccessorId, unconfirmedSuccessorId]);
+    await db.query(`
+      insert into public.digest_message_parts (
+        id, digest_run_id, part_kind, part_number, part_count, item_ids, payload_hash,
+        client_message_id, delivery_state, delivery_attempts, delivery_claimed_at,
+        slack_channel_id, slack_message_ts, delivered_at, cleanup_state,
+        cleanup_attempts, cleanup_attempted_at, cleanup_error
+      ) values (
+        $1::uuid, $2::uuid, 'ordinary', 1, 1,
+        array['81000000-0000-4000-8000-000000000006'::uuid], repeat('f', 64),
+        '81000000-0000-4000-8000-000000000007'::uuid, 'delivered', 1,
+        '2026-08-29T09:00:01Z', 'CBACKLOG', '900.01', '2026-08-29T09:00:02Z',
+        'failed', 1, '2026-08-29T10:00:03Z', 'rate_limited'
+      )
+    `, [backlogPartId, backlogPriorId]);
+    await assert.rejects(db.query(listCleanupBacklogSql, ['slack:CBACKLOG', 11]), /invalid digest cleanup backlog/i);
+    const backlog = await db.query(listCleanupBacklogSql, ['slack:CBACKLOG', 10]);
+    assert.deepEqual(backlog.rows[0].result, [{
+      successor_digest_id: replacedSuccessorId,
+      previous_digest_id: backlogPriorId,
+      previous_cleanup_state: 'failed',
+      parts: [{
+        previous_part_id: backlogPartId,
+        part_kind: 'ordinary',
+        part_number: 1,
+        part_count: 1,
+        slack_channel_id: 'CBACKLOG',
+        slack_message_ts: '900.01',
+        cleanup_state: 'failed'
+      }]
+    }]);
+    const replacedClaim = await db.query(claimCleanupSql, [
+      replacedSuccessorId, backlogPriorId, backlogPartId, 'bridge:backlog', 120
+    ]);
+    assert.equal(replacedClaim.rows[0].result.claimed, true, 'a confirmed replaced successor can resume its prior cleanup');
+    const unconfirmedClaim = await db.query(claimCleanupSql, [
+      unconfirmedSuccessorId, backlogPriorId, backlogPartId, 'bridge:unconfirmed', 120
+    ]);
+    assert.deepEqual(unconfirmedClaim.rows[0].result, { claimed: false, row: null, part: null });
+    const replacedRecord = await db.query(recordCleanupSql, [
+      replacedSuccessorId, backlogPriorId, backlogPartId, 'bridge:backlog',
+      replacedClaim.rows[0].result.part.cleanup_token, 2, 'failed', 'rate_limited'
+    ]);
+    assert.equal(replacedRecord.rows[0].result.applied, true);
+    assert.equal(replacedRecord.rows[0].result.row.state, 'replaced');
 
     assert.deepEqual({
       listedIds: failClosedP0.map((row) => row.id),

@@ -51,6 +51,7 @@ function normalizeConfig(value) {
   const intervalMinutes = boundedInteger(value.intervalMinutes, 180, 60, MAX_INTERVAL_MINUTES);
   const leaseSeconds = boundedInteger(value.leaseSeconds, 120, 1, 900);
   const cleanupLeaseSeconds = boundedInteger(value.cleanupLeaseSeconds, 120, 1, 900);
+  const cleanupBacklogLimit = boundedInteger(value.cleanupBacklogLimit, 10, 1, 10);
   const reconcileWindowSeconds = boundedInteger(
     value.reconcileWindowSeconds, 300, 1, MAX_RECONCILE_WINDOW_SECONDS
   );
@@ -65,6 +66,7 @@ function normalizeConfig(value) {
     leaseSeconds,
     cleanupEnabled: value.cleanupEnabled === true,
     cleanupLeaseSeconds,
+    cleanupBacklogLimit,
     reconcileWindowSeconds,
     ownerSlackIds: value.ownerSlackIds || {}
   };
@@ -82,7 +84,9 @@ function validateDependencies(store, slack, cleanupEnabled) {
   ]) requireMethod(store, method);
   for (const method of ['postMessage', 'findMessageByClientId']) requireMethod(slack, method);
   if (cleanupEnabled) {
-    for (const method of ['claimDigestPartCleanup', 'recordDigestPartCleanup']) requireMethod(store, method);
+    for (const method of [
+      'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
+    ]) requireMethod(store, method);
     requireMethod(slack, 'deleteMessage');
   }
 }
@@ -242,17 +246,28 @@ async function reconcilePart(slack, part, channelId, reconcileWindowSeconds) {
 }
 
 async function settleDelivered({ store, run, part, coordinate, config, now, leaseOwner }) {
-  const result = await store.markDigestPartDelivered({
-    id: run.id,
-    partId: part.id,
-    leaseOwner,
-    leaseToken: run.lease_token,
-    expectedDeliveryAttempts: part.delivery_attempts,
-    channelId: config.channelId,
-    messageTs: coordinate.ts,
-    deliveredAt: now
-  });
-  if (!isRecord(result) || result.applied !== true) throw new Error('delivery_unconfirmed');
+  let result;
+  try {
+    result = await store.markDigestPartDelivered({
+      id: run.id,
+      partId: part.id,
+      leaseOwner,
+      leaseToken: run.lease_token,
+      expectedDeliveryAttempts: part.delivery_attempts,
+      channelId: config.channelId,
+      messageTs: coordinate.ts,
+      deliveredAt: now
+    });
+  } catch {
+    const error = new Error('digest_delivery_unconfirmed');
+    error.code = 'digest_delivery_unconfirmed';
+    throw error;
+  }
+  if (!isRecord(result) || result.applied !== true) {
+    const error = new Error('digest_delivery_unconfirmed');
+    error.code = 'digest_delivery_unconfirmed';
+    throw error;
+  }
   return { ...part, delivery_state: 'delivered', slack_channel_id: config.channelId, slack_message_ts: coordinate.ts };
 }
 
@@ -313,6 +328,8 @@ async function deliverPart({ store, slack, run, persisted, local, config, now, l
   }
 
   if (part.delivery_state === 'delivering' && newlyClaimed) {
+    let coordinate = null;
+    let postError = null;
     try {
       const posted = await slack.postMessage({
         channel: config.channelId,
@@ -321,28 +338,38 @@ async function deliverPart({ store, slack, run, persisted, local, config, now, l
         clientMsgId: part.client_message_id
       });
       if (!validMessageCoordinate(posted, config.channelId)) throw new Error('delivery_unconfirmed');
-      return await settleDelivered({ store, run, part, coordinate: posted, config, now, leaseOwner });
+      coordinate = posted;
     } catch (error) {
+      postError = error;
       if (error?.ambiguous === true) {
         try {
           const found = await reconcilePart(slack, part, config.channelId, config.reconcileWindowSeconds);
-          if (found) return await settleDelivered({ store, run, part, coordinate: found, config, now, leaseOwner });
+          if (found) coordinate = found;
         } catch {
           // The finite reconciliation attempt did not produce an exact coordinate.
         }
       }
-      const code = deliveryFailureCode(error, error?.ambiguous === true);
+    }
+    if (coordinate) {
+      return settleDelivered({ store, run, part, coordinate, config, now, leaseOwner });
+    }
+    {
+      const code = deliveryFailureCode(postError, postError?.ambiguous === true);
       await settleFailed({ store, run, part, code, leaseOwner });
       throw new Error(code);
     }
   }
 
   if (part.delivery_state === 'delivering') {
+    let coordinate = null;
     try {
       const found = await reconcilePart(slack, part, config.channelId, config.reconcileWindowSeconds);
-      if (found) return await settleDelivered({ store, run, part, coordinate: found, config, now, leaseOwner });
+      if (found) coordinate = found;
     } catch {
       // Fall through to durable failure evidence; never repost an unreconciled in-flight attempt.
+    }
+    if (coordinate) {
+      return settleDelivered({ store, run, part, coordinate, config, now, leaseOwner });
     }
     await settleFailed({ store, run, part, code: 'delivery_unconfirmed', leaseOwner });
     throw new Error('delivery_unconfirmed');
@@ -371,40 +398,82 @@ function cleanupFailureCode(error) {
   return 'slack_api_error';
 }
 
-function validatePreviousDigest(value) {
-  if (value === null || value === undefined) return null;
-  if (!isRecord(value) || typeof value.id !== 'string' || !UUID.test(value.id) || !Array.isArray(value.parts)) {
+const CLEANUP_BACKLOG_KEYS = [
+  'successor_digest_id', 'previous_digest_id', 'previous_cleanup_state', 'parts'
+].sort();
+const CLEANUP_BACKLOG_PART_KEYS = [
+  'previous_part_id', 'part_kind', 'part_number', 'part_count',
+  'slack_channel_id', 'slack_message_ts', 'cleanup_state'
+].sort();
+
+function validateCleanupBacklogEntry(value) {
+  if (!isRecord(value)
+    || Object.keys(value).sort().join(',') !== CLEANUP_BACKLOG_KEYS.join(',')
+    || typeof value.successor_digest_id !== 'string' || !UUID.test(value.successor_digest_id)
+    || typeof value.previous_digest_id !== 'string' || !UUID.test(value.previous_digest_id)
+    || value.successor_digest_id === value.previous_digest_id
+    || !['idle', 'deleting', 'failed'].includes(value.previous_cleanup_state)
+    || !Array.isArray(value.parts) || value.parts.length < 1 || value.parts.length > 50) {
     throw new Error('cleanup_unconfirmed');
   }
   const seen = new Set();
-  for (const part of value.parts) {
-    if (!isRecord(part) || typeof part.id !== 'string' || !UUID.test(part.id) || seen.has(part.id)
+  return value.parts.map((part) => {
+    if (!isRecord(part)
+      || Object.keys(part).sort().join(',') !== CLEANUP_BACKLOG_PART_KEYS.join(',')
+      || typeof part.previous_part_id !== 'string' || !UUID.test(part.previous_part_id)
+      || seen.has(part.previous_part_id)
+      || !['idle', 'deleting', 'failed'].includes(part.cleanup_state)
       || !PART_KINDS.has(part.part_kind) || !Number.isSafeInteger(part.part_number)
-      || !Number.isSafeInteger(part.part_count) || typeof part.slack_channel_id !== 'string'
-      || !CHANNEL_ID.test(part.slack_channel_id) || typeof part.slack_message_ts !== 'string'
-      || !SLACK_TS.test(part.slack_message_ts)) throw new Error('cleanup_unconfirmed');
-    seen.add(part.id);
-  }
-  return value;
+      || part.part_number < 1 || !Number.isSafeInteger(part.part_count)
+      || part.part_count < part.part_number || part.part_count > 50
+      || typeof part.slack_channel_id !== 'string' || !CHANNEL_ID.test(part.slack_channel_id)
+      || typeof part.slack_message_ts !== 'string' || !SLACK_TS.test(part.slack_message_ts)) {
+      throw new Error('cleanup_unconfirmed');
+    }
+    seen.add(part.previous_part_id);
+    return {
+      successor_digest_id: value.successor_digest_id,
+      previous_digest_id: value.previous_digest_id,
+      previous_cleanup_state: value.previous_cleanup_state,
+      ...part
+    };
+  });
 }
 
-async function cleanupPrevious({ store, slack, currentRunId, previousDigest, config, leaseOwner }) {
+async function cleanupBacklog({ store, slack, config, leaseOwner }) {
   const result = { attempted: 0, settled: 0, failed: 0 };
-  if (!config.cleanupEnabled || !previousDigest) return result;
-  let previous;
+  if (!config.cleanupEnabled) return result;
+  let backlog;
   try {
-    previous = validatePreviousDigest(previousDigest);
+    backlog = await store.listDigestCleanupBacklog({
+      destinationKey: config.destinationKey,
+      limit: config.cleanupBacklogLimit
+    });
+    if (!Array.isArray(backlog) || backlog.length > config.cleanupBacklogLimit) {
+      throw new Error('cleanup_unconfirmed');
+    }
   } catch {
     result.failed = 1;
     return result;
   }
-  for (const target of previous.parts) {
+  const seenTargets = new Set();
+  const targets = [];
+  for (const rawEntry of backlog) {
+    try {
+      targets.push(...validateCleanupBacklogEntry(rawEntry));
+    } catch {
+      result.failed += 1;
+    }
+  }
+  for (const target of targets) {
+    if (seenTargets.has(target.previous_part_id)) continue;
+    seenTargets.add(target.previous_part_id);
     let claim;
     try {
       claim = await store.claimDigestPartCleanup({
-        id: currentRunId,
-        previousDigestId: previous.id,
-        previousPartId: target.id,
+        id: target.successor_digest_id,
+        previousDigestId: target.previous_digest_id,
+        previousPartId: target.previous_part_id,
         cleanupOwner: leaseOwner,
         leaseSeconds: config.cleanupLeaseSeconds
       });
@@ -422,7 +491,7 @@ async function cleanupPrevious({ store, slack, currentRunId, previousDigest, con
       continue;
     }
     const part = claim.part;
-    if (!isRecord(part) || part.id !== undefined && part.id !== target.id
+    if (!isRecord(part) || part.id !== undefined && part.id !== target.previous_part_id
       || !Number.isSafeInteger(part.cleanup_attempts) || part.cleanup_attempts < 1
       || typeof part.cleanup_token !== 'string' || !UUID.test(part.cleanup_token)) {
       result.failed += 1;
@@ -446,9 +515,9 @@ async function cleanupPrevious({ store, slack, currentRunId, previousDigest, con
     if (!DELETE_FAILURE_CODES.has(errorCode) && outcome === 'failed') errorCode = 'slack_api_error';
     try {
       const recorded = await store.recordDigestPartCleanup({
-        id: currentRunId,
-        previousDigestId: previous.id,
-        previousPartId: target.id,
+        id: target.successor_digest_id,
+        previousDigestId: target.previous_digest_id,
+        previousPartId: target.previous_part_id,
         cleanupOwner: leaseOwner,
         cleanupToken: part.cleanup_token,
         expectedCleanupAttempts: part.cleanup_attempts,
@@ -494,6 +563,14 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
   const owner = requiredText(leaseOwner, 200);
   validateDependencies(store, slack, config.cleanupEnabled);
   const window = digestScheduleWindow(timestamp, config.intervalMinutes);
+  const finish = async (input) => {
+    const cleanup = await cleanupBacklog({ store, slack, config, leaseOwner: owner });
+    return baseResult({
+      ...input,
+      cleanup,
+      retryable: input.retryable === true || cleanup.failed > 0
+    });
+  };
 
   let claimed;
   try {
@@ -506,27 +583,20 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
       leaseSeconds: config.leaseSeconds
     }), window);
   } catch {
-    return baseResult({
+    return finish({
       status: 'failed', error: 'digest_claim_failed', scheduledAt: window.scheduledAt,
       runId: null
     });
   }
 
   if (!claimed.claimed) {
-    const cleanup = claimed.row.state === 'delivered'
-      ? await cleanupPrevious({
-          store, slack, currentRunId: claimed.row.id,
-          previousDigest: claimed.previous_digest,
-          config, leaseOwner: owner
-        })
-      : { attempted: 0, settled: 0, failed: 0 };
     const selectedCount = claimed.row.state === 'delivered' && Array.isArray(claimed.row.item_snapshot)
       ? claimed.row.item_snapshot.length
       : 0;
-    return baseResult({
+    return finish({
       status: 'not_claimed', scheduledAt: window.scheduledAt, runId: claimed.row.id,
-      selectedCount, renderedCount: selectedCount, cleanup,
-      retryable: ['building', 'delivering', 'failed'].includes(claimed.row.state) || cleanup.failed > 0
+      selectedCount, renderedCount: selectedCount,
+      retryable: ['building', 'delivering', 'failed'].includes(claimed.row.state)
     });
   }
 
@@ -557,7 +627,7 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
     persistedParts = validatePrepared(prepared, run.id, localParts);
   } catch {
     await markRunFailed(store, run, owner, 'digest_build_failed');
-    return baseResult({
+    return finish({
       status: 'failed', error: 'digest_build_failed', scheduledAt: window.scheduledAt,
       runId: run.id, selectedCount, renderedCount,
       partCount: localParts.length, deliveredPartCount: 0
@@ -577,34 +647,45 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
       || delivered.some(({ delivery_state }) => delivery_state !== 'delivered')) {
       throw new Error('delivery_unconfirmed');
     }
-    const finalized = await store.finalizeDigestRun({
-      id: run.id,
-      leaseOwner: owner,
-      leaseToken: run.lease_token,
-      deliveredAt: timestamp
-    });
-    if (!isRecord(finalized) || finalized.applied !== true) throw new Error('delivery_unconfirmed');
-  } catch {
+    let finalized;
+    try {
+      finalized = await store.finalizeDigestRun({
+        id: run.id,
+        leaseOwner: owner,
+        leaseToken: run.lease_token,
+        deliveredAt: timestamp
+      });
+    } catch {
+      const error = new Error('digest_delivery_unconfirmed');
+      error.code = 'digest_delivery_unconfirmed';
+      throw error;
+    }
+    if (!isRecord(finalized) || finalized.applied !== true) {
+      const error = new Error('digest_delivery_unconfirmed');
+      error.code = 'digest_delivery_unconfirmed';
+      throw error;
+    }
+  } catch (error) {
+    if (error?.code === 'digest_delivery_unconfirmed') {
+      return finish({
+        status: 'failed', error: 'digest_delivery_unconfirmed', retryable: true,
+        scheduledAt: window.scheduledAt, runId: run.id, selectedCount, renderedCount,
+        partCount: persistedParts.length,
+        deliveredPartCount: delivered.filter(({ delivery_state }) => delivery_state === 'delivered').length
+      });
+    }
     await markRunFailed(store, run, owner, 'digest_delivery_failed');
-    return baseResult({
+    return finish({
       status: 'failed', error: 'digest_delivery_failed', scheduledAt: window.scheduledAt,
       runId: run.id, selectedCount, renderedCount,
       partCount: persistedParts.length,
-      deliveredPartCount: delivered.filter(({ delivery_state }) => delivery_state === 'delivered').length
+      deliveredPartCount: delivered.filter(({ delivery_state }) => delivery_state === 'delivered').length,
+      retryable: true
     });
   }
 
-  const cleanup = await cleanupPrevious({
-    store,
-    slack,
-    currentRunId: run.id,
-    previousDigest: claimed.previous_digest,
-    config,
-    leaseOwner: owner
-  });
-  return baseResult({
+  return finish({
     status: 'delivered', scheduledAt: window.scheduledAt, runId: run.id,
-    selectedCount, renderedCount, partCount: persistedParts.length,
-    deliveredPartCount: delivered.length, cleanup
+    selectedCount, renderedCount, partCount: persistedParts.length, deliveredPartCount: delivered.length
   });
 }

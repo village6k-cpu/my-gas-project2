@@ -203,6 +203,28 @@ class FakeStore {
     return { applied: true, row: structuredClone(this.run) };
   }
 
+  async listDigestCleanupBacklog(input) {
+    this.calls.push(['listDigestCleanupBacklog', structuredClone(input)]);
+    if (!this.finalized || !this.previous) return [];
+    const parts = this.previous.parts
+      .filter((part) => !['deleted', 'already_absent'].includes(this.cleanup.get(part.id)?.state))
+      .map((part) => ({
+        previous_part_id: part.id,
+        part_kind: part.part_kind,
+        part_number: part.part_number,
+        part_count: part.part_count,
+        slack_channel_id: part.slack_channel_id,
+        slack_message_ts: part.slack_message_ts,
+        cleanup_state: this.cleanup.get(part.id)?.state || 'idle'
+      }));
+    return parts.length === 0 ? [] : [{
+      successor_digest_id: RUN_ID,
+      previous_digest_id: this.previous.id,
+      previous_cleanup_state: parts.some(({ cleanup_state }) => cleanup_state === 'failed') ? 'failed' : 'idle',
+      parts
+    }].slice(0, input.limit);
+  }
+
   async claimDigestPartCleanup(input) {
     this.calls.push(['claimDigestPartCleanup', structuredClone(input)]);
     assert.equal(this.finalized, true, 'cleanup must happen after finalization');
@@ -407,6 +429,101 @@ test('an already delivering part and an ambiguous post reconcile by exact stored
   assert.equal(store.parts[0].slack_message_ts, '203.1');
 });
 
+test('post coordinate survives a delivered-settlement failure and the next lease reconciles without reposting', async () => {
+  const privateValue = 'private-post-settlement-store-body';
+  const store = new FakeStore({ items: [workItem()] });
+  const markDelivered = store.markDigestPartDelivered.bind(store);
+  let rejectSettlement = true;
+  store.markDigestPartDelivered = async (input) => {
+    if (rejectSettlement) throw new Error(privateValue);
+    return markDelivered(input);
+  };
+  const slack = slackFake({
+    post: (input) => ({ ok: true, channel: input.channel, ts: '203.2', message: {} }),
+    find: (input) => ({ client_msg_id: input.clientMsgId, ts: '203.2' })
+  });
+
+  const first = await runDigestCycle({ store, slack, config: config(), now: NOW, leaseOwner: 'runner:a' });
+  assert.equal(first.status, 'failed');
+  assert.equal(first.error, 'digest_delivery_unconfirmed');
+  assert.equal(first.retryable, true);
+  assert.equal(store.parts[0].delivery_state, 'delivering');
+  assert.deepEqual(store.failures, []);
+  assert.doesNotMatch(JSON.stringify(first), new RegExp(privateValue));
+
+  rejectSettlement = false;
+  store.allowReclaim();
+  const second = await runDigestCycle({ store, slack, config: config(), now: NOW, leaseOwner: 'runner:b' });
+  assert.equal(second.status, 'delivered');
+  assert.equal(store.parts[0].slack_message_ts, '203.2');
+  assert.equal(slack.calls.filter(([name]) => name === 'postMessage').length, 1);
+  assert.equal(slack.calls.filter(([name]) => name === 'findMessageByClientId').length, 1);
+  assert.equal(
+    slack.calls.find(([name]) => name === 'postMessage')[1].clientMsgId,
+    slack.calls.find(([name]) => name === 'findMessageByClientId')[1].clientMsgId,
+    'the reclaimed lease resumes the same DB-issued client ID'
+  );
+});
+
+test('ambiguous-post reconciliation coordinate survives settlement failure and resumes without a second post', async () => {
+  const privateValue = 'private-reconcile-settlement-store-body';
+  const store = new FakeStore({ items: [workItem()] });
+  const markDelivered = store.markDigestPartDelivered.bind(store);
+  let rejectSettlement = true;
+  store.markDigestPartDelivered = async (input) => {
+    if (rejectSettlement) throw new Error(privateValue);
+    return markDelivered(input);
+  };
+  const slack = slackFake({
+    post() {
+      const error = new Error('private-ambiguous-slack-body');
+      error.ambiguous = true;
+      throw error;
+    },
+    find: (input) => ({ client_msg_id: input.clientMsgId, ts: '203.3' })
+  });
+
+  const first = await runDigestCycle({ store, slack, config: config(), now: NOW, leaseOwner: 'runner:a' });
+  assert.equal(first.error, 'digest_delivery_unconfirmed');
+  assert.equal(first.retryable, true);
+  assert.equal(store.parts[0].delivery_state, 'delivering');
+  assert.deepEqual(store.failures, []);
+  assert.doesNotMatch(JSON.stringify(first), new RegExp(privateValue));
+
+  rejectSettlement = false;
+  store.allowReclaim();
+  const second = await runDigestCycle({ store, slack, config: config(), now: NOW, leaseOwner: 'runner:b' });
+  assert.equal(second.status, 'delivered');
+  assert.equal(store.parts[0].slack_message_ts, '203.3');
+  assert.equal(slack.calls.filter(([name]) => name === 'postMessage').length, 1);
+  assert.equal(slack.calls.filter(([name]) => name === 'findMessageByClientId').length, 2);
+});
+
+test('all durable part coordinates survive finalization transport failure without failing or reposting', async () => {
+  const privateValue = 'private-finalize-store-body';
+  const store = new FakeStore({ items: [workItem()] });
+  const finalize = store.finalizeDigestRun.bind(store);
+  let rejectFinalize = true;
+  store.finalizeDigestRun = async (input) => {
+    if (rejectFinalize) throw new Error(privateValue);
+    return finalize(input);
+  };
+  const slack = slackFake();
+
+  const first = await runDigestCycle({ store, slack, config: config(), now: NOW, leaseOwner: 'runner:a' });
+  assert.equal(first.error, 'digest_delivery_unconfirmed');
+  assert.equal(first.retryable, true);
+  assert.equal(store.parts[0].delivery_state, 'delivered');
+  assert.deepEqual(store.failures, []);
+  assert.doesNotMatch(JSON.stringify(first), new RegExp(privateValue));
+
+  rejectFinalize = false;
+  store.allowReclaim();
+  const second = await runDigestCycle({ store, slack, config: config(), now: NOW, leaseOwner: 'runner:b' });
+  assert.equal(second.status, 'delivered');
+  assert.equal(slack.calls.filter(([name]) => name === 'postMessage').length, 1);
+});
+
 test('a newly claimed part posts even when the store reuses the prepared row object identity', async () => {
   const store = new FakeStore({ items: [workItem()] });
   const prepare = store.prepareDigestParts.bind(store);
@@ -467,6 +584,10 @@ test('delivery failure preserves every previous coordinate and never starts clea
     store, slack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:a'
   });
   assert.equal(result.status, 'failed');
+  assert.equal(result.retryable, true);
+  assert.equal(slack.calls.filter(([name]) => name === 'postMessage').length, 1, 'one cycle never loops on 429');
+  assert.equal(store.calls.filter(([name]) => name === 'claimDigestPartDelivery').length, 1);
+  assert.equal(store.parts[0].delivery_error, 'rate_limited');
   assert.deepEqual(store.previous.parts, previousParts);
   assert.equal(store.calls.some(([name]) => name === 'claimDigestPartCleanup'), false);
   assert.equal(slack.calls.some(([name]) => name === 'deleteMessage'), false);
@@ -520,6 +641,111 @@ test('delete failures are recorded and retried without changing delivered new di
   assert.equal(second.status, 'not_claimed');
   assert.deepEqual(second.cleanup, { attempted: 1, settled: 1, failed: 0 });
   assert.equal(store.cleanup.get(previousParts[1].id).state, 'already_absent');
+});
+
+test('durable backlog still cleans A through replaced B after C has already cleaned B', async () => {
+  const aId = '91000000-0000-4000-8000-000000000001';
+  const bId = '91000000-0000-4000-8000-000000000002';
+  const cId = '91000000-0000-4000-8000-000000000003';
+  const aPartId = '91000000-0000-4000-8000-000000000004';
+  const bPartId = '91000000-0000-4000-8000-000000000005';
+  const entries = [{
+    successor_digest_id: cId, previous_digest_id: bId, previous_cleanup_state: 'idle',
+    parts: [{
+      previous_part_id: bPartId, part_kind: 'ordinary', part_number: 1, part_count: 1,
+      slack_channel_id: 'CBACKLOG', slack_message_ts: '910.02', cleanup_state: 'idle'
+    }]
+  }, {
+    successor_digest_id: bId, previous_digest_id: aId, previous_cleanup_state: 'failed',
+    parts: [{
+      previous_part_id: aPartId, part_kind: 'ordinary', part_number: 1, part_count: 1,
+      slack_channel_id: 'CBACKLOG', slack_message_ts: '910.01', cleanup_state: 'failed'
+    }]
+  }];
+  const cleanupState = new Map(entries.flatMap((entry) => entry.parts.map((part) => [part.previous_part_id, {
+    state: part.cleanup_state, attempts: part.cleanup_state === 'failed' ? 1 : 0
+  }])));
+  const calls = [];
+  const store = {
+    async claimDigestRun(input) {
+      return {
+        claimed: false, created: false, previous_digest: null,
+        row: { id: RUN_ID, state: 'delivered', scheduled_at: input.scheduledAt, item_snapshot: [] }
+      };
+    },
+    async listDigestCleanupBacklog(input) {
+      calls.push(['list', structuredClone(input)]);
+      return entries.map((entry) => ({
+        ...entry,
+        parts: entry.parts.filter((part) => !['deleted', 'already_absent'].includes(
+          cleanupState.get(part.previous_part_id).state
+        ))
+      })).filter((entry) => entry.parts.length > 0).slice(0, input.limit);
+    },
+    async claimDigestPartCleanup(input) {
+      calls.push(['claim', structuredClone(input)]);
+      const entry = entries.find((candidate) => candidate.successor_digest_id === input.id
+        && candidate.previous_digest_id === input.previousDigestId
+        && candidate.parts.some((part) => part.previous_part_id === input.previousPartId));
+      assert.ok(entry, 'cleanup uses one exact durable successor link');
+      const state = cleanupState.get(input.previousPartId);
+      state.attempts += 1;
+      state.state = 'deleting';
+      state.token = `92000000-0000-4000-8000-${String(state.attempts).padStart(12, '0')}`;
+      return {
+        claimed: true, row: { state: input.id === bId ? 'replaced' : 'delivered' },
+        part: { cleanup_state: 'deleting', cleanup_attempts: state.attempts, cleanup_token: state.token }
+      };
+    },
+    async recordDigestPartCleanup(input) {
+      calls.push(['record', structuredClone(input)]);
+      const state = cleanupState.get(input.previousPartId);
+      assert.equal(input.cleanupToken, state.token);
+      assert.equal(input.expectedCleanupAttempts, state.attempts);
+      state.state = input.outcome;
+      return {
+        applied: true, row: { state: input.id === bId ? 'replaced' : 'delivered' },
+        part: { cleanup_state: input.outcome }
+      };
+    },
+    async listActionableWork() { throw new Error('not called'); },
+    async prepareDigestParts() { throw new Error('not called'); },
+    async claimDigestPartDelivery() { throw new Error('not called'); },
+    async markDigestPartDelivered() { throw new Error('not called'); },
+    async markDigestPartFailed() { throw new Error('not called'); },
+    async finalizeDigestRun() { throw new Error('not called'); },
+    async failDigestRun() { throw new Error('not called'); }
+  };
+  let failedAOnce = false;
+  const slack = slackFake({
+    remove(input) {
+      if (input.ts === '910.01' && !failedAOnce) {
+        failedAOnce = true;
+        const error = new Error('private deletion detail');
+        error.code = 'cant_delete_message';
+        throw error;
+      }
+      return { status: 'deleted' };
+    }
+  });
+
+  const first = await runDigestCycle({
+    store, slack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:c'
+  });
+  assert.equal(first.status, 'not_claimed');
+  assert.deepEqual(first.cleanup, { attempted: 2, settled: 1, failed: 1 });
+  assert.equal(cleanupState.get(bPartId).state, 'deleted', 'C cleans B first');
+  assert.equal(cleanupState.get(aPartId).state, 'failed', 'B to A remains durable after its first failure');
+
+  const second = await runDigestCycle({
+    store, slack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:sweep'
+  });
+  assert.deepEqual(second.cleanup, { attempted: 1, settled: 1, failed: 0 });
+  assert.equal(cleanupState.get(aPartId).state, 'deleted');
+  assert.equal(calls.filter(([name]) => name === 'claim').at(-1)[1].id, bId);
+  assert.deepEqual(slack.calls.filter(([name]) => name === 'deleteMessage').map(([, input]) => input.ts), [
+    '910.02', '910.01', '910.01'
+  ]);
 });
 
 test('invalid clocks, channels, lease bounds, and ambient time access fail before side effects', async () => {

@@ -1024,6 +1024,89 @@ test('digest part cleanup claim and terminal record carry exact rotating lease g
   });
 });
 
+test('listDigestCleanupBacklog requests one finite destination and accepts only content-free exact targets', async () => {
+  const row = {
+    successor_digest_id: DIGEST_ID,
+    previous_digest_id: PREVIOUS_DIGEST_ID,
+    previous_cleanup_state: 'failed',
+    parts: [{
+      previous_part_id: PREVIOUS_PART_ID,
+      part_kind: 'ordinary',
+      part_number: 1,
+      part_count: 1,
+      slack_channel_id: 'COLD',
+      slack_message_ts: '100.10',
+      cleanup_state: 'failed'
+    }]
+  };
+  const fetch = createFetch([
+    response({ data: [row] }),
+    response({ data: [{ ...row, payload: serviceRoleKey }] }),
+    response({ data: [{ ...row, parts: Array.from({ length: 51 }, () => row.parts[0]) }] })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  assert.deepEqual(await store.listDigestCleanupBacklog({ destinationKey: 'slack:CINBOX', limit: 10 }), [row]);
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/list_digest_cleanup_backlog_v2');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_destination_key: 'slack:CINBOX', p_limit: 10
+  });
+  await assert.rejects(
+    store.listDigestCleanupBacklog({ destinationKey: 'slack:CINBOX', limit: 10 }),
+    (error) => /response invalid/i.test(error.message) && !error.message.includes(serviceRoleKey)
+  );
+  await assert.rejects(
+    store.listDigestCleanupBacklog({ destinationKey: 'slack:CINBOX', limit: 10 }),
+    /response invalid/i
+  );
+  await assert.rejects(store.listDigestCleanupBacklog({ destinationKey: 'slack:CINBOX', limit: 11 }), /input is invalid/i);
+});
+
+test('cleanup claim and record preserve a confirmed replaced successor response shape', async () => {
+  const deletingPart = digestPartRow({
+    id: PREVIOUS_PART_ID, digest_run_id: PREVIOUS_DIGEST_ID,
+    delivery_state: 'delivered', delivery_attempts: 1,
+    delivery_claimed_at: '2026-08-29T02:00:01.000Z', slack_channel_id: 'COLD',
+    slack_message_ts: '100.10', delivered_at: '2026-08-29T02:00:05.000Z',
+    cleanup_state: 'deleting', cleanup_attempts: 2, cleanup_owner: 'bridge:replaced',
+    cleanup_token: CLEANUP_TOKEN, cleanup_expires_at: '2026-08-29T03:02:00.000Z',
+    cleanup_attempted_at: '2026-08-29T03:00:10.000Z'
+  });
+  const failedPart = {
+    ...deletingPart, cleanup_state: 'failed', cleanup_owner: null, cleanup_token: null,
+    cleanup_expires_at: null, cleanup_error: 'rate_limited'
+  };
+  const replaced = digestRow({
+    state: 'replaced', lease_owner: null, lease_token: null, lease_expires_at: null,
+    delivered_at: '2026-08-29T03:00:05.000Z', previous_cleanup_state: 'deleting',
+    previous_cleanup_error: null, previous_deleted_at: null
+  });
+  const fetch = createFetch([
+    response({ data: { claimed: true, row: replaced, part: deletingPart } }),
+    response({ data: {
+      applied: true,
+      row: { ...replaced, previous_cleanup_state: 'failed', previous_cleanup_error: 'rate_limited' },
+      part: failedPart
+    } })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+  const claimed = await store.claimDigestPartCleanup({
+    id: DIGEST_ID, previousDigestId: PREVIOUS_DIGEST_ID, previousPartId: PREVIOUS_PART_ID,
+    cleanupOwner: 'bridge:replaced', leaseSeconds: 120
+  });
+  const recorded = await store.recordDigestPartCleanup({
+    id: DIGEST_ID, previousDigestId: PREVIOUS_DIGEST_ID, previousPartId: PREVIOUS_PART_ID,
+    cleanupOwner: 'bridge:replaced', cleanupToken: CLEANUP_TOKEN,
+    expectedCleanupAttempts: 2, outcome: 'failed', error: 'rate_limited'
+  });
+  assert.equal(claimed.row.state, 'replaced');
+  assert.equal(recorded.row.state, 'replaced');
+});
+
 test('digest part cleanup rejects secrets, stale generations, and malformed identities generically', async () => {
   const fetch = createFetch();
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
