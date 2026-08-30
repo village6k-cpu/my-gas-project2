@@ -30,6 +30,7 @@ const AUTOMATION_STATES = new Set(['not_attempted', 'running', 'succeeded', 'fai
 const PRIORITY_RANK = Object.freeze({ low: 0, normal: 1, urgent: 2, p0: 3 });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
+const VERIFIED_AUTO_REPLY_REASON = /^sent_via_(?:chrome|devtools)_verified(?:_|$)/;
 const MAX_ACTION_VALUE_LENGTH = 1000;
 const PAYLOAD_STRING_LIMITS = Object.freeze({
   action_family: 100,
@@ -243,12 +244,14 @@ export function buildHumanWorkCandidates(input = {}) {
   }
 
   const autoReplyResult = isRecord(input.autoReplyResult) ? input.autoReplyResult : {};
-  const verifiedReason = boundedText(autoReplyResult?.sendResult?.reason, 100);
+  const verifiedReason = boundedText(autoReplyResult.reason, 100);
+  const nestedVerifiedReason = boundedText(autoReplyResult?.sendResult?.reason, 100);
   const verifiedReply = autoReplyResult.sent === true
     && (autoReplyResult.readbackConfirmed === true
       || autoReplyResult.readback_confirmed === true
+      || VERIFIED_AUTO_REPLY_REASON.test(verifiedReason)
       || (autoReplyResult?.sendResult?.sent === true
-        && /^sent_via_(?:chrome|devtools)_verified(?:_|$)/.test(verifiedReason)));
+        && VERIFIED_AUTO_REPLY_REASON.test(nestedVerifiedReason)));
   const completedKeyValues = verifiedReply
     ? [
         autoReplyResult.completed_work_key,

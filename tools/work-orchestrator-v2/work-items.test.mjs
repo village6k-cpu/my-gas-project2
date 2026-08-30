@@ -125,6 +125,31 @@ test('one reply obligation uses the real verified send-result contract as a safe
   assert.deepEqual(candidates.map((item) => item.work_key), ['trade:1:document']);
 });
 
+test('one reply obligation accepts the current top-level verified send result only', () => {
+  const verified = buildHumanWorkCandidates({
+    now: NOW,
+    autoReplyResult: { sent: true, reason: 'sent_via_chrome_verified' },
+    followUpRows: [
+      { work_key: 'room:1:reply', type: 'reply_needed', requires_human_action: true },
+      { work_key: 'trade:1:payment', type: 'payment_check', requires_human_action: true }
+    ]
+  });
+  const unverified = buildHumanWorkCandidates({
+    now: NOW,
+    autoReplyResult: { sent: true, reason: 'send_button_clicked' },
+    followUpRows: [
+      { work_key: 'room:1:reply', type: 'reply_needed', requires_human_action: true },
+      { work_key: 'trade:1:payment', type: 'payment_check', requires_human_action: true }
+    ]
+  });
+
+  assert.deepEqual(verified.map((item) => item.work_key), ['trade:1:payment']);
+  assert.deepEqual(unverified.map((item) => item.work_key), [
+    'room:1:reply',
+    'trade:1:payment'
+  ]);
+});
+
 test('a sent reply without authoritative readback does not suppress human work', () => {
   const candidates = buildHumanWorkCandidates({
     now: NOW,
