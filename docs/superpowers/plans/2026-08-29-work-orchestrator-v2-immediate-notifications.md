@@ -280,6 +280,8 @@ git commit -m "feat: deliver idempotent immediate notifications"
 - Modify: `tools/kakao-dom-bridge/server.mjs:3903-4000,4040-4130`
 - Modify: `tools/kakao-dom-bridge/server.test.mjs`
 - Modify: `tools/kakao-dom-bridge/.env.example`
+- Modify: `tools/work-orchestrator-v2/supabase-store.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
 
 **Interfaces:**
 - Consumes: `ensureImmediateNotification` and the existing accepted normalized event.
@@ -296,6 +298,10 @@ assert.equal(response.statusCode, 202);
 
 Add a worker-slow test where the response includes the delivered notification before any Hermes promise resolves, a duplicate event test with one Slack post, and a failed-delivery test expecting HTTP 503 plus no worker scheduling. The 503 is intentional: accepting an event without the mandatory notice would violate the first-notification invariant.
 
+Add the exact-retry recovery cases required by Ruling 4: `503` on a new revision, the same exact source event retry finding its existing receipt and completing delivery before legacy scheduling, an already-delivered duplicate posting zero times, and a `changed=false` event with a different event hash and no exact receipt posting zero times. A `503` response alone does not schedule a retry; recovery depends on the watcher/source retrying the exact event key.
+
+Add a store RED test for a bounded oldest-backlog query that selects only `created_at` from at most one `pending|delivering|failed` receipt. Health age must come from this durable readback, not process memory.
+
 - [ ] **Step 2: Run RED**
 
 ```powershell
@@ -308,11 +314,15 @@ Expected: FAIL because `handleEvent` does not call the v2 delivery path.
 
 When `WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=1`:
 
-1. require `WORK_ORCHESTRATOR_V2_INBOX_CHANNEL_ID` and Slack token at startup;
+1. require a locally constructed store client and Slack client plus non-empty `WORK_ORCHESTRATOR_V2_INBOX_CHANNEL_ID` and Slack token at startup; construction proves local configuration only, never connectivity;
 2. call `ensureImmediateNotification` after event acceptance and before `writeSupabaseEvent`;
 3. return 503 with `{ok:false,error:'immediate_notification_unconfirmed',eventHash}` if it is not delivered;
 4. append a bounded error record without message content;
 5. leave `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED`, `KAKAO_FOLLOW_UP_ITEMS_ENABLED`, and `SLACK_AGENT_CARD_DELIVERY_ENABLED` untouched.
+6. on `changed=false`, look up the receipt by this exact normalized source event key before calling the state machine; resume only when that receipt already exists, and never create or notify for an arbitrary stale/different event;
+7. after confirmed exact-retry recovery, continue the unchanged legacy Supabase write and worker scheduling path.
+
+Parse mention IDs only from the existing server-owned `SLACK_CARD_MENTION_USER_IDS`; the immediate notice builder remains the strict validator. Construction and tests perform no network calls.
 
 Add health fields:
 
@@ -323,6 +333,8 @@ state.workOrchestrator.immediateDuplicates
 state.workOrchestrator.immediateFailed
 state.workOrchestrator.oldestPendingNotificationAgeMs
 ```
+
+Also expose explicitly named local-configuration and durable backlog-readback states without IDs or content. Refresh `oldestPendingNotificationAgeMs` from the bounded store query above; query failure returns `null` plus a generic readback error state.
 
 - [ ] **Step 4: Run focused and full GREEN**
 

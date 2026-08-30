@@ -236,6 +236,22 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const { data } = await request(`message_notification_receipts?${query}`);
       return Array.isArray(data) ? data[0] || null : null;
     },
+    getOldestPendingNotificationCreatedAt: async () => {
+      const query = new URLSearchParams({
+        select: 'created_at',
+        notification_state: 'in.(pending,delivering,failed)',
+        order: 'created_at.asc',
+        limit: '1'
+      });
+      const { data } = await request(`message_notification_receipts?${query}`);
+      const row = Array.isArray(data) ? data[0] || null : null;
+      if (!row) return null;
+      const createdAt = typeof row.created_at === 'string' ? row.created_at.trim() : '';
+      if (!createdAt || Number.isNaN(Date.parse(createdAt))) {
+        throw new Error(`${REQUEST_ERROR_PREFIX}: response invalid`);
+      }
+      return new Date(createdAt).toISOString();
+    },
     transitionNotification,
     claimNotificationDelivery: async (input = {}) => {
       let id;

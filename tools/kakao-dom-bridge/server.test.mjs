@@ -32,6 +32,7 @@ const {
   createGatewayFailureNotificationCoordinator,
   createGatewayResultApplicationCoordinator,
   createAiJobDispatcher,
+  createWorkOrchestratorImmediateRuntime,
   createWorkOrchestratorShadowRuntime,
   configForHermesTransport,
   classifyInitialScanIngress,
@@ -2165,12 +2166,13 @@ test('room revisions continue after the durable Gateway revision when the bridge
   assert.equal(newer.revision, 9);
 });
 
-test('Work Orchestrator shadow ignores heartbeat, diagnostic, container, non-message, ignored-room, and stale events', async () => {
+test('immediate notification ignores heartbeat, diagnostic, container, non-message, ignored-room, and stale events', async () => {
   const calls = [];
   const shadowRuntime = { recordAccepted: () => calls.push('shadow') };
   const dependencies = {
     appendNdjson: () => {},
     shadowRuntime,
+    immediateRuntime: { enabled: true, deliverAccepted: () => calls.push('immediate') },
     writeSupabaseEvent: async () => calls.push('legacy-write'),
     scheduleDebouncedJob: () => calls.push('legacy-queue')
   };
@@ -2189,6 +2191,390 @@ test('Work Orchestrator shadow ignores heartbeat, diagnostic, container, non-mes
   }
 
   assert.deepEqual(calls, []);
+});
+
+function immediateNotificationEvent(overrides = {}) {
+  return {
+    reason: 'dom_event',
+    roomKey: 'chat:immediate-notification',
+    previewText: 'new camera question',
+    customerName: '테스트 고객',
+    displayTime: '오후 4:00',
+    eventHash: 'immediate-notification-event-1',
+    detectedAt: '2026-08-29T07:00:00.000Z',
+    ...overrides
+  };
+}
+
+function immediateNotificationRuntime({ ensure, store = {}, slack = {}, now } = {}) {
+  return createWorkOrchestratorImmediateRuntime({
+    config: { immediateEnabled: true, inboxChannelId: 'CINBOX', mentionUserIds: ['UOWNER'] },
+    store: {
+      getNotificationByEventKey: async () => null,
+      getOldestPendingNotificationCreatedAt: async () => null,
+      ...store
+    },
+    slack: {
+      postMessage: async () => ({ ok: true, channel: 'CINBOX', ts: '100.1', message: {} }),
+      findMessageByClientId: async () => null,
+      ...slack
+    },
+    slackToken: 'test-slack-token',
+    ensure,
+    now
+  });
+}
+
+test('immediate notification follows acceptance, precedes legacy persistence, and gates HTTP 202', async () => {
+  const callOrder = [];
+  const runtime = immediateNotificationRuntime({
+    ensure: async ({ event }) => {
+      assert.equal(event.roomRevision, 1);
+      callOrder.push('immediate-notice');
+      return {
+        status: 'delivered',
+        receipt: { id: 'receipt-1' },
+        delivery: { channel: 'CINBOX', ts: '100.1' },
+        reconciled: false
+      };
+    }
+  });
+  const event = immediateNotificationEvent({ roomKey: 'chat:immediate-order' });
+  const response = await postShadowEvent(event, {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    onRoomRevisionAccepted: () => {
+      callOrder.push('accept-room-revision');
+    },
+    writeSupabaseEvent: async () => callOrder.push('legacy-supabase-event'),
+    scheduleDebouncedJob: () => callOrder.push('schedule-worker')
+  });
+
+  assert.deepEqual(callOrder, ['accept-room-revision', 'immediate-notice', 'legacy-supabase-event', 'schedule-worker']);
+  assert.equal(response.status, 202);
+  assert.deepEqual(response.body.immediateNotification, {
+    status: 'delivered',
+    duplicate: false,
+    reconciled: false
+  });
+});
+
+test('immediate notification responds after delivery without awaiting a slow Hermes worker promise', async () => {
+  let resolveWorker;
+  let workerResolved = false;
+  const workerPending = new Promise((resolve) => {
+    resolveWorker = () => {
+      workerResolved = true;
+      resolve();
+    };
+  });
+  const runtime = immediateNotificationRuntime({
+    ensure: async () => ({
+      status: 'delivered', receipt: { id: 'receipt-slow' },
+      delivery: { channel: 'CINBOX', ts: '101.1' }, reconciled: false
+    })
+  });
+
+  try {
+    const response = await Promise.race([
+      postShadowEvent(immediateNotificationEvent({
+        roomKey: 'chat:immediate-slow-worker',
+        eventHash: 'immediate-slow-worker-1'
+      }), {
+        appendNdjson: () => {},
+        shadowRuntime: { recordAccepted: () => null },
+        immediateRuntime: runtime,
+        writeSupabaseEvent: async () => ({ ok: true }),
+        scheduleDebouncedJob: () => workerPending
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('HTTP response waited for Hermes')), 200))
+    ]);
+
+    assert.equal(response.status, 202);
+    assert.equal(response.body.immediateNotification.status, 'delivered');
+    assert.equal(workerResolved, false);
+  } finally {
+    resolveWorker();
+    await workerPending;
+  }
+});
+
+test('immediate notification failure returns typed 503 with content-free metadata and no legacy queue', async () => {
+  const calls = [];
+  const privateValue = 'private-customer-room-preview-token-channel';
+  const runtime = immediateNotificationRuntime({
+    ensure: async () => {
+      const error = new Error(privateValue);
+      error.code = privateValue;
+      throw error;
+    }
+  });
+
+  const response = await postShadowEvent(immediateNotificationEvent({
+    roomKey: `chat:${privateValue}`,
+    previewText: privateValue,
+    customerName: privateValue,
+    eventHash: 'immediate-failure-1'
+  }), {
+    appendNdjson: (file, value) => calls.push({ file, value }),
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push({ file: 'legacy-write' }),
+    scheduleDebouncedJob: () => calls.push({ file: 'legacy-queue' })
+  });
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(response.body, {
+    ok: false,
+    error: 'immediate_notification_unconfirmed',
+    eventHash: 'immediate-failure-1'
+  });
+  assert.equal(calls.some(({ file }) => ['legacy-write', 'legacy-queue'].includes(file)), false);
+  const failureLog = calls.find(({ file, value }) => file === 'errors.ndjson' && value.type === 'immediate_notification');
+  assert.ok(failureLog);
+  assert.deepEqual(Object.keys(failureLog.value).sort(), ['at', 'code', 'eventHash', 'type']);
+  assert.doesNotMatch(JSON.stringify(failureLog), new RegExp(privateValue));
+  assert.equal(runtime.state.immediateFailed, 1);
+});
+
+test('immediate notification exact retry resumes an existing receipt, delivers once, then preserves duplicate scheduling', async () => {
+  const calls = [];
+  let receipt = null;
+  let failFirstDeliveryClaim = true;
+  const slackPosts = [];
+  const exactLookups = [];
+  const event = immediateNotificationEvent({
+    roomKey: 'chat:immediate-exact-retry',
+    eventHash: 'immediate-exact-retry-1'
+  });
+  const runtime = immediateNotificationRuntime({
+    store: {
+      claimNotificationReceipt: async (input) => {
+        const created = !receipt;
+        if (!receipt) {
+          receipt = {
+            id: 'receipt-retry',
+            source_event_key: input.sourceEventKey,
+            client_message_id: input.clientMessageId,
+            notification_state: 'pending',
+            delivery_attempts: 0,
+            created_at: input.receivedAt
+          };
+        }
+        return { created, row: { ...receipt } };
+      },
+      getNotificationByEventKey: async (eventKey) => {
+        exactLookups.push(eventKey);
+        return receipt?.source_event_key === eventKey ? { ...receipt } : null;
+      },
+      claimNotificationDelivery: async ({ expectedDeliveryAttempts }) => {
+        if (failFirstDeliveryClaim) {
+          failFirstDeliveryClaim = false;
+          throw new Error('private store outage');
+        }
+        if (!['pending', 'failed'].includes(receipt.notification_state)
+          || receipt.delivery_attempts !== expectedDeliveryAttempts) {
+          return { applied: false, row: null };
+        }
+        receipt = {
+          ...receipt,
+          notification_state: 'delivering',
+          delivery_attempts: receipt.delivery_attempts + 1,
+          last_delivery_error: null
+        };
+        return { applied: true, row: { ...receipt } };
+      },
+      markNotificationDelivered: async ({ channelId, messageTs, deliveredAt }) => {
+        if (receipt.notification_state !== 'delivering') return { applied: false, row: null };
+        receipt = {
+          ...receipt,
+          notification_state: 'delivered',
+          slack_channel_id: channelId,
+          slack_message_ts: messageTs,
+          delivered_at: deliveredAt
+        };
+        return { applied: true, row: { ...receipt } };
+      },
+      markNotificationFailed: async () => {
+        throw new Error('not expected');
+      }
+    },
+    slack: {
+      postMessage: async (input) => {
+        slackPosts.push(input);
+        return { ok: true, channel: 'CINBOX', ts: '102.1', message: {} };
+      },
+      findMessageByClientId: async () => {
+        throw new Error('not expected');
+      }
+    }
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push('legacy-supabase-event'),
+    scheduleDebouncedJob: () => calls.push('schedule-worker')
+  };
+
+  const failed = await postShadowEvent(event, dependencies);
+  const recovered = await postShadowEvent(event, dependencies);
+  const duplicate = await postShadowEvent(event, dependencies);
+
+  assert.equal(failed.status, 503);
+  assert.equal(recovered.status, 202);
+  assert.equal(duplicate.status, 202);
+  assert.equal(slackPosts.length, 1);
+  assert.equal(slackPosts[0].clientMsgId, receipt.client_message_id);
+  assert.deepEqual(exactLookups, ['immediate-exact-retry-1', 'immediate-exact-retry-1']);
+  assert.deepEqual(calls, [
+    'legacy-supabase-event',
+    'schedule-worker',
+    'legacy-supabase-event',
+    'schedule-worker'
+  ]);
+  assert.deepEqual({
+    delivered: runtime.state.immediateDelivered,
+    duplicates: runtime.state.immediateDuplicates,
+    failed: runtime.state.immediateFailed
+  }, { delivered: 1, duplicates: 1, failed: 1 });
+});
+
+test('immediate notification changed-false event with a different hash and no receipt posts zero', async () => {
+  const ensuredHashes = [];
+  const lookedUpHashes = [];
+  const runtime = immediateNotificationRuntime({
+    store: {
+      getNotificationByEventKey: async (eventKey) => {
+        lookedUpHashes.push(eventKey);
+        return null;
+      }
+    },
+    ensure: async ({ event }) => {
+      ensuredHashes.push(event.eventHash);
+      return {
+        status: 'delivered', receipt: { id: 'receipt-first' },
+        delivery: { channel: 'CINBOX', ts: '103.1' }, reconciled: false
+      };
+    }
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => ({ ok: true }),
+    scheduleDebouncedJob: () => {}
+  };
+  const first = immediateNotificationEvent({
+    roomKey: 'chat:immediate-different-hash',
+    eventHash: 'immediate-different-hash-a'
+  });
+  const staleDuplicate = { ...first, eventHash: 'immediate-different-hash-b' };
+
+  await postShadowEvent(first, dependencies);
+  const response = await postShadowEvent(staleDuplicate, dependencies);
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(ensuredHashes, ['immediate-different-hash-a']);
+  assert.deepEqual(lookedUpHashes, ['immediate-different-hash-b']);
+  assert.equal('immediateNotification' in response.body, false);
+});
+
+test('immediate notification OFF makes zero store or Slack calls and preserves legacy duplicate behavior', async () => {
+  const calls = [];
+  const runtime = createWorkOrchestratorImmediateRuntime({
+    config: { immediateEnabled: false },
+    store: new Proxy({}, { get: () => () => { throw new Error('store must not be called'); } }),
+    slack: new Proxy({}, { get: () => () => { throw new Error('Slack must not be called'); } }),
+    ensure: async () => { throw new Error('immediate ensure must not be called'); }
+  });
+  const event = immediateNotificationEvent({
+    roomKey: 'chat:immediate-off',
+    eventHash: 'immediate-off-1'
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: (_, roomVersion) => calls.push(`shadow:${roomVersion.changed}`) },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  };
+
+  const first = await postShadowEvent(event, dependencies);
+  const duplicate = await postShadowEvent(event, dependencies);
+
+  assert.deepEqual(first.body, { ok: true, roomKey: 'chat:immediate-off', eventHash: 'immediate-off-1' });
+  assert.deepEqual(duplicate.body, first.body);
+  assert.deepEqual(calls, ['shadow:true', 'legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
+});
+
+test('immediate notification startup is locally fail-closed and performs no network at construction', () => {
+  const store = {
+    getNotificationByEventKey: async () => null,
+    getOldestPendingNotificationCreatedAt: async () => null
+  };
+  const slack = {
+    postMessage: async () => { throw new Error('not called'); },
+    findMessageByClientId: async () => { throw new Error('not called'); }
+  };
+  const enabled = { immediateEnabled: true, inboxChannelId: 'CINBOX' };
+
+  assert.throws(() => createWorkOrchestratorImmediateRuntime({ config: enabled, store, slack, slackToken: '' }), /local configuration is missing/i);
+  assert.throws(() => createWorkOrchestratorImmediateRuntime({ config: enabled, store: null, slack, slackToken: 'test' }), /local configuration is missing/i);
+  assert.throws(() => createWorkOrchestratorImmediateRuntime({ config: { ...enabled, inboxChannelId: '' }, store, slack, slackToken: 'test' }), /local configuration is missing/i);
+  assert.throws(() => createWorkOrchestratorImmediateRuntime({ config: enabled, store, slack: null, slackToken: 'test' }), /local configuration is missing/i);
+
+  const runtime = immediateNotificationRuntime({
+    ensure: async () => { throw new Error('not called'); }
+  });
+  assert.equal(runtime.localConfigReady, true);
+  assert.equal(runtime.state.immediateDelivered, 0);
+  assert.equal(runtime.state.immediateBacklogReadback, 'not_checked');
+});
+
+test('immediate notification health uses durable backlog age and fails content-free on query errors', async () => {
+  const privateValue = 'private-backlog-customer-room-token-channel';
+  const runtime = immediateNotificationRuntime({
+    ensure: async () => { throw new Error('not called'); },
+    store: {
+      getOldestPendingNotificationCreatedAt: async () => '2026-08-29T06:59:30.000Z'
+    },
+    now: () => new Date('2026-08-29T07:00:00.000Z')
+  });
+  await runtime.refreshBacklogHealth();
+  assert.deepEqual(buildWorkOrchestratorHealthState(runtime.state), {
+    shadowClaims: 0,
+    shadowDuplicates: 0,
+    shadowErrors: 0,
+    lastShadowReceipt: null,
+    immediateDelivered: 0,
+    immediateDuplicates: 0,
+    immediateFailed: 0,
+    oldestPendingNotificationAgeMs: 30_000,
+    immediateBacklogReadback: 'ok'
+  });
+
+  runtime.store.getOldestPendingNotificationCreatedAt = async () => { throw new Error(privateValue); };
+  await runtime.refreshBacklogHealth();
+  const health = {
+    config: buildHealthConfig({
+      workOrchestrator: { immediateEnabled: true },
+      workOrchestratorImmediateLocalConfigReady: true
+    }).workOrchestrator,
+    state: buildWorkOrchestratorHealthState({
+      ...runtime.state,
+      payload: privateValue,
+      roomKey: privateValue,
+      channelId: privateValue,
+      token: privateValue
+    })
+  };
+  assert.equal(health.config.immediateEnabled, true);
+  assert.equal(health.config.immediateLocalConfigReady, true);
+  assert.equal(health.state.oldestPendingNotificationAgeMs, null);
+  assert.equal(health.state.immediateBacklogReadback, 'error');
+  assert.doesNotMatch(JSON.stringify(health), new RegExp(privateValue));
 });
 
 test('Work Orchestrator shadow starts after revision acceptance and does not block the legacy queue', async () => {
@@ -2255,7 +2641,12 @@ test('Work Orchestrator shadow failure increments bounded health state and still
       at: '2026-08-29T04:00:01.000Z',
       outcome: 'error',
       error: 'shadow_receipt_store_failed'
-    }
+    },
+    immediateDelivered: 0,
+    immediateDuplicates: 0,
+    immediateFailed: 0,
+    oldestPendingNotificationAgeMs: null,
+    immediateBacklogReadback: 'disabled'
   });
   assert.doesNotMatch(JSON.stringify(buildWorkOrchestratorHealthState(runtime.state)), /private-customer-payload/);
 });
@@ -2295,7 +2686,12 @@ test('Work Orchestrator shadow skips a rejected duplicate revision without suppr
     lastShadowReceipt: {
       at: '2026-08-29T04:02:01.000Z',
       outcome: 'duplicate'
-    }
+    },
+    immediateDelivered: 0,
+    immediateDuplicates: 0,
+    immediateFailed: 0,
+    oldestPendingNotificationAgeMs: null,
+    immediateBacklogReadback: 'disabled'
   });
   assert.doesNotMatch(JSON.stringify(runtime.state.lastShadowReceipt), /private-row-id/);
 });
@@ -2330,7 +2726,8 @@ test('Work Orchestrator shadow health exposes only flags, readiness, counters, t
       digestEnabled: false,
       cleanupEnabled: false,
       storeConfigured: false,
-      shadowReady: false
+      shadowReady: false,
+      immediateLocalConfigReady: false
     },
     state: {
       shadowClaims: 0,
@@ -2340,7 +2737,12 @@ test('Work Orchestrator shadow health exposes only flags, readiness, counters, t
         at: '2026-08-29T04:00:00.000Z',
         outcome: 'configuration_error',
         error: 'shadow_store_unavailable'
-      }
+      },
+      immediateDelivered: 0,
+      immediateDuplicates: 0,
+      immediateFailed: 0,
+      oldestPendingNotificationAgeMs: null,
+      immediateBacklogReadback: 'disabled'
     }
   });
   assert.doesNotMatch(
@@ -2372,7 +2774,12 @@ test('Work Orchestrator shadow health fails closed on arbitrary internal receipt
       at: '',
       outcome: 'error',
       error: 'shadow_receipt_failed'
-    }
+    },
+    immediateDelivered: 0,
+    immediateDuplicates: 0,
+    immediateFailed: 0,
+    oldestPendingNotificationAgeMs: null,
+    immediateBacklogReadback: 'disabled'
   });
   assert.doesNotMatch(JSON.stringify(health), /private-customer-payload|sourceEventKey|roomKey/);
 });

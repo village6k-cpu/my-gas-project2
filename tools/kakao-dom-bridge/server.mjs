@@ -24,8 +24,10 @@ import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { buildGatewayHealthReadback, createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
 import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
-import { loadWorkOrchestratorConfig } from '../work-orchestrator-v2/contracts.mjs';
+import { loadWorkOrchestratorConfig, notificationReceiptInput } from '../work-orchestrator-v2/contracts.mjs';
+import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-notifications.mjs';
 import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shadow-receipts.mjs';
+import { createSlackClient } from '../work-orchestrator-v2/slack-client.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
 
 export { buildGatewayHealthReadback } from './hermes-gateway-http.mjs';
@@ -183,7 +185,9 @@ export function buildHealthConfig(config = {}) {
       cleanupEnabled: Boolean(config.workOrchestrator.cleanupEnabled),
       storeConfigured: Boolean(config.workOrchestratorStoreConfigured),
       // True means shadow writes are disabled or the local store client was constructed; it does not prove Supabase connectivity.
-      shadowReady: Boolean(config.workOrchestratorShadowReady)
+      shadowReady: Boolean(config.workOrchestratorShadowReady),
+      // This proves local values and clients were constructed only. Durable-store and Slack connectivity require separate readback.
+      immediateLocalConfigReady: Boolean(config.workOrchestratorImmediateLocalConfigReady)
     };
   }
   return health;
@@ -208,6 +212,13 @@ function safeShadowOutcome(value) {
 
 export function buildWorkOrchestratorHealthState(value = {}) {
   const receipt = value.lastShadowReceipt;
+  const backlogReadback = ['disabled', 'not_checked', 'ok', 'error'].includes(value.immediateBacklogReadback)
+    ? value.immediateBacklogReadback
+    : 'disabled';
+  const hasOldestAge = value.oldestPendingNotificationAgeMs !== null
+    && value.oldestPendingNotificationAgeMs !== undefined
+    && value.oldestPendingNotificationAgeMs !== '';
+  const oldestAge = Number(value.oldestPendingNotificationAgeMs);
   return {
     shadowClaims: Math.max(0, Number(value.shadowClaims || 0)),
     shadowDuplicates: Math.max(0, Number(value.shadowDuplicates || 0)),
@@ -218,7 +229,12 @@ export function buildWorkOrchestratorHealthState(value = {}) {
           outcome: safeShadowOutcome(receipt.outcome),
           ...(receipt.error ? { error: genericShadowError(receipt.error) } : {})
         }
-      : null
+      : null,
+    immediateDelivered: Math.max(0, Number(value.immediateDelivered || 0)),
+    immediateDuplicates: Math.max(0, Number(value.immediateDuplicates || 0)),
+    immediateFailed: Math.max(0, Number(value.immediateFailed || 0)),
+    oldestPendingNotificationAgeMs: hasOldestAge && Number.isFinite(oldestAge) && oldestAge >= 0 ? oldestAge : null,
+    immediateBacklogReadback: backlogReadback
   };
 }
 
@@ -288,6 +304,158 @@ export function createWorkOrchestratorShadowRuntime({
     settled() {
       return Promise.allSettled([...active]);
     }
+  };
+}
+
+const IMMEDIATE_FAILURE_CODES = new Set([
+  'attempts_exhausted',
+  'claim_conflict',
+  'clock_unavailable',
+  'delivery_persistence_failed',
+  'history_no_match',
+  'history_unavailable',
+  'post_rejected',
+  'receipt_identity_invalid',
+  'receipt_persistence_failed',
+  'receipt_state_unavailable',
+  'receipt_unavailable'
+]);
+
+function genericImmediateFailureCode(value) {
+  return IMMEDIATE_FAILURE_CODES.has(value) ? value : 'immediate_notification_failed';
+}
+
+function immediateRuntimeDate(now) {
+  const value = now();
+  const date = value instanceof Date ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error('Immediate notification clock is invalid');
+  return date;
+}
+
+export function createWorkOrchestratorImmediateRuntime({
+  config = {},
+  store = null,
+  slack = null,
+  slackToken = '',
+  ensure = ensureImmediateNotification,
+  now = () => new Date(),
+  state: sharedState = null
+} = {}) {
+  const enabled = config.immediateEnabled === true;
+  const inboxChannelId = String(config.inboxChannelId || '').trim();
+  const storeReady = Boolean(
+    store
+    && typeof store.getNotificationByEventKey === 'function'
+    && typeof store.getOldestPendingNotificationCreatedAt === 'function'
+  );
+  const slackReady = Boolean(
+    slack
+    && typeof slack.postMessage === 'function'
+    && typeof slack.findMessageByClientId === 'function'
+  );
+  const localConfigReady = Boolean(
+    enabled
+    && storeReady
+    && slackReady
+    && String(slackToken || '').trim()
+    && inboxChannelId
+    && typeof ensure === 'function'
+  );
+  if (enabled && !localConfigReady) {
+    throw new Error('Work Orchestrator immediate notification local configuration is missing');
+  }
+
+  const runtimeState = sharedState && typeof sharedState === 'object' ? sharedState : {};
+  runtimeState.shadowClaims = Math.max(0, Number(runtimeState.shadowClaims || 0));
+  runtimeState.shadowDuplicates = Math.max(0, Number(runtimeState.shadowDuplicates || 0));
+  runtimeState.shadowErrors = Math.max(0, Number(runtimeState.shadowErrors || 0));
+  runtimeState.lastShadowReceipt = runtimeState.lastShadowReceipt || null;
+  runtimeState.immediateDelivered = Math.max(0, Number(runtimeState.immediateDelivered || 0));
+  runtimeState.immediateDuplicates = Math.max(0, Number(runtimeState.immediateDuplicates || 0));
+  runtimeState.immediateFailed = Math.max(0, Number(runtimeState.immediateFailed || 0));
+  runtimeState.oldestPendingNotificationAgeMs = null;
+  runtimeState.immediateBacklogReadback = enabled ? 'not_checked' : 'disabled';
+
+  const fail = (error) => {
+    runtimeState.immediateFailed += 1;
+    const wrapped = new Error('Immediate notification is unconfirmed');
+    wrapped.code = genericImmediateFailureCode(error?.code);
+    throw wrapped;
+  };
+
+  const deliverAccepted = async (event, roomVersion = {}) => {
+    if (!enabled) return null;
+    try {
+      if (roomVersion.changed !== true) {
+        const sourceEventKey = notificationReceiptInput(event).sourceEventKey;
+        let existing;
+        try {
+          existing = await store.getNotificationByEventKey(sourceEventKey);
+        } catch {
+          const lookupError = new Error('Exact notification receipt lookup failed');
+          lookupError.code = 'delivery_persistence_failed';
+          throw lookupError;
+        }
+        if (!existing) return { status: 'skipped', reason: 'duplicate_without_receipt' };
+      }
+
+      const result = await ensure({
+        event,
+        config: {
+          inboxChannelId,
+          mentionUserIds: Array.isArray(config.mentionUserIds) ? config.mentionUserIds : []
+        },
+        store,
+        slack,
+        now
+      });
+      if (result?.status !== 'delivered') {
+        const resultError = new Error('Immediate notification result is unconfirmed');
+        resultError.code = 'delivery_persistence_failed';
+        throw resultError;
+      }
+      const duplicate = result.delivery === null;
+      if (duplicate) runtimeState.immediateDuplicates += 1;
+      else runtimeState.immediateDelivered += 1;
+      return {
+        status: 'delivered',
+        duplicate,
+        reconciled: result.reconciled === true
+      };
+    } catch (error) {
+      return fail(error);
+    }
+  };
+
+  const refreshBacklogHealth = async () => {
+    if (!enabled) {
+      runtimeState.oldestPendingNotificationAgeMs = null;
+      runtimeState.immediateBacklogReadback = 'disabled';
+      return;
+    }
+    try {
+      const createdAt = await store.getOldestPendingNotificationCreatedAt();
+      if (createdAt === null) {
+        runtimeState.oldestPendingNotificationAgeMs = null;
+      } else {
+        const createdAtMs = Date.parse(createdAt);
+        if (!Number.isFinite(createdAtMs)) throw new Error('Immediate backlog response is invalid');
+        runtimeState.oldestPendingNotificationAgeMs = Math.max(0, immediateRuntimeDate(now).getTime() - createdAtMs);
+      }
+      runtimeState.immediateBacklogReadback = 'ok';
+    } catch {
+      runtimeState.oldestPendingNotificationAgeMs = null;
+      runtimeState.immediateBacklogReadback = 'error';
+    }
+  };
+
+  return {
+    enabled,
+    localConfigReady,
+    state: runtimeState,
+    store,
+    deliverAccepted,
+    refreshBacklogHealth
   };
 }
 
@@ -562,6 +730,27 @@ const workOrchestratorShadowRuntime = createWorkOrchestratorShadowRuntime({
   config: CONFIG.workOrchestrator,
   store: workOrchestratorStore
 });
+let workOrchestratorSlackClient = null;
+if (CONFIG.workOrchestrator.immediateEnabled && CONFIG.slackBotToken.trim()) {
+  try {
+    workOrchestratorSlackClient = createSlackClient({ token: CONFIG.slackBotToken });
+  } catch {
+    workOrchestratorSlackClient = null;
+  }
+}
+const workOrchestratorImmediateRuntime = createWorkOrchestratorImmediateRuntime({
+  config: {
+    ...CONFIG.workOrchestrator,
+    mentionUserIds: String(process.env.SLACK_CARD_MENTION_USER_IDS || '')
+      .split(/[\s,]+/)
+      .filter(Boolean)
+  },
+  store: workOrchestratorStore,
+  slack: workOrchestratorSlackClient,
+  slackToken: CONFIG.slackBotToken,
+  state: workOrchestratorShadowRuntime.state
+});
+CONFIG.workOrchestratorImmediateLocalConfigReady = workOrchestratorImmediateRuntime.localConfigReady;
 
 const state = {
   startedAt: new Date().toISOString(),
@@ -4048,6 +4237,7 @@ export async function handleEvent(req, res, dependencies = {}) {
   const writeEvent = dependencies.writeSupabaseEvent || writeSupabaseEvent;
   const scheduleEvent = dependencies.scheduleDebouncedJob || scheduleDebouncedJob;
   const shadowRuntime = dependencies.shadowRuntime || workOrchestratorShadowRuntime;
+  const immediateRuntime = dependencies.immediateRuntime || workOrchestratorImmediateRuntime;
   const body = await readRequestBody(req);
   const raw = JSON.parse(body || '{}');
   let event = normalizeEvent(raw);
@@ -4150,6 +4340,7 @@ export async function handleEvent(req, res, dependencies = {}) {
     durableRoomRevision
   );
   event.roomRevision = roomVersion.revision;
+  dependencies.onRoomRevisionAccepted?.(event, roomVersion);
 
   if (roomVersion.changed) {
     try {
@@ -4162,6 +4353,25 @@ export async function handleEvent(req, res, dependencies = {}) {
     }
   }
 
+  let immediateNotification = null;
+  if (immediateRuntime?.enabled === true) {
+    try {
+      immediateNotification = await immediateRuntime.deliverAccepted(event, roomVersion);
+    } catch (error) {
+      appendEvent('errors.ndjson', {
+        at: nowIso(),
+        type: 'immediate_notification',
+        code: genericImmediateFailureCode(error?.code),
+        eventHash: String(event.eventHash || '').slice(0, 500)
+      });
+      return json(res, 503, {
+        ok: false,
+        error: 'immediate_notification_unconfirmed',
+        eventHash: event.eventHash
+      });
+    }
+  }
+
   try {
     await writeEvent(event, 'event');
   } catch (error) {
@@ -4171,7 +4381,14 @@ export async function handleEvent(req, res, dependencies = {}) {
   }
 
   scheduleEvent(event);
-  return json(res, 202, { ok: true, roomKey: event.roomKey, eventHash: event.eventHash });
+  return json(res, 202, {
+    ok: true,
+    roomKey: event.roomKey,
+    eventHash: event.eventHash,
+    ...(immediateNotification?.status === 'delivered'
+      ? { immediateNotification }
+      : {})
+  });
 }
 
 const server = http.createServer(async (req, res) => {
@@ -4185,6 +4402,7 @@ const server = http.createServer(async (req, res) => {
     if (await gatewayHttpHandler(req, res, url)) return;
 
     if (req.method === 'GET' && url.pathname === '/health') {
+      await workOrchestratorImmediateRuntime.refreshBacklogHealth();
       const gatewayStatus = gatewayChannel ? await gatewayChannel.status() : {};
       const documentExecutionConfig = gatewayTransportEnabled
         ? resolveGatewayDocumentConfig(CONFIG, getKakaoWorkerRuntimeConfigForTransport())

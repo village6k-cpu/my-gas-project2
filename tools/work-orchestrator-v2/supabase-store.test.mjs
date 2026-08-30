@@ -70,6 +70,19 @@ test('getNotificationByEventKey URL-encodes an event-key filter', async () => {
   assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/message_notification_receipts?select=*&source_event_key=eq.event%3Fkey%26one&limit=1');
 });
 
+test('getOldestPendingNotificationCreatedAt reads one bounded content-free durable backlog row', async () => {
+  const fetch = createFetch([response({ data: [{ created_at: '2026-08-29T00:00:00.000Z' }] })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example/', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  assert.equal(await store.getOldestPendingNotificationCreatedAt(), '2026-08-29T00:00:00.000Z');
+  assert.equal(
+    fetch.requests[0].url,
+    'https://supabase.example/rest/v1/message_notification_receipts?select=created_at&notification_state=in.%28pending%2Cdelivering%2Cfailed%29&order=created_at.asc&limit=1'
+  );
+  assert.equal(fetch.requests[0].init.method, undefined);
+  assert.doesNotMatch(fetch.requests[0].url, /payload|preview|customer|room|channel|token/i);
+});
+
 test('transitionNotification PATCHes only the requested id and source states', async () => {
   const fetch = createFetch([response({ data: [{ id: 'receipt-1', notification_state: 'delivering' }] })]);
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
