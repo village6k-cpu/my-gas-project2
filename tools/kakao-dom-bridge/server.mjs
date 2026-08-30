@@ -30,6 +30,7 @@ import {
   notificationReceiptInput
 } from '../work-orchestrator-v2/contracts.mjs';
 import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-notifications.mjs';
+import { digestScheduleWindow, runDigestCycle } from '../work-orchestrator-v2/digest-runner.mjs';
 import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shadow-receipts.mjs';
 import { createSlackClient } from '../work-orchestrator-v2/slack-client.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
@@ -191,7 +192,10 @@ export function buildHealthConfig(config = {}) {
       // True means shadow writes are disabled or the local store client was constructed; it does not prove Supabase connectivity.
       shadowReady: Boolean(config.workOrchestratorShadowReady),
       // This proves local values and clients were constructed only. Durable-store and Slack connectivity require separate readback.
-      immediateLocalConfigReady: Boolean(config.workOrchestratorImmediateLocalConfigReady)
+      immediateLocalConfigReady: Boolean(config.workOrchestratorImmediateLocalConfigReady),
+      ...(Object.hasOwn(config, 'workOrchestratorDigestLocalConfigReady')
+        ? { digestLocalConfigReady: Boolean(config.workOrchestratorDigestLocalConfigReady) }
+        : {})
     };
   }
   return health;
@@ -223,7 +227,7 @@ export function buildWorkOrchestratorHealthState(value = {}) {
     && value.oldestPendingNotificationAgeMs !== undefined
     && value.oldestPendingNotificationAgeMs !== '';
   const oldestAge = Number(value.oldestPendingNotificationAgeMs);
-  return {
+  const health = {
     shadowClaims: Math.max(0, Number(value.shadowClaims || 0)),
     shadowDuplicates: Math.max(0, Number(value.shadowDuplicates || 0)),
     shadowErrors: Math.max(0, Number(value.shadowErrors || 0)),
@@ -239,6 +243,50 @@ export function buildWorkOrchestratorHealthState(value = {}) {
     immediateFailed: Math.max(0, Number(value.immediateFailed || 0)),
     oldestPendingNotificationAgeMs: hasOldestAge && Number.isFinite(oldestAge) && oldestAge >= 0 ? oldestAge : null,
     immediateBacklogReadback: backlogReadback
+  };
+  const hasDigestState = [
+    'digestRunning', 'lastDigestRun', 'lastDigestSuccessAt', 'lastDigestFailureAt',
+    'nextScheduledAt', 'digestFailureCount', 'omittedEligibleCount'
+  ].some((key) => Object.hasOwn(value, key));
+  if (!hasDigestState) return health;
+
+  const count = (input, maximum) => {
+    const numeric = Number(input);
+    return Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= maximum ? numeric : 0;
+  };
+  const safeLastRun = (run) => {
+    if (!run || typeof run !== 'object' || Array.isArray(run)) return null;
+    const status = ['delivered', 'not_claimed', 'failed'].includes(run.status) ? run.status : 'failed';
+    const trigger = ['startup', 'interval', 'manual'].includes(run.trigger) ? run.trigger : 'manual';
+    const result = {
+      at: safeShadowTimestamp(run.at),
+      trigger,
+      status,
+      scheduledAt: safeShadowTimestamp(run.scheduledAt),
+      selectedCount: count(run.selectedCount, 500),
+      renderedCount: count(run.renderedCount, 500),
+      omittedEligibleCount: count(run.omittedEligibleCount, 500),
+      partCount: count(run.partCount, 50),
+      deliveredPartCount: count(run.deliveredPartCount, 50),
+      cleanupFailed: count(run.cleanupFailed, 50)
+    };
+    if (run.error) {
+      result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_cycle_failed',
+        'digest_omission_detected', 'digest_cleanup_failed'].includes(run.error)
+        ? run.error
+        : 'digest_cycle_failed';
+    }
+    return result;
+  };
+  return {
+    ...health,
+    digestRunning: value.digestRunning === true,
+    lastDigestRun: safeLastRun(value.lastDigestRun),
+    lastDigestSuccessAt: safeShadowTimestamp(value.lastDigestSuccessAt) || null,
+    lastDigestFailureAt: safeShadowTimestamp(value.lastDigestFailureAt) || null,
+    nextScheduledAt: safeShadowTimestamp(value.nextScheduledAt) || null,
+    digestFailureCount: count(value.digestFailureCount, Number.MAX_SAFE_INTEGER),
+    omittedEligibleCount: count(value.omittedEligibleCount, 500)
   };
 }
 
@@ -595,6 +643,313 @@ export function createWorkOrchestratorImmediateRuntime({
   };
 }
 
+const DIGEST_STORE_METHODS = [
+  'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
+  'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
+  'claimDigestPartCleanup', 'recordDigestPartCleanup'
+];
+
+function digestRuntimeIso(now) {
+  let value;
+  try {
+    value = typeof now === 'function' ? now() : now;
+  } catch {
+    throw new Error('Work Orchestrator digest clock is invalid');
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error('Work Orchestrator digest clock is invalid');
+  return date.toISOString();
+}
+
+function digestRuntimeCount(value, maximum) {
+  const numeric = Number(value);
+  if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > maximum) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  return numeric;
+}
+
+function safeDigestRuntimeResult(value, scheduledAt) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !['delivered', 'not_claimed', 'failed'].includes(value.status)) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  const selectedCount = digestRuntimeCount(value.selectedCount, 500);
+  const renderedCount = digestRuntimeCount(value.renderedCount, 500);
+  const partCount = digestRuntimeCount(value.partCount, 50);
+  const deliveredPartCount = digestRuntimeCount(value.deliveredPartCount, 50);
+  if (renderedCount > selectedCount || deliveredPartCount > partCount) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  const cleanup = value.cleanup;
+  if (!cleanup || typeof cleanup !== 'object' || Array.isArray(cleanup)) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  const safeCleanup = {
+    attempted: digestRuntimeCount(cleanup.attempted, 50),
+    settled: digestRuntimeCount(cleanup.settled, 50),
+    failed: digestRuntimeCount(cleanup.failed, 50)
+  };
+  if (safeCleanup.settled + safeCleanup.failed > safeCleanup.attempted) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  const exactOmission = selectedCount - renderedCount;
+  const resultScheduledAt = safeShadowTimestamp(value.scheduledAt);
+  if (!resultScheduledAt || resultScheduledAt !== scheduledAt) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  const result = {
+    status: value.status,
+    scheduledAt: resultScheduledAt,
+    runId: typeof value.runId === 'string' && /^[0-9a-f-]{36}$/i.test(value.runId) ? value.runId : null,
+    selectedCount,
+    renderedCount,
+    omittedEligibleCount: exactOmission,
+    partCount,
+    deliveredPartCount,
+    cleanup: safeCleanup
+  };
+  if (value.retryable === true) result.retryable = true;
+  if (value.status === 'failed') {
+    result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed'].includes(value.error)
+      ? value.error
+      : 'digest_cycle_failed';
+  }
+  return result;
+}
+
+export function createWorkOrchestratorDigestRuntime({
+  config = {},
+  store = null,
+  slack = null,
+  run = runDigestCycle,
+  now = () => new Date(),
+  leaseOwner = `bridge:digest:${process.pid}`,
+  state: sharedState = null,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval
+} = {}) {
+  const enabled = config.digestEnabled === true;
+  const channelId = String(config.digestChannelId || '').trim();
+  const intervalMinutes = config.digestIntervalMinutes === undefined ? 180 : Number(config.digestIntervalMinutes);
+  const cleanupEnabled = config.cleanupEnabled === true;
+  const storeReady = Boolean(store && DIGEST_STORE_METHODS.every((method) => typeof store[method] === 'function'));
+  const slackReady = Boolean(slack
+    && typeof slack.postMessage === 'function'
+    && typeof slack.findMessageByClientId === 'function'
+    && (!cleanupEnabled || typeof slack.deleteMessage === 'function'));
+  const localConfigReady = Boolean(enabled
+    && storeReady
+    && slackReady
+    && /^[A-Z0-9][A-Z0-9_-]{0,79}$/.test(channelId)
+    && Number.isSafeInteger(intervalMinutes)
+    && intervalMinutes >= 60
+    && intervalMinutes <= 7 * 24 * 60
+    && typeof run === 'function'
+    && typeof now === 'function'
+    && typeof setIntervalImpl === 'function'
+    && typeof clearIntervalImpl === 'function'
+    && typeof leaseOwner === 'string'
+    && leaseOwner.trim() === leaseOwner
+    && leaseOwner.length > 0
+    && leaseOwner.length <= 200);
+  if (enabled && !localConfigReady) {
+    throw new Error('Work Orchestrator digest local configuration is missing');
+  }
+
+  const runtimeState = sharedState && typeof sharedState === 'object' ? sharedState : {};
+  runtimeState.digestRunning = false;
+  runtimeState.lastDigestRun = runtimeState.lastDigestRun || null;
+  runtimeState.lastDigestSuccessAt = runtimeState.lastDigestSuccessAt || null;
+  runtimeState.lastDigestFailureAt = runtimeState.lastDigestFailureAt || null;
+  runtimeState.nextScheduledAt = runtimeState.nextScheduledAt || null;
+  runtimeState.digestFailureCount = Math.max(0, Number(runtimeState.digestFailureCount || 0));
+  runtimeState.omittedEligibleCount = Math.max(0, Number(runtimeState.omittedEligibleCount || 0));
+
+  let timer = null;
+  let lastAttemptedScheduledAt = null;
+
+  const recordFailure = (at, trigger, scheduledAt, error = 'digest_cycle_failed') => {
+    const safeError = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_omission_detected',
+      'digest_cleanup_failed'].includes(error) ? error : 'digest_cycle_failed';
+    runtimeState.digestFailureCount += 1;
+    runtimeState.lastDigestFailureAt = at;
+    runtimeState.lastDigestRun = {
+      at,
+      trigger,
+      status: 'failed',
+      scheduledAt,
+      selectedCount: 0,
+      renderedCount: 0,
+      omittedEligibleCount: 0,
+      partCount: 0,
+      deliveredPartCount: 0,
+      cleanupFailed: 0,
+      error: safeError
+    };
+    runtimeState.omittedEligibleCount = 0;
+    return {
+      status: 'failed', scheduledAt, runId: null,
+      selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+      partCount: 0, deliveredPartCount: 0,
+      cleanup: { attempted: 0, settled: 0, failed: 0 },
+      error: safeError
+    };
+  };
+
+  const runAt = async (trigger, { force = false } = {}) => {
+    if (!enabled) return { status: 'disabled' };
+    let at;
+    let window;
+    try {
+      at = digestRuntimeIso(now);
+      window = digestScheduleWindow(at, intervalMinutes);
+    } catch {
+      return recordFailure('', trigger, '', 'digest_cycle_failed');
+    }
+    runtimeState.nextScheduledAt = window.nextScheduledAt;
+    const cleanupRetryDue = (Number(runtimeState.lastDigestRun?.cleanupFailed || 0) > 0
+      || runtimeState.lastDigestRun?.retryable === true)
+      && window.scheduledAt === lastAttemptedScheduledAt;
+    if (!force && !cleanupRetryDue && lastAttemptedScheduledAt !== null
+      && Date.parse(window.scheduledAt) <= Date.parse(lastAttemptedScheduledAt)) {
+      return { status: 'not_due', scheduledAt: window.scheduledAt };
+    }
+    if (runtimeState.digestRunning) return { status: 'already_running', scheduledAt: window.scheduledAt };
+
+    lastAttemptedScheduledAt = window.scheduledAt;
+    runtimeState.digestRunning = true;
+    try {
+      let result;
+      try {
+        result = safeDigestRuntimeResult(await run({
+          store,
+          slack,
+          config: {
+            channelId,
+            destinationKey: `slack:${channelId}`,
+            intervalMinutes,
+            leaseSeconds: 120,
+            cleanupEnabled,
+            cleanupLeaseSeconds: 120,
+            reconcileWindowSeconds: 300,
+            ownerSlackIds: config.ownerSlackIds || {}
+          },
+          now: at,
+          leaseOwner
+        }), window.scheduledAt);
+      } catch {
+        return recordFailure(at, trigger, window.scheduledAt, 'digest_cycle_failed');
+      }
+
+      let error = result.error || null;
+      if (result.status === 'delivered' && result.omittedEligibleCount !== 0) {
+        result.status = 'failed';
+        result.error = 'digest_omission_detected';
+        error = result.error;
+      } else if (result.cleanup.failed > 0) {
+        error = 'digest_cleanup_failed';
+      }
+      runtimeState.omittedEligibleCount = result.omittedEligibleCount;
+      runtimeState.lastDigestRun = {
+        at,
+        trigger,
+        status: result.status,
+        scheduledAt: result.scheduledAt,
+        selectedCount: result.selectedCount,
+        renderedCount: result.renderedCount,
+        omittedEligibleCount: result.omittedEligibleCount,
+        partCount: result.partCount,
+        deliveredPartCount: result.deliveredPartCount,
+        cleanupFailed: result.cleanup.failed,
+        retryable: result.retryable === true,
+        ...(error ? { error } : {})
+      };
+      if (result.status === 'delivered') runtimeState.lastDigestSuccessAt = at;
+      if (result.status === 'failed' || result.cleanup.failed > 0) {
+        runtimeState.digestFailureCount += 1;
+        runtimeState.lastDigestFailureAt = at;
+      }
+      return result;
+    } finally {
+      runtimeState.digestRunning = false;
+    }
+  };
+
+  return {
+    enabled,
+    localConfigReady,
+    state: runtimeState,
+    async start() {
+      if (!enabled) return { status: 'disabled' };
+      if (timer === null) timer = setIntervalImpl(() => runAt('interval'), 60_000);
+      return runAt('startup');
+    },
+    stop() {
+      if (timer !== null) clearIntervalImpl(timer);
+      timer = null;
+    },
+    runNow(trigger = 'manual') {
+      return runAt(['startup', 'interval', 'manual'].includes(trigger) ? trigger : 'manual', { force: trigger === 'manual' });
+    },
+    check() {
+      return runAt('interval');
+    }
+  };
+}
+
+function safeMaintenanceDigestResult(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { status: 'failed', error: 'digest_cycle_failed' };
+  }
+  const result = {};
+  if (['disabled', 'not_due', 'already_running', 'delivered', 'not_claimed', 'failed'].includes(value.status)) {
+    result.status = value.status;
+  } else {
+    result.status = 'failed';
+  }
+  for (const key of ['scheduledAt', 'runId']) {
+    if (typeof value[key] === 'string' && value[key].length <= 40) result[key] = value[key];
+  }
+  if (['startup', 'interval', 'manual'].includes(value.trigger)) result.trigger = value.trigger;
+  if (value.retryable === true) result.retryable = true;
+  for (const [key, maximum] of Object.entries({
+    selectedCount: 500, renderedCount: 500, omittedEligibleCount: 500,
+    partCount: 50, deliveredPartCount: 50
+  })) {
+    const numeric = Number(value[key]);
+    if (Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= maximum) result[key] = numeric;
+  }
+  if (value.cleanup && typeof value.cleanup === 'object' && !Array.isArray(value.cleanup)) {
+    result.cleanup = {};
+    for (const key of ['attempted', 'settled', 'failed']) {
+      const numeric = Number(value.cleanup[key]);
+      result.cleanup[key] = Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= 50 ? numeric : 0;
+    }
+  }
+  if (result.status === 'failed') {
+    result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_omission_detected',
+      'digest_cleanup_failed'].includes(value.error) ? value.error : 'digest_cycle_failed';
+  }
+  return result;
+}
+
+export async function handleWorkOrchestratorDigestMaintenance(runtime) {
+  if (!runtime || typeof runtime.runNow !== 'function') {
+    return { statusCode: 503, body: { ok: false, result: { status: 'failed', error: 'digest_cycle_failed' } } };
+  }
+  let result;
+  try {
+    result = safeMaintenanceDigestResult(await runtime.runNow('manual'));
+  } catch {
+    result = { status: 'failed', error: 'digest_cycle_failed' };
+  }
+  return {
+    statusCode: result.status === 'failed' ? 502 : 200,
+    body: { ok: result.status !== 'failed', result }
+  };
+}
+
 const GATEWAY_EVENT_FIELDS = [
   'schema', 'job_id', 'room_key', 'room_revision', 'prompt', 'detected_at', 'raw'
 ].sort();
@@ -867,7 +1222,8 @@ const workOrchestratorShadowRuntime = createWorkOrchestratorShadowRuntime({
   store: workOrchestratorStore
 });
 let workOrchestratorSlackClient = null;
-if (CONFIG.workOrchestrator.immediateEnabled && CONFIG.slackBotToken.trim()) {
+if ((CONFIG.workOrchestrator.immediateEnabled || CONFIG.workOrchestrator.digestEnabled)
+  && CONFIG.slackBotToken.trim()) {
   try {
     workOrchestratorSlackClient = createSlackClient({ token: CONFIG.slackBotToken });
   } catch {
@@ -891,6 +1247,14 @@ const workOrchestratorImmediateRuntime = createWorkOrchestratorImmediateRuntime(
   attemptGuard: workOrchestratorImmediateAttemptGuard
 });
 CONFIG.workOrchestratorImmediateLocalConfigReady = workOrchestratorImmediateRuntime.localConfigReady;
+const workOrchestratorDigestRuntime = createWorkOrchestratorDigestRuntime({
+  config: CONFIG.workOrchestrator,
+  store: workOrchestratorStore,
+  slack: workOrchestratorSlackClient,
+  state: workOrchestratorShadowRuntime.state,
+  leaseOwner: `bridge:digest:${process.pid}`
+});
+CONFIG.workOrchestratorDigestLocalConfigReady = workOrchestratorDigestRuntime.localConfigReady;
 
 const state = {
   startedAt: new Date().toISOString(),
@@ -4716,6 +5080,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: !result.errors?.length, result });
     }
 
+    if (req.method === 'POST' && url.pathname === '/maintenance/work-orchestrator-digest') {
+      const result = await handleWorkOrchestratorDigestMaintenance(workOrchestratorDigestRuntime);
+      return json(res, result.statusCode, result.body);
+    }
+
     if (req.method === 'POST' && url.pathname === '/maintenance/slack-case-update') {
       const body = await readJsonBody(req);
       const id = String(body.id || body.followUpId || body.follow_up_id || '').trim();
@@ -4773,6 +5142,9 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     if (CONFIG.kakaoTabCleanupEnabled) {
       setTimeout(() => cleanupIdleKakaoConversationTabs('startup'), 10_000).unref?.();
       setInterval(() => cleanupIdleKakaoConversationTabs('interval'), CONFIG.kakaoTabCleanupIntervalMs).unref?.();
+    }
+    if (CONFIG.workOrchestrator.digestEnabled) {
+      workOrchestratorDigestRuntime.start().catch(() => {});
     }
   });
 }

@@ -240,3 +240,102 @@ test('findMessageByClientId stops after ten pages and rejects an oversized next 
   );
   assert.equal(cursorCalls, 1);
 });
+
+test('updateMessage validates exact coordinates and sends a bounded update payload', async () => {
+  const requests = [];
+  const client = createSlackClient({
+    token,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, body: JSON.parse(init.body) });
+      return jsonResponse(200, { ok: true, channel: 'CFOCUS', ts: '123.45', message: { text: 'updated' } });
+    }
+  });
+  assert.equal(typeof client.updateMessage, 'function');
+  assert.deepEqual(await client.updateMessage({
+    channel: 'CFOCUS', ts: '123.45', text: 'updated', blocks: [{ type: 'section' }]
+  }), { ok: true, channel: 'CFOCUS', ts: '123.45', message: { text: 'updated' } });
+  assert.deepEqual(requests, [{
+    url: 'https://slack.com/api/chat.update',
+    body: { channel: 'CFOCUS', ts: '123.45', text: 'updated', blocks: [{ type: 'section' }] }
+  }]);
+});
+
+test('deleteMessage maps only exact success and message_not_found to terminal outcomes', async (t) => {
+  await t.test('deleted', async () => {
+    const client = createSlackClient({
+      token,
+      fetchImpl: async (_url, init) => {
+        assert.deepEqual(JSON.parse(init.body), { channel: 'CFOCUS', ts: '123.45' });
+        return jsonResponse(200, { ok: true, channel: 'CFOCUS', ts: '123.45' });
+      }
+    });
+    assert.equal(typeof client.deleteMessage, 'function');
+    assert.deepEqual(await client.deleteMessage({ channel: 'CFOCUS', ts: '123.45' }), { status: 'deleted' });
+  });
+  await t.test('already absent', async () => {
+    const client = createSlackClient({
+      token,
+      fetchImpl: async () => jsonResponse(200, { ok: false, error: 'message_not_found' })
+    });
+    assert.deepEqual(await client.deleteMessage({ channel: 'CFOCUS', ts: '123.45' }), { status: 'already_absent' });
+  });
+  await t.test('cant delete remains an error', async () => {
+    const client = createSlackClient({
+      token,
+      fetchImpl: async () => jsonResponse(200, { ok: false, error: 'cant_delete_message' })
+    });
+    await assert.rejects(
+      client.deleteMessage({ channel: 'CFOCUS', ts: '123.45' }),
+      (error) => error instanceof SlackApiError && error.code === 'cant_delete_message'
+    );
+  });
+  await t.test('HTTP failure cannot impersonate absence', async () => {
+    const client = createSlackClient({
+      token,
+      fetchImpl: async () => jsonResponse(503, { ok: false, error: 'message_not_found' })
+    });
+    await assert.rejects(
+      client.deleteMessage({ channel: 'CFOCUS', ts: '123.45' }),
+      (error) => error instanceof SlackApiError && error.status === 503 && error.code === 'message_not_found'
+    );
+  });
+});
+
+test('update and delete reject malformed or mismatched successful coordinates generically', async (t) => {
+  for (const [name, method, payload] of [
+    ['update mismatch', 'updateMessage', { ok: true, channel: 'COTHER', ts: '123.45', message: {} }],
+    ['update malformed message', 'updateMessage', { ok: true, channel: 'CFOCUS', ts: '123.45', message: [] }],
+    ['delete mismatch', 'deleteMessage', { ok: true, channel: 'CFOCUS', ts: '999.1' }],
+    ['delete missing coordinate', 'deleteMessage', { ok: true }]
+  ]) {
+    await t.test(name, async () => {
+      const client = createSlackClient({ token, fetchImpl: async () => jsonResponse(200, payload) });
+      const input = method === 'updateMessage'
+        ? { channel: 'CFOCUS', ts: '123.45', text: 'x', blocks: [] }
+        : { channel: 'CFOCUS', ts: '123.45' };
+      await assert.rejects(
+        client[method](input),
+        (error) => error instanceof SlackApiError
+          && error.code === 'malformed_response'
+          && !error.message.includes(token)
+      );
+    });
+  }
+});
+
+test('update and delete validate strict channel, timestamp, text, and blocks before fetch', async () => {
+  let calls = 0;
+  const client = createSlackClient({
+    token,
+    fetchImpl: async () => {
+      calls += 1;
+      return jsonResponse(200, { ok: true, channel: 'CFOCUS', ts: '1.1', message: {} });
+    }
+  });
+  await assert.rejects(client.updateMessage({ channel: 'bad channel', ts: '1.1', text: 'x', blocks: [] }), /channel/i);
+  await assert.rejects(client.updateMessage({ channel: 'CFOCUS', ts: 'bad', text: 'x', blocks: [] }), /timestamp/i);
+  await assert.rejects(client.updateMessage({ channel: 'CFOCUS', ts: '1.1', text: '', blocks: [] }), /text/i);
+  await assert.rejects(client.updateMessage({ channel: 'CFOCUS', ts: '1.1', text: 'x', blocks: {} }), /blocks/i);
+  await assert.rejects(client.deleteMessage({ channel: 'CFOCUS', ts: 'bad' }), /timestamp/i);
+  assert.equal(calls, 0);
+});

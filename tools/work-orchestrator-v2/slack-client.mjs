@@ -37,6 +37,34 @@ function requiredString(value, name) {
   return value;
 }
 
+function exactChannel(value) {
+  const channel = requiredString(value, 'channel');
+  if (channel !== channel.trim() || !SAFE_SLACK_CHANNEL.test(channel)) {
+    throw new Error('Slack channel is invalid');
+  }
+  return channel;
+}
+
+function exactTimestamp(value) {
+  const timestamp = requiredString(value, 'timestamp');
+  if (timestamp !== timestamp.trim() || !SLACK_TIMESTAMP.test(timestamp)) {
+    throw new Error('Slack timestamp is invalid');
+  }
+  return timestamp;
+}
+
+function updateBody({ channel, ts, text, blocks } = {}) {
+  const exactText = requiredString(text, 'text');
+  if (exactText.length > 40_000) throw new Error('Slack text exceeds the maximum');
+  if (!Array.isArray(blocks) || blocks.length > 50) throw new Error('Slack blocks are invalid');
+  return {
+    channel: exactChannel(channel),
+    ts: exactTimestamp(ts),
+    text: exactText,
+    blocks
+  };
+}
+
 function positiveFiniteNumber(value, name) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) throw new Error(`Slack ${name} must be a finite positive number`);
@@ -175,6 +203,36 @@ export function createSlackClient({ token, fetchImpl = fetch, timeoutMs = 7_000 
         cursor = nextCursor;
       }
       return null;
+    },
+
+    async updateMessage(input = {}) {
+      const body = updateBody(input);
+      const payload = await call('chat.update', body);
+      const result = normalizedPostResult(payload);
+      if (!result || result.channel !== body.channel || result.ts !== body.ts) {
+        throw errorFor('chat.update', { kind: 'response', code: 'malformed_response' });
+      }
+      return result;
+    },
+
+    async deleteMessage({ channel, ts } = {}) {
+      const body = { channel: exactChannel(channel), ts: exactTimestamp(ts) };
+      let payload;
+      try {
+        payload = await call('chat.delete', body);
+      } catch (error) {
+        if (error instanceof SlackApiError
+          && error.kind === 'api'
+          && error.status === 200
+          && error.code === 'message_not_found') {
+          return { status: 'already_absent' };
+        }
+        throw error;
+      }
+      if (payload.channel !== body.channel || payload.ts !== body.ts) {
+        throw errorFor('chat.delete', { kind: 'response', code: 'malformed_response' });
+      }
+      return { status: 'deleted' };
     }
   };
 }
