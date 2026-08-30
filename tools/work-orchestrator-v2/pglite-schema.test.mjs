@@ -173,6 +173,31 @@ test('foundation migration executes and exposes only service-role access in Post
       'touch_work_items_v2_updated_at',
     ]);
 
+    const acknowledgementCases = [
+      ['null payload', null, '2026-08-29T06:00:00.000Z', false],
+      ['non-record payload', 'not-a-record', '2026-08-29T06:00:00.000Z', false],
+      ['array payload', [], '2026-08-29T06:00:00.000Z', false],
+      ['missing acknowledgement', {}, '2026-08-29T06:00:00.000Z', false],
+      ['null acknowledgement', { p0_acknowledged_at: null }, '2026-08-29T06:00:00.000Z', false],
+      ['array acknowledgement', { p0_acknowledged_at: [] }, '2026-08-29T06:00:00.000Z', false],
+      ['malformed acknowledgement', { p0_acknowledged_at: 'not-a-time' }, '2026-08-29T06:00:00.000Z', false],
+      ['impossible calendar date', { p0_acknowledged_at: '2026-02-30T00:00:00.000Z' }, '2026-08-29T06:00:00.000Z', false],
+      ['year zero', { p0_acknowledged_at: '0000-01-01T00:00:00.000Z' }, '2026-08-29T06:00:00.000Z', false],
+      ['negative extended year', { p0_acknowledged_at: '-000001-01-01T00:00:00.000Z' }, '2026-08-29T06:00:00.000Z', false],
+      ['positive extended year', { p0_acknowledged_at: '+010000-01-01T00:00:00.000Z' }, '2026-08-29T06:00:00.000Z', false],
+      ['minimum supported year', { p0_acknowledged_at: '0001-01-01T00:00:00.000Z' }, '2026-08-29T06:00:00.000Z', true],
+      ['normal past acknowledgement', { p0_acknowledged_at: '2026-08-29T05:59:59.999Z' }, '2026-08-29T06:00:00.000Z', true],
+      ['normal boundary acknowledgement', { p0_acknowledged_at: '2026-08-29T06:00:00.000Z' }, '2026-08-29T06:00:00.000Z', true],
+      ['normal future acknowledgement', { p0_acknowledged_at: '2026-08-29T06:00:00.001Z' }, '2026-08-29T06:00:00.000Z', false],
+      ['maximum supported year', { p0_acknowledged_at: '9999-12-31T23:59:59.999Z' }, '9999-12-31T23:59:59.999Z', true]
+    ];
+    for (const [name, payload, cutoff, expected] of acknowledgementCases) {
+      const { rows } = await db.query(`
+        select public.is_effective_p0_ack_v2($1::jsonb, $2::timestamptz) as effective
+      `, [JSON.stringify(payload), cutoff]);
+      assert.equal(rows[0].effective, expected, name);
+    }
+
     const claimInput = [
       'kakao',
       'pglite-event-1',

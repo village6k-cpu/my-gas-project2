@@ -26,6 +26,7 @@ const WORK_PAYLOAD_TEXT_LIMITS = Object.freeze({
   recommended_action: 1200
 });
 const WORK_ACTIONS = new Set(['progress', 'snooze', 'ack_p0', 'request_resolve', 'dismiss']);
+const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const DIGEST_INCLUSION_REASONS = new Set(['p0', 'overdue', 'urgent', 'carry_over', 'actionable', 'daily_reminder']);
 const DIGEST_FAILURE_CODES = new Set(['digest_build_failed', 'digest_delivery_failed', 'delivery_unconfirmed']);
 const DIGEST_CLEANUP_FAILURE_CODES = new Set(['cant_delete_message', 'rate_limited', 'cleanup_unconfirmed', 'slack_api_error']);
@@ -72,7 +73,7 @@ function sameJsonValue(left, right) {
 
 function hasCanonicalP0Acknowledgement(payload, cutoff) {
   const value = isRecord(payload) ? payload.p0_acknowledged_at : undefined;
-  if (typeof value !== 'string' || !value || value.length > 40) return false;
+  if (typeof value !== 'string' || !P0_ACKNOWLEDGEMENT_TIMESTAMP.test(value)) return false;
   const parsed = new Date(value);
   const cutoffDate = new Date(cutoff);
   return !Number.isNaN(parsed.getTime())

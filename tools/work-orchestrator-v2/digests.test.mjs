@@ -135,18 +135,28 @@ test('terminal and unacknowledged P0 rows are omitted while malformed active row
 
 test('P0 acknowledgement is canonical, present, and not later than the supplied selection clock', async (t) => {
   const cases = [
-    ['missing payload', undefined, []],
-    ['null payload', null, []],
-    ['non-record payload', [], []],
-    ['missing acknowledgement', { requires_human_action: true }, []],
-    ['malformed acknowledgement', { p0_acknowledged_at: 'not-a-time' }, []],
-    ['future acknowledgement', { p0_acknowledged_at: '2026-08-29T06:00:00.001Z' }, []],
-    ['acknowledgement at boundary', { p0_acknowledged_at: NOW }, [UUIDS[0]]]
+    ['missing payload', undefined, NOW, []],
+    ['null payload', null, NOW, []],
+    ['non-record payload', 'not-a-record', NOW, []],
+    ['array payload', [], NOW, []],
+    ['missing acknowledgement', { requires_human_action: true }, NOW, []],
+    ['null acknowledgement', { p0_acknowledged_at: null }, NOW, []],
+    ['array acknowledgement', { p0_acknowledged_at: [] }, NOW, []],
+    ['malformed acknowledgement', { p0_acknowledged_at: 'not-a-time' }, NOW, []],
+    ['impossible calendar date', { p0_acknowledged_at: '2026-02-30T00:00:00.000Z' }, NOW, []],
+    ['year zero', { p0_acknowledged_at: '0000-01-01T00:00:00.000Z' }, NOW, []],
+    ['negative extended year', { p0_acknowledged_at: '-000001-01-01T00:00:00.000Z' }, NOW, []],
+    ['positive extended year', { p0_acknowledged_at: '+010000-01-01T00:00:00.000Z' }, '+010001-01-01T00:00:00.000Z', []],
+    ['minimum supported year', { p0_acknowledged_at: '0001-01-01T00:00:00.000Z' }, NOW, [UUIDS[0]]],
+    ['normal past acknowledgement', { p0_acknowledged_at: '2026-08-29T05:59:59.999Z' }, NOW, [UUIDS[0]]],
+    ['normal boundary acknowledgement', { p0_acknowledged_at: NOW }, NOW, [UUIDS[0]]],
+    ['normal future acknowledgement', { p0_acknowledged_at: '2026-08-29T06:00:00.001Z' }, NOW, []],
+    ['maximum supported year', { p0_acknowledged_at: '9999-12-31T23:59:59.999Z' }, '9999-12-31T23:59:59.999Z', [UUIDS[0]]]
   ];
 
-  for (const [name, payload, expectedIds] of cases) {
+  for (const [name, payload, cutoff, expectedIds] of cases) {
     await t.test(name, () => {
-      const selected = selectDigestItems([workItem({ priority: 'p0', payload })], NOW);
+      const selected = selectDigestItems([workItem({ priority: 'p0', payload })], cutoff);
       assert.deepEqual(selected.map(({ id }) => id), expectedIds);
     });
   }

@@ -45,6 +45,7 @@ const PAYLOAD_STRING_LIMITS = Object.freeze({
   recommended_action: 1200
 });
 const LIFECYCLE_PAYLOAD_STRING_LIMITS = Object.freeze({ p0_acknowledged_at: 40 });
+const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -376,13 +377,17 @@ function actionType(action) {
   return type;
 }
 
+function canonicalP0Acknowledgement(value) {
+  if (typeof value !== 'string' || !P0_ACKNOWLEDGEMENT_TIMESTAMP.test(value)) return null;
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.toISOString() === value ? date : null;
+}
+
 function p0Acknowledged(item, cutoff) {
   const value = isRecord(item?.payload) ? item.payload.p0_acknowledged_at : null;
-  if (typeof value !== 'string' || !value || value.length > 40) return false;
-  const date = new Date(value);
+  const date = canonicalP0Acknowledgement(value);
   const cutoffDate = new Date(cutoff);
-  return !Number.isNaN(date.getTime())
-    && date.toISOString() === value
+  return date !== null
     && !Number.isNaN(cutoffDate.getTime())
     && date.getTime() <= cutoffDate.getTime();
 }
@@ -398,6 +403,9 @@ export function applyWorkAction(item, action, now = new Date()) {
   const changedAt = isoDate(now, 'work action clock');
   const priority = normalizedPriority(item.priority);
   if (type === 'ack_p0' && priority !== 'p0') throw new Error('acknowledgement requires a P0 work item');
+  if (type === 'ack_p0' && canonicalP0Acknowledgement(changedAt) === null) {
+    throw new Error('invalid work action');
+  }
   if (priority === 'p0' && !p0Acknowledged(item, changedAt) && (type === 'snooze' || type === 'dismiss')) {
     throw new Error('acknowledge P0 before hiding work');
   }

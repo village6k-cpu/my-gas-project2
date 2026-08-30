@@ -176,6 +176,7 @@ begin
     or not isfinite(p_cutoff)
     or p_payload is null
     or jsonb_typeof(p_payload) <> 'object'
+    or left(p_payload->>'p0_acknowledged_at', 4) = '0000'
     or not (
       p_payload @? '$.p0_acknowledged_at ? (
         @.type() == "string"

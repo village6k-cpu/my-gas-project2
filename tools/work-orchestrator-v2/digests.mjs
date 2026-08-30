@@ -22,6 +22,7 @@ const MAX_SLACK_SECTION_TEXT = 3000;
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const KST_OFFSET_MS = 9 * HOUR_MS;
+const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 
 /**
  * @typedef {object} SelectedDigestItem
@@ -107,7 +108,7 @@ function nonnegativeCounter(value) {
 function validAcknowledgement(payload, nowMs) {
   if (!isRecord(payload)) return false;
   const value = payload.p0_acknowledged_at;
-  if (typeof value !== 'string' || !value || value.length > 40) return false;
+  if (typeof value !== 'string' || !P0_ACKNOWLEDGEMENT_TIMESTAMP.test(value)) return false;
   const parsed = new Date(value);
   return !Number.isNaN(parsed.getTime())
     && parsed.toISOString() === value

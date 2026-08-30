@@ -63,4 +63,9 @@ test('foundation migration defines private atomic work and digest RPC contracts'
   assert.match(sql, /previous_digest_id/i);
   assert.match(sql, /previous_cleanup_state/i);
   assert.match(sql, /slack_message_ts.*\^\[0-9\]/i);
+  assert.match(
+    sql,
+    /left\s*\(\s*p_payload->>'p0_acknowledged_at'\s*,\s*4\s*\)\s*=\s*'0000'/i,
+    'the shared acknowledgement helper explicitly rejects year zero'
+  );
 });

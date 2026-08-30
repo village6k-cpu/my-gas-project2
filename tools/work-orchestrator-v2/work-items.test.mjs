@@ -629,6 +629,60 @@ test('ack_p0 replaces a future acknowledgement with the supplied action time', (
   assert.equal(result.item.payload.p0_acknowledged_at, '2026-08-29T06:00:00.000Z');
 });
 
+test('P0 hide actions accept only canonical millisecond UTC acknowledgements in years 0001 through 9999', async (t) => {
+  const cases = [
+    ['missing payload', undefined, NOW, false],
+    ['null payload', null, NOW, false],
+    ['non-record payload', 'not-a-record', NOW, false],
+    ['array payload', [], NOW, false],
+    ['missing acknowledgement', { requires_human_action: true }, NOW, false],
+    ['null acknowledgement', { p0_acknowledged_at: null }, NOW, false],
+    ['array acknowledgement', { p0_acknowledged_at: [] }, NOW, false],
+    ['malformed acknowledgement', { p0_acknowledged_at: 'not-a-time' }, NOW, false],
+    ['impossible calendar date', { p0_acknowledged_at: '2026-02-30T00:00:00.000Z' }, NOW, false],
+    ['year zero', { p0_acknowledged_at: '0000-01-01T00:00:00.000Z' }, NOW, false],
+    ['negative extended year', { p0_acknowledged_at: '-000001-01-01T00:00:00.000Z' }, NOW, false],
+    ['positive extended year', { p0_acknowledged_at: '+010000-01-01T00:00:00.000Z' }, '+010001-01-01T00:00:00.000Z', false],
+    ['minimum supported year', { p0_acknowledged_at: '0001-01-01T00:00:00.000Z' }, NOW, true],
+    ['normal past acknowledgement', { p0_acknowledged_at: '2026-08-29T05:59:59.999Z' }, NOW, true],
+    ['normal boundary acknowledgement', { p0_acknowledged_at: '2026-08-29T06:00:00.000Z' }, NOW, true],
+    ['normal future acknowledgement', { p0_acknowledged_at: '2026-08-29T06:00:00.001Z' }, NOW, false],
+    ['maximum supported year', { p0_acknowledged_at: '9999-12-31T23:59:59.999Z' }, '9999-12-31T23:59:59.999Z', true]
+  ];
+
+  for (const [name, payload, cutoff, effective] of cases) {
+    await t.test(name, () => {
+      const run = () => applyWorkAction(activeItem({ priority: 'p0', payload }), {
+        type: 'dismiss', expectedVersion: 4, requestedBy: 'UOWNER'
+      }, cutoff);
+      if (effective) {
+        assert.equal(run().item.state, 'dismissed');
+      } else {
+        assert.throws(run, /acknowledge P0/i);
+      }
+    });
+  }
+});
+
+test('ack_p0 rejects operation clocks that cannot produce an effective acknowledgement', async (t) => {
+  for (const clock of [
+    '0000-01-01T00:00:00.000Z',
+    '-000001-01-01T00:00:00.000Z',
+    '+010000-01-01T00:00:00.000Z'
+  ]) {
+    await t.test(clock, () => {
+      assert.throws(
+        () => applyWorkAction(
+          activeItem({ priority: 'p0' }),
+          { type: 'ack_p0', expectedVersion: 4 },
+          clock
+        ),
+        (error) => error.message === 'invalid work action' && !error.message.includes(clock)
+      );
+    });
+  }
+});
+
 test('malformed P0 acknowledgement metadata does not unlock hide actions', () => {
   assert.throws(
     () => applyWorkAction(activeItem({

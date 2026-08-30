@@ -828,6 +828,48 @@ test('listActionableWork uses the supplied cutoff for future and boundary P0 ack
   );
 });
 
+test('listActionableWork validates the exact effective P0 acknowledgement timestamp domain', async (t) => {
+  const futureActionableAt = '2099-01-01T00:00:00.000Z';
+  const cases = [
+    ['missing payload', () => {
+      const row = workRow({ priority: 'p0', actionable_at: futureActionableAt });
+      delete row.payload;
+      return row;
+    }, '2026-08-29T03:00:00.000Z', 'invalid-response'],
+    ['null payload', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: null }), '2026-08-29T03:00:00.000Z', 'invalid-response'],
+    ['non-record payload', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: 'not-a-record' }), '2026-08-29T03:00:00.000Z', 'invalid-response'],
+    ['array payload', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: [] }), '2026-08-29T03:00:00.000Z', 'invalid-response'],
+    ['missing acknowledgement', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: {} }), '2026-08-29T03:00:00.000Z', 'visible'],
+    ['null acknowledgement', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: { p0_acknowledged_at: null } }), '2026-08-29T03:00:00.000Z', 'visible'],
+    ['array acknowledgement', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: { p0_acknowledged_at: [] } }), '2026-08-29T03:00:00.000Z', 'visible'],
+    ['malformed acknowledgement', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: { p0_acknowledged_at: 'not-a-time' } }), '2026-08-29T03:00:00.000Z', 'visible'],
+    ['impossible calendar date', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: { p0_acknowledged_at: '2026-02-30T00:00:00.000Z' } }), '2026-08-29T03:00:00.000Z', 'visible'],
+    ['year zero', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: { p0_acknowledged_at: '0000-01-01T00:00:00.000Z' } }), '2026-08-29T03:00:00.000Z', 'visible'],
+    ['negative extended year', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: { p0_acknowledged_at: '-000001-01-01T00:00:00.000Z' } }), '2026-08-29T03:00:00.000Z', 'visible'],
+    ['positive extended year', () => workRow({ priority: 'p0', actionable_at: '+020000-01-01T00:00:00.000Z', payload: { p0_acknowledged_at: '+010000-01-01T00:00:00.000Z' } }), '+010001-01-01T00:00:00.000Z', 'visible'],
+    ['normal past acknowledgement', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: { p0_acknowledged_at: '2026-08-29T02:59:59.999Z' } }), '2026-08-29T03:00:00.000Z', 'invalid-response'],
+    ['normal boundary acknowledgement', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: { p0_acknowledged_at: '2026-08-29T03:00:00.000Z' } }), '2026-08-29T03:00:00.000Z', 'invalid-response'],
+    ['normal future acknowledgement', () => workRow({ priority: 'p0', actionable_at: futureActionableAt, payload: { p0_acknowledged_at: '2026-08-29T03:00:00.001Z' } }), '2026-08-29T03:00:00.000Z', 'visible']
+  ];
+
+  for (const [name, rowFactory, now, outcome] of cases) {
+    await t.test(name, async () => {
+      const fetch = createFetch([response({ data: [rowFactory()] })]);
+      const store = createWorkOrchestratorStore({
+        supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+      });
+      const operation = store.listActionableWork({ now, limit: 50 });
+      if (outcome === 'visible') {
+        assert.equal((await operation).length, 1);
+      } else {
+        await assert.rejects(operation, {
+          message: 'Work Orchestrator Supabase request failed: response invalid'
+        });
+      }
+    });
+  }
+});
+
 test('recordDigestCleanup sends exact replacement evidence without touching Slack', async () => {
   const cleanedRow = digestRow({
     state: 'delivered', lease_owner: null, lease_token: null, lease_expires_at: null,
