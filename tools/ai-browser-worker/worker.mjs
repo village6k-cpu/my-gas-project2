@@ -19,6 +19,8 @@ import {
   mergeFollowUpCaseLifecycle
 } from './follow-up-case-lifecycle.mjs';
 import { validateStaffConfirmedMutation } from './staff-confirmed-mutation.mjs';
+import { buildHumanWorkCandidates } from '../work-orchestrator-v2/work-items.mjs';
+import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -4524,6 +4526,7 @@ export function requireConfig() {
     brainCustomerProfilesPath: process.env.VILLAGE_BRAIN_CUSTOMER_PROFILES_PATH || 'C:\\Village\\VILLAGE_Brain\\Ops\\customer-profiles.jsonl',
     followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items',
     followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
+    workOrchestratorV2WorkItemsEnabled: process.env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED === '1',
     autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
     autoSendLogPath: process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
     // 응대 교정 원장 — 야간 채굴기(mine-kakao-corrections.mjs)가 사장 수동응대 사례를 적재하고
@@ -10431,7 +10434,57 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
   }
 }
 
-export async function finalizePreparedKakaoDecision({ config, job, applied } = {}) {
+function emptyWorkOrchestratorResult(skipped) {
+  return { skipped, inserted: 0, merged: 0, rows: [], error: null };
+}
+
+async function upsertWorkOrchestratorV2Items({ config, job, prepared, autoReplyResult, dependencies }) {
+  if (config.workOrchestratorV2WorkItemsEnabled !== true) return emptyWorkOrchestratorResult(true);
+  const result = emptyWorkOrchestratorResult(false);
+  let candidates;
+  try {
+    candidates = buildHumanWorkCandidates({
+      decision: prepared.decision,
+      job,
+      followUpRows: prepared.availabilityAwareRows || [],
+      autoReplyResult,
+      sheetResult: prepared.sheetResult,
+      postActionResult: prepared.postActionResult
+    });
+  } catch {
+    return { ...result, error: 'work_orchestrator_v2_validation_failed' };
+  }
+
+  let store;
+  try {
+    store = dependencies.workOrchestratorStore || createWorkOrchestratorStore({
+      supabaseUrl: config.supabaseUrl,
+      serviceRoleKey: config.serviceRoleKey,
+      fetchImpl: config.fetchImpl || fetch
+    });
+  } catch {
+    return { ...result, error: 'work_orchestrator_v2_store_failed' };
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const stored = await store.upsertWorkItem(candidate);
+      if (!stored || typeof stored.applied !== 'boolean' || typeof stored.created !== 'boolean'
+        || (stored.created && !stored.applied) || !stored.row || typeof stored.row !== 'object') {
+        throw new Error('invalid v2 store response');
+      }
+      if (stored.applied && stored.created) result.inserted += 1;
+      if (stored.applied && !stored.created) result.merged += 1;
+      result.rows.push(stored.row);
+    } catch {
+      result.error = 'work_orchestrator_v2_store_failed';
+      break;
+    }
+  }
+  return result;
+}
+
+export async function finalizePreparedKakaoDecision({ config, job, applied, dependencies = {} } = {}) {
   const prepared = applied?.prepared;
   if (!prepared) throw new Error('applied Kakao decision is required');
   if (prepared.status !== 'ai_prepared') return prepared;
@@ -10443,6 +10496,7 @@ export async function finalizePreparedKakaoDecision({ config, job, applied } = {
       superseded: true,
       followUpResult: { inserted: 0, skipped: true, reason: 'superseded_by_newer_room_event', rows: [] },
       slackDeliveryResult: { skipped: true, reason: 'superseded_by_newer_room_event', results: [] },
+      workOrchestratorResult: emptyWorkOrchestratorResult(true),
       autoReplyResult
     };
   }
@@ -10453,25 +10507,36 @@ export async function finalizePreparedKakaoDecision({ config, job, applied } = {
     followUpResult = { inserted: 0, skipped: true, reason: 'kakao_follow_up_rows_disabled', rows: caseRows };
   } else if (config.twoChannelRoutingEnabled === true) {
     try {
-      const caseResult = await upsertFollowUpCaseRows(config, caseRows);
+      const upsertCases = dependencies.upsertFollowUpCaseRows || upsertFollowUpCaseRows;
+      const caseResult = await upsertCases(config, caseRows);
       followUpResult = { ...caseResult, rows: caseResult.rows };
     } catch (error) {
       followUpResult = { inserted: 0, error: error.message, rows: [] };
     }
   } else {
     try {
-      followUpResult = await upsertFollowUpRows(config, followUpRows);
+      const upsertLegacyRows = dependencies.upsertFollowUpRows || upsertFollowUpRows;
+      followUpResult = await upsertLegacyRows(config, followUpRows);
     } catch (error) {
       followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
     }
   }
+  const deliverLegacyRows = dependencies.deliverSlackFollowUpRows || deliverSlackFollowUpRows;
   const slackDeliveryResult = config.followUpRowsEnabled === false
     ? { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] }
-    : await deliverSlackFollowUpRows(config, followUpResult.rows || []);
+    : await deliverLegacyRows(config, followUpResult.rows || []);
+  const workOrchestratorResult = await upsertWorkOrchestratorV2Items({
+    config,
+    job,
+    prepared,
+    autoReplyResult,
+    dependencies
+  });
   return {
     ...prepared,
     status: applied.superseded ? 'superseded_by_newer_room_event' : 'ai_completed',
     followUpResult,
+    workOrchestratorResult,
     inquiryResult: null,
     manualTaskResult: null,
     slackDeliveryResult,
