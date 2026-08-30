@@ -13,6 +13,24 @@ const receipt = {
   receivedAt: '2026-08-29T00:00:00.000Z',
   payload: { previewText: '문의' }
 };
+const workCandidate = {
+  work_key: 'room:1:payment',
+  source_event_keys: ['event-1'],
+  room_key: 'room:1',
+  title: 'Payment review',
+  summary: 'Verify the typed payment outcome.',
+  work_type: 'payment_check',
+  priority: 'normal',
+  state: 'open',
+  owner_id: 'UOWNER',
+  actionable_at: '2026-08-29T00:00:00.000Z',
+  due_at: null,
+  snoozed_until: null,
+  first_opened_at: '2026-08-29T00:00:00.000Z',
+  last_activity_at: '2026-08-29T00:00:00.000Z',
+  automation_state: 'needs_human',
+  payload: { requires_human_action: true, action_family: 'payment_reconcile' }
+};
 
 function response({ ok = true, status = 200, data = null, contentRange = null } = {}) {
   return {
@@ -304,6 +322,174 @@ test('counts uses HEAD requests with URL-encoded state filters', async () => {
     ['https://supabase.example/rest/v1/work_items_v2?select=id&state=in.%28open%2Cin_progress%2Csnoozed%29', 'HEAD', '0-0', 'count=exact'],
     ['https://supabase.example/rest/v1/digest_runs?select=id&state=in.%28building%2Cfailed%29', 'HEAD', '0-0', 'count=exact']
   ]);
+});
+
+test('upsertWorkItem sends only the reviewed bounded candidate to the atomic RPC', async () => {
+  const fetch = createFetch([response({ data: { applied: true, created: true, row: { id: '11111111-1111-4111-8111-111111111111' } } })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  const result = await store.upsertWorkItem({
+    ...workCandidate,
+    version: 99,
+    digest_inclusion_count: 99,
+    pending_action: { type: 'dismiss' },
+    resolution_evidence: { customer: 'must-not-cross-rpc-boundary' }
+  });
+
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/upsert_work_item_v2');
+  assert.equal(fetch.requests[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), { p_candidate: workCandidate });
+  assert.deepEqual(result, { applied: true, created: true, row: { id: '11111111-1111-4111-8111-111111111111' } });
+});
+
+test('requestWorkAction preserves exact id/version action CAS and exposes stale no-op', async () => {
+  const fetch = createFetch([
+    response({ data: { applied: true, row: { id: '11111111-1111-4111-8111-111111111111', version: 5 } } }),
+    response({ data: { applied: false, row: null } })
+  ]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+  const input = {
+    id: '11111111-1111-4111-8111-111111111111',
+    expectedVersion: 4,
+    action: { type: 'request_resolve' },
+    requestedBy: 'UOWNER'
+  };
+
+  assert.equal((await store.requestWorkAction(input)).applied, true);
+  assert.deepEqual(await store.requestWorkAction(input), { applied: false, row: null });
+  assert.ok(fetch.requests.every(({ url }) => url === 'https://supabase.example/rest/v1/rpc/request_work_item_action_v2'));
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_id: input.id,
+    p_expected_version: 4,
+    p_action: { type: 'request_resolve' },
+    p_requested_by: 'UOWNER'
+  });
+});
+
+test('listActionableWork selects a bounded deterministic digest surface including unresolved P0', async () => {
+  const fetch = createFetch([response({ data: [{ id: 'work-1', priority: 'p0' }] })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  const rows = await store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 50 });
+
+  assert.equal(rows.length, 1);
+  const url = new URL(fetch.requests[0].url);
+  assert.equal(url.pathname, '/rest/v1/work_items_v2');
+  assert.equal(url.searchParams.get('state'), 'in.(open,in_progress,snoozed)');
+  assert.equal(url.searchParams.get('or'), '(actionable_at.lte.2026-08-29T03:00:00.000Z,priority.eq.p0)');
+  assert.equal(url.searchParams.get('order'), 'actionable_at.asc,first_opened_at.asc,id.asc');
+  assert.equal(url.searchParams.get('limit'), '50');
+  assert.doesNotMatch(url.searchParams.get('select'), /resolution_evidence|pending_action|source_event_keys|slack/i);
+});
+
+test('claimDigestRun sends exact lease inputs and preserves the one-winner result shape', async () => {
+  const fetch = createFetch([
+    response({ data: { claimed: true, created: true, row: { id: '22222222-2222-4222-8222-222222222222' } } }),
+    response({ data: { claimed: false, created: false, row: { id: '22222222-2222-4222-8222-222222222222' } } })
+  ]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+  const input = {
+    destinationKey: 'slack:CINBOX',
+    scheduledAt: '2026-08-29T03:00:00.000Z',
+    windowStartedAt: '2026-08-29T00:00:00.000Z',
+    windowEndedAt: '2026-08-29T03:00:00.000Z',
+    leaseOwner: 'bridge:test',
+    leaseSeconds: 120
+  };
+
+  const first = await store.claimDigestRun(input);
+  const second = await store.claimDigestRun(input);
+
+  assert.equal(first.claimed, true);
+  assert.equal(second.claimed, false);
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_destination_key: 'slack:CINBOX',
+    p_scheduled_at: '2026-08-29T03:00:00.000Z',
+    p_window_started_at: '2026-08-29T00:00:00.000Z',
+    p_window_ended_at: '2026-08-29T03:00:00.000Z',
+    p_lease_owner: 'bridge:test',
+    p_lease_seconds: 120
+  });
+});
+
+test('finalizeDigestRun sends a content-free versioned snapshot and exact lease owner', async () => {
+  const fetch = createFetch([response({ data: { applied: true, row: { state: 'delivered' }, updated_count: 1 } })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+  const itemSnapshot = [{
+    id: '11111111-1111-4111-8111-111111111111', version: 4, inclusionReason: 'overdue', priority: 'urgent'
+  }];
+
+  const result = await store.finalizeDigestRun({
+    id: '22222222-2222-4222-8222-222222222222',
+    leaseOwner: 'bridge:test',
+    itemSnapshot,
+    channelId: 'CINBOX',
+    messageTs: '123.45',
+    deliveredAt: '2026-08-29T03:00:05.000Z'
+  });
+
+  assert.equal(result.applied, true);
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_id: '22222222-2222-4222-8222-222222222222',
+    p_lease_owner: 'bridge:test',
+    p_item_snapshot: itemSnapshot,
+    p_slack_channel_id: 'CINBOX',
+    p_slack_message_ts: '123.45',
+    p_delivered_at: '2026-08-29T03:00:05.000Z'
+  });
+  assert.deepEqual(Object.keys(itemSnapshot[0]).sort(), ['id', 'inclusionReason', 'priority', 'version']);
+});
+
+test('finalizeDigestRun accepts an empty snapshot and surfaces stale lease no-op unchanged', async () => {
+  const fetch = createFetch([
+    response({ data: { applied: true, row: { state: 'delivered', item_snapshot: [] }, updated_count: 0 } }),
+    response({ data: { applied: false, row: null, updated_count: 0 } })
+  ]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+  const input = {
+    id: '22222222-2222-4222-8222-222222222222', leaseOwner: 'bridge:test', itemSnapshot: [],
+    channelId: 'CINBOX', messageTs: '123.45', deliveredAt: '2026-08-29T03:00:05.000Z'
+  };
+
+  assert.equal((await store.finalizeDigestRun(input)).updated_count, 0);
+  assert.deepEqual(await store.finalizeDigestRun(input), { applied: false, row: null, updated_count: 0 });
+});
+
+test('failDigestRun sends only an allowlisted error token and exact lease fencing', async () => {
+  const fetch = createFetch([response({ data: { applied: true, row: { state: 'failed' } } })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  await store.failDigestRun({
+    id: '22222222-2222-4222-8222-222222222222', leaseOwner: 'bridge:test',
+    error: 'digest_delivery_failed'
+  });
+
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_id: '22222222-2222-4222-8222-222222222222',
+    p_lease_owner: 'bridge:test',
+    p_error: 'digest_delivery_failed'
+  });
+});
+
+test('work and digest methods reject unbounded or content-bearing input before requests', async () => {
+  const fetch = createFetch();
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  await assert.rejects(store.upsertWorkItem({ ...workCandidate, work_key: ' x ' }), /input is invalid/i);
+  await assert.rejects(store.upsertWorkItem({ ...workCandidate, work_type: 'completed_log' }), /input is invalid/i);
+  await assert.rejects(store.requestWorkAction({
+    id: '11111111-1111-4111-8111-111111111111', expectedVersion: 1,
+    action: { type: 'request_resolve', customer: serviceRoleKey }, requestedBy: 'U'
+  }), /input is invalid/i);
+  await assert.rejects(store.finalizeDigestRun({
+    id: '22222222-2222-4222-8222-222222222222', leaseOwner: 'bridge:test',
+    itemSnapshot: [{ id: '11111111-1111-4111-8111-111111111111', version: 1, inclusionReason: 'actionable', priority: 'normal', summary: serviceRoleKey }],
+    channelId: 'C', messageTs: '1.1', deliveredAt: '2026-08-29T03:00:00.000Z'
+  }), /input is invalid/i);
+  await assert.rejects(store.failDigestRun({
+    id: '22222222-2222-4222-8222-222222222222', leaseOwner: 'bridge:test', error: serviceRoleKey
+  }), (error) => /input is invalid/i.test(error.message) && !error.message.includes(serviceRoleKey));
+  assert.equal(fetch.requests.length, 0);
 });
 
 test('store rejects missing configuration without revealing the service role key', () => {

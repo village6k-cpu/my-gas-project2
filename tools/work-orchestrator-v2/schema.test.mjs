@@ -25,3 +25,32 @@ test('foundation migration enforces the private service-role schema contract', (
   assert.match(sql, /revoke execute on function public\.claim_message_notification_receipt/i);
   assert.doesNotMatch(sql, /create policy/i);
 });
+
+test('foundation migration defines private atomic work and digest RPC contracts', () => {
+  assert.equal(migrationFiles.length, 1, 'exactly one foundation migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, migrationFiles[0]), 'utf8');
+  const functions = [
+    'upsert_work_item_v2',
+    'request_work_item_action_v2',
+    'claim_digest_run_v2',
+    'finalize_digest_run_v2',
+    'fail_digest_run_v2'
+  ];
+
+  for (const functionName of functions) {
+    assert.match(sql, new RegExp(`create function public\\.${functionName}\\(`, 'i'));
+    assert.match(sql, new RegExp(
+      `create function public\\.${functionName}\\([\\s\\S]*?security invoker set search_path = ''`,
+      'i'
+    ));
+    assert.match(sql, new RegExp(`revoke execute on function public\\.${functionName}\\(`, 'i'));
+    assert.match(sql, new RegExp(`grant execute on function public\\.${functionName}\\(`, 'i'));
+  }
+
+  assert.match(sql, /on conflict do nothing/i, 'partial active-key races use target-free conflict handling');
+  assert.doesNotMatch(sql, /on conflict\s*\(\s*work_key\s*\)/i, 'partial index is not used as a full unique target');
+  assert.match(sql, /for update/i, 'work and digest rows are locked before mutation');
+  assert.match(sql, /jsonb_array_elements\(p_item_snapshot\)/i);
+  assert.match(sql, /w\.version\s*=\s*\(s\.entry->>'version'\)::integer/i);
+  assert.match(sql, /w\.state in \('open','in_progress','snoozed'\)/i);
+});

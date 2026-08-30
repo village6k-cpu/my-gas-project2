@@ -98,12 +98,25 @@ test('foundation migration executes and exposes only service-role access in Post
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
       where n.nspname = 'public'
-        and p.proname in ('touch_work_orchestrator_v2_updated_at', 'claim_message_notification_receipt')
+        and p.proname in (
+          'touch_work_orchestrator_v2_updated_at',
+          'claim_message_notification_receipt',
+          'upsert_work_item_v2',
+          'request_work_item_action_v2',
+          'claim_digest_run_v2',
+          'finalize_digest_run_v2',
+          'fail_digest_run_v2'
+        )
       order by p.proname
     `);
     assert.deepEqual(functions.map((row) => row.proname), [
+      'claim_digest_run_v2',
       'claim_message_notification_receipt',
+      'fail_digest_run_v2',
+      'finalize_digest_run_v2',
+      'request_work_item_action_v2',
       'touch_work_orchestrator_v2_updated_at',
+      'upsert_work_item_v2',
     ]);
     assert.ok(functions.every((row) => row.prosecdef === false), 'functions are SECURITY INVOKER');
     assert.ok(functions.every((row) => row.config === 'search_path=""'), 'functions set an empty search_path');
@@ -117,7 +130,15 @@ test('foundation migration executes and exposes only service-role access in Post
       join pg_namespace n on n.oid = p.pronamespace
       cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) as acl
       where n.nspname = 'public'
-        and p.proname in ('touch_work_orchestrator_v2_updated_at', 'claim_message_notification_receipt')
+        and p.proname in (
+          'touch_work_orchestrator_v2_updated_at',
+          'claim_message_notification_receipt',
+          'upsert_work_item_v2',
+          'request_work_item_action_v2',
+          'claim_digest_run_v2',
+          'finalize_digest_run_v2',
+          'fail_digest_run_v2'
+        )
         and acl.grantee = 0
         and lower(acl.privilege_type) = 'execute'
     `);
@@ -173,6 +194,305 @@ test('foundation migration executes and exposes only service-role access in Post
       where source_event_key = 'pglite-event-1'
     `);
     assert.deepEqual(receipt, [{ room_key: 'pglite-room-updated', trigger_touched: true }]);
+
+    const candidate = {
+      work_key: 'room:pglite:payment',
+      source_event_keys: ['event-a'],
+      room_key: 'room:pglite',
+      title: 'Payment review',
+      summary: 'Typed review',
+      work_type: 'payment_check',
+      priority: 'normal',
+      state: 'open',
+      owner_id: 'UOWNER',
+      actionable_at: '2026-08-20T00:00:00.000Z',
+      due_at: null,
+      snoozed_until: null,
+      first_opened_at: '2026-08-20T00:00:00.000Z',
+      last_activity_at: '2026-08-20T00:00:00.000Z',
+      automation_state: 'needs_human',
+      payload: { requires_human_action: true, action_family: 'payment_reconcile' }
+    };
+    const upsertSql = `select public.upsert_work_item_v2($1::jsonb) as result`;
+    const firstWork = await db.query(upsertSql, [JSON.stringify(candidate)]);
+    await db.query(`
+      update public.work_items_v2
+      set digest_inclusion_count = 4,
+          consecutive_unhandled_digests = 3,
+          next_reminder_at = '2026-08-23T00:00:00.000Z',
+          pending_action = '{"type":"progress","status":"pending"}'::jsonb,
+          resolution_evidence = '{"preexisting":"audit"}'::jsonb,
+          payload = payload || '{"p0_acknowledged_at":"2026-08-21T00:00:00.000Z"}'::jsonb
+      where id = $1::uuid
+    `, [firstWork.rows[0].result.row.id]);
+    const mergedWork = await db.query(upsertSql, [JSON.stringify({
+      ...candidate,
+      source_event_keys: ['event-a', 'event-b'],
+      title: 'Escalated payment review',
+      priority: 'p0',
+      owner_id: 'OTHER',
+      first_opened_at: '2026-08-29T00:00:00.000Z',
+      last_activity_at: '2026-08-29T00:00:00.000Z'
+    })]);
+    assert.equal(firstWork.rows[0].result.created, true);
+    assert.equal(firstWork.rows[0].result.applied, true);
+    assert.equal(mergedWork.rows[0].result.created, false);
+    assert.equal(mergedWork.rows[0].result.applied, true);
+    assert.equal(mergedWork.rows[0].result.row.version, 2);
+    assert.deepEqual(mergedWork.rows[0].result.row.source_event_keys, ['event-a', 'event-b']);
+    assert.equal(mergedWork.rows[0].result.row.priority, 'p0');
+    assert.equal(mergedWork.rows[0].result.row.owner_id, 'UOWNER', 'original owner is preserved');
+    assert.equal(mergedWork.rows[0].result.row.digest_inclusion_count, 4);
+    assert.equal(mergedWork.rows[0].result.row.consecutive_unhandled_digests, 3);
+    assert.equal(mergedWork.rows[0].result.row.pending_action.status, 'pending');
+    assert.deepEqual(mergedWork.rows[0].result.row.resolution_evidence, { preexisting: 'audit' });
+    assert.equal(
+      mergedWork.rows[0].result.row.payload.p0_acknowledged_at,
+      '2026-08-21T00:00:00.000Z'
+    );
+    assert.equal(
+      new Date(mergedWork.rows[0].result.row.first_opened_at).toISOString(),
+      '2026-08-20T00:00:00.000Z'
+    );
+
+    const staleLowerPriorityMerge = await db.query(upsertSql, [JSON.stringify({
+      ...candidate,
+      source_event_keys: ['event-stale'],
+      priority: 'low',
+      last_activity_at: '2026-08-19T00:00:00.000Z',
+      payload: { requires_human_action: true, action_family: 'stale_overwrite' }
+    })]);
+    assert.equal(staleLowerPriorityMerge.rows[0].result.applied, true);
+    assert.equal(staleLowerPriorityMerge.rows[0].result.row.version, 3);
+    assert.equal(staleLowerPriorityMerge.rows[0].result.row.priority, 'p0');
+    assert.equal(staleLowerPriorityMerge.rows[0].result.row.payload.action_family, 'payment_reconcile');
+    assert.equal(staleLowerPriorityMerge.rows[0].result.row.pending_action.status, 'pending');
+
+    const terminalId = staleLowerPriorityMerge.rows[0].result.row.id;
+    await db.query(`
+      update public.work_items_v2
+      set state = 'resolved', version = 4, resolution_kind = 'authoritative',
+          resolution_evidence = '{"readback":"confirmed"}'::jsonb,
+          resolved_at = '2026-08-29T01:00:00.000Z', resolved_by = 'worker'
+      where id = $1::uuid
+    `, [terminalId]);
+    const terminalRetry = await db.query(upsertSql, [JSON.stringify({ ...candidate, priority: 'urgent' })]);
+    assert.equal(terminalRetry.rows[0].result.applied, false);
+    assert.equal(terminalRetry.rows[0].result.created, false);
+    assert.equal(terminalRetry.rows[0].result.row.state, 'resolved');
+    assert.equal(terminalRetry.rows[0].result.row.version, 4);
+    assert.deepEqual(terminalRetry.rows[0].result.row.resolution_evidence, { readback: 'confirmed' });
+    const { rows: terminalCounts } = await db.query(`
+      select count(*)::integer as total,
+             count(*) filter (where state in ('open','in_progress','snoozed'))::integer as active
+      from public.work_items_v2 where work_key = $1
+    `, [candidate.work_key]);
+    assert.deepEqual(terminalCounts, [{ total: 1, active: 0 }], 'terminal work is never reopened');
+
+    const p0Candidate = {
+      ...candidate,
+      work_key: 'room:pglite:p0',
+      source_event_keys: ['event-p0'],
+      priority: 'p0'
+    };
+    const p0Work = await db.query(upsertSql, [JSON.stringify(p0Candidate)]);
+    await db.query(`
+      update public.work_items_v2
+      set state = 'snoozed', snoozed_until = '2099-01-01T00:00:00.000Z',
+          actionable_at = '2099-01-01T00:00:00.000Z'
+      where id = $1::uuid
+    `, [p0Work.rows[0].result.row.id]);
+    const unacknowledgedP0Merge = await db.query(upsertSql, [JSON.stringify(p0Candidate)]);
+    assert.equal(unacknowledgedP0Merge.rows[0].result.row.state, 'open');
+    assert.equal(unacknowledgedP0Merge.rows[0].result.row.snoozed_until, null);
+
+    await db.query(`
+      update public.work_items_v2
+      set state = 'snoozed', snoozed_until = '2099-01-01T00:00:00.000Z',
+          actionable_at = '2099-01-01T00:00:00.000Z',
+          payload = payload || '{"p0_acknowledged_at":"2026-08-21T00:00:00.000Z"}'::jsonb
+      where id = $1::uuid
+    `, [p0Work.rows[0].result.row.id]);
+    const acknowledgedP0Merge = await db.query(upsertSql, [JSON.stringify(p0Candidate)]);
+    assert.equal(acknowledgedP0Merge.rows[0].result.row.state, 'snoozed');
+    assert.equal(
+      new Date(acknowledgedP0Merge.rows[0].result.row.snoozed_until).toISOString(),
+      '2099-01-01T00:00:00.000Z'
+    );
+
+    const actionCandidate = {
+      ...candidate,
+      work_key: 'room:pglite:action',
+      source_event_keys: ['event-action'],
+      priority: 'normal'
+    };
+    const actionWork = await db.query(upsertSql, [JSON.stringify(actionCandidate)]);
+    const actionId = actionWork.rows[0].result.row.id;
+    const actionSql = `
+      select public.request_work_item_action_v2(
+        $1::uuid, $2::integer, $3::jsonb, $4::text
+      ) as result
+    `;
+    const staleAction = await db.query(actionSql, [
+      actionId, 99, JSON.stringify({ type: 'request_resolve' }), 'UOWNER'
+    ]);
+    assert.equal(staleAction.rows[0].result.applied, false);
+    const appliedAction = await db.query(actionSql, [
+      actionId, 1, JSON.stringify({ type: 'request_resolve' }), 'UOWNER'
+    ]);
+    assert.equal(appliedAction.rows[0].result.applied, true);
+    assert.equal(appliedAction.rows[0].result.row.version, 2);
+    assert.equal(appliedAction.rows[0].result.row.state, 'open', 'action request cannot resolve work');
+    assert.equal(appliedAction.rows[0].result.row.pending_action.status, 'pending');
+
+    const concurrentCandidate = {
+      ...candidate,
+      work_key: 'room:pglite:concurrent',
+      source_event_keys: ['event-concurrent']
+    };
+    const concurrent = await Promise.all([
+      db.query(upsertSql, [JSON.stringify(concurrentCandidate)]),
+      db.query(upsertSql, [JSON.stringify(concurrentCandidate)])
+    ]);
+    assert.equal(concurrent.filter((result) => result.rows[0].result.created).length, 1);
+    const { rows: concurrentRows } = await db.query(`
+      select id, version from public.work_items_v2
+      where work_key = 'room:pglite:concurrent' and state in ('open','in_progress','snoozed')
+    `);
+    assert.equal(concurrentRows.length, 1, 'partial unique key converges to one active row');
+
+    const claimDigestSql = `
+      select public.claim_digest_run_v2(
+        $1::text, $2::timestamptz, $3::timestamptz, $4::timestamptz, $5::text, $6::integer
+      ) as result
+    `;
+    const digestArgs = [
+      'slack:CINBOX', '2026-08-29T03:00:00.000Z', '2026-08-29T00:00:00.000Z',
+      '2026-08-29T03:00:00.000Z', 'bridge:pglite', 120
+    ];
+    const firstDigest = await db.query(claimDigestSql, digestArgs);
+    const secondDigest = await db.query(claimDigestSql, digestArgs);
+    assert.equal(firstDigest.rows[0].result.claimed, true);
+    assert.equal(firstDigest.rows[0].result.created, true);
+    assert.equal(secondDigest.rows[0].result.claimed, false);
+    const digestId = firstDigest.rows[0].result.row.id;
+
+    const snapshot = [
+      { id: actionId, version: 2, inclusionReason: 'overdue', priority: 'normal' },
+      { id: concurrentRows[0].id, version: 999, inclusionReason: 'actionable', priority: 'normal' }
+    ];
+    const finalizeSql = `
+      select public.finalize_digest_run_v2(
+        $1::uuid, $2::text, $3::jsonb, $4::text, $5::text, $6::timestamptz
+      ) as result
+    `;
+    const wrongFinalizeOwner = await db.query(finalizeSql, [
+      digestId, 'bridge:other', JSON.stringify(snapshot), 'CINBOX', '123.45', '2026-08-29T03:00:05.000Z'
+    ]);
+    assert.equal(wrongFinalizeOwner.rows[0].result.applied, false);
+    assert.equal(wrongFinalizeOwner.rows[0].result.updated_count, 0);
+    const finalized = await db.query(finalizeSql, [
+      digestId, 'bridge:pglite', JSON.stringify(snapshot), 'CINBOX', '123.45', '2026-08-29T03:00:05.000Z'
+    ]);
+    assert.equal(finalized.rows[0].result.applied, true);
+    assert.equal(finalized.rows[0].result.updated_count, 1);
+    assert.deepEqual(finalized.rows[0].result.row.item_snapshot, snapshot);
+    const { rows: digestCounters } = await db.query(`
+      select id, version, digest_inclusion_count, consecutive_unhandled_digests, last_digest_at, next_reminder_at
+      from public.work_items_v2 where id in ($1::uuid, $2::uuid) order by id
+    `, [actionId, concurrentRows[0].id]);
+    const matching = digestCounters.find((row) => row.id === actionId);
+    const stale = digestCounters.find((row) => row.id === concurrentRows[0].id);
+    assert.equal(matching.digest_inclusion_count, 1);
+    assert.equal(matching.consecutive_unhandled_digests, 1);
+    assert.equal(matching.version, 2, 'digest metadata never invalidates the rendered work version');
+    assert.ok(matching.last_digest_at);
+    assert.equal(new Date(matching.next_reminder_at).toISOString(), '2026-08-23T00:00:00.000Z');
+    assert.equal(stale.digest_inclusion_count, 0, 'stale snapshot versions do not advance counters');
+
+    const emptyDigest = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T06:00:00.000Z', '2026-08-29T03:00:00.000Z',
+      '2026-08-29T06:00:00.000Z', 'bridge:pglite', 120
+    ]);
+    const emptyFinalized = await db.query(finalizeSql, [
+      emptyDigest.rows[0].result.row.id, 'bridge:pglite', '[]', 'CINBOX', '456.78', '2026-08-29T06:00:05.000Z'
+    ]);
+    assert.equal(emptyFinalized.rows[0].result.applied, true);
+    assert.equal(emptyFinalized.rows[0].result.updated_count, 0);
+
+    const dailyDigest = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T07:00:00.000Z', '2026-08-29T06:00:00.000Z',
+      '2026-08-29T07:00:00.000Z', 'bridge:pglite', 120
+    ]);
+    const dailyFinalized = await db.query(finalizeSql, [
+      dailyDigest.rows[0].result.row.id, 'bridge:pglite', JSON.stringify([{
+        id: actionId, version: 2, inclusionReason: 'daily_reminder', priority: 'normal'
+      }]), 'CINBOX', '789.01', '2026-08-29T07:00:05.000Z'
+    ]);
+    assert.equal(dailyFinalized.rows[0].result.updated_count, 1);
+    const { rows: dailyReminderWork } = await db.query(`
+      select version, digest_inclusion_count, next_reminder_at
+      from public.work_items_v2 where id = $1::uuid
+    `, [actionId]);
+    assert.equal(dailyReminderWork[0].version, 2);
+    assert.equal(dailyReminderWork[0].digest_inclusion_count, 2);
+    assert.equal(new Date(dailyReminderWork[0].next_reminder_at).toISOString(), '2026-08-30T07:00:05.000Z');
+
+    const failedDigest = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T09:00:00.000Z', '2026-08-29T06:00:00.000Z',
+      '2026-08-29T09:00:00.000Z', 'bridge:pglite', 120
+    ]);
+    const failSql = `
+      select public.fail_digest_run_v2(
+        $1::uuid, $2::text, $3::text
+      ) as result
+    `;
+    const wrongOwner = await db.query(failSql, [
+      failedDigest.rows[0].result.row.id, 'bridge:other', 'digest_delivery_failed'
+    ]);
+    const rightOwner = await db.query(failSql, [
+      failedDigest.rows[0].result.row.id, 'bridge:pglite', 'digest_delivery_failed'
+    ]);
+    const staleFailure = await db.query(failSql, [
+      failedDigest.rows[0].result.row.id, 'bridge:pglite', 'digest_delivery_failed'
+    ]);
+    assert.equal(wrongOwner.rows[0].result.applied, false);
+    assert.equal(rightOwner.rows[0].result.applied, true);
+    assert.equal(staleFailure.rows[0].result.applied, false, 'failed lease cannot be failed twice');
+    await db.query(`
+      update public.digest_runs set lease_expires_at = '2000-01-01T00:00:00.000Z'
+      where id = $1::uuid
+    `, [failedDigest.rows[0].result.row.id]);
+    const recoveredFailure = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T09:00:00.000Z', '2026-08-29T06:00:00.000Z',
+      '2026-08-29T09:00:00.000Z', 'bridge:recovery', 120
+    ]);
+    assert.equal(recoveredFailure.rows[0].result.claimed, true);
+    assert.equal(recoveredFailure.rows[0].result.created, false);
+    assert.equal(recoveredFailure.rows[0].result.row.lease_owner, 'bridge:recovery');
+
+    const buildingDigest = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T12:00:00.000Z', '2026-08-29T09:00:00.000Z',
+      '2026-08-29T12:00:00.000Z', 'bridge:original', 120
+    ]);
+    await db.query(`
+      update public.digest_runs set lease_expires_at = '2000-01-01T00:00:00.000Z'
+      where id = $1::uuid
+    `, [buildingDigest.rows[0].result.row.id]);
+    const recoveredBuilding = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T12:00:00.000Z', '2026-08-29T09:00:00.000Z',
+      '2026-08-29T12:00:00.000Z', 'bridge:recovery', 120
+    ]);
+    assert.equal(recoveredBuilding.rows[0].result.claimed, true);
+    assert.equal(recoveredBuilding.rows[0].result.created, false);
+
+    const { rows: failureCounterAudit } = await db.query(`
+      select id, version, digest_inclusion_count
+      from public.work_items_v2 where id in ($1::uuid, $2::uuid) order by id
+    `, [actionId, concurrentRows[0].id]);
+    assert.equal(failureCounterAudit.find((row) => row.id === actionId).digest_inclusion_count, 2);
+    assert.equal(failureCounterAudit.find((row) => row.id === actionId).version, 2);
+    assert.equal(failureCounterAudit.find((row) => row.id === concurrentRows[0].id).digest_inclusion_count, 0);
   } finally {
     await db.close();
   }
