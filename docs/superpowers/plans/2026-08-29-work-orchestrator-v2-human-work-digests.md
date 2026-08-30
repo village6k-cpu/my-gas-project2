@@ -252,7 +252,9 @@ git commit -m "feat: dual write typed human work items"
 
 **Interfaces:**
 - Consumes: active work rows and a supplied clock.
-- Produces: `selectDigestItems(items,now)`, `buildDigestSnapshot(items,now)`, `buildDigestSlackMessage(snapshot,config)`, `nextDigestScheduledAt(lastDeliveredAt,intervalMinutes)`.
+- Produces: `selectDigestItems(items,now)`, `buildDigestSnapshot(selected)`, `buildDigestSlackMessage(selected,config)`, `nextDigestScheduledAt(lastScheduledAt,intervalMinutes)`.
+- `selectDigestItems` returns render-safe selected entries with a section and inclusion reason while retaining the bounded work fields needed for display. `buildDigestSnapshot` is the separate content-free persistence projection `{id,version,inclusionReason,priority}`; rendering must not attempt to reconstruct useful text from that minimal snapshot.
+- `buildDigestSlackMessage` returns deterministic message parts for the complete selected set plus any due daily-reminder parts. Task 5 must durably retain every posted coordinate before multi-part delivery can be enabled; a single stored coordinate must never stand in for several Slack messages.
 
 - [ ] **Step 1: Write table-driven RED tests**
 
@@ -260,10 +262,10 @@ Use fixed KST timestamps to prove:
 
 - snoozed rows are excluded before but included at `snoozed_until`;
 - every active actionable row appears;
-- P0 acknowledged unresolved precedes overdue, urgent, carry-over, normal;
+- unacknowledged P0 remains on its separate immediate/P0 surface and is excluded from the ordinary digest; acknowledged unresolved P0 precedes overdue, urgent, carry-over, normal;
 - `consecutive_unhandled_digests >= 2` adds owner mention;
 - age >=24h adds overdue section;
-- age >=72h and `next_reminder_at <= now` adds daily reminder reason;
+- age >=72h and `next_reminder_at <= now` (or no prior reminder timestamp) adds a once-due daily reminder part and `daily_reminder` snapshot reason;
 - snapshot stores only `{id,version,inclusionReason,priority}`;
 - rendered buttons encode id/version/action.
 
@@ -275,7 +277,7 @@ node --test tools\work-orchestrator-v2\digests.test.mjs
 
 - [ ] **Step 3: Implement deterministic pure functions**
 
-Define sections as `p0`, `overdue`, `urgent`, `carry_over`, `actionable`; cap each Slack message at 45 work rows and create additional numbered digest messages only when required. A run snapshot contains all rows across its messages.
+Define sections as `p0`, `overdue`, `urgent`, `carry_over`, `actionable`; cap each Slack message at 45 work rows and create additional numbered digest messages only when required. A run snapshot contains all rows across its messages. Escape Slack mrkdwn and reject malformed/unbounded active rows rather than emitting ambiguous actions. Selection and rendering are pure and never read the ambient clock.
 
 - [ ] **Step 4: Run GREEN and commit**
 
