@@ -31,6 +31,7 @@ import {
 } from '../work-orchestrator-v2/contracts.mjs';
 import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-notifications.mjs';
 import { digestScheduleWindow, runDigestCycle } from '../work-orchestrator-v2/digest-runner.mjs';
+import { processPendingWorkAction } from '../work-orchestrator-v2/work-actions.mjs';
 import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shadow-receipts.mjs';
 import { createSlackClient } from '../work-orchestrator-v2/slack-client.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
@@ -195,6 +196,9 @@ export function buildHealthConfig(config = {}) {
       immediateLocalConfigReady: Boolean(config.workOrchestratorImmediateLocalConfigReady),
       ...(Object.hasOwn(config, 'workOrchestratorDigestLocalConfigReady')
         ? { digestLocalConfigReady: Boolean(config.workOrchestratorDigestLocalConfigReady) }
+        : {}),
+      ...(Object.hasOwn(config, 'workOrchestratorActionLocalConfigReady')
+        ? { actionLocalConfigReady: Boolean(config.workOrchestratorActionLocalConfigReady) }
         : {})
     };
   }
@@ -244,11 +248,29 @@ export function buildWorkOrchestratorHealthState(value = {}) {
     oldestPendingNotificationAgeMs: hasOldestAge && Number.isFinite(oldestAge) && oldestAge >= 0 ? oldestAge : null,
     immediateBacklogReadback: backlogReadback
   };
+  const hasWorkActionState = ['workActionPollRunning', 'lastWorkActionPoll']
+    .some((key) => Object.hasOwn(value, key));
+  const actionCount = (input) => Number.isSafeInteger(input) && input >= 0 && input <= 10 ? input : 0;
+  const action = value.lastWorkActionPoll;
+  const safeAction = hasWorkActionState && action && typeof action === 'object' && !Array.isArray(action)
+    ? {
+        status: ['ok', 'error', 'disabled', 'running'].includes(action.status) ? action.status : 'error',
+        trigger: ['startup', 'interval', 'manual'].includes(action.trigger) ? action.trigger : 'manual',
+        scanned: actionCount(action.scanned),
+        applied: actionCount(action.applied),
+        awaitingResolution: actionCount(action.awaitingResolution),
+        conflicts: actionCount(action.conflicts),
+        invalid: actionCount(action.invalid)
+      }
+    : null;
+  const healthWithActions = hasWorkActionState
+    ? { ...health, workActionPollRunning: value.workActionPollRunning === true, lastWorkActionPoll: safeAction }
+    : health;
   const hasDigestState = [
     'digestRunning', 'lastDigestRun', 'lastDigestSuccessAt', 'lastDigestFailureAt',
     'nextScheduledAt', 'digestFailureCount', 'omittedEligibleCount'
   ].some((key) => Object.hasOwn(value, key));
-  if (!hasDigestState) return health;
+  if (!hasDigestState) return healthWithActions;
 
   const count = (input, maximum) => {
     const numeric = input;
@@ -280,7 +302,7 @@ export function buildWorkOrchestratorHealthState(value = {}) {
     return result;
   };
   return {
-    ...health,
+    ...healthWithActions,
     digestRunning: value.digestRunning === true,
     lastDigestRun: safeLastRun(value.lastDigestRun),
     lastDigestSuccessAt: safeShadowTimestamp(value.lastDigestSuccessAt) || null,
@@ -649,6 +671,306 @@ const DIGEST_STORE_METHODS = [
   'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
   'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
 ];
+
+const WORK_ACTION_ROW_FIELDS = Object.freeze([
+  'id', 'state', 'priority', 'actionable_at', 'snoozed_until', 'resolution_kind',
+  'resolution_evidence', 'resolved_at', 'resolved_by', 'pending_action', 'version',
+  'payload', 'updated_at'
+]);
+const WORK_ACTION_PATCH_FIELDS = new Set([
+  'state', 'actionable_at', 'snoozed_until', 'payload', 'resolution_kind',
+  'resolution_evidence', 'resolved_at', 'resolved_by', 'pending_action', 'version', 'updated_at'
+]);
+const WORK_ACTION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const WORK_ACTION_ACTIVE_STATES = new Set(['open', 'in_progress', 'snoozed']);
+const WORK_ACTION_TRIGGERS = new Set(['startup', 'interval', 'manual']);
+const WORK_ACTION_TIMESTAMP_FIELDS = new Set(['actionable_at', 'snoozed_until', 'resolved_at']);
+
+function workActionRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function workActionExactKeys(value, allowed) {
+  if (!workActionRecord(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...allowed].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function workActionSameJson(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => workActionSameJson(value, right[index]));
+  }
+  if (!workActionRecord(left) || !workActionRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && workActionSameJson(left[key], right[key]));
+}
+
+function safeWorkActionTrigger(value) {
+  return WORK_ACTION_TRIGGERS.has(value) ? value : 'manual';
+}
+
+function safeWorkActionPollResult(value, trigger) {
+  const empty = {
+    status: 'error', trigger: safeWorkActionTrigger(trigger), scanned: 0, applied: 0,
+    awaitingResolution: 0, conflicts: 0, invalid: 0
+  };
+  if (!workActionRecord(value) || !['ok', 'error', 'disabled', 'running'].includes(value.status)
+    || value.trigger !== empty.trigger) return empty;
+  const result = { status: value.status, trigger: value.trigger };
+  for (const key of ['scanned', 'applied', 'awaitingResolution', 'conflicts', 'invalid']) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > 10) return empty;
+    result[key] = value[key];
+  }
+  if (result.applied + result.awaitingResolution + result.conflicts + result.invalid > result.scanned) return empty;
+  return result;
+}
+
+function validatePendingWorkActionRow(row) {
+  if (!workActionExactKeys(row, WORK_ACTION_ROW_FIELDS)
+    || typeof row.id !== 'string' || !WORK_ACTION_UUID.test(row.id)
+    || !WORK_ACTION_ACTIVE_STATES.has(row.state)
+    || !Number.isSafeInteger(row.version) || row.version < 2
+    || !workActionRecord(row.pending_action) || row.pending_action.status !== 'pending') {
+    throw new Error('Work Orchestrator action response invalid');
+  }
+  return row;
+}
+
+async function workActionFetchJson(url, init, fetchImpl) {
+  try {
+    const response = await fetchImpl(url, init);
+    const text = await response.text();
+    if (!response.ok) throw new Error('invalid');
+    return JSON.parse(text);
+  } catch {
+    throw new Error('Work Orchestrator action request failed');
+  }
+}
+
+function workActionHeaders(serviceRoleKey, prefer = null) {
+  const headers = {
+    apikey: serviceRoleKey,
+    authorization: `Bearer ${serviceRoleKey}`,
+    'content-type': 'application/json'
+  };
+  if (prefer) headers.prefer = prefer;
+  return headers;
+}
+
+function workActionEndpoint(supabaseUrl) {
+  const base = String(supabaseUrl || '').trim().replace(/\/$/, '');
+  if (!/^https?:\/\/[^\s]+$/i.test(base)) throw new Error('Work Orchestrator action configuration invalid');
+  return `${base}/rest/v1/work_items_v2`;
+}
+
+export async function listPendingWorkActionsV2({
+  supabaseUrl,
+  serviceRoleKey,
+  limit = 3,
+  fetchImpl = fetch
+} = {}) {
+  try {
+    const key = String(serviceRoleKey || '').trim();
+    if (!key || typeof fetchImpl !== 'function'
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new Error('invalid');
+    const url = new URL(workActionEndpoint(supabaseUrl));
+    url.searchParams.set('select', WORK_ACTION_ROW_FIELDS.join(','));
+    url.searchParams.set('state', 'in.(open,in_progress,snoozed)');
+    url.searchParams.set('pending_action->>status', 'eq.pending');
+    url.searchParams.set('order', 'updated_at.asc');
+    url.searchParams.set('limit', String(limit));
+    const data = await workActionFetchJson(url.toString(), {
+      method: 'GET', headers: workActionHeaders(key)
+    }, fetchImpl);
+    if (!Array.isArray(data) || data.length > limit) throw new Error('invalid');
+    return data.map(validatePendingWorkActionRow);
+  } catch {
+    throw new Error('Work Orchestrator action request failed');
+  }
+}
+
+function validateWorkActionPatch(row, transition) {
+  if (!workActionRecord(transition) || transition.status !== 'ready'
+    || transition.expectedVersion !== row.version || transition.expectedPendingStatus !== 'pending'
+    || !workActionRecord(transition.patch)
+    || !workActionExactKeys(transition.patch.pending_action, [])
+    || transition.patch.version !== row.version + 1
+    || typeof transition.patch.updated_at !== 'string'
+    || !Number.isFinite(Date.parse(transition.patch.updated_at))) throw new Error('invalid');
+  const keys = Object.keys(transition.patch);
+  if (keys.some((key) => !WORK_ACTION_PATCH_FIELDS.has(key))
+    || !keys.includes('pending_action') || !keys.includes('version') || !keys.includes('updated_at')) {
+    throw new Error('invalid');
+  }
+  return transition.patch;
+}
+
+export async function applyPendingWorkActionPatchV2({
+  supabaseUrl,
+  serviceRoleKey,
+  row,
+  transition,
+  fetchImpl = fetch
+} = {}) {
+  try {
+    validatePendingWorkActionRow(row);
+    const patch = validateWorkActionPatch(row, transition);
+    const databasePatch = Object.fromEntries(
+      Object.entries(patch).filter(([field]) => field !== 'updated_at')
+    );
+    const key = String(serviceRoleKey || '').trim();
+    if (!key || typeof fetchImpl !== 'function') throw new Error('invalid');
+    const url = new URL(workActionEndpoint(supabaseUrl));
+    url.searchParams.set('select', WORK_ACTION_ROW_FIELDS.join(','));
+    url.searchParams.set('id', `eq.${row.id}`);
+    url.searchParams.set('version', `eq.${row.version}`);
+    url.searchParams.set('state', 'in.(open,in_progress,snoozed)');
+    url.searchParams.set('pending_action->>status', 'eq.pending');
+    const data = await workActionFetchJson(url.toString(), {
+      method: 'PATCH',
+      headers: workActionHeaders(key, 'return=representation'),
+      body: JSON.stringify(databasePatch)
+    }, fetchImpl);
+    if (!Array.isArray(data) || data.length > 1) throw new Error('invalid');
+    if (data.length === 0) return { applied: false };
+    const updated = validatePendingWorkActionRowAfterApply(data[0], row, databasePatch);
+    if (!updated) throw new Error('invalid');
+    return { applied: true };
+  } catch {
+    throw new Error('Work Orchestrator action request failed');
+  }
+}
+
+function validatePendingWorkActionRowAfterApply(updated, row, patch) {
+  if (!workActionExactKeys(updated, WORK_ACTION_ROW_FIELDS)
+    || updated.id !== row.id || updated.version !== patch.version
+    || !workActionExactKeys(updated.pending_action, [])
+    || typeof updated.updated_at !== 'string' || !Number.isFinite(Date.parse(updated.updated_at))) return false;
+  return Object.entries(patch).every(([key, value]) => {
+    if (WORK_ACTION_TIMESTAMP_FIELDS.has(key) && value !== null) {
+      return typeof updated[key] === 'string'
+        && Number.isFinite(Date.parse(updated[key]))
+        && Date.parse(updated[key]) === Date.parse(value);
+    }
+    return workActionSameJson(updated[key], value);
+  });
+}
+
+export function createWorkOrchestratorActionPoller({
+  config = {},
+  storeReady = false,
+  list = null,
+  apply = null,
+  now = () => new Date(),
+  state: sharedState = null
+} = {}) {
+  const localState = sharedState && workActionRecord(sharedState) ? sharedState : {};
+  const enabled = config.workItemsEnabled === true && storeReady === true
+    && typeof list === 'function' && typeof apply === 'function';
+  let running = false;
+
+  const poll = async (reason = 'interval') => {
+    const trigger = safeWorkActionTrigger(reason);
+    const result = {
+      status: enabled ? 'ok' : 'disabled', trigger, scanned: 0, applied: 0,
+      awaitingResolution: 0, conflicts: 0, invalid: 0
+    };
+    if (!enabled) return result;
+    if (running) return { ...result, status: 'running' };
+    running = true;
+    localState.workActionPollRunning = true;
+    try {
+      let changedAt;
+      try {
+        const supplied = typeof now === 'function' ? now() : now;
+        const date = supplied instanceof Date ? new Date(supplied.getTime()) : new Date(supplied);
+        if (Number.isNaN(date.getTime())) throw new Error('invalid');
+        changedAt = date.toISOString();
+      } catch {
+        result.status = 'error';
+        return result;
+      }
+      let rows;
+      try {
+        rows = await list({ limit: 10, now: changedAt });
+        if (!Array.isArray(rows) || rows.length > 10) throw new Error('invalid');
+      } catch {
+        result.status = 'error';
+        return result;
+      }
+      result.scanned = rows.length;
+      for (const row of rows) {
+        let transition;
+        try {
+          transition = processPendingWorkAction({ row, action: row?.pending_action, now: changedAt });
+        } catch {
+          result.invalid += 1;
+          continue;
+        }
+        if (transition.status === 'awaiting_authoritative_resolution') {
+          result.awaitingResolution += 1;
+          continue;
+        }
+        try {
+          const applied = await apply({ row, transition });
+          if (!workActionExactKeys(applied, ['applied']) || typeof applied.applied !== 'boolean') throw new Error('invalid');
+          if (applied.applied) result.applied += 1;
+          else result.conflicts += 1;
+        } catch {
+          result.status = 'error';
+        }
+      }
+      return result;
+    } finally {
+      running = false;
+      localState.workActionPollRunning = false;
+      localState.lastWorkActionPoll = safeWorkActionPollResult(result, trigger);
+    }
+  };
+
+  return { enabled, localConfigReady: enabled, state: localState, poll };
+}
+
+export async function runSlackActionPollPair({
+  reason = 'manual',
+  legacy = null,
+  workActions = null
+} = {}) {
+  const trigger = safeWorkActionTrigger(reason);
+  const result = { legacy: null, workOrchestratorV2: null };
+  try {
+    result.legacy = typeof legacy === 'function' ? await legacy() : null;
+  } catch {
+    result.legacyError = true;
+  }
+  try {
+    result.workOrchestratorV2 = workActions && typeof workActions.poll === 'function'
+      ? safeWorkActionPollResult(await workActions.poll(trigger), trigger)
+      : safeWorkActionPollResult({
+          status: 'disabled', trigger, scanned: 0, applied: 0,
+          awaitingResolution: 0, conflicts: 0, invalid: 0
+        }, trigger);
+  } catch {
+    result.workOrchestratorV2 = safeWorkActionPollResult(null, trigger);
+  }
+  return result;
+}
+
+export function slackActionMaintenanceSucceeded(result = {}) {
+  if (!workActionRecord(result) || result.legacyError === true) return false;
+  const legacyErrors = Array.isArray(result.errors)
+    ? result.errors
+    : (Array.isArray(result.legacy?.errors) ? result.legacy.errors : []);
+  return legacyErrors.length === 0
+    && workActionRecord(result.workOrchestratorV2)
+    && result.workOrchestratorV2.status !== 'error';
+}
 
 function digestRuntimeIso(now) {
   let value;
@@ -1264,6 +1586,27 @@ const workOrchestratorDigestRuntime = createWorkOrchestratorDigestRuntime({
   leaseOwner: `bridge:digest:${process.pid}`
 });
 CONFIG.workOrchestratorDigestLocalConfigReady = workOrchestratorDigestRuntime.localConfigReady;
+const workOrchestratorActionPoller = createWorkOrchestratorActionPoller({
+  config: CONFIG.workOrchestrator,
+  storeReady: Boolean(workOrchestratorStore),
+  list: workOrchestratorCredentialsPresent
+    ? ({ limit }) => listPendingWorkActionsV2({
+        supabaseUrl: CONFIG.supabaseUrl,
+        serviceRoleKey: CONFIG.supabaseServiceRoleKey,
+        limit
+      })
+    : null,
+  apply: workOrchestratorCredentialsPresent
+    ? ({ row, transition }) => applyPendingWorkActionPatchV2({
+        supabaseUrl: CONFIG.supabaseUrl,
+        serviceRoleKey: CONFIG.supabaseServiceRoleKey,
+        row,
+        transition
+      })
+    : null,
+  state: workOrchestratorShadowRuntime.state
+});
+CONFIG.workOrchestratorActionLocalConfigReady = workOrchestratorActionPoller.localConfigReady;
 
 const state = {
   startedAt: new Date().toISOString(),
@@ -4133,27 +4476,37 @@ async function handlePendingSlackActionRow(row) {
 }
 
 async function runSlackActionPoll(reason = 'interval') {
-  if (!CONFIG.slackActionPollEnabled || !supabaseConfigured()) return { skipped: true };
+  const legacyEnabled = CONFIG.slackActionPollEnabled && supabaseConfigured();
+  if (!legacyEnabled && !workOrchestratorActionPoller.enabled) return { skipped: true };
   if (state.slackActionPollRunning) return { skipped: true, reason: 'already_running' };
   state.slackActionPollRunning = true;
   const startedAt = nowIso();
   const result = { startedAt, reason, scanned: 0, handled: 0, errors: [] };
-  try {
-    const rows = await fetchPendingSlackActionRows(3);
-    result.scanned = rows.length;
-    for (const row of rows) {
-      const handled = await handlePendingSlackActionRow(row);
-      if (handled.ok) result.handled += 1;
-      if (handled.error) result.errors.push({ id: row.id, error: handled.error });
+  if (legacyEnabled) {
+    try {
+      const rows = await fetchPendingSlackActionRows(3);
+      result.scanned = rows.length;
+      for (const row of rows) {
+        const handled = await handlePendingSlackActionRow(row);
+        if (handled.ok) result.handled += 1;
+        if (handled.error) result.errors.push({ id: row.id, error: handled.error });
+      }
+    } catch (error) {
+      result.errors.push({ error: error.message });
+      appendNdjson('errors.ndjson', { at: nowIso(), type: 'slack_action_poll', message: error.message });
     }
-  } catch (error) {
-    result.errors.push({ error: error.message });
-    appendNdjson('errors.ndjson', { at: nowIso(), type: 'slack_action_poll', message: error.message });
-  } finally {
-    result.finishedAt = nowIso();
-    state.lastSlackActionPoll = result;
-    state.slackActionPollRunning = false;
   }
+  try {
+    result.workOrchestratorV2 = safeWorkActionPollResult(
+      await workOrchestratorActionPoller.poll(reason),
+      safeWorkActionTrigger(reason)
+    );
+  } catch {
+    result.workOrchestratorV2 = safeWorkActionPollResult(null, safeWorkActionTrigger(reason));
+  }
+  result.finishedAt = nowIso();
+  state.lastSlackActionPoll = result;
+  state.slackActionPollRunning = false;
   return result;
 }
 
@@ -5081,7 +5434,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/maintenance/slack-actions') {
       const result = await runSlackActionPoll('manual');
-      return json(res, 200, { ok: !result.errors?.length, result });
+      return json(res, 200, { ok: slackActionMaintenanceSucceeded(result), result });
     }
 
     if (req.method === 'POST' && url.pathname === '/maintenance/p0-slack-escalation') {
@@ -5140,7 +5493,7 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
       setTimeout(() => runSupabaseRecoverySweep('startup'), 5000).unref?.();
       setInterval(() => runSupabaseRecoverySweep('interval'), CONFIG.supabaseRecoveryIntervalMs).unref?.();
     }
-    if (CONFIG.slackActionPollEnabled) {
+    if (CONFIG.slackActionPollEnabled || workOrchestratorActionPoller.enabled) {
       setTimeout(() => runSlackActionPoll('startup'), 7000).unref?.();
       setInterval(() => runSlackActionPoll('interval'), CONFIG.slackActionPollIntervalMs).unref?.();
     }

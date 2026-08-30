@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { decodeWorkActionValue } from './work-items.mjs';
+import { decodeWorkActionContext } from './work-actions.mjs';
 
 const digestModule = await import('./digests.mjs').catch(() => ({}));
 const missing = (name) => () => assert.fail(`${name} is not implemented`);
@@ -67,7 +68,12 @@ function actionBlocks(result) {
 
 function decodedActions(block) {
   return block.elements
-    .map((element) => ({ actionId: element.action_id, decoded: decodeWorkActionValue(element.value) }));
+    .map((element) => ({
+      actionId: element.action_id,
+      decoded: element.action_id === 'village_work_v2_snooze_custom'
+        ? { ...decodeWorkActionContext(element.value), action: { type: 'snooze_custom' } }
+        : decodeWorkActionValue(element.value)
+    }));
 }
 
 test('digest module exports the four required pure interfaces', () => {
@@ -310,13 +316,14 @@ test('ordinary actions reuse the versioned codec without inventing a newer versi
     'village_work_v2_snooze_3h',
     'village_work_v2_snooze_evening',
     'village_work_v2_snooze_tomorrow',
+    'village_work_v2_snooze_custom',
     'village_work_v2_request_resolve',
     'village_work_v2_dismiss'
   ]);
   assert.deepEqual(actions.map(({ decoded }) => decoded.id), Array(actions.length).fill(UUIDS[0]));
   assert.deepEqual(actions.map(({ decoded }) => decoded.version), Array(actions.length).fill(17));
   assert.deepEqual(actions.map(({ decoded }) => decoded.action.type), [
-    'progress', 'snooze', 'snooze', 'snooze', 'request_resolve', 'dismiss'
+    'progress', 'snooze', 'snooze', 'snooze', 'snooze_custom', 'request_resolve', 'dismiss'
   ]);
   assert.deepEqual(actions.filter(({ decoded }) => decoded.action.type === 'snooze').map(({ decoded }) => decoded.action.snoozedUntil), [
     '2026-08-29T09:00:00.000Z',

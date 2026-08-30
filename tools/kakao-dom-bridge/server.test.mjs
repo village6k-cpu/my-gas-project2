@@ -37,6 +37,7 @@ const {
   createImmediateNotificationAttemptGuard,
   createWorkOrchestratorDigestRuntime,
   createWorkOrchestratorImmediateRuntime,
+  createWorkOrchestratorActionPoller,
   createWorkOrchestratorShadowRuntime,
   configForHermesTransport,
   classifyInitialScanIngress,
@@ -47,6 +48,10 @@ const {
   hasUnreadCount,
   handleEvent,
   handleWorkOrchestratorDigestMaintenance,
+  listPendingWorkActionsV2,
+  applyPendingWorkActionPatchV2,
+  runSlackActionPollPair,
+  slackActionMaintenanceSucceeded,
   mergeQueuedRoomJobs,
   kakaoSendAllowedForTransport,
   mapWorkerPayloadToSupabaseStatus,
@@ -111,6 +116,254 @@ test('Task 7 loads the sanitized replay fixture through a neutral incident ident
     name: '소니 FE 28-135mm',
     quantity: 1
   }]);
+});
+
+const WORK_ACTION_ID = '11111111-1111-4111-8111-111111111111';
+const WORK_ACTION_NOW = '2026-08-30T06:00:00.000Z';
+
+function pendingWorkActionRow(overrides = {}) {
+  const action = overrides.action ?? { type: 'progress' };
+  return {
+    id: WORK_ACTION_ID,
+    state: 'open',
+    priority: 'normal',
+    actionable_at: '2026-08-30T03:00:00.000Z',
+    snoozed_until: null,
+    resolution_kind: null,
+    resolution_evidence: {},
+    resolved_at: null,
+    resolved_by: null,
+    pending_action: {
+      type: action.type,
+      action,
+      status: 'pending',
+      requested_at: '2026-08-30T05:59:00.000Z',
+      requested_by: 'UOWNER1',
+      expected_version: 4
+    },
+    version: 5,
+    payload: { requires_human_action: true },
+    updated_at: '2026-08-30T05:59:00.000Z',
+    ...overrides,
+    pending_action: overrides.pending_action ?? {
+      type: action.type,
+      action,
+      status: 'pending',
+      requested_at: '2026-08-30T05:59:00.000Z',
+      requested_by: 'UOWNER1',
+      expected_version: 4
+    }
+  };
+}
+
+test('Work Orchestrator action list uses service credentials, active pending filter, and bounded exact rows', async () => {
+  const requests = [];
+  const row = pendingWorkActionRow();
+  const rows = await listPendingWorkActionsV2({
+    supabaseUrl: 'https://supabase.example/', serviceRoleKey: 'service-secret', limit: 3,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return { ok: true, status: 200, text: async () => JSON.stringify([row]) };
+    }
+  });
+  assert.deepEqual(rows, [row]);
+  const url = new URL(requests[0].url);
+  assert.equal(url.origin, 'https://supabase.example');
+  assert.equal(url.pathname, '/rest/v1/work_items_v2');
+  assert.equal(url.searchParams.get('state'), 'in.(open,in_progress,snoozed)');
+  assert.equal(url.searchParams.get('pending_action->>status'), 'eq.pending');
+  assert.equal(url.searchParams.get('limit'), '3');
+  assert.equal(requests[0].init.headers.apikey, 'service-secret');
+  assert.equal(requests[0].init.headers.authorization, 'Bearer service-secret');
+});
+
+test('Work Orchestrator action apply PATCH is fenced by id, current version, active state, and pending status', async () => {
+  const requests = [];
+  const row = pendingWorkActionRow();
+  const transition = {
+    status: 'ready', expectedVersion: 5, expectedPendingStatus: 'pending',
+    patch: {
+      state: 'in_progress', snoozed_until: null, actionable_at: WORK_ACTION_NOW,
+      pending_action: {}, version: 6, updated_at: WORK_ACTION_NOW
+    }
+  };
+  const returned = { ...row, ...transition.patch };
+  const result = await applyPendingWorkActionPatchV2({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-secret', row, transition,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return { ok: true, status: 200, text: async () => JSON.stringify([returned]) };
+    }
+  });
+  assert.deepEqual(result, { applied: true });
+  const url = new URL(requests[0].url);
+  assert.equal(url.searchParams.get('id'), `eq.${WORK_ACTION_ID}`);
+  assert.equal(url.searchParams.get('version'), 'eq.5');
+  assert.equal(url.searchParams.get('state'), 'in.(open,in_progress,snoozed)');
+  assert.equal(url.searchParams.get('pending_action->>status'), 'eq.pending');
+  assert.equal(requests[0].init.method, 'PATCH');
+  assert.equal(requests[0].init.headers.prefer, 'return=representation');
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    state: 'in_progress', snoozed_until: null, actionable_at: WORK_ACTION_NOW,
+    pending_action: {}, version: 6
+  });
+});
+
+test('Work Orchestrator action apply accepts equivalent PostgreSQL timestamps and trigger-owned updated_at', async () => {
+  const row = pendingWorkActionRow();
+  const transition = {
+    status: 'ready', expectedVersion: 5, expectedPendingStatus: 'pending',
+    patch: {
+      state: 'snoozed', snoozed_until: '2026-08-30T09:00:00.000Z',
+      actionable_at: '2026-08-30T09:00:00.000Z', pending_action: {},
+      version: 6, updated_at: WORK_ACTION_NOW
+    }
+  };
+  const returned = {
+    ...row,
+    ...transition.patch,
+    snoozed_until: '2026-08-30T18:00:00+09:00',
+    actionable_at: '2026-08-30T18:00:00+09:00',
+    updated_at: '2026-08-30T15:00:00.123+09:00'
+  };
+  const result = await applyPendingWorkActionPatchV2({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-secret', row, transition,
+    fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify([returned]) })
+  });
+  assert.deepEqual(result, { applied: true });
+});
+
+test('Work Orchestrator action poller uses terminal CAS so two pollers have one winner', async () => {
+  let current = pendingWorkActionRow();
+  const list = async () => current.pending_action?.status === 'pending' ? [structuredClone(current)] : [];
+  const apply = async ({ row, transition }) => {
+    await Promise.resolve();
+    if (current.version !== row.version || current.pending_action?.status !== 'pending') return { applied: false };
+    current = { ...current, ...structuredClone(transition.patch) };
+    return { applied: true };
+  };
+  const config = { workItemsEnabled: true };
+  const first = createWorkOrchestratorActionPoller({ config, storeReady: true, list, apply, now: () => WORK_ACTION_NOW });
+  const second = createWorkOrchestratorActionPoller({ config, storeReady: true, list, apply, now: () => WORK_ACTION_NOW });
+  const results = await Promise.all([first.poll('manual'), second.poll('manual')]);
+  assert.equal(results.reduce((sum, result) => sum + result.applied, 0), 1);
+  assert.equal(results.reduce((sum, result) => sum + result.conflicts, 0), 1);
+  assert.equal(current.state, 'in_progress');
+  assert.equal(current.version, 6);
+  assert.deepEqual(current.pending_action, {});
+});
+
+test('Work Orchestrator action poller preserves request_resolve, fails invalid rows closed, and has no stuck pre-claim state', async () => {
+  const resolveRow = pendingWorkActionRow({ action: { type: 'request_resolve' } });
+  const invalidRow = pendingWorkActionRow({ pending_action: { status: 'pending', customer: 'private-content' } });
+  const applied = [];
+  const runtime = createWorkOrchestratorActionPoller({
+    config: { workItemsEnabled: true }, storeReady: true,
+    list: async () => [resolveRow, invalidRow],
+    apply: async (value) => { applied.push(value); return { applied: true }; },
+    now: () => WORK_ACTION_NOW
+  });
+  assert.deepEqual(await runtime.poll('manual'), {
+    status: 'ok', trigger: 'manual', scanned: 2, applied: 0,
+    awaitingResolution: 1, conflicts: 0, invalid: 1
+  });
+  assert.deepEqual(applied, []);
+  assert.equal(resolveRow.pending_action.status, 'pending');
+  assert.equal(JSON.stringify(runtime.state).includes('private-content'), false);
+
+  let firstAttempt = true;
+  let durable = pendingWorkActionRow();
+  const list = async () => [structuredClone(durable)];
+  const flakyApply = async ({ transition }) => {
+    if (firstAttempt) { firstAttempt = false; throw new Error('private transport detail'); }
+    durable = { ...durable, ...transition.patch };
+    return { applied: true };
+  };
+  const failed = createWorkOrchestratorActionPoller({
+    config: { workItemsEnabled: true }, storeReady: true, list, apply: flakyApply, now: () => WORK_ACTION_NOW
+  });
+  assert.equal((await failed.poll('interval')).status, 'error');
+  assert.equal(durable.pending_action.status, 'pending');
+  const restarted = createWorkOrchestratorActionPoller({
+    config: { workItemsEnabled: true }, storeReady: true, list, apply: flakyApply, now: () => WORK_ACTION_NOW
+  });
+  assert.equal((await restarted.poll('startup')).applied, 1);
+  assert.deepEqual(durable.pending_action, {});
+});
+
+test('Work Orchestrator action poller is active only with enabled work-items and ready store/seams', async () => {
+  const list = async () => [];
+  const apply = async () => ({ applied: true });
+  const off = createWorkOrchestratorActionPoller({ config: { workItemsEnabled: false }, storeReady: true, list, apply });
+  const noStore = createWorkOrchestratorActionPoller({ config: { workItemsEnabled: true }, storeReady: false, list, apply });
+  const ready = createWorkOrchestratorActionPoller({ config: { workItemsEnabled: true }, storeReady: true, list, apply });
+  assert.equal(off.enabled, false);
+  assert.equal(noStore.enabled, false);
+  assert.equal(ready.enabled, true);
+  assert.deepEqual(await off.poll('manual'), {
+    status: 'disabled', trigger: 'manual', scanned: 0, applied: 0,
+    awaitingResolution: 0, conflicts: 0, invalid: 0
+  });
+});
+
+test('Work Orchestrator action health exposes only bounded status and counts', async () => {
+  const shared = {};
+  const runtime = createWorkOrchestratorActionPoller({
+    config: { workItemsEnabled: true }, storeReady: true,
+    list: async () => [pendingWorkActionRow({
+      pending_action: { status: 'pending', id: WORK_ACTION_ID, customer: 'private-customer-content' }
+    })],
+    apply: async () => ({ applied: true }),
+    now: () => WORK_ACTION_NOW,
+    state: shared
+  });
+  await runtime.poll('manual');
+  const health = buildWorkOrchestratorHealthState(shared);
+  assert.deepEqual(health.lastWorkActionPoll, {
+    status: 'ok', trigger: 'manual', scanned: 1, applied: 0,
+    awaitingResolution: 0, conflicts: 0, invalid: 1
+  });
+  assert.equal(health.workActionPollRunning, false);
+  assert.equal(JSON.stringify(health).includes(WORK_ACTION_ID), false);
+  assert.equal(JSON.stringify(health).includes('private-customer-content'), false);
+});
+
+test('combined Slack action maintenance keeps legacy and v2 independent and v2 output content-free', async () => {
+  let legacyCalls = 0;
+  const result = await runSlackActionPollPair({
+    reason: 'manual',
+    legacy: async () => { legacyCalls += 1; return { scanned: 1, handled: 1, errors: [] }; },
+    workActions: { poll: async () => { throw new Error(`private ${WORK_ACTION_ID}`); } }
+  });
+  assert.equal(legacyCalls, 1);
+  assert.deepEqual(result.legacy, { scanned: 1, handled: 1, errors: [] });
+  assert.deepEqual(result.workOrchestratorV2, {
+    status: 'error', trigger: 'manual', scanned: 0, applied: 0,
+    awaitingResolution: 0, conflicts: 0, invalid: 0
+  });
+  assert.equal(JSON.stringify(result).includes(WORK_ACTION_ID), false);
+  assert.equal(slackActionMaintenanceSucceeded(result), false);
+
+  let v2Calls = 0;
+  const second = await runSlackActionPollPair({
+    reason: 'interval',
+    legacy: async () => { throw new Error('legacy failure'); },
+    workActions: { poll: async () => { v2Calls += 1; return {
+      status: 'ok', trigger: 'interval', scanned: 0, applied: 0,
+      awaitingResolution: 0, conflicts: 0, invalid: 0
+    }; } }
+  });
+  assert.equal(v2Calls, 1);
+  assert.equal(second.legacyError, true);
+  assert.equal(second.workOrchestratorV2.status, 'ok');
+  assert.equal(slackActionMaintenanceSucceeded(second), false);
+  assert.equal(slackActionMaintenanceSucceeded({
+    legacy: { errors: [] },
+    workOrchestratorV2: {
+      status: 'ok', trigger: 'manual', scanned: 0, applied: 0,
+      awaitingResolution: 0, conflicts: 0, invalid: 0
+    }
+  }), true);
 });
 
 function task7Mutation(overrides = {}) {

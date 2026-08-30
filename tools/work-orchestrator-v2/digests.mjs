@@ -1,4 +1,5 @@
 import { encodeWorkActionValue } from './work-items.mjs';
+import { encodeWorkActionContext } from './work-actions.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SLACK_USER_ID = /^[UW][A-Z0-9]{1,79}$/;
@@ -347,12 +348,22 @@ function button(item, actionId, label, action, style) {
   return result;
 }
 
+function contextButton(item, actionId, label) {
+  return {
+    type: 'button',
+    text: { type: 'plain_text', text: label.slice(0, 75), emoji: true },
+    action_id: actionId,
+    value: encodeWorkActionContext({ id: item.id, version: item.version })
+  };
+}
+
 function itemActions(item, presets) {
   const actions = [
     button(item, 'village_work_v2_progress', '진행 중', { type: 'progress' }, 'primary'),
     ...presets.map((preset) => button(item, preset.actionId, preset.label, {
       type: 'snooze', snoozedUntil: preset.snoozedUntil
-    }))
+    })),
+    contextButton(item, 'village_work_v2_snooze_custom', '날짜 지정')
   ];
   actions.push(
     button(item, 'village_work_v2_request_resolve', '해결 요청', { type: 'request_resolve' }),
