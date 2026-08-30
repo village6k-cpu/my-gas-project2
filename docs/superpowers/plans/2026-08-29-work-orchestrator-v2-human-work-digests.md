@@ -303,6 +303,7 @@ git commit -m "feat: build durable focus digests"
 **Interfaces:**
 - Add `digest_message_parts` as the service-role-only durable manifest and delivery/cleanup lifecycle for every ordinary and daily-reminder Slack message.
 - Add atomic store/RPC operations to prepare an immutable content-free manifest, claim and terminally record each delivery attempt, finalize only a completely delivered manifest, return all prior coordinates, and record cleanup per prior part.
+- Cleanup uses two fenced operations: `claimDigestPartCleanup({id,previousDigestId,previousPartId,cleanupOwner,leaseSeconds})` rotates a durable cleanup token and increments the attempt generation for `idle|failed` or expired `deleting`; `recordDigestPartCleanup({id,previousDigestId,previousPartId,cleanupOwner,cleanupToken,expectedCleanupAttempts,outcome,error})` can settle only that exact unexpired generation. This permits crash recovery to converge through `already_absent` without a concurrent or stale terminal writer overwriting newer evidence.
 
 - [ ] **Step 1: Write RED schema/store/PGlite tests**
 

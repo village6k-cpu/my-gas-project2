@@ -27,10 +27,11 @@ test('foundation migration executes and exposes only service-role access in Post
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public'
-        and c.relname in ('message_notification_receipts', 'work_items_v2', 'digest_runs')
+        and c.relname in ('message_notification_receipts', 'work_items_v2', 'digest_runs', 'digest_message_parts')
       order by c.relname
     `);
     assert.deepEqual(tables.map((row) => row.relname), [
+      'digest_message_parts',
       'digest_runs',
       'message_notification_receipts',
       'work_items_v2',
@@ -54,7 +55,7 @@ test('foundation migration executes and exposes only service-role access in Post
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public'
-        and c.relname in ('message_notification_receipts', 'work_items_v2', 'digest_runs')
+        and c.relname in ('message_notification_receipts', 'work_items_v2', 'digest_runs', 'digest_message_parts')
       order by c.relname
     `);
     for (const row of tablePrivileges) {
@@ -81,7 +82,7 @@ test('foundation migration executes and exposes only service-role access in Post
       join pg_namespace n on n.oid = c.relnamespace
       cross join lateral aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) as acl
       where n.nspname = 'public'
-        and c.relname in ('message_notification_receipts', 'work_items_v2', 'digest_runs')
+        and c.relname in ('message_notification_receipts', 'work_items_v2', 'digest_runs', 'digest_message_parts')
         and acl.grantee = 0
         and lower(acl.privilege_type) in ('select', 'insert', 'update', 'delete')
     `);
@@ -106,20 +107,30 @@ test('foundation migration executes and exposes only service-role access in Post
           'request_work_item_action_v2',
           'list_actionable_work_v2',
           'claim_digest_run_v2',
+          'prepare_digest_parts_v2',
+          'claim_digest_part_delivery_v2',
+          'mark_digest_part_delivered_v2',
+          'mark_digest_part_failed_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
-          'record_digest_cleanup_v2'
+          'claim_digest_part_cleanup_v2',
+          'record_digest_part_cleanup_v2'
         )
       order by p.proname
     `);
     assert.deepEqual(functions.map((row) => row.proname), [
+      'claim_digest_part_cleanup_v2',
+      'claim_digest_part_delivery_v2',
       'claim_digest_run_v2',
       'claim_message_notification_receipt',
       'fail_digest_run_v2',
       'finalize_digest_run_v2',
       'is_effective_p0_ack_v2',
       'list_actionable_work_v2',
-      'record_digest_cleanup_v2',
+      'mark_digest_part_delivered_v2',
+      'mark_digest_part_failed_v2',
+      'prepare_digest_parts_v2',
+      'record_digest_part_cleanup_v2',
       'request_work_item_action_v2',
       'touch_work_orchestrator_v2_updated_at',
       'upsert_work_item_v2',
@@ -144,9 +155,14 @@ test('foundation migration executes and exposes only service-role access in Post
           'request_work_item_action_v2',
           'list_actionable_work_v2',
           'claim_digest_run_v2',
+          'prepare_digest_parts_v2',
+          'claim_digest_part_delivery_v2',
+          'mark_digest_part_delivered_v2',
+          'mark_digest_part_failed_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
-          'record_digest_cleanup_v2'
+          'claim_digest_part_cleanup_v2',
+          'record_digest_part_cleanup_v2'
         )
         and acl.grantee = 0
         and lower(acl.privilege_type) = 'execute'
@@ -162,12 +178,14 @@ test('foundation migration executes and exposes only service-role access in Post
         and t.tgname in (
           'touch_message_notification_receipts_updated_at',
           'touch_work_items_v2_updated_at',
-          'touch_digest_runs_updated_at'
+          'touch_digest_runs_updated_at',
+          'touch_digest_message_parts_updated_at'
         )
         and not t.tgisinternal
       order by t.tgname
     `);
     assert.deepEqual(triggers.map((row) => row.tgname), [
+      'touch_digest_message_parts_updated_at',
       'touch_digest_runs_updated_at',
       'touch_message_notification_receipts_updated_at',
       'touch_work_items_v2_updated_at',
@@ -527,337 +545,336 @@ test('foundation migration executes and exposes only service-role access in Post
         $1::text, $2::timestamptz, $3::timestamptz, $4::timestamptz, $5::text, $6::integer
       ) as result
     `;
+    const prepareSql = `
+      select public.prepare_digest_parts_v2(
+        $1::uuid, $2::text, $3::uuid, $4::jsonb, $5::jsonb
+      ) as result
+    `;
+    const claimPartSql = `
+      select public.claim_digest_part_delivery_v2(
+        $1::uuid, $2::uuid, $3::text, $4::uuid
+      ) as result
+    `;
+    const deliverPartSql = `
+      select public.mark_digest_part_delivered_v2(
+        $1::uuid, $2::uuid, $3::text, $4::uuid, $5::integer,
+        $6::text, $7::text, $8::timestamptz
+      ) as result
+    `;
+    const failPartSql = `
+      select public.mark_digest_part_failed_v2(
+        $1::uuid, $2::uuid, $3::text, $4::uuid, $5::integer, $6::text
+      ) as result
+    `;
+    const finalizeSql = `
+      select public.finalize_digest_run_v2(
+        $1::uuid, $2::text, $3::uuid, $4::timestamptz
+      ) as result
+    `;
+    const claimCleanupSql = `
+      select public.claim_digest_part_cleanup_v2(
+        $1::uuid, $2::uuid, $3::uuid, $4::text, $5::integer
+      ) as result
+    `;
+    const recordCleanupSql = `
+      select public.record_digest_part_cleanup_v2(
+        $1::uuid, $2::uuid, $3::uuid, $4::text, $5::uuid,
+        $6::integer, $7::text, $8::text
+      ) as result
+    `;
     const digestArgs = [
       'slack:CINBOX', '2026-08-29T03:00:00.000Z', '2026-08-29T00:00:00.000Z',
       '2026-08-29T03:00:00.000Z', 'bridge:pglite', 120
     ];
-    await assert.rejects(
-      db.query(claimDigestSql, [
-        'slack:CINBOX', 'infinity', '2026-08-29T00:00:00.000Z',
-        '2026-08-29T03:00:00.000Z', 'bridge:pglite', 120
-      ]),
-      /invalid digest claim/i
-    );
+    await assert.rejects(db.query(claimDigestSql, [
+      'slack:CINBOX', 'infinity', '2026-08-29T00:00:00.000Z',
+      '2026-08-29T03:00:00.000Z', 'bridge:pglite', 120
+    ]), /invalid digest claim/i);
     const firstDigest = await db.query(claimDigestSql, digestArgs);
     const secondDigest = await db.query(claimDigestSql, digestArgs);
     assert.equal(firstDigest.rows[0].result.claimed, true);
     assert.equal(firstDigest.rows[0].result.created, true);
     assert.equal(secondDigest.rows[0].result.claimed, false);
-    assert.match(firstDigest.rows[0].result.row.lease_token, /^[0-9a-f-]{36}$/);
     assert.equal(firstDigest.rows[0].result.previous_digest, null);
     const digestId = firstDigest.rows[0].result.row.id;
-    const digestLeaseToken = firstDigest.rows[0].result.row.lease_token;
+    const originalLeaseToken = firstDigest.rows[0].result.row.lease_token;
 
-    const snapshot = [
-      { id: actionId, version: 2, inclusionReason: 'overdue', priority: 'normal' },
-      { id: concurrentRows[0].id, version: 999, inclusionReason: 'actionable', priority: 'normal' }
+    const auditIds = [
+      actionId,
+      concurrentRows[0].id,
+      ...Array.from({ length: 23 }, (_, index) =>
+        `90000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`)
     ];
-    const finalizeSql = `
-      select public.finalize_digest_run_v2(
-        $1::uuid, $2::text, $3::uuid, $4::jsonb, $5::text, $6::text, $7::timestamptz
-      ) as result
-    `;
+    const snapshot = auditIds.map((id, index) => ({
+      id,
+      version: index === 0 ? 2 : index === 1 ? 999 : 1,
+      inclusionReason: index === 0 ? 'daily_reminder' : 'actionable',
+      priority: 'normal'
+    }));
+    const parts = [
+      {
+        kind: 'ordinary', partNumber: 1, partCount: 2,
+        itemIds: auditIds.slice(0, 24), payloadHash: 'a'.repeat(64)
+      },
+      {
+        kind: 'ordinary', partNumber: 2, partCount: 2,
+        itemIds: auditIds.slice(24), payloadHash: 'b'.repeat(64)
+      },
+      {
+        kind: 'daily_reminder', partNumber: 1, partCount: 1,
+        itemIds: [actionId], payloadHash: 'c'.repeat(64)
+      }
+    ];
+    await assert.rejects(db.query(prepareSql, [
+      digestId, 'bridge:pglite', originalLeaseToken, JSON.stringify(snapshot),
+      JSON.stringify([{ ...parts[0], partCount: 1, itemIds: auditIds }])
+    ]), /invalid digest manifest/i, '25 work rows cannot fit in one message part');
+    await assert.rejects(db.query(prepareSql, [
+      digestId, 'bridge:pglite', originalLeaseToken, JSON.stringify(snapshot),
+      JSON.stringify([{ ...parts[0], itemIds: [...auditIds.slice(0, 23), auditIds[24]] }, parts[1], parts[2]])
+    ]), /invalid digest manifest/i, 'ordinary parts must preserve the exact snapshot partition');
+    await assert.rejects(db.query(prepareSql, [
+      digestId, 'bridge:pglite', originalLeaseToken, JSON.stringify(snapshot),
+      JSON.stringify([parts[0], parts[1], { ...parts[2], itemIds: [concurrentRows[0].id] }])
+    ]), /invalid digest manifest/i, 'reminder parts must equal the ordered reminder subset');
+    await assert.rejects(db.query(prepareSql, [
+      digestId, 'bridge:pglite', originalLeaseToken, JSON.stringify(snapshot),
+      JSON.stringify([parts[2], parts[0], parts[1]])
+    ]), /invalid digest manifest/i, 'part intent has one canonical ordinary-then-reminder order');
+
+    const prepared = await db.query(prepareSql, [
+      digestId, 'bridge:pglite', originalLeaseToken, JSON.stringify(snapshot), JSON.stringify(parts)
+    ]);
+    assert.equal(prepared.rows[0].result.applied, true);
+    assert.equal(prepared.rows[0].result.created, true);
+    assert.equal(prepared.rows[0].result.row.state, 'delivering');
+    assert.equal(prepared.rows[0].result.parts.length, 3);
+    const preparedPartIds = prepared.rows[0].result.parts.map((part) => part.id);
+    const preparedClientIds = prepared.rows[0].result.parts.map((part) => part.client_message_id);
+    const exactRetry = await db.query(prepareSql, [
+      digestId, 'bridge:pglite', originalLeaseToken, JSON.stringify(snapshot), JSON.stringify(parts)
+    ]);
+    assert.equal(exactRetry.rows[0].result.created, false);
+    assert.deepEqual(exactRetry.rows[0].result.parts.map((part) => part.id), preparedPartIds);
+    assert.deepEqual(exactRetry.rows[0].result.parts.map((part) => part.client_message_id), preparedClientIds);
+    await assert.rejects(db.query(prepareSql, [
+      digestId, 'bridge:pglite', originalLeaseToken, JSON.stringify(snapshot),
+      JSON.stringify([{ ...parts[0], payloadHash: 'd'.repeat(64) }, parts[1], parts[2]])
+    ]), /digest manifest mismatch/i, 'a divergent retry cannot rewrite durable intent');
+
+    const ordinaryOne = prepared.rows[0].result.parts.find((part) =>
+      part.part_kind === 'ordinary' && part.part_number === 1);
+    const ordinaryTwo = prepared.rows[0].result.parts.find((part) =>
+      part.part_kind === 'ordinary' && part.part_number === 2);
+    const reminderOne = prepared.rows[0].result.parts.find((part) => part.part_kind === 'daily_reminder');
+    const firstPartClaim = await db.query(claimPartSql, [
+      digestId, ordinaryOne.id, 'bridge:pglite', originalLeaseToken
+    ]);
+    assert.equal(firstPartClaim.rows[0].result.claimed, true);
+    const firstPartDelivery = await db.query(deliverPartSql, [
+      digestId, ordinaryOne.id, 'bridge:pglite', originalLeaseToken, 1,
+      'CINBOX', '100.01', '2026-08-29T03:00:01.000Z'
+    ]);
+    assert.equal(firstPartDelivery.rows[0].result.applied, true);
+    const partialFinalize = await db.query(finalizeSql, [
+      digestId, 'bridge:pglite', originalLeaseToken, '2026-08-29T03:00:02.000Z'
+    ]);
+    assert.equal(partialFinalize.rows[0].result.applied, false);
+
+    const secondPartClaim = await db.query(claimPartSql, [
+      digestId, ordinaryTwo.id, 'bridge:pglite', originalLeaseToken
+    ]);
+    assert.equal(secondPartClaim.rows[0].result.claimed, true);
+    await db.query(`update public.digest_runs set lease_expires_at = '2000-01-01T00:00:00.000Z' where id = $1::uuid`, [digestId]);
+    const reclaimed = await db.query(claimDigestSql, [
+      ...digestArgs.slice(0, 4), 'bridge:recovery', 120
+    ]);
+    assert.equal(reclaimed.rows[0].result.claimed, true);
+    assert.equal(reclaimed.rows[0].result.row.state, 'delivering');
+    const recoveryToken = reclaimed.rows[0].result.row.lease_token;
+    assert.notEqual(recoveryToken, originalLeaseToken);
+    const staleDelivery = await db.query(deliverPartSql, [
+      digestId, ordinaryTwo.id, 'bridge:pglite', originalLeaseToken, 1,
+      'CINBOX', '100.02', '2026-08-29T03:00:03.000Z'
+    ]);
+    assert.equal(staleDelivery.rows[0].result.applied, false);
+    const reconcileClaim = await db.query(claimPartSql, [
+      digestId, ordinaryTwo.id, 'bridge:recovery', recoveryToken
+    ]);
+    assert.equal(reconcileClaim.rows[0].result.claimed, false, 'a prior delivering attempt must be reconciled, not reposted');
+    assert.equal(reconcileClaim.rows[0].result.row.delivery_attempts, 1);
+    const reconciled = await db.query(deliverPartSql, [
+      digestId, ordinaryTwo.id, 'bridge:recovery', recoveryToken, 1,
+      'CINBOX', '100.02', '2026-08-29T03:00:03.000Z'
+    ]);
+    assert.equal(reconciled.rows[0].result.applied, true);
+    const deliveredReclaim = await db.query(claimPartSql, [
+      digestId, ordinaryOne.id, 'bridge:recovery', recoveryToken
+    ]);
+    assert.equal(deliveredReclaim.rows[0].result.claimed, false);
+    assert.equal(deliveredReclaim.rows[0].result.row.client_message_id, ordinaryOne.client_message_id);
+    assert.equal(deliveredReclaim.rows[0].result.row.slack_message_ts, '100.01');
+
+    const reminderClaim = await db.query(claimPartSql, [
+      digestId, reminderOne.id, 'bridge:recovery', recoveryToken
+    ]);
+    assert.equal(reminderClaim.rows[0].result.claimed, true);
+    await db.query(deliverPartSql, [
+      digestId, reminderOne.id, 'bridge:recovery', recoveryToken, 1,
+      'CINBOX', '100.03', '2026-08-29T03:00:04.000Z'
+    ]);
     const wrongFinalizeOwner = await db.query(finalizeSql, [
-      digestId, 'bridge:other', digestLeaseToken, JSON.stringify(snapshot), 'CINBOX', '123.45', '2026-08-29T03:00:05.000Z'
+      digestId, 'bridge:other', recoveryToken, '2026-08-29T03:00:05.000Z'
     ]);
     assert.equal(wrongFinalizeOwner.rows[0].result.applied, false);
-    assert.equal(wrongFinalizeOwner.rows[0].result.updated_count, 0);
     const finalized = await db.query(finalizeSql, [
-      digestId, 'bridge:pglite', digestLeaseToken, JSON.stringify(snapshot), 'CINBOX', '123.45', '2026-08-29T03:00:05.000Z'
+      digestId, 'bridge:recovery', recoveryToken, '2026-08-29T03:00:05.000Z'
     ]);
     assert.equal(finalized.rows[0].result.applied, true);
     assert.equal(finalized.rows[0].result.updated_count, 1);
-    assert.deepEqual(finalized.rows[0].result.row.item_snapshot, snapshot);
+    assert.equal(finalized.rows[0].result.row.slack_message_ts, '100.01', 'root compatibility coordinate derives from ordinary part one');
+    const duplicateFinalize = await db.query(finalizeSql, [
+      digestId, 'bridge:recovery', recoveryToken, '2026-08-29T03:00:05.000Z'
+    ]);
+    assert.equal(duplicateFinalize.rows[0].result.applied, false);
     const { rows: digestCounters } = await db.query(`
-      select id, version, digest_inclusion_count, consecutive_unhandled_digests, last_digest_at, next_reminder_at
+      select id, version, digest_inclusion_count, consecutive_unhandled_digests, next_reminder_at
       from public.work_items_v2 where id in ($1::uuid, $2::uuid) order by id
     `, [actionId, concurrentRows[0].id]);
     const matching = digestCounters.find((row) => row.id === actionId);
     const stale = digestCounters.find((row) => row.id === concurrentRows[0].id);
     assert.equal(matching.digest_inclusion_count, 1);
     assert.equal(matching.consecutive_unhandled_digests, 1);
-    assert.equal(matching.version, 2, 'digest metadata never invalidates the rendered work version');
-    assert.ok(matching.last_digest_at);
-    assert.equal(new Date(matching.next_reminder_at).toISOString(), '2026-08-23T00:00:00.000Z');
-    assert.equal(stale.digest_inclusion_count, 0, 'stale snapshot versions do not advance counters');
+    assert.equal(matching.version, 2);
+    assert.equal(new Date(matching.next_reminder_at).toISOString(), '2026-08-30T03:00:05.000Z');
+    assert.equal(stale.digest_inclusion_count, 0, 'stale snapshot versions remain audit-only');
+
+    const cappedDigest = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T05:00:00.000Z', '2026-08-29T03:00:00.000Z',
+      '2026-08-29T05:00:00.000Z', 'bridge:cap', 120
+    ]);
+    const capId = cappedDigest.rows[0].result.row.id;
+    const capToken = cappedDigest.rows[0].result.row.lease_token;
+    const capSnapshot = [{ id: actionId, version: 999, inclusionReason: 'actionable', priority: 'normal' }];
+    const capParts = [{
+      kind: 'ordinary', partNumber: 1, partCount: 1, itemIds: [actionId], payloadHash: 'e'.repeat(64)
+    }];
+    const capPrepared = await db.query(prepareSql, [
+      capId, 'bridge:cap', capToken, JSON.stringify(capSnapshot), JSON.stringify(capParts)
+    ]);
+    const capPartId = capPrepared.rows[0].result.parts[0].id;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const claim = await db.query(claimPartSql, [capId, capPartId, 'bridge:cap', capToken]);
+      assert.equal(claim.rows[0].result.claimed, true);
+      assert.equal(claim.rows[0].result.row.delivery_attempts, attempt);
+      const failed = await db.query(failPartSql, [
+        capId, capPartId, 'bridge:cap', capToken, attempt, 'rate_limited'
+      ]);
+      assert.equal(failed.rows[0].result.applied, true);
+    }
+    const cappedClaim = await db.query(claimPartSql, [capId, capPartId, 'bridge:cap', capToken]);
+    assert.equal(cappedClaim.rows[0].result.claimed, false);
+    assert.equal(cappedClaim.rows[0].result.row.delivery_attempts, 3);
 
     const emptyDigest = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T06:00:00.000Z', '2026-08-29T03:00:00.000Z',
-      '2026-08-29T06:00:00.000Z', 'bridge:pglite', 120
+      'slack:CINBOX', '2026-08-29T06:00:00.000Z', '2026-08-29T05:00:00.000Z',
+      '2026-08-29T06:00:00.000Z', 'bridge:empty', 120
     ]);
+    assert.equal(emptyDigest.rows[0].result.previous_digest.id, digestId);
+    assert.deepEqual(
+      emptyDigest.rows[0].result.previous_digest.parts.map((part) => [part.part_kind, part.part_number, part.slack_message_ts]),
+      [['ordinary', 1, '100.01'], ['ordinary', 2, '100.02'], ['daily_reminder', 1, '100.03']]
+    );
+    const earlyCleanup = await db.query(claimCleanupSql, [
+      emptyDigest.rows[0].result.row.id, digestId, ordinaryOne.id, 'bridge:cleanup', 120
+    ]);
+    assert.equal(earlyCleanup.rows[0].result.claimed, false, 'cleanup cannot begin before current delivery');
+    const emptyPrepared = await db.query(prepareSql, [
+      emptyDigest.rows[0].result.row.id, 'bridge:empty', emptyDigest.rows[0].result.row.lease_token,
+      '[]', '[]'
+    ]);
+    assert.equal(emptyPrepared.rows[0].result.parts.length, 0);
+    const emptyRetry = await db.query(prepareSql, [
+      emptyDigest.rows[0].result.row.id, 'bridge:empty', emptyDigest.rows[0].result.row.lease_token,
+      '[]', '[]'
+    ]);
+    assert.equal(emptyRetry.rows[0].result.created, false);
     const emptyFinalized = await db.query(finalizeSql, [
-      emptyDigest.rows[0].result.row.id, 'bridge:pglite', emptyDigest.rows[0].result.row.lease_token,
-      '[]', null, null, '2026-08-29T06:00:05.000Z'
+      emptyDigest.rows[0].result.row.id, 'bridge:empty', emptyDigest.rows[0].result.row.lease_token,
+      '2026-08-29T06:00:05.000Z'
     ]);
     assert.equal(emptyFinalized.rows[0].result.applied, true);
     assert.equal(emptyFinalized.rows[0].result.updated_count, 0);
     assert.equal(emptyFinalized.rows[0].result.row.slack_channel_id, null);
-    assert.equal(emptyFinalized.rows[0].result.row.slack_message_ts, null);
-    assert.equal(emptyDigest.rows[0].result.previous_digest.id, digestId);
+    const currentId = emptyDigest.rows[0].result.row.id;
 
-    const cleanupSql = `
-      select public.record_digest_cleanup_v2(
-        $1::uuid, $2::uuid, $3::text, $4::text
-      ) as result
-    `;
-    const cleanup = await db.query(cleanupSql, [
-      emptyDigest.rows[0].result.row.id, digestId, 'deleted', null
+    const [cleanupWinner, cleanupLoser] = await Promise.all([
+      db.query(claimCleanupSql, [currentId, digestId, ordinaryOne.id, 'bridge:cleanup-a', 120]),
+      db.query(claimCleanupSql, [currentId, digestId, ordinaryOne.id, 'bridge:cleanup-b', 120])
     ]);
-    assert.equal(cleanup.rows[0].result.applied, true);
-    assert.equal(cleanup.rows[0].result.row.previous_cleanup_state, 'deleted');
-    const { rows: replacedDigest } = await db.query(`
-      select state from public.digest_runs where id = $1::uuid
-    `, [digestId]);
-    assert.equal(replacedDigest[0].state, 'replaced');
+    const cleanupClaims = [cleanupWinner.rows[0].result, cleanupLoser.rows[0].result];
+    assert.equal(cleanupClaims.filter((result) => result.claimed).length, 1, 'only one cleanup worker wins');
+    const winningCleanup = cleanupClaims.find((result) => result.claimed);
+    const firstCleanupFailure = await db.query(recordCleanupSql, [
+      currentId, digestId, ordinaryOne.id, winningCleanup.part.cleanup_owner,
+      winningCleanup.part.cleanup_token, 1, 'failed', 'rate_limited'
+    ]);
+    assert.equal(firstCleanupFailure.rows[0].result.applied, true);
+    assert.equal(firstCleanupFailure.rows[0].result.row.state, 'delivered');
+    const { rows: priorAfterFailure } = await db.query(`select state from public.digest_runs where id = $1::uuid`, [digestId]);
+    assert.equal(priorAfterFailure[0].state, 'delivered');
+    const retriedCleanup = await db.query(claimCleanupSql, [
+      currentId, digestId, ordinaryOne.id, 'bridge:cleanup-retry', 120
+    ]);
+    assert.equal(retriedCleanup.rows[0].result.claimed, true);
+    assert.equal(retriedCleanup.rows[0].result.part.cleanup_attempts, 2);
+    assert.notEqual(retriedCleanup.rows[0].result.part.cleanup_token, winningCleanup.part.cleanup_token);
+    await db.query(recordCleanupSql, [
+      currentId, digestId, ordinaryOne.id, 'bridge:cleanup-retry',
+      retriedCleanup.rows[0].result.part.cleanup_token, 2, 'deleted', null
+    ]);
 
-    const dailyDigest = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T07:00:00.000Z', '2026-08-29T06:00:00.000Z',
-      '2026-08-29T07:00:00.000Z', 'bridge:pglite', 120
+    const expiringCleanup = await db.query(claimCleanupSql, [
+      currentId, digestId, ordinaryTwo.id, 'bridge:cleanup-old', 120
     ]);
-    const dailyFinalized = await db.query(finalizeSql, [
-      dailyDigest.rows[0].result.row.id, 'bridge:pglite', dailyDigest.rows[0].result.row.lease_token,
-      JSON.stringify([{
-        id: actionId, version: 2, inclusionReason: 'daily_reminder', priority: 'normal'
-      }]), 'CINBOX', '789.01', '2026-08-29T07:00:05.000Z'
-    ]);
-    assert.equal(dailyFinalized.rows[0].result.updated_count, 1);
-    const { rows: dailyReminderWork } = await db.query(`
-      select version, digest_inclusion_count, next_reminder_at
-      from public.work_items_v2 where id = $1::uuid
-    `, [actionId]);
-    assert.equal(dailyReminderWork[0].version, 2);
-    assert.equal(dailyReminderWork[0].digest_inclusion_count, 2);
-    assert.equal(new Date(dailyReminderWork[0].next_reminder_at).toISOString(), '2026-08-30T07:00:05.000Z');
-
-    const cleanupFailureDigest = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T08:00:00.000Z', '2026-08-29T07:00:00.000Z',
-      '2026-08-29T08:00:00.000Z', 'bridge:pglite', 120
-    ]);
-    assert.equal(cleanupFailureDigest.rows[0].result.previous_digest.id, dailyDigest.rows[0].result.row.id);
-    const cleanupFailureFinalized = await db.query(finalizeSql, [
-      cleanupFailureDigest.rows[0].result.row.id, 'bridge:pglite',
-      cleanupFailureDigest.rows[0].result.row.lease_token, '[]', null, null,
-      '2026-08-29T08:00:05.000Z'
-    ]);
-    assert.equal(cleanupFailureFinalized.rows[0].result.applied, true);
-    const cleanupFailed = await db.query(cleanupSql, [
-      cleanupFailureDigest.rows[0].result.row.id, dailyDigest.rows[0].result.row.id,
-      'failed', 'rate_limited'
-    ]);
-    assert.equal(cleanupFailed.rows[0].result.applied, true);
-    assert.equal(cleanupFailed.rows[0].result.row.state, 'delivered');
-    assert.equal(cleanupFailed.rows[0].result.row.previous_cleanup_state, 'failed');
-    const { rows: priorAfterCleanupFailure } = await db.query(`
-      select state from public.digest_runs where id = $1::uuid
-    `, [dailyDigest.rows[0].result.row.id]);
-    assert.equal(priorAfterCleanupFailure[0].state, 'delivered');
-    const cleanupRecovered = await db.query(cleanupSql, [
-      cleanupFailureDigest.rows[0].result.row.id, dailyDigest.rows[0].result.row.id,
-      'already_absent', null
-    ]);
-    assert.equal(cleanupRecovered.rows[0].result.row.previous_cleanup_state, 'already_absent');
-    const { rows: priorAfterCleanupRecovery } = await db.query(`
-      select state from public.digest_runs where id = $1::uuid
-    `, [dailyDigest.rows[0].result.row.id]);
-    assert.equal(priorAfterCleanupRecovery[0].state, 'replaced');
-
-    const carryWork = await db.query(upsertSql, [JSON.stringify({
-      ...candidate,
-      work_key: 'room:pglite:carry-threshold',
-      source_event_keys: ['event-carry-threshold']
-    })]);
     await db.query(`
-      update public.work_items_v2
-      set digest_inclusion_count = 99, consecutive_unhandled_digests = 1
+      update public.digest_message_parts set cleanup_expires_at = '2000-01-01T00:00:00.000Z'
       where id = $1::uuid
-    `, [carryWork.rows[0].result.row.id]);
-    const hiddenWork = await db.query(upsertSql, [JSON.stringify({
-      ...candidate,
-      work_key: 'room:pglite:hidden-acknowledged-p0',
-      source_event_keys: ['event-hidden-acknowledged-p0']
-    })]);
-    await db.query(`
-      update public.work_items_v2
-      set priority = 'p0', state = 'snoozed',
-          actionable_at = '2099-01-01T00:00:00.000Z',
-          snoozed_until = '2099-01-01T00:00:00.000Z',
-          payload = payload || '{"p0_acknowledged_at":"2026-08-29T11:00:05.000Z"}'::jsonb
-      where id = $1::uuid
-    `, [hiddenWork.rows[0].result.row.id]);
-    const futureHiddenWork = await db.query(upsertSql, [JSON.stringify({
-      ...candidate,
-      work_key: 'room:pglite:hidden-future-ack-p0',
-      source_event_keys: ['event-hidden-future-ack-p0']
-    })]);
-    await db.query(`
-      update public.work_items_v2
-      set priority = 'p0', state = 'snoozed',
-          actionable_at = '2099-01-01T00:00:00.000Z',
-          snoozed_until = '2099-01-01T00:00:00.000Z',
-          payload = payload || '{"p0_acknowledged_at":"2026-08-29T11:30:05.001Z"}'::jsonb
-      where id = $1::uuid
-    `, [futureHiddenWork.rows[0].result.row.id]);
-    const carryDigest = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T10:00:00.000Z', '2026-08-29T09:00:00.000Z',
-      '2026-08-29T10:00:00.000Z', 'bridge:pglite', 120
+    `, [ordinaryTwo.id]);
+    const reclaimedCleanup = await db.query(claimCleanupSql, [
+      currentId, digestId, ordinaryTwo.id, 'bridge:cleanup-new', 120
     ]);
-    const hiddenDigest = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T11:00:00.000Z', '2026-08-29T10:00:00.000Z',
-      '2026-08-29T11:00:00.000Z', 'bridge:pglite', 120
+    assert.equal(reclaimedCleanup.rows[0].result.claimed, true);
+    assert.equal(reclaimedCleanup.rows[0].result.part.cleanup_attempts, 2);
+    assert.notEqual(reclaimedCleanup.rows[0].result.part.cleanup_token, expiringCleanup.rows[0].result.part.cleanup_token);
+    const staleCleanupTerminal = await db.query(recordCleanupSql, [
+      currentId, digestId, ordinaryTwo.id, 'bridge:cleanup-old',
+      expiringCleanup.rows[0].result.part.cleanup_token, 1, 'failed', 'cleanup_unconfirmed'
     ]);
-    const futureHiddenDigest = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T11:30:00.000Z', '2026-08-29T11:00:00.000Z',
-      '2026-08-29T11:30:00.000Z', 'bridge:pglite', 120
+    assert.equal(staleCleanupTerminal.rows[0].result.applied, false);
+    await db.query(recordCleanupSql, [
+      currentId, digestId, ordinaryTwo.id, 'bridge:cleanup-new',
+      reclaimedCleanup.rows[0].result.part.cleanup_token, 2, 'already_absent', null
     ]);
-    const semanticGuards = await Promise.allSettled([
-      db.query(finalizeSql, [
-        carryDigest.rows[0].result.row.id, 'bridge:pglite', carryDigest.rows[0].result.row.lease_token,
-        JSON.stringify([{
-          id: carryWork.rows[0].result.row.id, version: 1,
-          inclusionReason: 'carry_over', priority: 'normal'
-        }]), 'CINBOX', '810.01', '2026-08-29T10:00:05.000Z'
-      ]),
-      db.query(finalizeSql, [
-        hiddenDigest.rows[0].result.row.id, 'bridge:pglite', hiddenDigest.rows[0].result.row.lease_token,
-        JSON.stringify([{
-          id: hiddenWork.rows[0].result.row.id, version: 1,
-          inclusionReason: 'p0', priority: 'p0'
-        }]), 'CINBOX', '811.01', '2026-08-29T11:00:05.000Z'
-      ]),
-      db.query(finalizeSql, [
-        futureHiddenDigest.rows[0].result.row.id, 'bridge:pglite',
-        futureHiddenDigest.rows[0].result.row.lease_token,
-        JSON.stringify([{
-          id: futureHiddenWork.rows[0].result.row.id, version: 1,
-          inclusionReason: 'p0', priority: 'p0'
-        }]), 'CINBOX', '812.01', '2026-08-29T11:30:05.000Z'
-      ])
+    const reminderCleanup = await db.query(claimCleanupSql, [
+      currentId, digestId, reminderOne.id, 'bridge:cleanup-final', 120
     ]);
+    const completedCleanup = await db.query(recordCleanupSql, [
+      currentId, digestId, reminderOne.id, 'bridge:cleanup-final',
+      reminderCleanup.rows[0].result.part.cleanup_token, 1, 'already_absent', null
+    ]);
+    assert.equal(completedCleanup.rows[0].result.applied, true);
+    assert.equal(completedCleanup.rows[0].result.row.previous_cleanup_state, 'deleted');
+    const { rows: finalPrior } = await db.query(`select state from public.digest_runs where id = $1::uuid`, [digestId]);
+    assert.equal(finalPrior[0].state, 'replaced');
+
     assert.deepEqual({
       listedIds: failClosedP0.map((row) => row.id),
-      mergeStates: [futureAckMerge.rows[0].result.row.state, boundaryAckMerge.rows[0].result.row.state],
-      finalizeStates: semanticGuards.map((result) => result.status)
+      mergeStates: [futureAckMerge.rows[0].result.row.state, boundaryAckMerge.rows[0].result.row.state]
     }, {
       listedIds: p0ListRows.slice(2).map((row) => row.id),
-      mergeStates: ['open', 'snoozed'],
-      finalizeStates: ['rejected', 'rejected', 'fulfilled']
-    }, 'SQL uses each operation cutoff for list, upsert wake, and finalization eligibility');
-    assert.ok(semanticGuards.slice(0, 2).every((result) => /snapshot semantics/i.test(result.reason?.message)));
-    assert.equal(semanticGuards[2].value.rows[0].result.updated_count, 1);
-    const { rows: guardedCounters } = await db.query(`
-      select id, digest_inclusion_count, consecutive_unhandled_digests, last_digest_at
-      from public.work_items_v2 where id in ($1::uuid, $2::uuid, $3::uuid) order by id
-    `, [
-      carryWork.rows[0].result.row.id,
-      hiddenWork.rows[0].result.row.id,
-      futureHiddenWork.rows[0].result.row.id
-    ]);
-    assert.equal(guardedCounters.find((row) => row.id === carryWork.rows[0].result.row.id).digest_inclusion_count, 99);
-    assert.equal(guardedCounters.find((row) => row.id === hiddenWork.rows[0].result.row.id).digest_inclusion_count, 0);
-    const futureGuarded = guardedCounters.find((row) => row.id === futureHiddenWork.rows[0].result.row.id);
-    assert.equal(futureGuarded.digest_inclusion_count, 1);
-    assert.ok(futureGuarded.last_digest_at);
-
-    const failedDigest = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T09:00:00.000Z', '2026-08-29T06:00:00.000Z',
-      '2026-08-29T09:00:00.000Z', 'bridge:pglite', 120
-    ]);
-    const failSql = `
-      select public.fail_digest_run_v2(
-        $1::uuid, $2::text, $3::uuid, $4::text
-      ) as result
-    `;
-    const wrongOwner = await db.query(failSql, [
-      failedDigest.rows[0].result.row.id, 'bridge:other', failedDigest.rows[0].result.row.lease_token,
-      'digest_delivery_failed'
-    ]);
-    const rightOwner = await db.query(failSql, [
-      failedDigest.rows[0].result.row.id, 'bridge:pglite', failedDigest.rows[0].result.row.lease_token,
-      'digest_delivery_failed'
-    ]);
-    const staleFailure = await db.query(failSql, [
-      failedDigest.rows[0].result.row.id, 'bridge:pglite', failedDigest.rows[0].result.row.lease_token,
-      'digest_delivery_failed'
-    ]);
-    assert.equal(wrongOwner.rows[0].result.applied, false);
-    assert.equal(rightOwner.rows[0].result.applied, true);
-    assert.equal(staleFailure.rows[0].result.applied, false, 'failed lease cannot be failed twice');
-    await db.query(`
-      update public.digest_runs set lease_expires_at = '2000-01-01T00:00:00.000Z'
-      where id = $1::uuid
-    `, [failedDigest.rows[0].result.row.id]);
-    const recoveredFailure = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T09:00:00.000Z', '2026-08-29T06:00:00.000Z',
-      '2026-08-29T09:00:00.000Z', 'bridge:pglite', 120
-    ]);
-    assert.equal(recoveredFailure.rows[0].result.claimed, true);
-    assert.equal(recoveredFailure.rows[0].result.created, false);
-    assert.equal(recoveredFailure.rows[0].result.row.lease_owner, 'bridge:pglite');
-    assert.notEqual(
-      recoveredFailure.rows[0].result.row.lease_token,
-      failedDigest.rows[0].result.row.lease_token,
-      'every reclaim rotates the lease generation even for the same owner'
-    );
-    const oldGenerationFailure = await db.query(failSql, [
-      failedDigest.rows[0].result.row.id, 'bridge:pglite', failedDigest.rows[0].result.row.lease_token,
-      'digest_delivery_failed'
-    ]);
-    assert.equal(oldGenerationFailure.rows[0].result.applied, false);
-    const oldGenerationFinalize = await db.query(finalizeSql, [
-      failedDigest.rows[0].result.row.id, 'bridge:pglite', failedDigest.rows[0].result.row.lease_token,
-      '[]', null, null, '2026-08-29T09:00:05.000Z'
-    ]);
-    assert.equal(oldGenerationFinalize.rows[0].result.applied, false);
-
-    const buildingDigest = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T12:00:00.000Z', '2026-08-29T09:00:00.000Z',
-      '2026-08-29T12:00:00.000Z', 'bridge:original', 120
-    ]);
-    await db.query(`
-      update public.digest_runs set lease_expires_at = '2000-01-01T00:00:00.000Z'
-      where id = $1::uuid
-    `, [buildingDigest.rows[0].result.row.id]);
-    const recoveredBuilding = await db.query(claimDigestSql, [
-      'slack:CINBOX', '2026-08-29T12:00:00.000Z', '2026-08-29T09:00:00.000Z',
-      '2026-08-29T12:00:00.000Z', 'bridge:recovery', 120
-    ]);
-    assert.equal(recoveredBuilding.rows[0].result.claimed, true);
-    assert.equal(recoveredBuilding.rows[0].result.created, false);
-
-    await assert.rejects(db.query(finalizeSql, [
-      recoveredBuilding.rows[0].result.row.id, 'bridge:recovery',
-      recoveredBuilding.rows[0].result.row.lease_token,
-      JSON.stringify([
-        { id: actionId, version: 2, inclusionReason: 'actionable', priority: 'urgent' }
-      ]), 'CINBOX', '900.01', '2026-08-29T12:00:05.000Z'
-    ]), /snapshot semantics/i);
-    await assert.rejects(db.query(finalizeSql, [
-      recoveredBuilding.rows[0].result.row.id, 'bridge:recovery',
-      recoveredBuilding.rows[0].result.row.lease_token,
-      JSON.stringify([
-        { id: actionId, version: 2, inclusionReason: 'daily_reminder', priority: 'normal' }
-      ]), 'CINBOX', '900.01', '2026-08-29T12:00:05.000Z'
-    ]), /snapshot semantics/i);
-    await assert.rejects(db.query(finalizeSql, [
-      recoveredBuilding.rows[0].result.row.id, 'bridge:recovery',
-      recoveredBuilding.rows[0].result.row.lease_token,
-      JSON.stringify([
-        { id: actionId.toUpperCase(), version: 2, inclusionReason: 'actionable', priority: 'normal' },
-        { id: actionId, version: 2, inclusionReason: 'actionable', priority: 'normal' }
-      ]), 'CINBOX', '900.01', '2026-08-29T12:00:05.000Z'
-    ]), /invalid digest finalization/i);
-    await assert.rejects(db.query(finalizeSql, [
-      recoveredBuilding.rows[0].result.row.id, 'bridge:recovery',
-      recoveredBuilding.rows[0].result.row.lease_token, '[]', null, null, 'infinity'
-    ]), /invalid digest finalization/i);
-
-    const { rows: failureCounterAudit } = await db.query(`
-      select id, version, digest_inclusion_count
-      from public.work_items_v2 where id in ($1::uuid, $2::uuid) order by id
-    `, [actionId, concurrentRows[0].id]);
-    assert.equal(failureCounterAudit.find((row) => row.id === actionId).digest_inclusion_count, 2);
-    assert.equal(failureCounterAudit.find((row) => row.id === actionId).version, 2);
-    assert.equal(failureCounterAudit.find((row) => row.id === concurrentRows[0].id).digest_inclusion_count, 0);
+      mergeStates: ['open', 'snoozed']
+    }, 'SQL uses each operation cutoff for list and upsert wake eligibility');
   } finally {
     await db.close();
   }
