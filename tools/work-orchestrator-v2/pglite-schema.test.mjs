@@ -105,7 +105,8 @@ test('foundation migration executes and exposes only service-role access in Post
           'request_work_item_action_v2',
           'claim_digest_run_v2',
           'finalize_digest_run_v2',
-          'fail_digest_run_v2'
+          'fail_digest_run_v2',
+          'record_digest_cleanup_v2'
         )
       order by p.proname
     `);
@@ -114,6 +115,7 @@ test('foundation migration executes and exposes only service-role access in Post
       'claim_message_notification_receipt',
       'fail_digest_run_v2',
       'finalize_digest_run_v2',
+      'record_digest_cleanup_v2',
       'request_work_item_action_v2',
       'touch_work_orchestrator_v2_updated_at',
       'upsert_work_item_v2',
@@ -137,7 +139,8 @@ test('foundation migration executes and exposes only service-role access in Post
           'request_work_item_action_v2',
           'claim_digest_run_v2',
           'finalize_digest_run_v2',
-          'fail_digest_run_v2'
+          'fail_digest_run_v2',
+          'record_digest_cleanup_v2'
         )
         and acl.grantee = 0
         and lower(acl.privilege_type) = 'execute'
@@ -320,6 +323,33 @@ test('foundation migration executes and exposes only service-role access in Post
       '2099-01-01T00:00:00.000Z'
     );
 
+    const staleP0Candidate = {
+      ...candidate,
+      work_key: 'room:pglite:stale-p0',
+      source_event_keys: ['event-newer-normal'],
+      last_activity_at: '2026-08-29T00:00:00.000Z',
+      priority: 'normal'
+    };
+    const staleP0Work = await db.query(upsertSql, [JSON.stringify(staleP0Candidate)]);
+    await db.query(`
+      update public.work_items_v2
+      set state = 'snoozed', snoozed_until = '2099-01-01T00:00:00.000Z',
+          actionable_at = '2099-01-01T00:00:00.000Z'
+      where id = $1::uuid
+    `, [staleP0Work.rows[0].result.row.id]);
+    const staleHigherP0 = await db.query(upsertSql, [JSON.stringify({
+      ...staleP0Candidate,
+      source_event_keys: ['event-older-p0'],
+      last_activity_at: '2026-08-28T00:00:00.000Z',
+      priority: 'p0'
+    })]);
+    assert.equal(staleHigherP0.rows[0].result.row.priority, 'normal');
+    assert.equal(staleHigherP0.rows[0].result.row.state, 'snoozed');
+    assert.equal(
+      new Date(staleHigherP0.rows[0].result.row.snoozed_until).toISOString(),
+      '2099-01-01T00:00:00.000Z'
+    );
+
     const actionCandidate = {
       ...candidate,
       work_key: 'room:pglite:action',
@@ -345,6 +375,36 @@ test('foundation migration executes and exposes only service-role access in Post
     assert.equal(appliedAction.rows[0].result.row.state, 'open', 'action request cannot resolve work');
     assert.equal(appliedAction.rows[0].result.row.pending_action.status, 'pending');
 
+    await assert.rejects(
+      db.query(upsertSql, [JSON.stringify({ ...candidate, state: null })]),
+      /invalid work candidate/i
+    );
+    await assert.rejects(
+      db.query(upsertSql, [JSON.stringify({ ...candidate, unreviewed: true })]),
+      /invalid work candidate/i
+    );
+    await assert.rejects(
+      db.query(upsertSql, [JSON.stringify({ ...candidate, actionable_at: 'infinity' })]),
+      /invalid work candidate/i
+    );
+    await assert.rejects(
+      db.query(actionSql, [actionId, 2, JSON.stringify({ type: 7 }), 'UOWNER']),
+      /invalid work action request/i
+    );
+    await assert.rejects(
+      db.query(actionSql, [
+        actionId, 2, JSON.stringify({ type: 'progress', unreviewed: true }), 'UOWNER'
+      ]),
+      /invalid work action request/i
+    );
+    await assert.rejects(
+      db.query(actionSql, [
+        staleP0Work.rows[0].result.row.id, 2,
+        JSON.stringify({ type: 'snooze', snoozedUntil: '2000-01-01T00:00:00.000Z' }), 'UOWNER'
+      ]),
+      /invalid work action request/i
+    );
+
     const concurrentCandidate = {
       ...candidate,
       work_key: 'room:pglite:concurrent',
@@ -360,6 +420,7 @@ test('foundation migration executes and exposes only service-role access in Post
       where work_key = 'room:pglite:concurrent' and state in ('open','in_progress','snoozed')
     `);
     assert.equal(concurrentRows.length, 1, 'partial unique key converges to one active row');
+    assert.equal(concurrentRows[0].version, 2, 'one insert plus one merge each apply exactly once');
 
     const claimDigestSql = `
       select public.claim_digest_run_v2(
@@ -370,12 +431,22 @@ test('foundation migration executes and exposes only service-role access in Post
       'slack:CINBOX', '2026-08-29T03:00:00.000Z', '2026-08-29T00:00:00.000Z',
       '2026-08-29T03:00:00.000Z', 'bridge:pglite', 120
     ];
+    await assert.rejects(
+      db.query(claimDigestSql, [
+        'slack:CINBOX', 'infinity', '2026-08-29T00:00:00.000Z',
+        '2026-08-29T03:00:00.000Z', 'bridge:pglite', 120
+      ]),
+      /invalid digest claim/i
+    );
     const firstDigest = await db.query(claimDigestSql, digestArgs);
     const secondDigest = await db.query(claimDigestSql, digestArgs);
     assert.equal(firstDigest.rows[0].result.claimed, true);
     assert.equal(firstDigest.rows[0].result.created, true);
     assert.equal(secondDigest.rows[0].result.claimed, false);
+    assert.match(firstDigest.rows[0].result.row.lease_token, /^[0-9a-f-]{36}$/);
+    assert.equal(firstDigest.rows[0].result.previous_digest, null);
     const digestId = firstDigest.rows[0].result.row.id;
+    const digestLeaseToken = firstDigest.rows[0].result.row.lease_token;
 
     const snapshot = [
       { id: actionId, version: 2, inclusionReason: 'overdue', priority: 'normal' },
@@ -383,16 +454,16 @@ test('foundation migration executes and exposes only service-role access in Post
     ];
     const finalizeSql = `
       select public.finalize_digest_run_v2(
-        $1::uuid, $2::text, $3::jsonb, $4::text, $5::text, $6::timestamptz
+        $1::uuid, $2::text, $3::uuid, $4::jsonb, $5::text, $6::text, $7::timestamptz
       ) as result
     `;
     const wrongFinalizeOwner = await db.query(finalizeSql, [
-      digestId, 'bridge:other', JSON.stringify(snapshot), 'CINBOX', '123.45', '2026-08-29T03:00:05.000Z'
+      digestId, 'bridge:other', digestLeaseToken, JSON.stringify(snapshot), 'CINBOX', '123.45', '2026-08-29T03:00:05.000Z'
     ]);
     assert.equal(wrongFinalizeOwner.rows[0].result.applied, false);
     assert.equal(wrongFinalizeOwner.rows[0].result.updated_count, 0);
     const finalized = await db.query(finalizeSql, [
-      digestId, 'bridge:pglite', JSON.stringify(snapshot), 'CINBOX', '123.45', '2026-08-29T03:00:05.000Z'
+      digestId, 'bridge:pglite', digestLeaseToken, JSON.stringify(snapshot), 'CINBOX', '123.45', '2026-08-29T03:00:05.000Z'
     ]);
     assert.equal(finalized.rows[0].result.applied, true);
     assert.equal(finalized.rows[0].result.updated_count, 1);
@@ -415,17 +486,37 @@ test('foundation migration executes and exposes only service-role access in Post
       '2026-08-29T06:00:00.000Z', 'bridge:pglite', 120
     ]);
     const emptyFinalized = await db.query(finalizeSql, [
-      emptyDigest.rows[0].result.row.id, 'bridge:pglite', '[]', 'CINBOX', '456.78', '2026-08-29T06:00:05.000Z'
+      emptyDigest.rows[0].result.row.id, 'bridge:pglite', emptyDigest.rows[0].result.row.lease_token,
+      '[]', null, null, '2026-08-29T06:00:05.000Z'
     ]);
     assert.equal(emptyFinalized.rows[0].result.applied, true);
     assert.equal(emptyFinalized.rows[0].result.updated_count, 0);
+    assert.equal(emptyFinalized.rows[0].result.row.slack_channel_id, null);
+    assert.equal(emptyFinalized.rows[0].result.row.slack_message_ts, null);
+    assert.equal(emptyDigest.rows[0].result.previous_digest.id, digestId);
+
+    const cleanupSql = `
+      select public.record_digest_cleanup_v2(
+        $1::uuid, $2::uuid, $3::text, $4::text
+      ) as result
+    `;
+    const cleanup = await db.query(cleanupSql, [
+      emptyDigest.rows[0].result.row.id, digestId, 'deleted', null
+    ]);
+    assert.equal(cleanup.rows[0].result.applied, true);
+    assert.equal(cleanup.rows[0].result.row.previous_cleanup_state, 'deleted');
+    const { rows: replacedDigest } = await db.query(`
+      select state from public.digest_runs where id = $1::uuid
+    `, [digestId]);
+    assert.equal(replacedDigest[0].state, 'replaced');
 
     const dailyDigest = await db.query(claimDigestSql, [
       'slack:CINBOX', '2026-08-29T07:00:00.000Z', '2026-08-29T06:00:00.000Z',
       '2026-08-29T07:00:00.000Z', 'bridge:pglite', 120
     ]);
     const dailyFinalized = await db.query(finalizeSql, [
-      dailyDigest.rows[0].result.row.id, 'bridge:pglite', JSON.stringify([{
+      dailyDigest.rows[0].result.row.id, 'bridge:pglite', dailyDigest.rows[0].result.row.lease_token,
+      JSON.stringify([{
         id: actionId, version: 2, inclusionReason: 'daily_reminder', priority: 'normal'
       }]), 'CINBOX', '789.01', '2026-08-29T07:00:05.000Z'
     ]);
@@ -438,23 +529,58 @@ test('foundation migration executes and exposes only service-role access in Post
     assert.equal(dailyReminderWork[0].digest_inclusion_count, 2);
     assert.equal(new Date(dailyReminderWork[0].next_reminder_at).toISOString(), '2026-08-30T07:00:05.000Z');
 
+    const cleanupFailureDigest = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T08:00:00.000Z', '2026-08-29T07:00:00.000Z',
+      '2026-08-29T08:00:00.000Z', 'bridge:pglite', 120
+    ]);
+    assert.equal(cleanupFailureDigest.rows[0].result.previous_digest.id, dailyDigest.rows[0].result.row.id);
+    const cleanupFailureFinalized = await db.query(finalizeSql, [
+      cleanupFailureDigest.rows[0].result.row.id, 'bridge:pglite',
+      cleanupFailureDigest.rows[0].result.row.lease_token, '[]', null, null,
+      '2026-08-29T08:00:05.000Z'
+    ]);
+    assert.equal(cleanupFailureFinalized.rows[0].result.applied, true);
+    const cleanupFailed = await db.query(cleanupSql, [
+      cleanupFailureDigest.rows[0].result.row.id, dailyDigest.rows[0].result.row.id,
+      'failed', 'rate_limited'
+    ]);
+    assert.equal(cleanupFailed.rows[0].result.applied, true);
+    assert.equal(cleanupFailed.rows[0].result.row.state, 'delivered');
+    assert.equal(cleanupFailed.rows[0].result.row.previous_cleanup_state, 'failed');
+    const { rows: priorAfterCleanupFailure } = await db.query(`
+      select state from public.digest_runs where id = $1::uuid
+    `, [dailyDigest.rows[0].result.row.id]);
+    assert.equal(priorAfterCleanupFailure[0].state, 'delivered');
+    const cleanupRecovered = await db.query(cleanupSql, [
+      cleanupFailureDigest.rows[0].result.row.id, dailyDigest.rows[0].result.row.id,
+      'already_absent', null
+    ]);
+    assert.equal(cleanupRecovered.rows[0].result.row.previous_cleanup_state, 'already_absent');
+    const { rows: priorAfterCleanupRecovery } = await db.query(`
+      select state from public.digest_runs where id = $1::uuid
+    `, [dailyDigest.rows[0].result.row.id]);
+    assert.equal(priorAfterCleanupRecovery[0].state, 'replaced');
+
     const failedDigest = await db.query(claimDigestSql, [
       'slack:CINBOX', '2026-08-29T09:00:00.000Z', '2026-08-29T06:00:00.000Z',
       '2026-08-29T09:00:00.000Z', 'bridge:pglite', 120
     ]);
     const failSql = `
       select public.fail_digest_run_v2(
-        $1::uuid, $2::text, $3::text
+        $1::uuid, $2::text, $3::uuid, $4::text
       ) as result
     `;
     const wrongOwner = await db.query(failSql, [
-      failedDigest.rows[0].result.row.id, 'bridge:other', 'digest_delivery_failed'
+      failedDigest.rows[0].result.row.id, 'bridge:other', failedDigest.rows[0].result.row.lease_token,
+      'digest_delivery_failed'
     ]);
     const rightOwner = await db.query(failSql, [
-      failedDigest.rows[0].result.row.id, 'bridge:pglite', 'digest_delivery_failed'
+      failedDigest.rows[0].result.row.id, 'bridge:pglite', failedDigest.rows[0].result.row.lease_token,
+      'digest_delivery_failed'
     ]);
     const staleFailure = await db.query(failSql, [
-      failedDigest.rows[0].result.row.id, 'bridge:pglite', 'digest_delivery_failed'
+      failedDigest.rows[0].result.row.id, 'bridge:pglite', failedDigest.rows[0].result.row.lease_token,
+      'digest_delivery_failed'
     ]);
     assert.equal(wrongOwner.rows[0].result.applied, false);
     assert.equal(rightOwner.rows[0].result.applied, true);
@@ -465,11 +591,26 @@ test('foundation migration executes and exposes only service-role access in Post
     `, [failedDigest.rows[0].result.row.id]);
     const recoveredFailure = await db.query(claimDigestSql, [
       'slack:CINBOX', '2026-08-29T09:00:00.000Z', '2026-08-29T06:00:00.000Z',
-      '2026-08-29T09:00:00.000Z', 'bridge:recovery', 120
+      '2026-08-29T09:00:00.000Z', 'bridge:pglite', 120
     ]);
     assert.equal(recoveredFailure.rows[0].result.claimed, true);
     assert.equal(recoveredFailure.rows[0].result.created, false);
-    assert.equal(recoveredFailure.rows[0].result.row.lease_owner, 'bridge:recovery');
+    assert.equal(recoveredFailure.rows[0].result.row.lease_owner, 'bridge:pglite');
+    assert.notEqual(
+      recoveredFailure.rows[0].result.row.lease_token,
+      failedDigest.rows[0].result.row.lease_token,
+      'every reclaim rotates the lease generation even for the same owner'
+    );
+    const oldGenerationFailure = await db.query(failSql, [
+      failedDigest.rows[0].result.row.id, 'bridge:pglite', failedDigest.rows[0].result.row.lease_token,
+      'digest_delivery_failed'
+    ]);
+    assert.equal(oldGenerationFailure.rows[0].result.applied, false);
+    const oldGenerationFinalize = await db.query(finalizeSql, [
+      failedDigest.rows[0].result.row.id, 'bridge:pglite', failedDigest.rows[0].result.row.lease_token,
+      '[]', null, null, '2026-08-29T09:00:05.000Z'
+    ]);
+    assert.equal(oldGenerationFinalize.rows[0].result.applied, false);
 
     const buildingDigest = await db.query(claimDigestSql, [
       'slack:CINBOX', '2026-08-29T12:00:00.000Z', '2026-08-29T09:00:00.000Z',
@@ -485,6 +626,33 @@ test('foundation migration executes and exposes only service-role access in Post
     ]);
     assert.equal(recoveredBuilding.rows[0].result.claimed, true);
     assert.equal(recoveredBuilding.rows[0].result.created, false);
+
+    await assert.rejects(db.query(finalizeSql, [
+      recoveredBuilding.rows[0].result.row.id, 'bridge:recovery',
+      recoveredBuilding.rows[0].result.row.lease_token,
+      JSON.stringify([
+        { id: actionId, version: 2, inclusionReason: 'actionable', priority: 'urgent' }
+      ]), 'CINBOX', '900.01', '2026-08-29T12:00:05.000Z'
+    ]), /snapshot semantics/i);
+    await assert.rejects(db.query(finalizeSql, [
+      recoveredBuilding.rows[0].result.row.id, 'bridge:recovery',
+      recoveredBuilding.rows[0].result.row.lease_token,
+      JSON.stringify([
+        { id: actionId, version: 2, inclusionReason: 'daily_reminder', priority: 'normal' }
+      ]), 'CINBOX', '900.01', '2026-08-29T12:00:05.000Z'
+    ]), /snapshot semantics/i);
+    await assert.rejects(db.query(finalizeSql, [
+      recoveredBuilding.rows[0].result.row.id, 'bridge:recovery',
+      recoveredBuilding.rows[0].result.row.lease_token,
+      JSON.stringify([
+        { id: actionId.toUpperCase(), version: 2, inclusionReason: 'actionable', priority: 'normal' },
+        { id: actionId, version: 2, inclusionReason: 'actionable', priority: 'normal' }
+      ]), 'CINBOX', '900.01', '2026-08-29T12:00:05.000Z'
+    ]), /invalid digest finalization/i);
+    await assert.rejects(db.query(finalizeSql, [
+      recoveredBuilding.rows[0].result.row.id, 'bridge:recovery',
+      recoveredBuilding.rows[0].result.row.lease_token, '[]', null, null, 'infinity'
+    ]), /invalid digest finalization/i);
 
     const { rows: failureCounterAudit } = await db.query(`
       select id, version, digest_inclusion_count

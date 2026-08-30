@@ -34,7 +34,8 @@ test('foundation migration defines private atomic work and digest RPC contracts'
     'request_work_item_action_v2',
     'claim_digest_run_v2',
     'finalize_digest_run_v2',
-    'fail_digest_run_v2'
+    'fail_digest_run_v2',
+    'record_digest_cleanup_v2'
   ];
 
   for (const functionName of functions) {
@@ -53,4 +54,11 @@ test('foundation migration defines private atomic work and digest RPC contracts'
   assert.match(sql, /jsonb_array_elements\(p_item_snapshot\)/i);
   assert.match(sql, /w\.version\s*=\s*\(s\.entry->>'version'\)::integer/i);
   assert.match(sql, /w\.state in \('open','in_progress','snoozed'\)/i);
+  assert.match(sql, /lease_token uuid/i);
+  assert.match(sql, /pg_advisory_xact_lock\s*\(\s*hashtextextended/i);
+  assert.match(sql, /isfinite\s*\(/i, 'all RPC timestamps reject infinity');
+  assert.match(sql, /count\(distinct \(entry->>'id'\)::uuid\)/i, 'snapshot UUID duplicates use canonical UUID identity');
+  assert.match(sql, /previous_digest_id/i);
+  assert.match(sql, /previous_cleanup_state/i);
+  assert.match(sql, /slack_message_ts.*\^\[0-9\]/i);
 });

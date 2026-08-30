@@ -135,7 +135,9 @@ git commit -m "feat: define durable human work lifecycle"
 - Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
 
 **Interfaces:**
-- Produces RPCs `upsert_work_item_v2`, `request_work_item_action_v2`, `claim_digest_run_v2`, `finalize_digest_run_v2` and store methods with the same camelCase names.
+- Produces RPCs `upsert_work_item_v2`, `request_work_item_action_v2`, `claim_digest_run_v2`, `finalize_digest_run_v2`, `fail_digest_run_v2`, and `record_digest_cleanup_v2`, plus store methods with the same camelCase names.
+- Every successful digest claim/reclaim returns a unique `lease_token`; finalize/fail require exact run ID, lease owner, and token.
+- A new run records and returns the exact latest prior delivered digest coordinate. Cleanup evidence is recorded only after the new run is delivered.
 
 - [ ] **Step 1: Generate an additive migration only when the foundation is already in migration history**
 
@@ -166,7 +168,8 @@ Expected: FAIL because RPCs/methods are absent.
 - `upsert_work_item_v2`: lock active row by `work_key`, insert if absent, otherwise merge typed source keys and update content/version; terminal rows are never reopened.
 - `request_work_item_action_v2`: update only when `id`, `version`, and active state match; store pending action and increment version.
 - `claim_digest_run_v2`: insert by `(destination_key,scheduled_at)` or claim an expired `building|failed` lease; only one caller receives `claimed=true`.
-- `finalize_digest_run_v2`: lock run and snapshot work rows; mark delivered and increment counters only for IDs and versions in `item_snapshot`.
+- `finalize_digest_run_v2`: require the exact lease generation, lock run and snapshot work rows, validate content-free snapshot semantics, then mark delivered and increment counters only for matching active IDs and versions. An empty snapshot stores null Slack coordinates and represents a no-send delivery.
+- `record_digest_cleanup_v2`: only after the new run is delivered, record confirmed deletion/already-absence or a reviewed cleanup failure for its exact `previous_digest_id`; mark the prior run replaced only after confirmed deletion/absence.
 
 Each function returns JSON `{applied|claimed|created,row}` and schema-qualifies all tables.
 
@@ -179,8 +182,9 @@ upsertWorkItem(candidate)
 requestWorkAction({ id, expectedVersion, action, requestedBy })
 listActionableWork({ now, limit })
 claimDigestRun({ destinationKey, scheduledAt, windowStartedAt, windowEndedAt, leaseOwner, leaseSeconds })
-finalizeDigestRun({ id, itemSnapshot, channelId, messageTs, deliveredAt })
-failDigestRun({ id, error })
+finalizeDigestRun({ id, leaseOwner, leaseToken, itemSnapshot, channelId, messageTs, deliveredAt })
+failDigestRun({ id, leaseOwner, leaseToken, error })
+recordDigestCleanup({ id, previousDigestId, outcome, error })
 ```
 
 Run:
@@ -302,10 +306,10 @@ git commit -m "feat: build durable focus digests"
 Prove:
 
 1. two runners race and one claims;
-2. zero eligible items marks the run delivered with an empty snapshot and sends no digest;
+2. zero eligible items finalizes with an empty snapshot and null Slack coordinates, and sends no digest;
 3. new digest posts and finalizes before previous digest deletion;
 4. post failure preserves previous digest and counters;
-5. previous deletion failure records cleanup error without failing the delivered new digest;
+5. the claimed run's exact `previous_digest` coordinate is deleted only after new delivery, and deletion failure is recorded through `recordDigestCleanup` without failing the delivered new digest;
 6. work counters advance only after finalize succeeds.
 
 - [ ] **Step 2: Run RED**

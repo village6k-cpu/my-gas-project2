@@ -28,6 +28,11 @@ const WORK_PAYLOAD_TEXT_LIMITS = Object.freeze({
 const WORK_ACTIONS = new Set(['progress', 'snooze', 'ack_p0', 'request_resolve', 'dismiss']);
 const DIGEST_INCLUSION_REASONS = new Set(['p0', 'overdue', 'urgent', 'carry_over', 'actionable', 'daily_reminder']);
 const DIGEST_FAILURE_CODES = new Set(['digest_build_failed', 'digest_delivery_failed', 'delivery_unconfirmed']);
+const DIGEST_CLEANUP_FAILURE_CODES = new Set(['cant_delete_message', 'rate_limited', 'cleanup_unconfirmed', 'slack_api_error']);
+const WORK_STATES = new Set(['open', 'in_progress', 'snoozed', 'resolved', 'dismissed']);
+const ACTIVE_WORK_STATES = new Set(['open', 'in_progress', 'snoozed']);
+const DIGEST_STATES = new Set(['building', 'delivering', 'delivered', 'failed', 'replaced']);
+const SLACK_MESSAGE_TS = /^[0-9]{1,20}\.[0-9]{1,20}$/;
 const ACTIONABLE_WORK_SELECT = [
   'id', 'work_key', 'room_key', 'title', 'summary', 'work_type', 'priority', 'state',
   'owner_id', 'actionable_at', 'due_at', 'snoozed_until', 'first_opened_at',
@@ -60,7 +65,7 @@ function exactText(value, maxLength) {
 function uuid(value) {
   const normalized = exactText(value, 36);
   if (!UUID.test(normalized)) throw invalidInput();
-  return normalized;
+  return normalized.toLowerCase();
 }
 
 function isoTimestamp(value, { nullable = false } = {}) {
@@ -123,13 +128,17 @@ function normalizeWorkCandidate(input) {
   };
 }
 
-function normalizeWorkAction(input) {
+function normalizeWorkAction(input, now = new Date()) {
   if (!isRecord(input)) throw invalidInput();
   const type = exactText(input.type, 30);
   if (!WORK_ACTIONS.has(type)) throw invalidInput();
   const expected = type === 'snooze' ? ['snoozedUntil', 'type'] : ['type'];
   if (!exactKeys(input, expected)) throw invalidInput();
-  if (type === 'snooze') return { type, snoozedUntil: isoTimestamp(input.snoozedUntil) };
+  if (type === 'snooze') {
+    const snoozedUntil = isoTimestamp(input.snoozedUntil);
+    if (Date.parse(snoozedUntil) <= now.getTime()) throw invalidInput();
+    return { type, snoozedUntil };
+  }
   return { type };
 }
 
@@ -148,8 +157,214 @@ function normalizeDigestSnapshot(input) {
   });
 }
 
-function rpcResult(data) {
-  if (!isRecord(data)) throw new Error(`${REQUEST_ERROR_PREFIX}: response invalid`);
+function responseInvalid() {
+  return new Error(`${REQUEST_ERROR_PREFIX}: response invalid`);
+}
+
+function responseTimestamp(value, { nullable = false } = {}) {
+  if ((value === null || value === undefined) && nullable) return null;
+  if (typeof value !== 'string' || !value || value.length > 100 || !Number.isFinite(Date.parse(value))) {
+    throw responseInvalid();
+  }
+  return value;
+}
+
+function responseUuid(value, { nullable = false } = {}) {
+  if ((value === null || value === undefined) && nullable) return null;
+  if (typeof value !== 'string' || !UUID.test(value) || value !== value.toLowerCase()) throw responseInvalid();
+  return value;
+}
+
+function responseText(value, maxLength, { nullable = false, allowEmpty = false } = {}) {
+  if ((value === null || value === undefined) && nullable) return null;
+  if (typeof value !== 'string' || value.length > maxLength || (!allowEmpty && (!value || value !== value.trim()))) {
+    throw responseInvalid();
+  }
+  return value;
+}
+
+function responseWorkRow(row, { activeOnly = false } = {}) {
+  if (!isRecord(row)) throw responseInvalid();
+  responseUuid(row.id);
+  responseText(row.work_key, 500);
+  responseText(row.room_key, 500);
+  responseText(row.title, 300);
+  responseText(row.summary, 2000, { allowEmpty: true });
+  if (!WORK_TYPES.has(row.work_type) || !WORK_PRIORITIES.has(row.priority) || !WORK_STATES.has(row.state)) {
+    throw responseInvalid();
+  }
+  if (activeOnly && !ACTIVE_WORK_STATES.has(row.state)) throw responseInvalid();
+  if (!Number.isSafeInteger(row.version) || row.version < 1) throw responseInvalid();
+  responseTimestamp(row.actionable_at);
+  responseTimestamp(row.first_opened_at);
+  responseTimestamp(row.last_activity_at);
+  responseTimestamp(row.due_at, { nullable: true });
+  responseTimestamp(row.snoozed_until, { nullable: true });
+  if (row.owner_id !== null && row.owner_id !== undefined) responseText(row.owner_id, 200);
+  if (!isRecord(row.payload)) throw responseInvalid();
+  return row;
+}
+
+function responsePreviousDigest(value, previousDigestId) {
+  if (value === null) {
+    if (previousDigestId !== null && previousDigestId !== undefined) throw responseInvalid();
+    return null;
+  }
+  if (!exactKeys(value, ['id', 'slack_channel_id', 'slack_message_ts'])) throw responseInvalid();
+  const id = responseUuid(value.id);
+  if (id !== previousDigestId) throw responseInvalid();
+  responseText(value.slack_channel_id, 500);
+  if (typeof value.slack_message_ts !== 'string' || !SLACK_MESSAGE_TS.test(value.slack_message_ts)) throw responseInvalid();
+  return value;
+}
+
+function responseDigestRow(row) {
+  if (!isRecord(row)) throw responseInvalid();
+  responseUuid(row.id);
+  responseText(row.destination_key, 500);
+  responseTimestamp(row.scheduled_at);
+  if (!DIGEST_STATES.has(row.state)) throw responseInvalid();
+  const previousDigestId = responseUuid(row.previous_digest_id, { nullable: true });
+  if (!Array.isArray(row.item_snapshot)) throw responseInvalid();
+  if (row.state === 'building' || row.state === 'delivering' || row.state === 'failed') {
+    responseText(row.lease_owner, 200);
+    responseUuid(row.lease_token);
+    responseTimestamp(row.lease_expires_at);
+    if (row.delivered_at !== null || row.slack_channel_id !== null || row.slack_message_ts !== null) {
+      throw responseInvalid();
+    }
+  }
+  if (row.state === 'delivered' || row.state === 'replaced') {
+    if (row.lease_owner !== null || row.lease_token !== null || row.lease_expires_at !== null) throw responseInvalid();
+    responseTimestamp(row.delivered_at);
+    if (row.item_snapshot.length === 0) {
+      if (row.slack_channel_id !== null || row.slack_message_ts !== null) throw responseInvalid();
+    } else {
+      responseText(row.slack_channel_id, 500);
+      if (typeof row.slack_message_ts !== 'string' || !SLACK_MESSAGE_TS.test(row.slack_message_ts)) {
+        throw responseInvalid();
+      }
+    }
+  }
+  return { row, previousDigestId };
+}
+
+function upsertResponse(data, candidate) {
+  if (!exactKeys(data, ['applied', 'created', 'row'])
+    || typeof data.applied !== 'boolean' || typeof data.created !== 'boolean'
+    || data.created && !data.applied) throw responseInvalid();
+  const row = responseWorkRow(data.row);
+  if (row.work_key !== candidate.work_key
+    || data.created && row.version !== 1
+    || data.applied && !data.created && row.version < 2) throw responseInvalid();
+  if (data.applied && !ACTIVE_WORK_STATES.has(row.state)) throw responseInvalid();
+  if (!data.applied && !['resolved', 'dismissed'].includes(row.state)) throw responseInvalid();
+  return data;
+}
+
+function actionResponse(data, input) {
+  if (!exactKeys(data, ['applied', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
+  if (!data.applied) {
+    if (data.row !== null) throw responseInvalid();
+    return data;
+  }
+  const row = responseWorkRow(data.row, { activeOnly: true });
+  if (row.id !== input.id || row.version !== input.expectedVersion + 1
+    || !isRecord(row.pending_action) || row.pending_action.status !== 'pending'
+    || row.pending_action.type !== input.action.type
+    || JSON.stringify(row.pending_action.action) !== JSON.stringify(input.action)
+    || row.pending_action.requested_by !== input.requestedBy
+    || row.pending_action.expected_version !== input.expectedVersion) throw responseInvalid();
+  responseTimestamp(row.pending_action.requested_at);
+  return data;
+}
+
+function claimResponse(data, input) {
+  if (!exactKeys(data, ['claimed', 'created', 'previous_digest', 'row'])
+    || typeof data.claimed !== 'boolean' || typeof data.created !== 'boolean'
+    || data.created && !data.claimed || !data.claimed && data.created) throw responseInvalid();
+  const { row, previousDigestId } = responseDigestRow(data.row);
+  if (row.destination_key !== input.destinationKey
+    || Date.parse(row.scheduled_at) !== Date.parse(input.scheduledAt)) throw responseInvalid();
+  if (data.claimed && (row.state !== 'building' || row.lease_owner !== input.leaseOwner)) throw responseInvalid();
+  responsePreviousDigest(data.previous_digest, previousDigestId);
+  return data;
+}
+
+function finalizeResponse(data, input, snapshot) {
+  if (!exactKeys(data, ['applied', 'row', 'updated_count'])
+    || typeof data.applied !== 'boolean'
+    || !Number.isSafeInteger(data.updated_count) || data.updated_count < 0 || data.updated_count > snapshot.length) {
+    throw responseInvalid();
+  }
+  if (!data.applied) {
+    if (data.row !== null || data.updated_count !== 0) throw responseInvalid();
+    return data;
+  }
+  const { row } = responseDigestRow(data.row);
+  if (row.id !== input.id || row.state !== 'delivered'
+    || Date.parse(responseTimestamp(row.delivered_at)) !== Date.parse(input.deliveredAt)
+    || JSON.stringify(row.item_snapshot) !== JSON.stringify(snapshot)) throw responseInvalid();
+  if (snapshot.length === 0) {
+    if (row.slack_channel_id !== null || row.slack_message_ts !== null) throw responseInvalid();
+  } else if (row.slack_channel_id !== input.channelId || row.slack_message_ts !== input.messageTs) {
+    throw responseInvalid();
+  }
+  return data;
+}
+
+function failResponse(data, input) {
+  if (!exactKeys(data, ['applied', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
+  if (!data.applied) {
+    if (data.row !== null) throw responseInvalid();
+    return data;
+  }
+  const { row } = responseDigestRow(data.row);
+  if (row.id !== input.id || row.state !== 'failed'
+    || row.lease_owner !== input.leaseOwner || row.lease_token !== input.leaseToken
+    || row.error !== input.error) throw responseInvalid();
+  return data;
+}
+
+function cleanupResponse(data, input) {
+  if (!exactKeys(data, ['applied', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
+  if (!data.applied) {
+    if (data.row !== null) {
+      const { row } = responseDigestRow(data.row);
+      if (row.id !== input.id || row.previous_digest_id !== input.previousDigestId) throw responseInvalid();
+    }
+    return data;
+  }
+  const { row } = responseDigestRow(data.row);
+  if (row.id !== input.id || row.state !== 'delivered'
+    || row.previous_digest_id !== input.previousDigestId
+    || row.previous_cleanup_state !== input.outcome) throw responseInvalid();
+  if (input.outcome === 'failed') {
+    if (row.previous_cleanup_error !== input.error) throw responseInvalid();
+  } else {
+    if (row.previous_cleanup_error !== null) throw responseInvalid();
+    responseTimestamp(row.previous_deleted_at);
+  }
+  return data;
+}
+
+function actionableResponse(data, now) {
+  if (!Array.isArray(data)) throw responseInvalid();
+  const expectedKeys = ACTIONABLE_WORK_SELECT.split(',');
+  for (const row of data) {
+    if (!exactKeys(row, expectedKeys)) throw responseInvalid();
+    responseWorkRow(row, { activeOnly: true });
+    for (const counter of ['digest_inclusion_count', 'consecutive_unhandled_digests']) {
+      if (!Number.isSafeInteger(row[counter]) || row[counter] < 0) throw responseInvalid();
+    }
+    responseTimestamp(row.last_digest_at, { nullable: true });
+    responseTimestamp(row.next_reminder_at, { nullable: true });
+    const acknowledgement = row.payload.p0_acknowledged_at;
+    if (acknowledgement !== undefined) responseTimestamp(acknowledgement);
+    const due = Date.parse(row.actionable_at) <= Date.parse(now);
+    const unacknowledgedP0 = row.priority === 'p0' && acknowledgement === undefined;
+    if (!due && !unacknowledgedP0) throw responseInvalid();
+  }
   return data;
 }
 
@@ -476,15 +691,17 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         method: 'POST',
         body: safeJson({ p_candidate: candidate })
       });
-      return rpcResult(data);
+      return upsertResponse(data, candidate);
     },
     requestWorkAction: async (input = {}) => {
       let body;
+      let validationNow;
       try {
+        validationNow = input.now === undefined ? new Date() : new Date(isoTimestamp(input.now));
         body = {
           p_id: uuid(input.id),
           p_expected_version: positiveVersion(input.expectedVersion),
-          p_action: normalizeWorkAction(input.action),
+          p_action: normalizeWorkAction(input.action, validationNow),
           p_requested_by: exactText(input.requestedBy, 200)
         };
       } catch {
@@ -493,7 +710,12 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const { data } = await request('rpc/request_work_item_action_v2', {
         method: 'POST', body: safeJson(body)
       });
-      return rpcResult(data);
+      return actionResponse(data, {
+        id: body.p_id,
+        expectedVersion: body.p_expected_version,
+        action: body.p_action,
+        requestedBy: body.p_requested_by
+      });
     },
     listActionableWork: async (input = {}) => {
       let now;
@@ -508,13 +730,12 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const query = new URLSearchParams({
         select: ACTIONABLE_WORK_SELECT,
         state: 'in.(open,in_progress,snoozed)',
-        or: `(actionable_at.lte.${now},priority.eq.p0)`,
+        or: `(actionable_at.lte.${now},and(priority.eq.p0,payload->>p0_acknowledged_at.is.null))`,
         order: 'actionable_at.asc,first_opened_at.asc,id.asc',
         limit: String(limit)
       });
       const { data } = await request(`work_items_v2?${query}`);
-      if (!Array.isArray(data)) throw new Error(`${REQUEST_ERROR_PREFIX}: response invalid`);
-      return data;
+      return actionableResponse(data, now);
     },
     claimDigestRun: async (input = {}) => {
       let body;
@@ -539,17 +760,31 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const { data } = await request('rpc/claim_digest_run_v2', {
         method: 'POST', body: safeJson(body)
       });
-      return rpcResult(data);
+      return claimResponse(data, {
+        destinationKey: body.p_destination_key,
+        scheduledAt: body.p_scheduled_at,
+        leaseOwner: body.p_lease_owner
+      });
     },
     finalizeDigestRun: async (input = {}) => {
       let body;
       try {
+        const snapshot = normalizeDigestSnapshot(input.itemSnapshot);
+        const empty = snapshot.length === 0;
+        let channelId = null;
+        let messageTs = null;
+        if (!empty) {
+          channelId = exactText(input.channelId, 500);
+          messageTs = exactText(input.messageTs, 100);
+          if (!SLACK_MESSAGE_TS.test(messageTs)) throw invalidInput();
+        }
         body = {
           p_id: uuid(input.id),
           p_lease_owner: exactText(input.leaseOwner, 200),
-          p_item_snapshot: normalizeDigestSnapshot(input.itemSnapshot),
-          p_slack_channel_id: exactText(input.channelId, 500),
-          p_slack_message_ts: exactText(input.messageTs, 100),
+          p_lease_token: uuid(input.leaseToken),
+          p_item_snapshot: snapshot,
+          p_slack_channel_id: channelId,
+          p_slack_message_ts: messageTs,
           p_delivered_at: isoTimestamp(input.deliveredAt)
         };
       } catch {
@@ -558,7 +793,12 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const { data } = await request('rpc/finalize_digest_run_v2', {
         method: 'POST', body: safeJson(body)
       });
-      return rpcResult(data);
+      return finalizeResponse(data, {
+        id: body.p_id,
+        channelId: body.p_slack_channel_id,
+        messageTs: body.p_slack_message_ts,
+        deliveredAt: body.p_delivered_at
+      }, body.p_item_snapshot);
     },
     failDigestRun: async (input = {}) => {
       let body;
@@ -568,6 +808,7 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         body = {
           p_id: uuid(input.id),
           p_lease_owner: exactText(input.leaseOwner, 200),
+          p_lease_token: uuid(input.leaseToken),
           p_error: error
         };
       } catch {
@@ -576,7 +817,42 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const { data } = await request('rpc/fail_digest_run_v2', {
         method: 'POST', body: safeJson(body)
       });
-      return rpcResult(data);
+      return failResponse(data, {
+        id: body.p_id, leaseOwner: body.p_lease_owner, leaseToken: body.p_lease_token,
+        error: body.p_error
+      });
+    },
+    recordDigestCleanup: async (input = {}) => {
+      let body;
+      try {
+        const outcome = exactText(input.outcome, 30);
+        if (!['deleted', 'already_absent', 'failed'].includes(outcome)) throw invalidInput();
+        let error = null;
+        if (outcome === 'failed') {
+          error = exactText(input.error, 50);
+          if (!DIGEST_CLEANUP_FAILURE_CODES.has(error)) throw invalidInput();
+        } else if (input.error !== null && input.error !== undefined) {
+          throw invalidInput();
+        }
+        body = {
+          p_id: uuid(input.id),
+          p_previous_digest_id: uuid(input.previousDigestId),
+          p_outcome: outcome,
+          p_error: error
+        };
+        if (body.p_id === body.p_previous_digest_id) throw invalidInput();
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/record_digest_cleanup_v2', {
+        method: 'POST', body: safeJson(body)
+      });
+      return cleanupResponse(data, {
+        id: body.p_id,
+        previousDigestId: body.p_previous_digest_id,
+        outcome: body.p_outcome,
+        error: body.p_error
+      });
     },
     counts: async () => {
       const count = async (table, filters) => {
