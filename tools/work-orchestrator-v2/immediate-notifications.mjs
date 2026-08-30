@@ -1,10 +1,10 @@
-import { notificationReceiptInput } from './contracts.mjs';
+import { deterministicClientMessageId, notificationReceiptInput } from './contracts.mjs';
 
 const RECONCILIATION_MARGIN_MS = 5 * 60 * 1000;
 const MAX_DELIVERY_ATTEMPTS = 3;
+const MAX_SOURCE_EVENT_KEY_LENGTH = 500;
 const SLACK_USER_ID = /^[UW][A-Z0-9]{1,79}$/;
 const SLACK_TIMESTAMP = /^\d{1,16}\.\d{1,10}$/;
-const DETERMINISTIC_CLIENT_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export class ImmediateNotificationError extends Error {
   constructor(code, kind = 'unconfirmed') {
@@ -51,8 +51,12 @@ function validReceipt(row) {
     && row.delivery_attempts >= 0;
 }
 
-function hasValidClientMessageId(receipt) {
-  return DETERMINISTIC_CLIENT_MESSAGE_ID_PATTERN.test(receipt.client_message_id);
+function hasCanonicalReceiptIdentity(receipt) {
+  const sourceEventKey = receipt.source_event_key;
+  return sourceEventKey.length > 0
+    && sourceEventKey.length <= MAX_SOURCE_EVENT_KEY_LENGTH
+    && sourceEventKey.trim() === sourceEventKey
+    && receipt.client_message_id === deterministicClientMessageId(sourceEventKey);
 }
 
 function validDelivery(delivery) {
@@ -183,7 +187,7 @@ export async function ensureImmediateNotification({ event, config = {}, store, s
   }
   const receipt = claim?.row;
   if (!validReceipt(receipt)) throw typedError('receipt_unavailable');
-  if (!hasValidClientMessageId(receipt)) throw typedError('receipt_identity_invalid');
+  if (!hasCanonicalReceiptIdentity(receipt)) throw typedError('receipt_identity_invalid');
 
   if (receipt.notification_state === 'delivered') {
     return { status: 'delivered', receipt, delivery: null, reconciled: false };
@@ -223,7 +227,7 @@ export async function ensureImmediateNotification({ event, config = {}, store, s
   if (deliveringReceipt.notification_state !== 'delivering') {
     throw typedError('claim_conflict');
   }
-  if (!hasValidClientMessageId(deliveringReceipt)) {
+  if (!hasCanonicalReceiptIdentity(deliveringReceipt)) {
     throw typedError('receipt_identity_invalid');
   }
 

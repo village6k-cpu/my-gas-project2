@@ -158,7 +158,7 @@ git commit -m "feat: add bounded Slack notification client"
 **Interfaces:**
 - Consumes: `store.claimNotificationReceipt`, `store.claimNotificationDelivery`, `store.getNotificationByEventKey`, `store.markNotificationDelivered`, `store.markNotificationFailed`, `slack.postMessage`, `slack.findMessageByClientId`.
 - Produces: `ensureImmediateNotification({event,config,store,slack,now}) -> {status,receipt,delivery,reconciled}`.
-- `store.claimNotificationReceipt(...)` returns `{created,row}`. The receipt is always `claim.row`, and its deterministic Slack identity is exactly `row.client_message_id`.
+- `store.claimNotificationReceipt(...)` returns `{created,row}`. The receipt is always `claim.row`; after validating a non-empty canonical `source_event_key` of at most 500 characters, require `row.client_message_id === deterministicClientMessageId(row.source_event_key)` exactly.
 
 - [ ] **Step 1: Write RED tests for the state machine**
 
@@ -170,7 +170,7 @@ Required cases:
 4. a pre-existing `delivering` row searches history before any post: only a result whose `client_msg_id` exactly equals the receipt `client_message_id` stores coordinates; missing/mismatched IDs are no match, and a history failure leaves the row delivering;
 5. an ambiguous timeout with no readback moves to `failed` with `last_delivery_error`;
 6. delivered persistence failure and empty compare-and-swap results are never reported as successful delivery;
-7. every claimed receipt identity is a lowercase UUID v5 with RFC variant before any post/history call, including the row returned by the delivery CAS;
+7. every claimed receipt and delivery-CAS row has a non-empty canonical `source_event_key` of at most 500 characters and an exact lowercase identity equal to `deterministicClientMessageId(source_event_key)` before any post/history call or subsequent delivery transition; a shape-valid unrelated UUID v5 is rejected;
 8. customer content cannot inject Slack mentions, special broadcasts, links, bold, italic, strike, or code markup;
 9. P0 is not inferred from customer text or Hermes. No reviewed trusted-alert transport field exists, so receipt urgency remains the schema default `normal`.
 
@@ -230,7 +230,7 @@ export function buildImmediateNotice(event = {}, { mentionUserIds = [] } = {}) {
 export async function ensureImmediateNotification({ event, config, store, slack, now = () => new Date() } = {}) {
   const claim = await store.claimNotificationReceipt(notificationReceiptInput(event));
   const receipt = claim.row;
-  assertDeterministicClientMessageId(receipt.client_message_id); // lowercase UUID v5 + RFC variant
+  assertCanonicalReceiptIdentity(receipt); // exact deterministicClientMessageId(receipt.source_event_key)
   if (receipt.notification_state === 'delivered') return { status: 'delivered', receipt, delivery: null, reconciled: false };
   if (receipt.notification_state === 'delivering') return reconcileExactHistoryOrThrowUnconfirmed(receipt);
   if (receipt.delivery_attempts >= 3) throw new ImmediateNotificationError('attempts_exhausted', 'exhausted');
@@ -242,7 +242,7 @@ export async function ensureImmediateNotification({ event, config, store, slack,
     await store.getNotificationByEventKey(receipt.source_event_key);
     throw new ImmediateNotificationError('claim_conflict', 'unconfirmed');
   }
-  assertDeterministicClientMessageId(claimed.row.client_message_id);
+  assertCanonicalReceiptIdentity(claimed.row);
   const notice = buildImmediateNotice(event, { mentionUserIds: config.mentionUserIds });
   let delivery;
   try {

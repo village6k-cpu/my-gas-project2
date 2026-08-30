@@ -5,7 +5,7 @@ const immediateModule = await import('./immediate-notifications.mjs').catch(() =
 const { buildImmediateNotice, ensureImmediateNotification } = immediateModule;
 
 const fixedNow = new Date('2026-08-29T00:02:00.000Z');
-const clientMessageId = 'b1d33dc4-d1f9-550b-a345-1525035f5e45';
+const clientMessageId = 'af168946-969b-559e-8335-07d0bdcef360';
 const otherClientMessageId = 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa';
 const event = {
   source: 'kakao_channel_manager_dom',
@@ -394,10 +394,11 @@ test('an empty delivery-claim CAS is observable and never reported as delivered'
   assert.equal(slack.posts.length, 0);
 });
 
-test('malformed receipt client IDs fail validation before every delivery state branch', async (t) => {
+test('noncanonical receipt client IDs fail validation before every delivery state branch', async (t) => {
   const invalidClientIds = [
     ['empty', ''],
     ['arbitrary', 'customer-room-event'],
+    ['unrelated valid UUID v5', otherClientMessageId],
     ['wrong UUID version', 'b1d33dc4-d1f9-450b-a345-1525035f5e45'],
     ['wrong UUID variant', 'b1d33dc4-d1f9-550b-7345-1525035f5e45'],
     ['uppercase', clientMessageId.toUpperCase()]
@@ -432,28 +433,62 @@ test('malformed receipt client IDs fail validation before every delivery state b
   }
 });
 
-test('a malformed client ID returned by the delivery CAS stops before Slack or a terminal transition', async () => {
-  const malformedClaimedRow = receipt({
-    notification_state: 'delivering',
-    delivery_attempts: 1,
-    client_message_id: 'not-a-deterministic-uuid'
-  });
-  const store = createStore({
-    claimDeliveryResult: { applied: true, row: malformedClaimedRow }
-  });
-  const slack = createSlack();
+test('a noncanonical client ID returned by the delivery CAS stops before Slack or a terminal transition', async (t) => {
+  for (const [name, claimedClientMessageId] of [
+    ['malformed', 'not-a-deterministic-uuid'],
+    ['unrelated valid UUID v5', otherClientMessageId]
+  ]) {
+    await t.test(name, async () => {
+      const claimedRow = receipt({
+        notification_state: 'delivering',
+        delivery_attempts: 1,
+        client_message_id: claimedClientMessageId
+      });
+      const store = createStore({
+        claimDeliveryResult: { applied: true, row: claimedRow }
+      });
+      const slack = createSlack();
 
-  await assert.rejects(
-    ensureImmediateNotification({ event, config, store, slack, now }),
-    (error) => isTypedError('receipt_identity_invalid', 'unconfirmed')(error)
-      && !error.message.includes(malformedClaimedRow.client_message_id)
-      && error.cause === undefined
-  );
-  assert.equal(store.calls.deliveryClaims.length, 1);
-  assert.equal(store.calls.delivered.length, 0);
-  assert.equal(store.calls.failed.length, 0);
-  assert.equal(slack.posts.length, 0);
-  assert.equal(slack.searches.length, 0);
+      await assert.rejects(
+        ensureImmediateNotification({ event, config, store, slack, now }),
+        (error) => isTypedError('receipt_identity_invalid', 'unconfirmed')(error)
+          && !error.message.includes(claimedClientMessageId)
+          && error.cause === undefined
+      );
+      assert.equal(store.calls.deliveryClaims.length, 1);
+      assert.equal(store.calls.delivered.length, 0);
+      assert.equal(store.calls.failed.length, 0);
+      assert.equal(slack.posts.length, 0);
+      assert.equal(slack.searches.length, 0);
+    });
+  }
+});
+
+test('invalid or noncanonical receipt event keys fail before Slack or a delivery transition', async (t) => {
+  for (const [name, sourceEventKey] of [
+    ['empty', ''],
+    ['blank', '   '],
+    ['padded', ' event-1 '],
+    ['oversized', 'x'.repeat(501)]
+  ]) {
+    await t.test(name, async () => {
+      const store = createStore({ initial: receipt({ source_event_key: sourceEventKey }) });
+      const slack = createSlack();
+
+      await assert.rejects(
+        ensureImmediateNotification({ event, config, store, slack, now }),
+        (error) => isTypedError('receipt_identity_invalid', 'unconfirmed')(error)
+          && (!sourceEventKey || !error.message.includes(sourceEventKey))
+          && error.cause === undefined
+      );
+      assert.equal(store.calls.receiptInputs.length, 1);
+      assert.equal(store.calls.deliveryClaims.length, 0);
+      assert.equal(store.calls.delivered.length, 0);
+      assert.equal(store.calls.failed.length, 0);
+      assert.equal(slack.posts.length, 0);
+      assert.equal(slack.searches.length, 0);
+    });
+  }
 });
 
 test('buildImmediateNotice escapes Kakao content and emits only validated deduplicated raw mentions', () => {
