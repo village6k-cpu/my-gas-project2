@@ -1854,6 +1854,67 @@ function workOrchestratorV2FinalizeInput({ rows = [], autoReplyResult, config = 
   };
 }
 
+function failIfWorkOrchestratorEarlyReturnTouchesDependencies() {
+  const fail = async () => assert.fail('non-ai-prepared finalization must not call stores or Slack');
+  return {
+    upsertFollowUpCaseRows: fail,
+    upsertFollowUpRows: fail,
+    deliverSlackFollowUpRows: fail,
+    workOrchestratorStore: { upsertWorkItem: fail }
+  };
+}
+
+test('Work Orchestrator v2 work item dry-run early return preserves fields and skips every dependency', async () => {
+  const prepared = {
+    status: 'dry_run',
+    decision: { should_write_to_sheet: false },
+    snapshot: { schema: 'kakao-room-snapshot/v1' },
+    dryRunEvidence: { untouched: true }
+  };
+
+  const result = await finalizePreparedKakaoDecision({
+    applied: { prepared },
+    dependencies: failIfWorkOrchestratorEarlyReturnTouchesDependencies()
+  });
+
+  assert.deepEqual(result, {
+    ...prepared,
+    workOrchestratorResult: {
+      skipped: true,
+      inserted: 0,
+      merged: 0,
+      rows: [],
+      error: null
+    }
+  });
+});
+
+test('Work Orchestrator v2 work item already-superseded early return preserves fields and skips every dependency', async () => {
+  const prepared = {
+    status: 'superseded_by_newer_room_event',
+    superseded: true,
+    followUpResult: { inserted: 0, skipped: true, reason: 'superseded_by_newer_room_event', rows: [] },
+    slackDeliveryResult: { skipped: true, reason: 'superseded_by_newer_room_event', results: [] },
+    supersededEvidence: { roomRevision: 9 }
+  };
+
+  const result = await finalizePreparedKakaoDecision({
+    applied: { prepared },
+    dependencies: failIfWorkOrchestratorEarlyReturnTouchesDependencies()
+  });
+
+  assert.deepEqual(result, {
+    ...prepared,
+    workOrchestratorResult: {
+      skipped: true,
+      inserted: 0,
+      merged: 0,
+      rows: [],
+      error: null
+    }
+  });
+});
+
 test('Work Orchestrator v2 work item flag OFF preserves legacy result without a v2 store', async () => {
   const input = workOrchestratorV2FinalizeInput({
     config: { workOrchestratorV2WorkItemsEnabled: false },

@@ -10487,7 +10487,9 @@ async function upsertWorkOrchestratorV2Items({ config, job, prepared, autoReplyR
 export async function finalizePreparedKakaoDecision({ config, job, applied, dependencies = {} } = {}) {
   const prepared = applied?.prepared;
   if (!prepared) throw new Error('applied Kakao decision is required');
-  if (prepared.status !== 'ai_prepared') return prepared;
+  if (prepared.status !== 'ai_prepared') {
+    return { ...prepared, workOrchestratorResult: emptyWorkOrchestratorResult(true) };
+  }
   const autoReplyResult = applied.autoReplyResult || { attempted: false, sent: false, reason: 'missing_apply_result' };
   if (applied.superseded === true) {
     return {
