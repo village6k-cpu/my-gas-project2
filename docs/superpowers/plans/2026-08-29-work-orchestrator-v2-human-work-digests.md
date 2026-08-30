@@ -135,7 +135,7 @@ git commit -m "feat: define durable human work lifecycle"
 - Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
 
 **Interfaces:**
-- Produces RPCs `upsert_work_item_v2`, `request_work_item_action_v2`, `claim_digest_run_v2`, `finalize_digest_run_v2`, `fail_digest_run_v2`, and `record_digest_cleanup_v2`, plus store methods with the same camelCase names.
+- Produces RPCs `upsert_work_item_v2`, `request_work_item_action_v2`, `list_actionable_work_v2`, `claim_digest_run_v2`, `finalize_digest_run_v2`, `fail_digest_run_v2`, and `record_digest_cleanup_v2`, plus matching store methods.
 - Every successful digest claim/reclaim returns a unique `lease_token`; finalize/fail require exact run ID, lease owner, and token.
 - A new run records and returns the exact latest prior delivered digest coordinate. Cleanup evidence is recorded only after the new run is delivered.
 

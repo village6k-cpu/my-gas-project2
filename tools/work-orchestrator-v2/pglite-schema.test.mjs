@@ -103,6 +103,7 @@ test('foundation migration executes and exposes only service-role access in Post
           'claim_message_notification_receipt',
           'upsert_work_item_v2',
           'request_work_item_action_v2',
+          'list_actionable_work_v2',
           'claim_digest_run_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
@@ -115,6 +116,7 @@ test('foundation migration executes and exposes only service-role access in Post
       'claim_message_notification_receipt',
       'fail_digest_run_v2',
       'finalize_digest_run_v2',
+      'list_actionable_work_v2',
       'record_digest_cleanup_v2',
       'request_work_item_action_v2',
       'touch_work_orchestrator_v2_updated_at',
@@ -137,6 +139,7 @@ test('foundation migration executes and exposes only service-role access in Post
           'claim_message_notification_receipt',
           'upsert_work_item_v2',
           'request_work_item_action_v2',
+          'list_actionable_work_v2',
           'claim_digest_run_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
@@ -422,6 +425,36 @@ test('foundation migration executes and exposes only service-role access in Post
     assert.equal(concurrentRows.length, 1, 'partial unique key converges to one active row');
     assert.equal(concurrentRows[0].version, 2, 'one insert plus one merge each apply exactly once');
 
+    const p0ListRows = [];
+    for (const [suffix, acknowledgement, actionableAt] of [
+      ['ack-one', '2026-08-28T00:00:00.000Z', '2026-01-01T00:00:00.000Z'],
+      ['ack-two', '2026-08-28T00:00:00.000Z', '2026-01-02T00:00:00.000Z'],
+      ['missing', null, '2026-02-01T00:00:00.000Z'],
+      ['malformed', 'not-a-timestamp', '2026-02-02T00:00:00.000Z']
+    ]) {
+      const inserted = await db.query(upsertSql, [JSON.stringify({
+        ...candidate,
+        work_key: `room:pglite:list-${suffix}`,
+        source_event_keys: [`event-list-${suffix}`]
+      })]);
+      await db.query(`
+        update public.work_items_v2
+        set priority = 'p0', actionable_at = $2::timestamptz,
+            payload = case when $3::text is null then payload - 'p0_acknowledged_at'
+              else payload || jsonb_build_object('p0_acknowledged_at', $3::text) end
+        where id = $1::uuid
+      `, [inserted.rows[0].result.row.id, actionableAt, acknowledgement]);
+      p0ListRows.push({ suffix, id: inserted.rows[0].result.row.id });
+    }
+    const { rows: failClosedP0 } = await db.query(`
+      select id from public.list_actionable_work_v2($1::timestamptz, $2::integer)
+    `, ['2000-01-01T00:00:00.000Z', 2]);
+    assert.deepEqual(
+      failClosedP0.map((row) => row.id),
+      p0ListRows.slice(2).map((row) => row.id),
+      'valid acknowledgements cannot crowd missing or malformed P0 acknowledgements out before limit'
+    );
+
     const claimDigestSql = `
       select public.claim_digest_run_v2(
         $1::text, $2::timestamptz, $3::timestamptz, $4::timestamptz, $5::text, $6::integer
@@ -560,6 +593,67 @@ test('foundation migration executes and exposes only service-role access in Post
       select state from public.digest_runs where id = $1::uuid
     `, [dailyDigest.rows[0].result.row.id]);
     assert.equal(priorAfterCleanupRecovery[0].state, 'replaced');
+
+    const carryWork = await db.query(upsertSql, [JSON.stringify({
+      ...candidate,
+      work_key: 'room:pglite:carry-threshold',
+      source_event_keys: ['event-carry-threshold']
+    })]);
+    await db.query(`
+      update public.work_items_v2
+      set digest_inclusion_count = 99, consecutive_unhandled_digests = 1
+      where id = $1::uuid
+    `, [carryWork.rows[0].result.row.id]);
+    const hiddenWork = await db.query(upsertSql, [JSON.stringify({
+      ...candidate,
+      work_key: 'room:pglite:hidden-acknowledged-p0',
+      source_event_keys: ['event-hidden-acknowledged-p0']
+    })]);
+    await db.query(`
+      update public.work_items_v2
+      set priority = 'p0', state = 'snoozed',
+          actionable_at = '2099-01-01T00:00:00.000Z',
+          snoozed_until = '2099-01-01T00:00:00.000Z',
+          payload = payload || '{"p0_acknowledged_at":"2026-08-29T00:00:00.000Z"}'::jsonb
+      where id = $1::uuid
+    `, [hiddenWork.rows[0].result.row.id]);
+    const carryDigest = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T10:00:00.000Z', '2026-08-29T09:00:00.000Z',
+      '2026-08-29T10:00:00.000Z', 'bridge:pglite', 120
+    ]);
+    const hiddenDigest = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T11:00:00.000Z', '2026-08-29T10:00:00.000Z',
+      '2026-08-29T11:00:00.000Z', 'bridge:pglite', 120
+    ]);
+    const semanticGuards = await Promise.allSettled([
+      db.query(finalizeSql, [
+        carryDigest.rows[0].result.row.id, 'bridge:pglite', carryDigest.rows[0].result.row.lease_token,
+        JSON.stringify([{
+          id: carryWork.rows[0].result.row.id, version: 1,
+          inclusionReason: 'carry_over', priority: 'normal'
+        }]), 'CINBOX', '810.01', '2026-08-29T10:00:05.000Z'
+      ]),
+      db.query(finalizeSql, [
+        hiddenDigest.rows[0].result.row.id, 'bridge:pglite', hiddenDigest.rows[0].result.row.lease_token,
+        JSON.stringify([{
+          id: hiddenWork.rows[0].result.row.id, version: 1,
+          inclusionReason: 'p0', priority: 'p0'
+        }]), 'CINBOX', '811.01', '2026-08-29T11:00:05.000Z'
+      ])
+    ]);
+    assert.deepEqual(
+      semanticGuards.map((result) => result.status),
+      ['rejected', 'rejected'],
+      'carry-over threshold and current actionable eligibility are both enforced before finalization'
+    );
+    assert.ok(semanticGuards.every((result) => /snapshot semantics/i.test(result.reason?.message)));
+    const { rows: guardedCounters } = await db.query(`
+      select id, digest_inclusion_count, consecutive_unhandled_digests, last_digest_at
+      from public.work_items_v2 where id in ($1::uuid, $2::uuid) order by id
+    `, [carryWork.rows[0].result.row.id, hiddenWork.rows[0].result.row.id]);
+    assert.equal(guardedCounters.find((row) => row.id === carryWork.rows[0].result.row.id).digest_inclusion_count, 99);
+    assert.equal(guardedCounters.find((row) => row.id === hiddenWork.rows[0].result.row.id).digest_inclusion_count, 0);
+    assert.ok(guardedCounters.every((row) => row.last_digest_at === null));
 
     const failedDigest = await db.query(claimDigestSql, [
       'slack:CINBOX', '2026-08-29T09:00:00.000Z', '2026-08-29T06:00:00.000Z',

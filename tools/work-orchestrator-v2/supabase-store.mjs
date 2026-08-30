@@ -55,6 +55,28 @@ function exactKeys(value, allowed) {
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
+function sameJsonValue(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => sameJsonValue(value, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index]
+      && sameJsonValue(left[key], right[key]));
+}
+
+function hasCanonicalP0Acknowledgement(payload) {
+  const value = isRecord(payload) ? payload.p0_acknowledged_at : undefined;
+  if (typeof value !== 'string' || !value || value.length > 40) return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+}
+
 function exactText(value, maxLength) {
   if (typeof value !== 'string' || !value || value !== value.trim() || value.length > maxLength) {
     throw invalidInput();
@@ -272,7 +294,7 @@ function actionResponse(data, input) {
   if (row.id !== input.id || row.version !== input.expectedVersion + 1
     || !isRecord(row.pending_action) || row.pending_action.status !== 'pending'
     || row.pending_action.type !== input.action.type
-    || JSON.stringify(row.pending_action.action) !== JSON.stringify(input.action)
+    || !sameJsonValue(row.pending_action.action, input.action)
     || row.pending_action.requested_by !== input.requestedBy
     || row.pending_action.expected_version !== input.expectedVersion) throw responseInvalid();
   responseTimestamp(row.pending_action.requested_at);
@@ -304,7 +326,7 @@ function finalizeResponse(data, input, snapshot) {
   const { row } = responseDigestRow(data.row);
   if (row.id !== input.id || row.state !== 'delivered'
     || Date.parse(responseTimestamp(row.delivered_at)) !== Date.parse(input.deliveredAt)
-    || JSON.stringify(row.item_snapshot) !== JSON.stringify(snapshot)) throw responseInvalid();
+    || !sameJsonValue(row.item_snapshot, snapshot)) throw responseInvalid();
   if (snapshot.length === 0) {
     if (row.slack_channel_id !== null || row.slack_message_ts !== null) throw responseInvalid();
   } else if (row.slack_channel_id !== input.channelId || row.slack_message_ts !== input.messageTs) {
@@ -359,10 +381,8 @@ function actionableResponse(data, now) {
     }
     responseTimestamp(row.last_digest_at, { nullable: true });
     responseTimestamp(row.next_reminder_at, { nullable: true });
-    const acknowledgement = row.payload.p0_acknowledged_at;
-    if (acknowledgement !== undefined) responseTimestamp(acknowledgement);
     const due = Date.parse(row.actionable_at) <= Date.parse(now);
-    const unacknowledgedP0 = row.priority === 'p0' && acknowledgement === undefined;
+    const unacknowledgedP0 = row.priority === 'p0' && !hasCanonicalP0Acknowledgement(row.payload);
     if (!due && !unacknowledgedP0) throw responseInvalid();
   }
   return data;
@@ -727,14 +747,9 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       } catch {
         throw invalidInput();
       }
-      const query = new URLSearchParams({
-        select: ACTIONABLE_WORK_SELECT,
-        state: 'in.(open,in_progress,snoozed)',
-        or: `(actionable_at.lte.${now},and(priority.eq.p0,payload->>p0_acknowledged_at.is.null))`,
-        order: 'actionable_at.asc,first_opened_at.asc,id.asc',
-        limit: String(limit)
+      const { data } = await request('rpc/list_actionable_work_v2', {
+        method: 'POST', body: safeJson({ p_now: now, p_limit: limit })
       });
-      const { data } = await request(`work_items_v2?${query}`);
       return actionableResponse(data, now);
     },
     claimDigestRun: async (input = {}) => {
@@ -773,7 +788,10 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         const empty = snapshot.length === 0;
         let channelId = null;
         let messageTs = null;
-        if (!empty) {
+        if (empty) {
+          if (input.channelId !== null && input.channelId !== undefined) throw invalidInput();
+          if (input.messageTs !== null && input.messageTs !== undefined) throw invalidInput();
+        } else {
           channelId = exactText(input.channelId, 500);
           messageTs = exactText(input.messageTs, 100);
           if (!SLACK_MESSAGE_TS.test(messageTs)) throw invalidInput();

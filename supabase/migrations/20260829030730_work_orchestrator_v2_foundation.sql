@@ -465,6 +465,61 @@ begin
 end;
 $$;
 
+create function public.list_actionable_work_v2(
+  p_now timestamptz,
+  p_limit integer
+) returns table (
+  id uuid,
+  work_key text,
+  room_key text,
+  title text,
+  summary text,
+  work_type text,
+  priority text,
+  state text,
+  owner_id text,
+  actionable_at timestamptz,
+  due_at timestamptz,
+  snoozed_until timestamptz,
+  first_opened_at timestamptz,
+  last_activity_at timestamptz,
+  digest_inclusion_count integer,
+  consecutive_unhandled_digests integer,
+  last_digest_at timestamptz,
+  next_reminder_at timestamptz,
+  version integer,
+  payload jsonb
+) language plpgsql stable security invoker set search_path = '' as $$
+begin
+  if p_now is null or not isfinite(p_now) or p_limit is null or p_limit not between 1 and 500 then
+    raise exception 'invalid actionable work query' using errcode = '22023';
+  end if;
+  return query
+  select
+    w.id, w.work_key, w.room_key, w.title, w.summary, w.work_type, w.priority, w.state,
+    w.owner_id, w.actionable_at, w.due_at, w.snoozed_until, w.first_opened_at,
+    w.last_activity_at, w.digest_inclusion_count, w.consecutive_unhandled_digests,
+    w.last_digest_at, w.next_reminder_at, w.version, w.payload
+  from public.work_items_v2 as w
+  where w.state in ('open','in_progress','snoozed')
+    and (
+      w.actionable_at <= p_now
+      or (
+        w.priority = 'p0'
+        and not (
+          w.payload @? '$.p0_acknowledged_at ? (
+            @.type() == "string"
+            && @ like_regex "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$"
+            && @.datetime("YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"") != null
+          )'
+        )
+      )
+    )
+  order by w.actionable_at, w.first_opened_at, w.id
+  limit p_limit;
+end;
+$$;
+
 create function public.claim_digest_run_v2(
   p_destination_key text,
   p_scheduled_at timestamptz,
@@ -651,11 +706,24 @@ begin
       and w.state in ('open','in_progress','snoozed')
       and (
         s.entry->>'priority' <> w.priority
+        or not (
+          w.actionable_at <= p_delivered_at
+          or (
+            w.priority = 'p0'
+            and not (
+              w.payload @? '$.p0_acknowledged_at ? (
+                @.type() == "string"
+                && @ like_regex "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$"
+                && @.datetime("YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"") != null
+              )'
+            )
+          )
+        )
         or (s.entry->>'inclusionReason' = 'p0' and w.priority <> 'p0')
         or (s.entry->>'inclusionReason' = 'urgent' and w.priority <> 'urgent')
         or (s.entry->>'inclusionReason' = 'overdue'
           and p_delivered_at < w.first_opened_at + interval '24 hours')
-        or (s.entry->>'inclusionReason' = 'carry_over' and w.digest_inclusion_count <= 0)
+        or (s.entry->>'inclusionReason' = 'carry_over' and w.consecutive_unhandled_digests < 2)
         or (s.entry->>'inclusionReason' = 'daily_reminder'
           and coalesce(w.next_reminder_at, w.first_opened_at + interval '72 hours') > p_delivered_at)
       )
@@ -810,6 +878,7 @@ revoke execute on function public.touch_work_orchestrator_v2_updated_at() from p
 revoke execute on function public.claim_message_notification_receipt(text,text,text,text,timestamptz,uuid,jsonb) from public, anon, authenticated;
 revoke execute on function public.upsert_work_item_v2(jsonb) from public, anon, authenticated;
 revoke execute on function public.request_work_item_action_v2(uuid,integer,jsonb,text) from public, anon, authenticated;
+revoke execute on function public.list_actionable_work_v2(timestamptz,integer) from public, anon, authenticated;
 revoke execute on function public.claim_digest_run_v2(text,timestamptz,timestamptz,timestamptz,text,integer) from public, anon, authenticated;
 revoke execute on function public.finalize_digest_run_v2(uuid,text,uuid,jsonb,text,text,timestamptz) from public, anon, authenticated;
 revoke execute on function public.fail_digest_run_v2(uuid,text,uuid,text) from public, anon, authenticated;
@@ -818,6 +887,7 @@ grant execute on function public.touch_work_orchestrator_v2_updated_at() to serv
 grant execute on function public.claim_message_notification_receipt(text,text,text,text,timestamptz,uuid,jsonb) to service_role;
 grant execute on function public.upsert_work_item_v2(jsonb) to service_role;
 grant execute on function public.request_work_item_action_v2(uuid,integer,jsonb,text) to service_role;
+grant execute on function public.list_actionable_work_v2(timestamptz,integer) to service_role;
 grant execute on function public.claim_digest_run_v2(text,timestamptz,timestamptz,timestamptz,text,integer) to service_role;
 grant execute on function public.finalize_digest_run_v2(uuid,text,uuid,jsonb,text,text,timestamptz) to service_role;
 grant execute on function public.fail_digest_run_v2(uuid,text,uuid,text) to service_role;

@@ -426,16 +426,11 @@ test('listActionableWork selects a bounded deterministic digest surface includin
   const rows = await store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 50 });
 
   assert.equal(rows.length, 1);
-  const url = new URL(fetch.requests[0].url);
-  assert.equal(url.pathname, '/rest/v1/work_items_v2');
-  assert.equal(url.searchParams.get('state'), 'in.(open,in_progress,snoozed)');
-  assert.equal(
-    url.searchParams.get('or'),
-    '(actionable_at.lte.2026-08-29T03:00:00.000Z,and(priority.eq.p0,payload->>p0_acknowledged_at.is.null))'
-  );
-  assert.equal(url.searchParams.get('order'), 'actionable_at.asc,first_opened_at.asc,id.asc');
-  assert.equal(url.searchParams.get('limit'), '50');
-  assert.doesNotMatch(url.searchParams.get('select'), /resolution_evidence|pending_action|source_event_keys|slack/i);
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/list_actionable_work_v2');
+  assert.equal(fetch.requests[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_now: '2026-08-29T03:00:00.000Z', p_limit: 50
+  });
 });
 
 test('claimDigestRun sends exact lease inputs and preserves the one-winner result shape', async () => {
@@ -527,10 +522,33 @@ test('finalizeDigestRun accepts an empty snapshot only with null Slack coordinat
     deliveredAt: '2026-08-29T03:00:05.000Z'
   };
 
-  assert.equal((await store.finalizeDigestRun(input)).updated_count, 0);
+  assert.equal((await store.finalizeDigestRun({
+    ...input, channelId: null, messageTs: null
+  })).updated_count, 0);
   assert.deepEqual(await store.finalizeDigestRun(input), { applied: false, row: null, updated_count: 0 });
   assert.equal(JSON.parse(fetch.requests[0].init.body).p_slack_channel_id, null);
   assert.equal(JSON.parse(fetch.requests[0].init.body).p_slack_message_ts, null);
+});
+
+test('finalizeDigestRun rejects provided coordinates for an empty snapshot before fetch', async () => {
+  const fetch = createFetch();
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+  const base = {
+    id: DIGEST_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN, itemSnapshot: [],
+    deliveredAt: '2026-08-29T03:00:05.000Z'
+  };
+
+  await assert.rejects(
+    store.finalizeDigestRun({ ...base, channelId: 'CINBOX' }),
+    { message: 'Work Orchestrator Supabase input is invalid' }
+  );
+  await assert.rejects(
+    store.finalizeDigestRun({ ...base, messageTs: '123.45' }),
+    { message: 'Work Orchestrator Supabase input is invalid' }
+  );
+  assert.equal(fetch.requests.length, 0);
 });
 
 test('failDigestRun sends only an allowlisted error token and exact owner plus generation fencing', async () => {
@@ -647,6 +665,98 @@ test('method-specific RPC validators reject typed-looking malformed response bod
   }
 });
 
+test('action and finalize responses compare JSON structurally across JSONB key ordering', async () => {
+  const snoozedUntil = '2026-08-30T00:00:00.000Z';
+  const snapshotInput = [{
+    id: WORK_ID, version: 4, inclusionReason: 'overdue', priority: 'urgent'
+  }];
+  const postgresOrderedSnapshot = [{
+    id: WORK_ID, version: 4, priority: 'urgent', inclusionReason: 'overdue'
+  }];
+  assert.deepEqual(
+    Object.keys(postgresOrderedSnapshot[0]),
+    ['id', 'version', 'priority', 'inclusionReason'],
+    'fixture mirrors executable PGlite/PostgreSQL JSONB key ordering'
+  );
+  const fetch = createFetch([
+    response({ data: { applied: true, row: workRow({
+      version: 5,
+      pending_action: {
+        type: 'snooze',
+        action: { snoozedUntil, type: 'snooze' },
+        status: 'pending',
+        requested_at: '2026-08-29T03:00:00.000Z',
+        requested_by: 'UOWNER',
+        expected_version: 4
+      }
+    }) } }),
+    response({ data: {
+      applied: true,
+      row: digestRow({
+        state: 'delivered', lease_owner: null, lease_token: null, lease_expires_at: null,
+        item_snapshot: postgresOrderedSnapshot,
+        slack_channel_id: 'CINBOX', slack_message_ts: '123.45',
+        delivered_at: '2026-08-29T03:00:05.000Z'
+      }),
+      updated_count: 1
+    } })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const action = await store.requestWorkAction({
+    id: WORK_ID, expectedVersion: 4,
+    action: { type: 'snooze', snoozedUntil }, requestedBy: 'UOWNER',
+    now: '2026-08-29T03:00:00.000Z'
+  });
+  const finalized = await store.finalizeDigestRun({
+    id: DIGEST_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
+    itemSnapshot: snapshotInput, channelId: 'CINBOX', messageTs: '123.45',
+    deliveredAt: '2026-08-29T03:00:05.000Z'
+  });
+
+  assert.equal(action.applied, true);
+  assert.equal(finalized.applied, true);
+
+  const extraFetch = createFetch([
+    response({ data: { applied: true, row: workRow({
+      version: 5,
+      pending_action: {
+        type: 'snooze',
+        action: { type: 'snooze', snoozedUntil, extra: 'must-not-pass' },
+        status: 'pending',
+        requested_at: '2026-08-29T03:00:00.000Z',
+        requested_by: 'UOWNER',
+        expected_version: 4
+      }
+    }) } }),
+    response({ data: {
+      applied: true,
+      row: digestRow({
+        state: 'delivered', lease_owner: null, lease_token: null, lease_expires_at: null,
+        item_snapshot: [{ ...postgresOrderedSnapshot[0], extra: 'must-not-pass' }],
+        slack_channel_id: 'CINBOX', slack_message_ts: '123.45',
+        delivered_at: '2026-08-29T03:00:05.000Z'
+      }),
+      updated_count: 1
+    } })
+  ]);
+  const extraStore = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: extraFetch.fetchImpl
+  });
+  await assert.rejects(extraStore.requestWorkAction({
+    id: WORK_ID, expectedVersion: 4,
+    action: { type: 'snooze', snoozedUntil }, requestedBy: 'UOWNER',
+    now: '2026-08-29T03:00:00.000Z'
+  }), { message: 'Work Orchestrator Supabase request failed: response invalid' });
+  await assert.rejects(extraStore.finalizeDigestRun({
+    id: DIGEST_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
+    itemSnapshot: snapshotInput, channelId: 'CINBOX', messageTs: '123.45',
+    deliveredAt: '2026-08-29T03:00:05.000Z'
+  }), { message: 'Work Orchestrator Supabase request failed: response invalid' });
+});
+
 test('listActionableWork rejects malformed and future acknowledged P0 rows from a bad response', async () => {
   const fetch = createFetch([
     response({ data: [{ ...workRow(), version: '1' }] }),
@@ -664,6 +774,28 @@ test('listActionableWork rejects malformed and future acknowledged P0 rows from 
     store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 50 }),
     { message: 'Work Orchestrator Supabase request failed: response invalid' }
   );
+});
+
+test('listActionableWork keeps missing or malformed P0 acknowledgements visible', async () => {
+  const missingId = '55555555-5555-4555-8555-555555555555';
+  const malformedId = '66666666-6666-4666-8666-666666666666';
+  const fetch = createFetch([response({ data: [
+    workRow({
+      id: missingId, priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z',
+      payload: { requires_human_action: true }
+    }),
+    workRow({
+      id: malformedId, priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z',
+      payload: { requires_human_action: true, p0_acknowledged_at: 'not-a-timestamp' }
+    })
+  ] })]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const rows = await store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 50 });
+
+  assert.deepEqual(rows.map((row) => row.id), [missingId, malformedId]);
 });
 
 test('recordDigestCleanup sends exact replacement evidence without touching Slack', async () => {

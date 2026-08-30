@@ -32,6 +32,7 @@ test('foundation migration defines private atomic work and digest RPC contracts'
   const functions = [
     'upsert_work_item_v2',
     'request_work_item_action_v2',
+    'list_actionable_work_v2',
     'claim_digest_run_v2',
     'finalize_digest_run_v2',
     'fail_digest_run_v2',
