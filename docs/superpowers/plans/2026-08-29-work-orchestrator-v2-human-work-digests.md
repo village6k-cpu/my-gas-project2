@@ -17,6 +17,7 @@
 - After two consecutive unhandled delivered digests, mention the owner; at 24 hours mark overdue; at 72 hours send at most one separate reminder per day.
 - Snooze choices are three hours, today evening, tomorrow, or explicit date/time; expiry preserves original age.
 - P0 bypasses ordinary timing and cannot be hidden or deleted before acknowledgement.
+- A P0 acknowledgement is effective only when it is a real calendar timestamp in exact `YYYY-MM-DDTHH:mm:ss.sssZ` form, year `0001..9999`, at or before the authoritative operation cutoff. Missing, malformed, impossible, year-zero, extended-year, or future values are unacknowledged in every lifecycle, store, digest, and SQL path.
 - New activity merges only through a typed stable `work_key`; never merge by loose customer-name matching.
 - Slack action values include work item id and expected version; stale actions are no-ops.
 - Vercel may request an action, but local authoritative runtime performs/validates completion.
@@ -30,6 +31,7 @@
 - Create `tools/work-orchestrator-v2/work-actions.mjs` and `.test.mjs`: versioned action codec and application policy.
 - Modify `tools/work-orchestrator-v2/supabase-store.mjs` and tests: work/digest RPCs and queries.
 - Modify the foundation migration before production application, or create a CLI-generated additive migration if already applied: work/digest RPCs.
+- Add durable digest message-part state before runner delivery: every ordinary/reminder part has immutable intent, a stable Slack client ID, delivery attempts/state, exact coordinates, and cleanup evidence.
 - Modify `tools/ai-browser-worker/worker.mjs` and tests: v2 dual-write integration in `finalizePreparedKakaoDecision`.
 - Modify `tools/kakao-dom-bridge/server.mjs` and tests: scheduler and action poller.
 - Modify `apps/follow-up-dashboard/api/slack-actions.js` and tests: signed v2 action requests.
@@ -289,6 +291,37 @@ git commit -m "feat: build durable focus digests"
 
 ---
 
+### Task 4.5: Add durable multi-part digest delivery operations
+
+**Files:**
+- Modify: the unapplied foundation migration, or create one additive CLI migration if production history later proves the foundation applied
+- Modify: `tools/work-orchestrator-v2/schema.test.mjs`
+- Modify: `tools/work-orchestrator-v2/pglite-schema.test.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
+
+**Interfaces:**
+- Add `digest_message_parts` as the service-role-only durable manifest and delivery/cleanup lifecycle for every ordinary and daily-reminder Slack message.
+- Add atomic store/RPC operations to prepare an immutable content-free manifest, claim and terminally record each delivery attempt, finalize only a completely delivered manifest, return all prior coordinates, and record cleanup per prior part.
+
+- [ ] **Step 1: Write RED schema/store/PGlite tests**
+
+Prove immutable/idempotent preparation, exact ordinary partition plus reminder subset, stable DB-issued client message IDs, delivery-attempt and run-lease fencing, crash/reclaim resume without reposting delivered parts, all-parts-before-finalize, zero-item no-send, full previous-coordinate return, and all-parts-before-replaced cleanup.
+
+- [ ] **Step 2: Implement the service-only part schema and RPCs**
+
+Keep rendered content out of the database. Persist only part kind/index/count, ordered item IDs, a deterministic payload hash, DB-issued client message ID, mechanical delivery state/attempts/timestamps/errors, exact channel/TS after confirmation, and cleanup state/timestamps/errors. Every function is `SECURITY INVOKER`, has empty `search_path`, schema-qualified relations, and exact service-role ACLs.
+
+- [ ] **Step 3: Bind run finalization and replacement to the full manifest**
+
+The prepared snapshot and manifest are immutable for a run. Nonempty finalization derives its root compatibility coordinate from the first ordinary part and succeeds only when every planned ordinary/reminder part has a durable delivered coordinate. Previous digest lookup returns every exact part coordinate. Prior run state becomes `replaced` only after every prior delivered part is confirmed `deleted|already_absent`; a failed cleanup remains retryable and never rolls back the delivered new run.
+
+- [ ] **Step 4: Run GREEN and commit**
+
+Run focused static/store/PGlite tests, the full Work Orchestrator suite, package checks, and `git diff --check`. Do not send Slack or touch live Supabase. Commit only the schema/store/test files.
+
+---
+
 ### Task 5: Add the leased digest runner and safe replacement
 
 **Files:**
@@ -300,7 +333,7 @@ git commit -m "feat: build durable focus digests"
 - Modify: `tools/kakao-dom-bridge/server.test.mjs`
 
 **Interfaces:**
-- Consumes: store, Slack client, digest pure functions.
+- Consumes: store multi-part operations, Slack client, digest pure functions.
 - Produces: `runDigestCycle({store,slack,config,now,leaseOwner})` and bridge `/maintenance/work-orchestrator-digest`.
 
 - [ ] **Step 1: Write RED runner tests**
@@ -308,11 +341,12 @@ git commit -m "feat: build durable focus digests"
 Prove:
 
 1. two runners race and one claims;
-2. zero eligible items finalizes with an empty snapshot and null Slack coordinates, and sends no digest;
-3. new digest posts and finalizes before previous digest deletion;
-4. post failure preserves previous digest and counters;
-5. the claimed run's exact `previous_digest` coordinate is deleted only after new delivery, and deletion failure is recorded through `recordDigestCleanup` without failing the delivered new digest;
-6. work counters advance only after finalize succeeds.
+2. zero eligible items prepares an empty manifest, finalizes without coordinates, and sends no digest;
+3. the complete content-free part manifest is durable before the first post; every post uses the stored client message ID;
+4. a crash after any subset of parts resumes the same run/client IDs, reconciles ambiguous posts, skips confirmed parts, and never silently duplicates or drops a part;
+5. finalization and work counters wait until every ordinary and daily-reminder part has a confirmed durable coordinate;
+6. post failure preserves the previous digest and counters;
+7. every exact part of the claimed `previous_digest` is deleted only after complete new delivery; per-part deletion failure is recorded/retried without failing the delivered new digest or prematurely replacing the prior run.
 
 - [ ] **Step 2: Run RED**
 
