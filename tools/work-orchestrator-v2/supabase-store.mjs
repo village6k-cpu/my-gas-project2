@@ -86,6 +86,12 @@ function expectedDeliveryAttempts(value) {
   return value;
 }
 
+function expectedTerminalDeliveryAttempts(value) {
+  const attempts = expectedDeliveryAttempts(value);
+  if (attempts < 1) throw invalidInput();
+  return attempts;
+}
+
 function deliveredPatch(input = {}) {
   const deliveredAt = requiredText(input.deliveredAt, 100);
   if (Number.isNaN(new Date(deliveredAt).getTime())) throw invalidInput();
@@ -277,9 +283,11 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
     },
     markNotificationDelivered: async (input = {}) => {
       let id;
+      let attempts;
       let patch;
       try {
         id = requiredText(input.id, 200);
+        attempts = expectedTerminalDeliveryAttempts(input.expectedDeliveryAttempts);
         patch = deliveredPatch(input);
       } catch {
         throw new Error('Work Orchestrator Supabase transition input is invalid');
@@ -289,13 +297,17 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         fromStates: ['delivering'],
         toState: 'delivered',
         patch
+      }, {
+        delivery_attempts: `eq.${attempts}`
       });
     },
     markNotificationFailed: async (input = {}) => {
       let id;
+      let attempts;
       let patch;
       try {
         id = requiredText(input.id, 200);
+        attempts = expectedTerminalDeliveryAttempts(input.expectedDeliveryAttempts);
         patch = failurePatch(input);
       } catch {
         throw new Error('Work Orchestrator Supabase transition input is invalid');
@@ -305,6 +317,8 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         fromStates: ['delivering'],
         toState: 'failed',
         patch
+      }, {
+        delivery_attempts: `eq.${attempts}`
       });
     },
     counts: async () => {

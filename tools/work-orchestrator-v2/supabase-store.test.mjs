@@ -192,13 +192,14 @@ test('markNotificationDelivered stores exact coordinates only from delivering an
 
   const result = await store.markNotificationDelivered({
     id: 'receipt-1',
+    expectedDeliveryAttempts: 2,
     channelId: 'CINBOX',
     messageTs: '100.1',
     deliveredAt: '2026-08-29T00:01:00.000Z'
   });
 
   assert.equal(result.applied, true);
-  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/message_notification_receipts?id=eq.receipt-1&notification_state=in.%28delivering%29&select=*');
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/message_notification_receipts?id=eq.receipt-1&notification_state=in.%28delivering%29&delivery_attempts=eq.2&select=*');
   assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
     slack_channel_id: 'CINBOX',
     slack_message_ts: '100.1',
@@ -212,10 +213,14 @@ test('markNotificationFailed persists only a bounded reviewed token and no nonex
   const fetch = createFetch([response({ data: [{ id: 'receipt-1', notification_state: 'failed' }] })]);
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
 
-  const result = await store.markNotificationFailed({ id: 'receipt-1', failureCode: 'delivery_unconfirmed' });
+  const result = await store.markNotificationFailed({
+    id: 'receipt-1',
+    expectedDeliveryAttempts: 2,
+    failureCode: 'delivery_unconfirmed'
+  });
 
   assert.equal(result.applied, true);
-  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/message_notification_receipts?id=eq.receipt-1&notification_state=in.%28delivering%29&select=*');
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/message_notification_receipts?id=eq.receipt-1&notification_state=in.%28delivering%29&delivery_attempts=eq.2&select=*');
   assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
     last_delivery_error: 'delivery_unconfirmed',
     notification_state: 'failed'
@@ -228,11 +233,51 @@ test('markNotificationFailed rejects arbitrary failure text before any request',
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
 
   await assert.rejects(
-    store.markNotificationFailed({ id: 'receipt-1', failureCode: `customer room token ${serviceRoleKey}` }),
+    store.markNotificationFailed({
+      id: 'receipt-1', expectedDeliveryAttempts: 1, failureCode: `customer room token ${serviceRoleKey}`
+    }),
     (error) => error.message === 'Work Orchestrator Supabase transition input is invalid'
       && !error.message.includes(serviceRoleKey)
   );
   assert.equal(fetch.requests.length, 0);
+});
+
+test('terminal notification transitions reject missing or non-positive delivery generations before requests', async () => {
+  const fetch = createFetch();
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  for (const expectedDeliveryAttempts of [undefined, 0, -1, 1.5, '1']) {
+    await assert.rejects(
+      store.markNotificationDelivered({
+        id: 'receipt-1', expectedDeliveryAttempts, channelId: 'CINBOX', messageTs: '100.1',
+        deliveredAt: '2026-08-29T00:01:00.000Z'
+      }),
+      (error) => error.message === 'Work Orchestrator Supabase transition input is invalid'
+    );
+    await assert.rejects(
+      store.markNotificationFailed({ id: 'receipt-1', expectedDeliveryAttempts, failureCode: 'post_rejected' }),
+      (error) => error.message === 'Work Orchestrator Supabase transition input is invalid'
+    );
+  }
+  assert.equal(fetch.requests.length, 0);
+});
+
+test('stale terminal writers are observable as empty generation CAS results', async () => {
+  const fetch = createFetch([response({ data: [] }), response({ data: [] })]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  assert.deepEqual(await store.markNotificationDelivered({
+    id: 'receipt-1', expectedDeliveryAttempts: 1, channelId: 'CINBOX', messageTs: '100.1',
+    deliveredAt: '2026-08-29T00:01:00.000Z'
+  }), { applied: false, row: null });
+  assert.deepEqual(await store.markNotificationFailed({
+    id: 'receipt-1', expectedDeliveryAttempts: 1, failureCode: 'delivery_unconfirmed'
+  }), { applied: false, row: null });
+  assert.ok(fetch.requests.every(({ url }) => url.includes('delivery_attempts=eq.1')));
 });
 
 test('transitionNotification rejects incomplete transition inputs before any request', async () => {

@@ -27,6 +27,7 @@ function receipt(overrides = {}) {
     client_message_id: clientMessageId,
     urgency: 'normal',
     created_at: '2026-08-29T00:00:00.000Z',
+    updated_at: '2026-08-29T00:01:00.000Z',
     last_delivery_error: null,
     ...overrides
   };
@@ -83,7 +84,10 @@ function createStore({
       calls.delivered.push({ ...input });
       if (markDeliveredResult instanceof Error) throw markDeliveredResult;
       if (markDeliveredResult !== undefined) return markDeliveredResult;
-      if (row.notification_state !== 'delivering') return { applied: false, row: null };
+      if (
+        row.notification_state !== 'delivering'
+        || row.delivery_attempts !== input.expectedDeliveryAttempts
+      ) return { applied: false, row: null };
       row = {
         ...row,
         notification_state: 'delivered',
@@ -98,7 +102,10 @@ function createStore({
       calls.failed.push({ ...input });
       if (markFailedResult instanceof Error) throw markFailedResult;
       if (markFailedResult !== undefined) return markFailedResult;
-      if (row.notification_state !== 'delivering') return { applied: false, row: null };
+      if (
+        row.notification_state !== 'delivering'
+        || row.delivery_attempts !== input.expectedDeliveryAttempts
+      ) return { applied: false, row: null };
       row = { ...row, notification_state: 'failed', last_delivery_error: input.failureCode };
       return { applied: true, row: { ...row } };
     }
@@ -226,8 +233,12 @@ test('a delivering receipt reconciles an exact history match without posting', a
   assert.deepEqual(slack.searches, [{
     channel: 'CINBOX',
     clientMsgId: clientMessageId,
-    oldest: (Date.parse('2026-08-29T00:00:00.000Z') - 300_000) / 1000,
-    latest: (fixedNow.getTime() + 300_000) / 1000
+    oldest: (Date.parse('2026-08-29T00:01:00.000Z') - 300_000) / 1000,
+    latest: (Date.parse('2026-08-29T00:01:00.000Z') + 300_000) / 1000
+  }]);
+  assert.deepEqual(store.calls.delivered, [{
+    id: 'receipt-1', expectedDeliveryAttempts: 1, channelId: 'CINBOX', messageTs: '100.2',
+    deliveredAt: '2026-08-29T00:02:00.000Z'
   }]);
   assert.equal(store.row.notification_state, 'delivered');
   assert.equal(store.row.slack_message_ts, '100.2');
@@ -249,7 +260,9 @@ test('a delivering receipt treats mismatched or missing history client IDs as no
       assert.equal(slack.posts.length, 0);
       assert.equal(slack.searches.length, 1);
       assert.equal(store.calls.delivered.length, 0);
-      assert.deepEqual(store.calls.failed, [{ id: 'receipt-1', failureCode: 'delivery_unconfirmed' }]);
+      assert.deepEqual(store.calls.failed, [{
+        id: 'receipt-1', expectedDeliveryAttempts: 1, failureCode: 'delivery_unconfirmed'
+      }]);
       assert.equal(store.row.notification_state, 'failed');
     });
   }
@@ -316,7 +329,9 @@ test('an ambiguous post treats mismatched or missing history client IDs as no ma
       assert.equal(slack.posts.length, 1);
       assert.equal(slack.searches.length, 1);
       assert.equal(store.calls.delivered.length, 0);
-      assert.deepEqual(store.calls.failed, [{ id: 'receipt-1', failureCode: 'delivery_unconfirmed' }]);
+      assert.deepEqual(store.calls.failed, [{
+        id: 'receipt-1', expectedDeliveryAttempts: 1, failureCode: 'delivery_unconfirmed'
+      }]);
       assert.equal(store.row.notification_state, 'failed');
     });
   }
@@ -334,7 +349,9 @@ test('an ambiguous post with no history match stores a safe failure and throws t
   );
   assert.equal(slack.posts.length, 1);
   assert.equal(slack.searches.length, 1);
-  assert.deepEqual(store.calls.failed, [{ id: 'receipt-1', failureCode: 'delivery_unconfirmed' }]);
+  assert.deepEqual(store.calls.failed, [{
+    id: 'receipt-1', expectedDeliveryAttempts: 1, failureCode: 'delivery_unconfirmed'
+  }]);
   assert.equal(store.row.notification_state, 'failed');
 });
 
@@ -352,7 +369,9 @@ test('a definite post rejection stores only a reviewed token and throws no Slack
   );
   assert.equal(slack.posts.length, 1);
   assert.equal(slack.searches.length, 0);
-  assert.deepEqual(store.calls.failed, [{ id: 'receipt-1', failureCode: 'post_rejected' }]);
+  assert.deepEqual(store.calls.failed, [{
+    id: 'receipt-1', expectedDeliveryAttempts: 1, failureCode: 'post_rejected'
+  }]);
   assert.equal(store.row.last_delivery_error, 'post_rejected');
 });
 
@@ -365,6 +384,7 @@ test('a successful Slack response remains unconfirmed when delivered persistence
       isTypedError('delivery_persistence_failed', 'unconfirmed')
     );
     assert.equal(slack.posts.length, 1);
+    assert.equal(store.calls.delivered[0].expectedDeliveryAttempts, 1);
   });
 
   await t.test('store failure is sanitized', async () => {
@@ -380,6 +400,21 @@ test('a successful Slack response remains unconfirmed when delivered persistence
   });
 });
 
+test('a stale failed terminal writer cannot overwrite a newer delivery generation', async () => {
+  const rejected = Object.assign(new Error('definite rejection'), { ambiguous: false });
+  const store = createStore({ markFailedResult: { applied: false, row: null } });
+  const slack = createSlack({ postError: rejected });
+
+  await assert.rejects(
+    ensureImmediateNotification({ event, config, store, slack, now }),
+    isTypedError('delivery_persistence_failed', 'unconfirmed')
+  );
+  assert.deepEqual(store.calls.failed, [{
+    id: 'receipt-1', expectedDeliveryAttempts: 1, failureCode: 'post_rejected'
+  }]);
+  assert.equal(store.row.notification_state, 'delivering');
+});
+
 test('an empty delivery-claim CAS is observable and never reported as delivered', async () => {
   const store = createStore({
     claimDeliveryResult: { applied: false, row: null }
@@ -392,6 +427,47 @@ test('an empty delivery-claim CAS is observable and never reported as delivered'
   );
   assert.equal(store.calls.reads.length, 1);
   assert.equal(slack.posts.length, 0);
+});
+
+test('reconciliation is bounded around the delivery generation timestamp, not old receipt creation or current time', async () => {
+  const deliveryAttemptAt = '2026-01-02T03:04:05.000Z';
+  const store = createStore({
+    initial: receipt({
+      notification_state: 'delivering',
+      delivery_attempts: 2,
+      created_at: '2025-01-01T00:00:00.000Z',
+      updated_at: deliveryAttemptAt
+    })
+  });
+  const match = { client_msg_id: clientMessageId, ts: '100.7' };
+  const slack = createSlack({ historyResult: match });
+
+  const result = await ensureImmediateNotification({ event, config, store, slack, now });
+
+  assert.equal(result.status, 'delivered');
+  assert.deepEqual(slack.searches, [{
+    channel: 'CINBOX',
+    clientMsgId: clientMessageId,
+    oldest: (Date.parse(deliveryAttemptAt) - 300_000) / 1000,
+    latest: (Date.parse(deliveryAttemptAt) + 300_000) / 1000
+  }]);
+  assert.equal(store.calls.delivered[0].expectedDeliveryAttempts, 2);
+});
+
+test('delivering receipt with a missing attempt timestamp fails closed before history or repost', async () => {
+  const store = createStore({
+    initial: receipt({ notification_state: 'delivering', delivery_attempts: 1, updated_at: null })
+  });
+  const slack = createSlack({ historyResult: { client_msg_id: clientMessageId, ts: '100.8' } });
+
+  await assert.rejects(
+    ensureImmediateNotification({ event, config, store, slack, now }),
+    isTypedError('history_unavailable', 'unconfirmed')
+  );
+  assert.equal(slack.posts.length, 0);
+  assert.equal(slack.searches.length, 0);
+  assert.equal(store.calls.delivered.length, 0);
+  assert.equal(store.calls.failed.length, 0);
 });
 
 test('noncanonical receipt client IDs fail validation before every delivery state branch', async (t) => {

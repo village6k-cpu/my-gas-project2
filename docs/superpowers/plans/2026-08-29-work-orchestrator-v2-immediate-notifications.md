@@ -14,7 +14,7 @@
 
 - The first notice is mandatory for every accepted customer-message event and cannot wait for Hermes.
 - Heartbeats, diagnostic snapshots, stale dated events, page containers, and action chrome are not customer-message events and must not notify.
-- Delivery is exact-once by `source_event_key`; an ambiguous Slack response must reconcile before retry.
+- Delivery is exact-once by canonical `source_event_key`; bounded identifiers are preserved byte-for-byte, surrounding whitespace is rejected, and identifiers over 500 characters become `v2-long-sha256:` plus SHA-256 of the complete identifier. An ambiguous Slack response must reconcile before retry.
 - Store exact `channel_id` and `message_ts` only after Slack readback/success.
 - Do not send any customer-facing Kakao message, write Sheets/GAS, disable legacy cards, or delete Slack messages in this plan.
 - A live internal Slack test message is an explicit cutover gate; mocked tests and shadow writes run first.
@@ -158,7 +158,7 @@ git commit -m "feat: add bounded Slack notification client"
 **Interfaces:**
 - Consumes: `store.claimNotificationReceipt`, `store.claimNotificationDelivery`, `store.getNotificationByEventKey`, `store.markNotificationDelivered`, `store.markNotificationFailed`, `slack.postMessage`, `slack.findMessageByClientId`.
 - Produces: `ensureImmediateNotification({event,config,store,slack,now}) -> {status,receipt,delivery,reconciled}`.
-- `store.claimNotificationReceipt(...)` returns `{created,row}`. The receipt is always `claim.row`; after validating a non-empty canonical `source_event_key` of at most 500 characters, require `row.client_message_id === deterministicClientMessageId(row.source_event_key)` exactly.
+- `store.claimNotificationReceipt(...)` returns `{created,row}`. The receipt is always `claim.row`; after validating the single `canonicalSourceEventKey` contract (including idempotent long-key hashes), require `row.client_message_id === deterministicClientMessageId(row.source_event_key)` exactly.
 
 - [ ] **Step 1: Write RED tests for the state machine**
 
@@ -198,11 +198,11 @@ Add:
 
 ```js
 claimNotificationDelivery({ id, expectedDeliveryAttempts })
-markNotificationDelivered({ id, channelId, messageTs, deliveredAt })
-markNotificationFailed({ id, failureCode })
+markNotificationDelivered({ id, expectedDeliveryAttempts, channelId, messageTs, deliveredAt })
+markNotificationFailed({ id, expectedDeliveryAttempts, failureCode })
 ```
 
-`claimNotificationDelivery` must atomically filter by `id`, `notification_state=in.(pending,failed)`, and the observed `delivery_attempts`, then set exactly `observed+1`, clear `last_delivery_error`, and refuse a fourth attempt. Empty representation means another process owns the claim and must remain observable. Both delivery terminal methods compare-and-swap only from `delivering`; failure accepts only reviewed bounded tokens and never writes an `attempted_at` column.
+`claimNotificationDelivery` must atomically filter by `id`, `notification_state=in.(pending,failed)`, and the observed `delivery_attempts`, then set exactly `observed+1`, clear `last_delivery_error`, and refuse a fourth attempt. Empty representation means another process owns the claim and must remain observable. Both delivery terminal methods compare-and-swap only from `delivering` and the same positive `expectedDeliveryAttempts` generation returned by the delivery claim, so a stale attempt N writer cannot mutate attempt N+1. Failure accepts only reviewed bounded tokens and never writes an `attempted_at` column.
 
 - [ ] **Step 4: Implement rendering and delivery**
 
@@ -253,16 +253,16 @@ export async function ensureImmediateNotification({ event, config, store, slack,
     });
   } catch (error) {
     if (error?.ambiguous) return reconcileExactHistoryOrThrowUnconfirmed(claimed.row);
-    await store.markNotificationFailed({ id: receipt.id, failureCode: 'post_rejected' });
+    await store.markNotificationFailed({ id: receipt.id, expectedDeliveryAttempts: claimed.row.delivery_attempts, failureCode: 'post_rejected' });
     throw new ImmediateNotificationError('post_rejected', 'failed');
   }
-  const delivered = await store.markNotificationDelivered({ id: receipt.id, channelId: delivery.channel, messageTs: delivery.ts, deliveredAt: now().toISOString() });
+  const delivered = await store.markNotificationDelivered({ id: receipt.id, expectedDeliveryAttempts: claimed.row.delivery_attempts, channelId: delivery.channel, messageTs: delivery.ts, deliveredAt: now().toISOString() });
   if (!delivered.applied) throw new ImmediateNotificationError('delivery_persistence_failed', 'unconfirmed');
   return { status: 'delivered', receipt: delivered.row, delivery, reconciled: false };
 }
 ```
 
-`reconcileExactHistoryOrThrowUnconfirmed` searches the exact `client_message_id` from five minutes before receipt creation to five minutes after the current attempt, then independently requires `match.client_msg_id === receipt.client_message_id` before storing coordinates. Missing/mismatched IDs are no match. A match is successful only after the delivered CAS readback applies. No match records the reviewed `delivery_unconfirmed` token and throws typed unconfirmed; history or persistence failure also throws bounded typed unconfirmed without copying store/Slack data. It never reposts inside the same call. A later exact retry may claim a failed row only while `delivery_attempts < 3`.
+`reconcileExactHistoryOrThrowUnconfirmed` searches the exact `client_message_id` only in a five-minute window on each side of the delivering row's `updated_at`, which is the database timestamp returned by the delivery-claim generation. Receipt creation time and the current recovery time never widen that window. Missing or invalid `updated_at` fails unconfirmed before history or repost. The readback independently requires `match.client_msg_id === receipt.client_message_id` before storing coordinates. Missing/mismatched IDs are no match. A match is successful only after the same-generation delivered CAS readback applies. No match records the reviewed `delivery_unconfirmed` token through the same-generation failed CAS and throws typed unconfirmed; history or persistence failure also throws bounded typed unconfirmed without copying store/Slack data. It never reposts inside the same call. A later exact retry may claim a failed row only while `delivery_attempts < 3`.
 
 - [ ] **Step 5: Run GREEN and commit**
 
@@ -298,7 +298,7 @@ assert.equal(response.statusCode, 202);
 
 Add a worker-slow test where the response includes the delivered notification before any Hermes promise resolves, a duplicate event test with one Slack post, and a failed-delivery test expecting HTTP 503 plus no worker scheduling. The 503 is intentional: accepting an event without the mandatory notice would violate the first-notification invariant.
 
-Add the exact-retry recovery cases required by Ruling 4: `503` on a new revision, the same exact source event retry finding its existing receipt and completing delivery before legacy scheduling, an already-delivered duplicate posting zero times, and a `changed=false` event with a different event hash and no exact receipt posting zero times while returning `503` with zero legacy write/schedule. Add the concurrent visibility gap where the first exact receipt is not query-visible yet; the concurrent duplicate also returns `503` and cannot create or notify. A `503` response alone does not schedule a retry; recovery depends on the watcher/source retrying the exact event key.
+Add the exact-retry recovery cases required by Ruling 4: `503` on a new revision, the same exact source event retry finding its existing receipt and completing delivery before legacy scheduling, an already-delivered duplicate posting zero times, A-B-retry-A where the first A failed before receipt creation and the later A cannot create, and two genuinely distinct exact event keys remaining eligible even when their semantic previews match. Add the concurrent visibility gap where the first exact receipt is not query-visible yet; the concurrent duplicate also returns `503` and cannot create or notify. Include two over-500-character identifiers with the same first 500 characters and different suffixes, proving distinct canonical receipt keys, client IDs, and notice attempts through `handleEvent`. A `503` response alone does not schedule a retry; recovery depends on the watcher/source retrying the exact event key.
 
 Add a store RED test for a bounded oldest-backlog query that selects only `created_at` from at most one `pending|delivering|failed` receipt. Health age must come from this durable readback, not process memory.
 
@@ -319,7 +319,7 @@ When `WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=1`:
 3. return 503 with `{ok:false,error:'immediate_notification_unconfirmed',eventHash}` if it is not delivered;
 4. append a bounded error record without message content; derive a SHA-256 correlation from the bounded event identifier and never copy caller-controlled `eventHash` into the persistent error log;
 5. leave `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED`, `KAKAO_FOLLOW_UP_ITEMS_ENABLED`, and `SLACK_AGENT_CARD_DELIVERY_ENABLED` untouched.
-6. on `changed=false`, look up the receipt by this exact normalized source event key before calling the state machine; resume only when that receipt already exists, and never create or notify for an arbitrary stale/different event; a missing exact receipt is unconfirmed and returns `503` with zero legacy write/schedule;
+6. synchronously claim the canonical source event key in a bounded exact attempt guard before the first asynchronous receipt call. The production guard persists only a SHA-256 digest in `immediate-notification-attempts.ndjson`, reloads it after restart, and bounds both memory and file entries. An already-attempted exact key may resume only when its exact receipt exists; a missing receipt is unconfirmed and returns `503` with zero Slack/legacy write/schedule. This is independent of the last semantic room identity, so A-B-retry-A stays closed while a genuinely new exact key remains eligible;
 7. after confirmed exact-retry recovery, continue the unchanged legacy Supabase write and worker scheduling path.
 
 The handler gate is positive: only an explicit `{status:'delivered'}` result may reach the legacy write/schedule path. Skipped, missing, busy, unconfirmed, exhausted, malformed, unknown, and thrown outcomes all return the same generic `503` contract.

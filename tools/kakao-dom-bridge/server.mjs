@@ -24,7 +24,11 @@ import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { buildGatewayHealthReadback, createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
 import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
-import { loadWorkOrchestratorConfig, notificationReceiptInput } from '../work-orchestrator-v2/contracts.mjs';
+import {
+  canonicalSourceEventKey,
+  loadWorkOrchestratorConfig,
+  notificationReceiptInput
+} from '../work-orchestrator-v2/contracts.mjs';
 import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-notifications.mjs';
 import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shadow-receipts.mjs';
 import { createSlackClient } from '../work-orchestrator-v2/slack-client.mjs';
@@ -332,6 +336,80 @@ function immediateRuntimeDate(now) {
   return date;
 }
 
+const IMMEDIATE_ATTEMPT_FILENAME = 'immediate-notification-attempts.ndjson';
+const IMMEDIATE_ATTEMPT_DIGEST = /^[0-9a-f]{64}$/;
+
+function immediateAttemptDigest(sourceEventKey) {
+  return sha256(`village-immediate-notification-attempt:${canonicalSourceEventKey(sourceEventKey)}`);
+}
+
+function createMemoryImmediateNotificationAttemptGuard(maxEntries = 10_000) {
+  const entries = new Map();
+  return {
+    claim(sourceEventKey) {
+      const digest = immediateAttemptDigest(sourceEventKey);
+      if (entries.has(digest)) return false;
+      entries.set(digest, true);
+      while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+      return true;
+    }
+  };
+}
+
+export function createImmediateNotificationAttemptGuard({
+  queueDir = CONFIG.queueDir,
+  maxEntries = 10_000
+} = {}) {
+  if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 100_000) {
+    throw new Error('Immediate notification attempt guard configuration is invalid');
+  }
+  const resolvedQueueDir = path.resolve(queueDir);
+  const filePath = path.join(resolvedQueueDir, IMMEDIATE_ATTEMPT_FILENAME);
+  const entries = new Map();
+
+  try {
+    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean);
+    for (const line of lines) {
+      let digest = '';
+      try { digest = JSON.parse(line)?.source_event_key_sha256 || ''; } catch {}
+      if (!IMMEDIATE_ATTEMPT_DIGEST.test(digest)) continue;
+      entries.delete(digest);
+      entries.set(digest, true);
+    }
+    while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw new Error('Immediate notification attempt guard is unavailable');
+  }
+
+  const rewrite = () => {
+    fs.mkdirSync(resolvedQueueDir, { recursive: true });
+    const contents = [...entries.keys()]
+      .map((digest) => `${JSON.stringify({ source_event_key_sha256: digest })}\n`)
+      .join('');
+    fs.writeFileSync(filePath, contents, 'utf8');
+  };
+
+  return {
+    claim(sourceEventKey) {
+      const digest = immediateAttemptDigest(sourceEventKey);
+      if (entries.has(digest)) return false;
+      entries.set(digest, true);
+      try {
+        fs.mkdirSync(resolvedQueueDir, { recursive: true });
+        if (entries.size > maxEntries) {
+          while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+          rewrite();
+        } else {
+          fs.appendFileSync(filePath, `${JSON.stringify({ source_event_key_sha256: digest })}\n`, 'utf8');
+        }
+      } catch {
+        throw new Error('Immediate notification attempt guard is unavailable');
+      }
+      return true;
+    }
+  };
+}
+
 export function createWorkOrchestratorImmediateRuntime({
   config = {},
   store = null,
@@ -339,7 +417,8 @@ export function createWorkOrchestratorImmediateRuntime({
   slackToken = '',
   ensure = ensureImmediateNotification,
   now = () => new Date(),
-  state: sharedState = null
+  state: sharedState = null,
+  attemptGuard = null
 } = {}) {
   const enabled = config.immediateEnabled === true;
   const inboxChannelId = String(config.inboxChannelId || '').trim();
@@ -364,6 +443,10 @@ export function createWorkOrchestratorImmediateRuntime({
   if (enabled && !localConfigReady) {
     throw new Error('Work Orchestrator immediate notification local configuration is missing');
   }
+  const resolvedAttemptGuard = attemptGuard || createMemoryImmediateNotificationAttemptGuard();
+  if (!resolvedAttemptGuard || typeof resolvedAttemptGuard.claim !== 'function') {
+    throw new Error('Work Orchestrator immediate notification attempt guard is missing');
+  }
 
   const runtimeState = sharedState && typeof sharedState === 'object' ? sharedState : {};
   runtimeState.shadowClaims = Math.max(0, Number(runtimeState.shadowClaims || 0));
@@ -386,8 +469,14 @@ export function createWorkOrchestratorImmediateRuntime({
   const deliverAccepted = async (event, roomVersion = {}) => {
     if (!enabled) return null;
     try {
-      if (roomVersion.changed !== true) {
-        const sourceEventKey = notificationReceiptInput(event).sourceEventKey;
+      const sourceEventKey = notificationReceiptInput(event).sourceEventKey;
+      const firstAttempt = resolvedAttemptGuard.claim(sourceEventKey);
+      if (typeof firstAttempt !== 'boolean') {
+        const guardError = new Error('Exact notification attempt guard result is invalid');
+        guardError.code = 'delivery_persistence_failed';
+        throw guardError;
+      }
+      if (!firstAttempt) {
         let existing;
         try {
           existing = await store.getNotificationByEventKey(sourceEventKey);
@@ -742,6 +831,9 @@ if (CONFIG.workOrchestrator.immediateEnabled && CONFIG.slackBotToken.trim()) {
     workOrchestratorSlackClient = null;
   }
 }
+const workOrchestratorImmediateAttemptGuard = CONFIG.workOrchestrator.immediateEnabled
+  ? createImmediateNotificationAttemptGuard({ queueDir: CONFIG.queueDir })
+  : null;
 const workOrchestratorImmediateRuntime = createWorkOrchestratorImmediateRuntime({
   config: {
     ...CONFIG.workOrchestrator,
@@ -752,7 +844,8 @@ const workOrchestratorImmediateRuntime = createWorkOrchestratorImmediateRuntime(
   store: workOrchestratorStore,
   slack: workOrchestratorSlackClient,
   slackToken: CONFIG.slackBotToken,
-  state: workOrchestratorShadowRuntime.state
+  state: workOrchestratorShadowRuntime.state,
+  attemptGuard: workOrchestratorImmediateAttemptGuard
 });
 CONFIG.workOrchestratorImmediateLocalConfigReady = workOrchestratorImmediateRuntime.localConfigReady;
 

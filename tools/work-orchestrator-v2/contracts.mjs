@@ -27,6 +27,8 @@ const NOTIFICATION_TRANSITIONS = Object.freeze({
 });
 
 const bounded = (value, max) => String(value ?? '').trim().slice(0, max);
+const LONG_SOURCE_EVENT_KEY_PREFIX = 'v2-long-sha256:';
+const CANONICAL_LONG_SOURCE_EVENT_KEY = /^v2-long-sha256:[0-9a-f]{64}$/;
 
 function finiteMinutes(value, fallback, minimum) {
   const normalized = bounded(value, 100);
@@ -36,9 +38,23 @@ function finiteMinutes(value, fallback, minimum) {
   return Number.isFinite(numeric) ? Math.max(minimum, numeric) : fallback;
 }
 
+export function canonicalSourceEventKey(value) {
+  const sourceEventKey = String(value ?? '');
+  if (!sourceEventKey.trim()) throw new Error('source event key is required');
+  if (sourceEventKey !== sourceEventKey.trim()) throw new Error('source event key is not canonical');
+  if (CANONICAL_LONG_SOURCE_EVENT_KEY.test(sourceEventKey)) return sourceEventKey;
+  if (sourceEventKey.length <= 500 && !sourceEventKey.startsWith(LONG_SOURCE_EVENT_KEY_PREFIX)) {
+    return sourceEventKey;
+  }
+  return `${LONG_SOURCE_EVENT_KEY_PREFIX}${createHash('sha256')
+    .update(`village-work-orchestrator-v2-source-event-key:${sourceEventKey}`)
+    .digest('hex')}`;
+}
+
 export function deterministicClientMessageId(sourceEventKey) {
+  const canonicalKey = canonicalSourceEventKey(sourceEventKey);
   const hex = createHash('sha256')
-    .update(`village-work-orchestrator-v2:${bounded(sourceEventKey, 500)}`)
+    .update(`village-work-orchestrator-v2:${canonicalKey}`)
     .digest('hex')
     .slice(0, 32)
     .split('');
@@ -49,8 +65,7 @@ export function deterministicClientMessageId(sourceEventKey) {
 }
 
 export function notificationReceiptInput(event = {}) {
-  const sourceEventKey = bounded(event.sourceEventKey || event.eventHash, 500);
-  if (!sourceEventKey) throw new Error('source event key is required');
+  const sourceEventKey = canonicalSourceEventKey(event.sourceEventKey || event.eventHash);
 
   const roomKey = bounded(event.roomKey, 500);
   if (!roomKey) throw new Error('room key is required');

@@ -1,4 +1,4 @@
-import { deterministicClientMessageId, notificationReceiptInput } from './contracts.mjs';
+import { canonicalSourceEventKey, deterministicClientMessageId, notificationReceiptInput } from './contracts.mjs';
 
 const RECONCILIATION_MARGIN_MS = 5 * 60 * 1000;
 const MAX_DELIVERY_ATTEMPTS = 3;
@@ -53,10 +53,14 @@ function validReceipt(row) {
 
 function hasCanonicalReceiptIdentity(receipt) {
   const sourceEventKey = receipt.source_event_key;
-  return sourceEventKey.length > 0
-    && sourceEventKey.length <= MAX_SOURCE_EVENT_KEY_LENGTH
-    && sourceEventKey.trim() === sourceEventKey
-    && receipt.client_message_id === deterministicClientMessageId(sourceEventKey);
+  try {
+    return sourceEventKey.length > 0
+      && sourceEventKey.length <= MAX_SOURCE_EVENT_KEY_LENGTH
+      && canonicalSourceEventKey(sourceEventKey) === sourceEventKey
+      && receipt.client_message_id === deterministicClientMessageId(sourceEventKey);
+  } catch {
+    return false;
+  }
 }
 
 function validDelivery(delivery) {
@@ -80,12 +84,12 @@ function attemptTime(now) {
   return date;
 }
 
-function reconciliationWindow(receipt, attemptedAt) {
-  const createdAt = Date.parse(receipt.created_at);
-  if (Number.isNaN(createdAt)) throw typedError('history_unavailable');
+function reconciliationWindow(receipt) {
+  const deliveryAttemptAt = Date.parse(receipt.updated_at);
+  if (Number.isNaN(deliveryAttemptAt)) throw typedError('history_unavailable');
   return {
-    oldest: (createdAt - RECONCILIATION_MARGIN_MS) / 1000,
-    latest: (attemptedAt.getTime() + RECONCILIATION_MARGIN_MS) / 1000
+    oldest: (deliveryAttemptAt - RECONCILIATION_MARGIN_MS) / 1000,
+    latest: (deliveryAttemptAt + RECONCILIATION_MARGIN_MS) / 1000
   };
 }
 
@@ -94,6 +98,7 @@ async function persistDelivered({ store, receipt, channelId, messageTs, delivere
   try {
     result = await store.markNotificationDelivered({
       id: receipt.id,
+      expectedDeliveryAttempts: receipt.delivery_attempts,
       channelId,
       messageTs,
       deliveredAt: deliveredAt.toISOString()
@@ -110,7 +115,11 @@ async function persistDelivered({ store, receipt, channelId, messageTs, delivere
 async function persistFailed({ store, receipt, failureCode }) {
   let result;
   try {
-    result = await store.markNotificationFailed({ id: receipt.id, failureCode });
+    result = await store.markNotificationFailed({
+      id: receipt.id,
+      expectedDeliveryAttempts: receipt.delivery_attempts,
+      failureCode
+    });
   } catch {
     throw typedError('delivery_persistence_failed');
   }
@@ -121,7 +130,7 @@ async function persistFailed({ store, receipt, failureCode }) {
 }
 
 async function reconcileDelivery({ receipt, config, store, slack, attemptedAt }) {
-  const window = reconciliationWindow(receipt, attemptedAt);
+  const window = reconciliationWindow(receipt);
   let match;
   try {
     match = await slack.findMessageByClientId({

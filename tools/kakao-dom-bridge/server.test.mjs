@@ -7,6 +7,7 @@ import { Readable } from 'node:stream';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
+import { notificationReceiptInput } from '../work-orchestrator-v2/contracts.mjs';
 
 process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
 const {
@@ -33,6 +34,7 @@ const {
   createGatewayResultApplicationCoordinator,
   createAiJobDispatcher,
   createErrorsAuditAppender,
+  createImmediateNotificationAttemptGuard,
   createWorkOrchestratorImmediateRuntime,
   createWorkOrchestratorShadowRuntime,
   configForHermesTransport,
@@ -2302,7 +2304,7 @@ function immediateNotificationEvent(overrides = {}) {
   };
 }
 
-function immediateNotificationRuntime({ ensure, store = {}, slack = {}, now } = {}) {
+function immediateNotificationRuntime({ ensure, store = {}, slack = {}, now, attemptGuard } = {}) {
   return createWorkOrchestratorImmediateRuntime({
     config: { immediateEnabled: true, inboxChannelId: 'CINBOX', mentionUserIds: ['UOWNER'] },
     store: {
@@ -2317,9 +2319,29 @@ function immediateNotificationRuntime({ ensure, store = {}, slack = {}, now } = 
     },
     slackToken: 'test-slack-token',
     ensure,
-    now
+    now,
+    attemptGuard
   });
 }
+
+test('immediate notification attempt guard is exact, bounded, private, and survives restart readback', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-immediate-attempt-guard-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const privateKey = 'private-source-event-key-A';
+  const first = createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 });
+
+  assert.equal(first.claim(privateKey), true);
+  assert.equal(first.claim(privateKey), false);
+  assert.equal(first.claim('source-event-B'), true);
+
+  const restarted = createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 });
+  assert.equal(restarted.claim(privateKey), false);
+  assert.equal(restarted.claim('source-event-C'), true);
+  assert.equal(restarted.claim('source-event-B'), false);
+  const persisted = await readFile(path.join(directory, 'immediate-notification-attempts.ndjson'), 'utf8');
+  assert.doesNotMatch(persisted, /private-source-event-key|source-event-B|source-event-C/);
+  assert.equal(persisted.trim().split('\n').length <= 2, true);
+});
 
 test('immediate notification follows acceptance, precedes legacy persistence, and gates HTTP 202', async () => {
   const callOrder = [];
@@ -2547,7 +2569,83 @@ test('immediate notification exact retry resumes an existing receipt, delivers o
   }, { delivered: 1, duplicates: 1, failed: 1 });
 });
 
-test('immediate notification changed-false event with a different hash and no receipt fails closed without posting', async () => {
+test('immediate notification A-B-retry-A never creates a missing stale A receipt', async () => {
+  const ensured = [];
+  const lookups = [];
+  const legacy = [];
+  const receipts = new Map();
+  const runtime = immediateNotificationRuntime({
+    store: {
+      getNotificationByEventKey: async (eventKey) => {
+        lookups.push(eventKey);
+        return receipts.get(eventKey) || null;
+      }
+    },
+    ensure: async ({ event }) => {
+      ensured.push(event.eventHash);
+      if (event.eventHash === 'attempt-A') {
+        const error = new Error('receipt store unavailable before insert');
+        error.code = 'receipt_persistence_failed';
+        throw error;
+      }
+      receipts.set(event.eventHash, { id: `receipt-${event.eventHash}` });
+      return {
+        status: 'delivered', receipt: receipts.get(event.eventHash),
+        delivery: { channel: 'CINBOX', ts: '105.1' }, reconciled: false
+      };
+    }
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async (event) => legacy.push(`write:${event.eventHash}`),
+    scheduleDebouncedJob: (event) => legacy.push(`schedule:${event.eventHash}`)
+  };
+  const base = immediateNotificationEvent({ roomKey: 'chat:attempt-a-b-a' });
+
+  const firstA = await postShadowEvent({ ...base, previewText: 'A', eventHash: 'attempt-A' }, dependencies);
+  const b = await postShadowEvent({ ...base, previewText: 'B', eventHash: 'attempt-B' }, dependencies);
+  const retryA = await postShadowEvent({ ...base, previewText: 'A', eventHash: 'attempt-A' }, dependencies);
+
+  assert.equal(firstA.status, 503);
+  assert.equal(b.status, 202);
+  assert.equal(retryA.status, 503);
+  assert.deepEqual(ensured, ['attempt-A', 'attempt-B']);
+  assert.deepEqual(lookups, ['attempt-A']);
+  assert.deepEqual(legacy, ['write:attempt-B', 'schedule:attempt-B']);
+});
+
+test('handleEvent keeps oversized source identifiers distinct through immediate notice attempts', async () => {
+  const attempts = [];
+  const runtime = immediateNotificationRuntime({
+    ensure: async ({ event }) => {
+      const input = notificationReceiptInput(event);
+      attempts.push({ sourceEventKey: input.sourceEventKey, clientMessageId: input.clientMessageId });
+      return {
+        status: 'delivered', receipt: { id: `receipt-${attempts.length}` },
+        delivery: { channel: 'CINBOX', ts: `106.${attempts.length}` }, reconciled: false
+      };
+    }
+  });
+  const dependencies = {
+    appendNdjson: () => {}, shadowRuntime: { recordAccepted: () => null }, immediateRuntime: runtime,
+    writeSupabaseEvent: async () => {}, scheduleDebouncedJob: () => {}
+  };
+  const sharedPrefix = 'x'.repeat(500);
+  const base = immediateNotificationEvent({ roomKey: 'chat:oversized-source-keys' });
+
+  const first = await postShadowEvent({ ...base, previewText: 'first', eventHash: `${sharedPrefix}A` }, dependencies);
+  const second = await postShadowEvent({ ...base, previewText: 'second', eventHash: `${sharedPrefix}B` }, dependencies);
+
+  assert.equal(first.status, 202);
+  assert.equal(second.status, 202);
+  assert.equal(attempts.length, 2);
+  assert.notEqual(attempts[0].sourceEventKey, attempts[1].sourceEventKey);
+  assert.notEqual(attempts[0].clientMessageId, attempts[1].clientMessageId);
+});
+
+test('immediate notification accepts a genuinely new exact event key even when its semantic preview is unchanged', async () => {
   const ensuredHashes = [];
   const lookedUpHashes = [];
   const legacyCalls = [];
@@ -2582,16 +2680,11 @@ test('immediate notification changed-false event with a different hash and no re
   await postShadowEvent(first, dependencies);
   const response = await postShadowEvent(staleDuplicate, dependencies);
 
-  assert.equal(response.status, 503);
-  assert.deepEqual(response.body, {
-    ok: false,
-    error: 'immediate_notification_unconfirmed',
-    eventHash: 'immediate-different-hash-b'
-  });
-  assert.deepEqual(ensuredHashes, ['immediate-different-hash-a']);
-  assert.deepEqual(lookedUpHashes, ['immediate-different-hash-b']);
-  assert.deepEqual(legacyCalls, ['legacy-write', 'legacy-queue']);
-  assert.equal(runtime.state.immediateFailed, 1);
+  assert.equal(response.status, 202);
+  assert.deepEqual(ensuredHashes, ['immediate-different-hash-a', 'immediate-different-hash-b']);
+  assert.deepEqual(lookedUpHashes, []);
+  assert.deepEqual(legacyCalls, ['legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
+  assert.equal(runtime.state.immediateFailed, 0);
 });
 
 test('immediate notification concurrent duplicate fails closed while the first exact receipt is not visible', async () => {

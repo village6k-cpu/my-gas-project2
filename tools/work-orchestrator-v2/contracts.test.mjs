@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   assertNotificationTransition,
+  canonicalSourceEventKey,
   deterministicClientMessageId,
   loadWorkOrchestratorConfig,
   notificationReceiptInput
@@ -34,6 +35,33 @@ test('notificationReceiptInput normalizes a Kakao event into a receipt with a de
 test('deterministicClientMessageId is stable and distinguishes event keys', () => {
   assert.equal(deterministicClientMessageId('event-1'), deterministicClientMessageId('event-1'));
   assert.notEqual(deterministicClientMessageId('event-1'), deterministicClientMessageId('event-2'));
+});
+
+test('canonical source keys preserve bounded identifiers and hash the complete oversized identifier', () => {
+  const sharedPrefix = 'x'.repeat(500);
+  const first = `${sharedPrefix}A`;
+  const second = `${sharedPrefix}B`;
+
+  assert.equal(canonicalSourceEventKey('event-1'), 'event-1');
+  assert.notEqual(canonicalSourceEventKey(first), canonicalSourceEventKey(second));
+  assert.match(canonicalSourceEventKey(first), /^v2-long-sha256:[0-9a-f]{64}$/);
+  assert.equal(
+    canonicalSourceEventKey(canonicalSourceEventKey(first)),
+    canonicalSourceEventKey(first),
+    'canonicalization must be idempotent for a stored oversized key'
+  );
+  assert.notEqual(deterministicClientMessageId(first), deterministicClientMessageId(second));
+  assert.notEqual(
+    notificationReceiptInput({ ...event, eventHash: first }).sourceEventKey,
+    notificationReceiptInput({ ...event, eventHash: second }).sourceEventKey
+  );
+});
+
+test('canonical source keys reject blank and surrounding whitespace without collapsing identifiers', () => {
+  assert.throws(() => canonicalSourceEventKey(''), /source event key is required/i);
+  assert.throws(() => canonicalSourceEventKey('   '), /source event key is required/i);
+  assert.throws(() => canonicalSourceEventKey(' event-1'), /source event key is not canonical/i);
+  assert.throws(() => canonicalSourceEventKey('event-1 '), /source event key is not canonical/i);
 });
 
 test('notificationReceiptInput rejects a missing or blank room key', () => {
