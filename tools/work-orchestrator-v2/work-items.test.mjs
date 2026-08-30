@@ -72,6 +72,59 @@ test('verified auto reply suppresses only the reply obligation it completed', ()
   assert.deepEqual(candidates.map((item) => item.work_key), ['trade:1:tax-invoice']);
 });
 
+test('verified auto reply without an exact key keeps two distinct reply obligations', () => {
+  const candidates = buildHumanWorkCandidates({
+    now: NOW,
+    autoReplyResult: { sent: true, readbackConfirmed: true },
+    followUpRows: [
+      { work_key: 'room:1:reply:a', type: 'reply_needed', requires_human_action: true },
+      { work_key: 'room:1:reply:b', type: 'reply_needed', requires_human_action: true }
+    ]
+  });
+
+  assert.deepEqual(candidates.map((item) => item.work_key), [
+    'room:1:reply:a',
+    'room:1:reply:b'
+  ]);
+});
+
+test('verified auto reply suppresses only its exact confirmed work key', () => {
+  const candidates = buildHumanWorkCandidates({
+    now: NOW,
+    autoReplyResult: {
+      sent: true,
+      readbackConfirmed: true,
+      completed_work_key: 'room:1:reply:b'
+    },
+    followUpRows: [
+      { work_key: 'room:1:reply:a', type: 'reply_needed', requires_human_action: true },
+      { work_key: 'room:1:reply:b', type: 'reply_needed', requires_human_action: true },
+      { work_key: 'trade:1:payment', type: 'payment_check', requires_human_action: true }
+    ]
+  });
+
+  assert.deepEqual(candidates.map((item) => item.work_key), [
+    'room:1:reply:a',
+    'trade:1:payment'
+  ]);
+});
+
+test('one reply obligation uses the real verified send-result contract as a safe fallback', () => {
+  const candidates = buildHumanWorkCandidates({
+    now: NOW,
+    autoReplyResult: {
+      sent: true,
+      sendResult: { sent: true, reason: 'sent_via_chrome_verified' }
+    },
+    followUpRows: [
+      { work_key: 'room:1:reply', type: 'reply_needed', requires_human_action: true },
+      { work_key: 'trade:1:document', type: 'contract_document', requires_human_action: true }
+    ]
+  });
+
+  assert.deepEqual(candidates.map((item) => item.work_key), ['trade:1:document']);
+});
+
 test('a sent reply without authoritative readback does not suppress human work', () => {
   const candidates = buildHumanWorkCandidates({
     now: NOW,
@@ -90,7 +143,7 @@ test('reviewed payload work keys and reviewed legacy follow-up keys map without 
   const candidates = buildHumanWorkCandidates({
     now: NOW,
     followUpRows: [
-      { payload: { work_key: 'room:1:reply' } },
+      { payload: { work_key: 'room:1:reply', requires_human_action: true } },
       { follow_up_key: 'trade:1:document', type: 'contract_document', requires_human_action: true },
       { type: 'payment_check', requires_human_action: true, payload: { follow_up_key: 'trade:1:payment' } }
     ]
@@ -101,6 +154,13 @@ test('reviewed payload work keys and reviewed legacy follow-up keys map without 
     ['trade:1:document', 'contract_document'],
     ['trade:1:payment', 'payment_check']
   ]);
+});
+
+test('an arbitrary untyped key-only row is not promoted into human work', () => {
+  assert.throws(
+    () => buildHumanWorkCandidates({ followUpRows: [{ payload: { work_key: 'audit:1' } }] }),
+    /explicit human work type/i
+  );
 });
 
 test('explicit non-human, terminal, and completed-log rows never become work', () => {
@@ -353,6 +413,65 @@ test('merge preserves a future snooze and original age', () => {
   assert.equal(merged.first_opened_at, EARLIER);
 });
 
+test('a fresh non-P0 to P0 escalation wakes a future snooze immediately', () => {
+  const existing = activeItem({
+    state: 'snoozed',
+    priority: 'normal',
+    snoozed_until: '2026-08-29T09:00:00.000Z',
+    actionable_at: '2026-08-29T09:00:00.000Z',
+    last_activity_at: '2026-08-29T05:00:00.000Z'
+  });
+  const incoming = activeItem({
+    priority: 'p0',
+    last_activity_at: '2026-08-29T05:30:00.000Z'
+  });
+
+  const merged = mergeWorkItem(existing, incoming, NOW);
+
+  assert.equal(merged.priority, 'p0');
+  assert.equal(merged.state, 'open');
+  assert.equal(merged.snoozed_until, null);
+  assert.equal(merged.actionable_at, '2026-08-29T06:00:00.000Z');
+  assert.equal(merged.created_at, EARLIER);
+  assert.equal(merged.first_opened_at, EARLIER);
+});
+
+test('an already-P0 acknowledged item is not broadly woken without a new escalation', () => {
+  const existing = activeItem({
+    state: 'snoozed',
+    priority: 'p0',
+    snoozed_until: '2026-08-29T09:00:00.000Z',
+    actionable_at: '2026-08-29T09:00:00.000Z',
+    payload: {
+      requires_human_action: true,
+      p0_acknowledged_at: '2026-08-29T04:00:00.000Z'
+    }
+  });
+
+  const merged = mergeWorkItem(existing, activeItem({ priority: 'p0' }), NOW);
+
+  assert.equal(merged.state, 'snoozed');
+  assert.equal(merged.snoozed_until, '2026-08-29T09:00:00.000Z');
+  assert.equal(merged.actionable_at, '2026-08-29T09:00:00.000Z');
+});
+
+test('an unacknowledged existing P0 cannot remain hidden by a future snooze', () => {
+  const existing = activeItem({
+    state: 'snoozed',
+    priority: 'p0',
+    snoozed_until: '2026-08-29T09:00:00.000Z',
+    actionable_at: '2026-08-29T09:00:00.000Z',
+    payload: { requires_human_action: true }
+  });
+
+  const merged = mergeWorkItem(existing, activeItem({ priority: 'p0' }), NOW);
+
+  assert.equal(merged.state, 'open');
+  assert.equal(merged.snoozed_until, null);
+  assert.equal(merged.actionable_at, '2026-08-29T06:00:00.000Z');
+  assert.equal(merged.first_opened_at, EARLIER);
+});
+
 test('actions require the exact current version and an active state', () => {
   assert.throws(
     () => applyWorkAction(activeItem(), { type: 'progress', expectedVersion: 3 }, NOW),
@@ -421,6 +540,32 @@ test('P0 acknowledgement never resolves the item and is rejected for non-P0 work
   assert.equal(result.item.payload.p0_acknowledged_at, '2026-08-29T06:00:00.000Z');
   assert.equal(result.item.resolved_at, null);
   assert.equal(result.item.version, 5);
+});
+
+test('repeated P0 acknowledgement preserves the first acknowledgement timestamp', () => {
+  const result = applyWorkAction(activeItem({
+    priority: 'p0',
+    payload: {
+      requires_human_action: true,
+      p0_acknowledged_at: '2026-08-29T05:00:00.000Z'
+    }
+  }), { type: 'ack_p0', expectedVersion: 4 }, NOW);
+
+  assert.equal(result.item.payload.p0_acknowledged_at, '2026-08-29T05:00:00.000Z');
+  assert.equal(result.item.version, 5);
+  assert.equal(result.item.state, 'open');
+});
+
+test('malformed P0 acknowledgement metadata does not unlock hide actions', () => {
+  assert.throws(
+    () => applyWorkAction(activeItem({
+      priority: 'p0',
+      payload: { requires_human_action: true, p0_acknowledged_at: 'not-a-date' }
+    }), {
+      type: 'snooze', expectedVersion: 4, snoozedUntil: '2026-08-29T09:00:00.000Z'
+    }, NOW),
+    /acknowledge P0/i
+  );
 });
 
 test('unacknowledged P0 work cannot be hidden by snooze or dismissal', () => {

@@ -53,14 +53,16 @@
 Cover:
 
 ```js
-assert.deepEqual(buildHumanWorkCandidates({ autoReplyResult: { sent: true, readbackConfirmed: true }, followUpRows: [{ type: 'reply_needed' }] }), []);
-assert.equal(buildHumanWorkCandidates({ autoReplyResult: { sent: false }, followUpRows: [{ payload: { work_key: 'room:1:reply' } }] })[0].work_key, 'room:1:reply');
+assert.deepEqual(buildHumanWorkCandidates({ autoReplyResult: { sent: true, readbackConfirmed: true, completed_work_key: 'room:1:reply' }, followUpRows: [{ work_key: 'room:1:reply', type: 'reply_needed' }] }), []);
+assert.equal(buildHumanWorkCandidates({ autoReplyResult: { sent: false }, followUpRows: [{ payload: { work_key: 'room:1:reply', requires_human_action: true } }] })[0].work_key, 'room:1:reply');
 assert.throws(() => buildHumanWorkCandidates({ followUpRows: [{ customer_name: '동명이인' }] }), /typed work_key/i);
 assert.equal(mergeWorkItem(existing, incoming, now).version, existing.version + 1);
 assert.throws(() => applyWorkAction(item, { type: 'progress', expectedVersion: item.version - 1 }, now), /stale work version/i);
 ```
 
-Add snooze expiry, P0 acknowledgement, resolved evidence, and dismissed terminal-state tests.
+An untyped row may map to the finite `human_review` type only for the reviewed legacy form that has both an explicit `requires_human_action=true` boolean and a stable payload key. A key-only audit row is invalid. Verified auto-reply suppression uses an exact confirmed work/follow-up key; the legacy no-key fallback applies only when the batch contains one distinct `reply_needed` key.
+
+Add snooze expiry, P0 escalation wake-up, first-acknowledgement preservation, resolved evidence, and dismissed terminal-state tests.
 
 - [ ] **Step 2: Run RED**
 

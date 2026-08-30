@@ -106,7 +106,7 @@ function sourceState(row) {
   throw new Error('invalid human work state');
 }
 
-function humanActionExplicitlyDisabled(row) {
+function humanActionRequirement(row) {
   const payload = isRecord(row?.payload) ? row.payload : {};
   const supplied = [
     row?.requires_human_action,
@@ -117,12 +117,20 @@ function humanActionExplicitlyDisabled(row) {
   if (supplied.some((value) => typeof value !== 'boolean')) {
     throw new Error('requires_human_action must be boolean');
   }
-  return supplied.includes(false);
+  return {
+    disabled: supplied.includes(false),
+    explicitHumanAction: supplied.includes(true)
+  };
 }
 
-function humanWorkType(row) {
+function humanWorkType(row, { explicitHumanAction = false } = {}) {
   const raw = boundedText(row?.work_type ?? row?.type, 100);
-  if (!raw) return 'human_review';
+  if (!raw) {
+    const payload = isRecord(row?.payload) ? row.payload : {};
+    const reviewedPayloadKey = payload.work_key !== undefined || payload.follow_up_key !== undefined;
+    if (explicitHumanAction && reviewedPayloadKey) return 'human_review';
+    throw new Error('explicit human work type is required');
+  }
   if (!WORK_TYPES.has(raw)) throw new Error('unsupported human work type');
   return raw;
 }
@@ -177,9 +185,7 @@ function safePayload(row, { includeLifecycle = false } = {}) {
   return result;
 }
 
-function candidateFor(row, input, changedAt) {
-  const workKey = stableWorkKey(row);
-  const workType = humanWorkType(row);
+function candidateFor(row, input, changedAt, { workKey, workType }) {
   const lastActivityAt = isoDate(
     row?.last_activity_at ?? row?.updated_at ?? row?.created_at ?? changedAt,
     'human work activity'
@@ -222,22 +228,54 @@ function candidateFor(row, input, changedAt) {
 
 export function buildHumanWorkCandidates(input = {}) {
   const rows = Array.isArray(input.followUpRows) ? input.followUpRows : [];
-  const verifiedReply = input?.autoReplyResult?.sent === true
-    && (input.autoReplyResult.readbackConfirmed === true
-      || input.autoReplyResult.readback_confirmed === true);
   const changedAt = candidateClock(input);
-  const candidates = [];
+  const eligible = [];
 
   for (const row of rows) {
-    if (!isRecord(row) || humanActionExplicitlyDisabled(row)) continue;
+    if (!isRecord(row)) continue;
+    const requirement = humanActionRequirement(row);
+    if (requirement.disabled) continue;
     const state = sourceState(row);
     if (TERMINAL_SOURCE_STATES.has(state)) continue;
-    const type = humanWorkType(row);
+    const type = humanWorkType(row, requirement);
     if (type === 'completed_log') continue;
-    if (verifiedReply && type === 'reply_needed') continue;
-    candidates.push(candidateFor(row, input, changedAt));
+    eligible.push({ row, type, workType: type, workKey: stableWorkKey(row) });
   }
-  return candidates;
+
+  const autoReplyResult = isRecord(input.autoReplyResult) ? input.autoReplyResult : {};
+  const verifiedReason = boundedText(autoReplyResult?.sendResult?.reason, 100);
+  const verifiedReply = autoReplyResult.sent === true
+    && (autoReplyResult.readbackConfirmed === true
+      || autoReplyResult.readback_confirmed === true
+      || (autoReplyResult?.sendResult?.sent === true
+        && /^sent_via_(?:chrome|devtools)_verified(?:_|$)/.test(verifiedReason)));
+  const completedKeyValues = verifiedReply
+    ? [
+        autoReplyResult.completed_work_key,
+        autoReplyResult.completedWorkKey,
+        autoReplyResult.completed_follow_up_key,
+        autoReplyResult.completedFollowUpKey,
+        autoReplyResult.work_key,
+        autoReplyResult.workKey,
+        autoReplyResult.follow_up_key,
+        autoReplyResult.followUpKey
+      ].filter((value) => value !== undefined && value !== null)
+    : [];
+  const completedKeys = completedKeyValues.map(exactStableKey);
+  if (new Set(completedKeys).size > 1) throw new Error('verified auto reply work_key is ambiguous');
+  const completedKey = completedKeys[0] || null;
+  const replyKeys = [...new Set(eligible
+    .filter((entry) => entry.type === 'reply_needed')
+    .map((entry) => entry.workKey))];
+  const suppressReplyKey = verifiedReply
+    ? (completedKey && replyKeys.includes(completedKey)
+        ? completedKey
+        : (!completedKey && replyKeys.length === 1 ? replyKeys[0] : null))
+    : null;
+
+  return eligible
+    .filter((entry) => !(entry.type === 'reply_needed' && entry.workKey === suppressReplyKey))
+    .map((entry) => candidateFor(entry.row, input, changedAt, entry));
 }
 
 function validateWorkState(state) {
@@ -291,7 +329,11 @@ export function mergeWorkItem(existing, incoming, now = new Date()) {
   const expiredSnooze = state === 'snoozed'
     && existing.snoozed_until
     && new Date(existing.snoozed_until).getTime() <= new Date(changedAt).getTime();
-  const priority = PRIORITY_RANK[incomingPriority] > PRIORITY_RANK[existingPriority]
+  const p0Escalation = !stale && existingPriority !== 'p0' && incomingPriority === 'p0';
+  const unacknowledgedP0 = existingPriority === 'p0' && !p0Acknowledged(existing);
+  const wakeSnooze = expiredSnooze
+    || (state === 'snoozed' && (p0Escalation || unacknowledgedP0));
+  const priority = !stale && PRIORITY_RANK[incomingPriority] > PRIORITY_RANK[existingPriority]
     ? incomingPriority
     : existingPriority;
 
@@ -305,14 +347,14 @@ export function mergeWorkItem(existing, incoming, now = new Date()) {
     title: !stale && boundedText(incoming.title, 300) ? boundedText(incoming.title, 300) : boundedText(existing.title, 300),
     summary: !stale && boundedText(incoming.summary, 2000) ? boundedText(incoming.summary, 2000) : boundedText(existing.summary, 2000),
     priority,
-    state: expiredSnooze ? 'open' : state,
+    state: wakeSnooze ? 'open' : state,
     owner_id: boundedText(existing.owner_id, 200) || boundedText(incoming.owner_id, 200) || null,
-    actionable_at: expiredSnooze ? changedAt : isoDate(existing.actionable_at, 'work item actionable date'),
+    actionable_at: wakeSnooze ? changedAt : isoDate(existing.actionable_at, 'work item actionable date'),
     due_at: earlierDate(
       isoDate(existing.due_at, 'work item due date', { nullable: true }),
       isoDate(incoming.due_at, 'work item due date', { nullable: true })
     ),
-    snoozed_until: expiredSnooze
+    snoozed_until: wakeSnooze
       ? null
       : isoDate(existing.snoozed_until, 'work item snooze date', { nullable: true }),
     first_opened_at: isoDate(existing.first_opened_at, 'work item opened date'),
@@ -332,7 +374,10 @@ function actionType(action) {
 }
 
 function p0Acknowledged(item) {
-  return Boolean(isRecord(item?.payload) && item.payload.p0_acknowledged_at);
+  const value = isRecord(item?.payload) ? item.payload.p0_acknowledged_at : null;
+  if (typeof value !== 'string' || !value || value.length > 40) return false;
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.toISOString() === value;
 }
 
 export function applyWorkAction(item, action, now = new Date()) {
@@ -379,7 +424,7 @@ export function applyWorkAction(item, action, now = new Date()) {
     next.actionable_at = snoozedUntil.toISOString();
   }
   if (type === 'ack_p0') {
-    next.payload.p0_acknowledged_at = changedAt;
+    if (!p0Acknowledged(item)) next.payload.p0_acknowledged_at = changedAt;
   }
   if (type === 'request_resolve') {
     const requestedBy = boundedText(action.requestedBy, 200) || null;
