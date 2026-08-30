@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -10,8 +10,29 @@ const require = createRequire(import.meta.url);
 const ts = require("typescript");
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const routePath = path.join(appRoot, "app/api/follow-ups/route.ts");
+const authCacheHooks = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const result = nextResolve(specifier, context);
+    return result.url.endsWith(".ts") || result.url.includes(".ts?")
+      ? { ...result, format: "module-typescript" }
+      : result;
+  },
+});
+const realAuthCache = await import("../lib/server/authCache.ts");
 
-function loadRoute({ authed = true, enabled = "1", serviceKey = "service-role-key", fetchImpl = async () => response([]) } = {}) {
+test.after(() => authCacheHooks.deregister());
+
+function loadRoute({
+  authed = true,
+  enabled = "1",
+  serviceKey = "service-role-key",
+  anonKey = "anon-key",
+  authModule = {
+    getAuthedUser: async () => (authed ? { id: "verified-user" } : null),
+    isAuthedRequest: async () => authed,
+  },
+  fetchImpl = async () => response([]),
+} = {}) {
   const source = readFileSync(routePath, "utf8");
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -28,13 +49,13 @@ function loadRoute({ authed = true, enabled = "1", serviceKey = "service-role-ke
     exports: module.exports,
     process: { env: {
       NEXT_PUBLIC_SUPABASE_URL: "https://unit.test",
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key",
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: anonKey,
       SUPABASE_SERVICE_ROLE_KEY: serviceKey,
       WORK_ORCHESTRATOR_V2_DASHBOARD_ENABLED: enabled,
     } },
     require(specifier) {
       if (specifier === "next/server") return { NextResponse: { json: responseJson } };
-      if (specifier === "@/lib/server/authCache") return { isAuthedRequest: async () => authed };
+      if (specifier === "@/lib/server/authCache") return authModule;
       if (specifier === "@/lib/followups/logic") return {
         dedupeFollowUpItems: (items) => items,
         duplicateFollowUpIdsForItem: () => [],
@@ -85,6 +106,36 @@ test("v2 GET rejects an unauthenticated request before config or database access
 
   const result = await GET(getRequest());
 
+  assert.equal(result.status, 401);
+  assert.deepEqual(await readBody(result), { error: "인증 필요" });
+  assert.equal(fetchCalls, 0);
+});
+
+test("v2 GET uses the real fail-closed authCache user guard when anon auth configuration is missing", async (t) => {
+  const priorUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const priorAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://auth-misconfigured.unit.test";
+  delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  t.after(() => {
+    if (priorUrl === undefined) delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    else process.env.NEXT_PUBLIC_SUPABASE_URL = priorUrl;
+    if (priorAnon === undefined) delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    else process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = priorAnon;
+  });
+
+  let fetchCalls = 0;
+  const { GET } = loadRoute({
+    anonKey: "",
+    authModule: realAuthCache,
+    fetchImpl: async () => { fetchCalls += 1; throw new Error("must not fetch"); },
+  });
+  const result = await GET({
+    ...getRequest(),
+    headers: new Headers({ authorization: "Bearer unverified-token" }),
+  });
+
+  assert.equal(await realAuthCache.getAuthedUser({ headers: new Headers({ authorization: "Bearer unverified-token" }) }), null);
+  assert.equal(await realAuthCache.isAuthedRequest({ headers: new Headers({ authorization: "Bearer unverified-token" }) }), true);
   assert.equal(result.status, 401);
   assert.deepEqual(await readBody(result), { error: "인증 필요" });
   assert.equal(fetchCalls, 0);
@@ -158,6 +209,16 @@ test("v2 GET reads only active allowlisted fields with service role and maps the
   assert.equal(requests[0].url.includes("work_key"), false);
   assert.match(requests[0].url, /recommended_action:payload->>recommended_action/);
   assert.equal(requests[0].url.includes(",payload,"), false);
+});
+
+test("v2 GET fails closed when a successful upstream response is not an array", async () => {
+  for (const malformed of [{ error: "upstream detail" }, null, "not-an-array"]) {
+    const { GET } = loadRoute({ fetchImpl: async () => response(malformed) });
+    const result = await GET(getRequest());
+
+    assert.equal(result.status, 503);
+    assert.deepEqual(await readBody(result), { error: "work orchestrator unavailable" });
+  }
 });
 
 test("legacy GET remains unchanged when the v2 dashboard flag is off", async () => {

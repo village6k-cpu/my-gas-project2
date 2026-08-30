@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthedRequest as requireUser } from "@/lib/server/authCache";
+import { getAuthedUser, isAuthedRequest as requireUser } from "@/lib/server/authCache";
 import { dedupeFollowUpItems, duplicateFollowUpIdsForItem, duplicateFollowUpIdsForItems, shouldHideLowValueActiveItem, summarize } from "@/lib/followups/logic";
 
 // 후속조치(카톡 AI봇) 보드 API — ai_follow_up_items(public 스키마).
@@ -126,11 +126,11 @@ async function getV2FollowUps(req: NextRequest) {
     });
     if (!res.ok) throw new Error("v2 fetch failed");
     const txt = await res.text();
-    let raw: any = [];
-    if (txt) {
-      try { raw = JSON.parse(txt); } catch { throw new Error("v2 response invalid"); }
-    }
-    const items = Array.isArray(raw) ? raw.map(mapV2Item) : [];
+    if (!txt) throw new Error("v2 response invalid");
+    let raw: any;
+    try { raw = JSON.parse(txt); } catch { throw new Error("v2 response invalid"); }
+    if (!Array.isArray(raw)) throw new Error("v2 response invalid");
+    const items = raw.map(mapV2Item);
     return NextResponse.json({ ok: true, source: "work_items_v2", updatedAt: new Date().toISOString(), summary: summarize(items), items });
   } catch {
     return NextResponse.json({ error: "work orchestrator unavailable" }, { status: 503 });
@@ -138,8 +138,11 @@ async function getV2FollowUps(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
+  if (V2_DASHBOARD_ENABLED) {
+    if (!(await getAuthedUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
+    return getV2FollowUps(req);
+  }
   if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
-  if (V2_DASHBOARD_ENABLED) return getV2FollowUps(req);
   try {
     const sp = req.nextUrl.searchParams;
     const status = sp.get("status") || "active";
@@ -156,8 +159,11 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
+  if (V2_DASHBOARD_ENABLED) {
+    if (!(await getAuthedUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
+    return NextResponse.json({ error: "work orchestrator v2 is read-only" }, { status: 409 });
+  }
   if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
-  if (V2_DASHBOARD_ENABLED) return NextResponse.json({ error: "work orchestrator v2 is read-only" }, { status: 409 });
   try {
     const body = await req.json().catch(() => ({}));
     const id = String(body.id || "");
