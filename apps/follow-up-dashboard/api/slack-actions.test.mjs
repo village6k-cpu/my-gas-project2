@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 
-import { encodeWorkActionValue } from '../../../tools/work-orchestrator-v2/work-items.mjs';
+import { decodeWorkActionValue as decodeSourceWorkActionValue, encodeWorkActionValue } from '../../../tools/work-orchestrator-v2/work-items.mjs';
 import { decodeWorkActionContext, encodeWorkActionContext } from '../../../tools/work-orchestrator-v2/work-actions.mjs';
+import {
+  decodeWorkActionContext as decodeLocalWorkActionContext,
+  decodeWorkActionValue as decodeLocalWorkActionValue
+} from './_work-action-codec.js';
 
 import {
   verifySlackSignature,
@@ -113,6 +117,29 @@ test('v2 action ids map only to exact canonical work action types', async (t) =>
   });
 });
 
+test('Vercel-local action decoder stays canonically compatible with the source codec', () => {
+  const actions = [
+    { type: 'progress' },
+    { type: 'snooze', snoozedUntil: '2026-08-30T09:00:00.000Z' },
+    { type: 'ack_p0' },
+    { type: 'request_resolve' },
+    { type: 'dismiss' }
+  ];
+  for (const action of actions) {
+    const value = canonicalValue(action, 7);
+    assert.deepEqual(decodeLocalWorkActionValue(value), decodeSourceWorkActionValue(value));
+  }
+  const context = encodeWorkActionContext({ id: WORK_ID, version: 7 });
+  assert.deepEqual(decodeLocalWorkActionContext(context), decodeWorkActionContext(context));
+  for (const malformed of [
+    'malformed',
+    Buffer.from(JSON.stringify({ id: WORK_ID, version: 7, action: { type: 'progress' }, extra: true })).toString('base64url'),
+    Buffer.from(JSON.stringify({ id: WORK_ID, version: 7, extra: true })).toString('base64url')
+  ]) {
+    assert.throws(() => decodeLocalWorkActionValue(malformed), { message: 'invalid work action value' });
+  }
+});
+
 test('custom snooze click accepts only canonical id/version context and builds a bounded modal', () => {
   const context = encodeWorkActionContext({ id: WORK_ID, version: 8 });
   const intent = parseV2ActionIntent({ action_id: 'village_work_v2_snooze_custom', value: context }, NOW);
@@ -196,7 +223,7 @@ test('service-role request rejects malformed responses and transport detail with
   );
 });
 
-test('signed v2 block handler requires bounded Slack identity and returns content-free stale response', async () => {
+test('signed v2 block handler requires bounded Slack identity and returns a content-free retry response', async () => {
   const calls = [];
   const requestAction = async (input) => {
     calls.push(input);
@@ -214,7 +241,7 @@ test('signed v2 block handler requires bounded Slack identity and returns conten
   }]);
   assert.deepEqual(result, {
     response_type: 'ephemeral', replace_original: false,
-    text: '이미 변경된 항목입니다. 최신 다이제스트에서 다시 시도해 주세요.'
+    text: '다이제스트가 마무리 중이거나 항목이 변경되었습니다. 잠시 후 최신 다이제스트에서 다시 시도해 주세요.'
   });
   assert.equal(JSON.stringify(result).includes(WORK_ID), false);
 
@@ -289,6 +316,7 @@ test('default v2 route verifies the raw Slack signature before the service-role 
     return req;
   };
   let fetchCalls = 0;
+  let rpcApplied = true;
   try {
     process.env.SLACK_SIGNING_SECRET = signingSecret;
     process.env.SUPABASE_URL = 'https://supabase.example';
@@ -298,9 +326,8 @@ test('default v2 route verifies the raw Slack signature before the service-role 
       return {
         ok: true,
         status: 200,
-        text: async () => JSON.stringify({
-          applied: true,
-          row: {
+        text: async () => JSON.stringify(rpcApplied ? {
+          applied: true, row: {
             id: WORK_ID,
             version: 5,
             state: 'open',
@@ -309,7 +336,7 @@ test('default v2 route verifies the raw Slack signature before the service-role 
               requested_at: new Date().toISOString(), requested_by: 'UOWNER1', expected_version: 4
             }
           }
-        })
+        } : { applied: false, row: null })
       };
     };
 
@@ -325,6 +352,17 @@ test('default v2 route verifies the raw Slack signature before the service-role 
     assert.deepEqual(accepted.body, {
       text: '요청을 접수했습니다. 로컬 처리 결과 전까지 완료로 간주하지 않습니다.'
     });
+
+    rpcApplied = false;
+    const digestBlocked = response();
+    await slackActionsHandler(request(signature), digestBlocked);
+    assert.equal(digestBlocked.statusCode, 200);
+    assert.equal(fetchCalls, 2);
+    assert.deepEqual(digestBlocked.body, {
+      response_type: 'ephemeral', replace_original: false,
+      text: '다이제스트가 마무리 중이거나 항목이 변경되었습니다. 잠시 후 최신 다이제스트에서 다시 시도해 주세요.'
+    });
+    assert.equal(JSON.stringify(digestBlocked.body).includes(WORK_ID), false);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalEnv.signing === undefined) delete process.env.SLACK_SIGNING_SECRET;

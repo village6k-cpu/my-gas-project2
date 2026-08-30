@@ -150,6 +150,21 @@ test('processPendingWorkAction returns exact mechanical CAS patches and clears p
   }
 });
 
+test('pending action parsing and processing require an explicit canonical clock', () => {
+  const current = row();
+  for (const invalidNow of [undefined, null, '', '2026-08-30T06:00:00Z', 'not-a-time']) {
+    assert.throws(() => parsePendingWorkAction(current, invalidNow), {
+      message: 'invalid pending work action'
+    });
+    assert.throws(() => processPendingWorkAction({ row: current, action: current.pending_action, now: invalidNow }), {
+      message: 'invalid pending work action'
+    });
+  }
+  assert.throws(() => processPendingWorkAction({ row: current, action: current.pending_action }), {
+    message: 'invalid pending work action'
+  });
+});
+
 test('request_resolve stays pending for authoritative resolution and produces no patch', () => {
   const current = row({ action: { type: 'request_resolve' } });
   assert.deepEqual(processPendingWorkAction({ row: current, action: current.pending_action, now: NOW }), {

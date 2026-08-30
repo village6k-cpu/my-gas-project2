@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
-import { decodeWorkActionValue } from '../../../tools/work-orchestrator-v2/work-items.mjs';
-import { decodeWorkActionContext } from '../../../tools/work-orchestrator-v2/work-actions.mjs';
+import { decodeWorkActionContext, decodeWorkActionValue } from './_work-action-codec.js';
 
 const VALID_STATUSES = new Set(['open', 'in_progress', 'waiting_customer', 'waiting_internal', 'done', 'dismissed']);
 const ACTIVE_WORK_STATES = new Set(['open', 'in_progress', 'snoozed']);
@@ -433,7 +432,7 @@ export async function handleV2BlockAction(payload, {
       return {
         response_type: 'ephemeral',
         replace_original: false,
-        text: '이미 변경된 항목입니다. 최신 다이제스트에서 다시 시도해 주세요.'
+        text: '다이제스트가 마무리 중이거나 항목이 변경되었습니다. 잠시 후 최신 다이제스트에서 다시 시도해 주세요.'
       };
     }
     return { text: '요청을 접수했습니다. 로컬 처리 결과 전까지 완료로 간주하지 않습니다.' };

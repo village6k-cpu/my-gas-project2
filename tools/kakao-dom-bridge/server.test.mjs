@@ -49,6 +49,7 @@ const {
   handleEvent,
   handleWorkOrchestratorDigestMaintenance,
   listPendingWorkActionsV2,
+  resolveSlackActionPollIntervalMs,
   applyPendingWorkActionPatchV2,
   runSlackActionPollPair,
   slackActionMaintenanceSucceeded,
@@ -156,7 +157,7 @@ function pendingWorkActionRow(overrides = {}) {
   };
 }
 
-test('Work Orchestrator action list uses service credentials, active pending filter, and bounded exact rows', async () => {
+test('Work Orchestrator action list uses the service-only filtered RPC with an exact bounded request', async () => {
   const requests = [];
   const row = pendingWorkActionRow();
   const rows = await listPendingWorkActionsV2({
@@ -167,14 +168,34 @@ test('Work Orchestrator action list uses service credentials, active pending fil
     }
   });
   assert.deepEqual(rows, [row]);
-  const url = new URL(requests[0].url);
-  assert.equal(url.origin, 'https://supabase.example');
-  assert.equal(url.pathname, '/rest/v1/work_items_v2');
-  assert.equal(url.searchParams.get('state'), 'in.(open,in_progress,snoozed)');
-  assert.equal(url.searchParams.get('pending_action->>status'), 'eq.pending');
-  assert.equal(url.searchParams.get('limit'), '3');
+  assert.equal(requests[0].url, 'https://supabase.example/rest/v1/rpc/list_pending_work_actions_v2');
+  assert.equal(requests[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(requests[0].init.body), { p_limit: 3 });
   assert.equal(requests[0].init.headers.apikey, 'service-secret');
   assert.equal(requests[0].init.headers.authorization, 'Bearer service-secret');
+});
+
+test('Work Orchestrator pending-action RPC bounds requests to 1..50 and rejects non-exact rows', async () => {
+  for (const limit of [0, 51, -1, 1.5, Number.NaN]) {
+    await assert.rejects(listPendingWorkActionsV2({
+      supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-secret', limit,
+      fetchImpl: async () => assert.fail('invalid limits must fail before fetch')
+    }), { message: 'Work Orchestrator action request failed' });
+  }
+  const row = pendingWorkActionRow();
+  await assert.rejects(listPendingWorkActionsV2({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-secret', limit: 50,
+    fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify([{ ...row, extra: true }]) })
+  }), { message: 'Work Orchestrator action request failed' });
+});
+
+test('Slack action poll interval is a strict bounded integer with a safe fallback', () => {
+  for (const value of [undefined, null, '', '0', '999', '-1', '1.5', 'NaN', 'Infinity', '300001', 0, -1, Number.NaN]) {
+    assert.equal(resolveSlackActionPollIntervalMs(value), 10_000, String(value));
+  }
+  assert.equal(resolveSlackActionPollIntervalMs('1000'), 1000);
+  assert.equal(resolveSlackActionPollIntervalMs(45_000), 45_000);
+  assert.equal(resolveSlackActionPollIntervalMs('300000'), 300_000);
 });
 
 test('Work Orchestrator action apply PATCH is fenced by id, current version, active state, and pending status', async () => {

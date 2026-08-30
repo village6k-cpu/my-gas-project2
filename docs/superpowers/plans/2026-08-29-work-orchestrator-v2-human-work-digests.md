@@ -382,12 +382,19 @@ git commit -m "feat: schedule and replace focus digests"
 - Create: `tools/work-orchestrator-v2/work-actions.test.mjs`
 - Modify: `apps/follow-up-dashboard/api/slack-actions.js`
 - Modify: `apps/follow-up-dashboard/api/slack-actions.test.mjs`
+- Create: `apps/follow-up-dashboard/api/_work-action-codec.js`
+- Modify: `supabase/migrations/20260829030730_work_orchestrator_v2_foundation.sql`
+- Modify: `tools/work-orchestrator-v2/schema.test.mjs`
+- Modify: `tools/work-orchestrator-v2/pglite-schema.test.mjs`
 - Modify: `tools/kakao-dom-bridge/server.mjs`
 - Modify: `tools/kakao-dom-bridge/server.test.mjs`
 
 **Interfaces:**
 - Vercel consumes Slack-signed `village_work_v2_*` actions and calls `request_work_item_action_v2`.
 - Bridge consumes pending actions and calls `processPendingWorkAction({row,action,now})`.
+- The service-only action-request RPC and digest preparation share a deterministic advisory lock per `{id,version}`. An action request returns `applied=false` while that exact version is present in any unfinished prepared run; the bridge lists only exact processable mechanical actions through `list_pending_work_actions_v2`.
+
+**Render-contract cutover gate:** Until a persisted render-contract version is added, renderer code or render-affecting configuration may change only after proving that there are zero unfinished prepared digest runs (`building|delivering|failed` with a stored manifest). This Task 6 feature is not deployed. Task 5 production cutover must prove the same zero-unfinished-run condition before enabling it. The action-request fence closes the Slack button mutation race only; it does not claim to fence every general worker or source mutation.
 
 - [ ] **Step 1: Write Vercel RED tests**
 
@@ -413,7 +420,7 @@ node --test apps\follow-up-dashboard\api\slack-actions.test.mjs
 
 - [ ] **Step 3: Implement signed v2 request handling**
 
-Reuse existing signature verification. Route legacy ids unchanged. For v2, call the service-only RPC and return an ephemeral stale-state message when `applied=false`.
+Reuse existing signature verification. Route legacy ids unchanged. For v2, call the service-only RPC and return one content-free ephemeral retry message when `applied=false`; it must cover both stale versions and a still-finishing digest without falsely classifying either case.
 
 - [ ] **Step 4: Write and implement local action tests**
 

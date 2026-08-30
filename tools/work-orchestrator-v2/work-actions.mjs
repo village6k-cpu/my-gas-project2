@@ -135,7 +135,7 @@ function validatePendingAction(row, pending, now) {
   };
 }
 
-export function parsePendingWorkAction(row, now = new Date()) {
+export function parsePendingWorkAction(row, now) {
   try {
     return validatePendingAction(row, row?.pending_action, canonicalNow(now));
   } catch {
@@ -158,7 +158,7 @@ function exactPatch(row, next) {
   return patch;
 }
 
-export function processPendingWorkAction({ row, action, now = new Date() } = {}) {
+export function processPendingWorkAction({ row, action, now } = {}) {
   const changedAt = canonicalNow(now);
   let pending;
   try {

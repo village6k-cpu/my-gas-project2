@@ -534,8 +534,7 @@ declare
   v_snoozed_until timestamptz;
 begin
   if p_id is null or p_expected_version is null or p_expected_version < 1
-    or p_requested_by is null or length(p_requested_by) not between 1 and 200
-    or p_requested_by <> btrim(p_requested_by)
+    or p_requested_by is null or p_requested_by !~ '^[UW][A-Z0-9]{2,79}$'
     or p_action is null or jsonb_typeof(p_action) <> 'object'
     or not (p_action ? 'type')
     or jsonb_typeof(p_action->'type') <> 'string' then
@@ -563,6 +562,10 @@ begin
     end;
   end if;
 
+  perform pg_advisory_xact_lock(hashtextextended(
+    'work-action:' || p_id::text || ':' || p_expected_version::text,
+    91420260830
+  ));
   update public.work_items_v2
   set pending_action = jsonb_build_object(
         'type', v_action_type,
@@ -576,8 +579,119 @@ begin
   where id = p_id
     and version = p_expected_version
     and state in ('open','in_progress','snoozed')
+    and not exists (
+      select 1
+      from public.digest_runs as unfinished
+      where unfinished.state in ('building','delivering','failed')
+        and unfinished.manifest_prepared_at is not null
+        and jsonb_array_length(unfinished.item_snapshot) > 0
+        and exists (
+          select 1 from public.digest_message_parts as stored_part
+          where stored_part.digest_run_id = unfinished.id
+        )
+        and exists (
+          select 1
+          from jsonb_array_elements(unfinished.item_snapshot) as snapshot(entry)
+          where snapshot.entry->>'id' = p_id::text
+            and (snapshot.entry->>'version')::integer = p_expected_version
+        )
+    )
   returning * into v_row;
   return jsonb_build_object('applied', found, 'row', case when found then to_jsonb(v_row) else null end);
+end;
+$$;
+
+create function public.is_processable_pending_work_action_v2(
+  p_pending jsonb,
+  p_current_version integer
+) returns boolean language plpgsql stable security invoker set search_path = '' as $$
+declare
+  v_type text;
+  v_action jsonb;
+  v_expected_version integer;
+  v_requested_at timestamptz;
+  v_snoozed_until timestamptz;
+begin
+  if p_pending is null or jsonb_typeof(p_pending) <> 'object'
+    or not (p_pending ?& array['type','action','status','requested_at','requested_by','expected_version'])
+    or (p_pending - array['type','action','status','requested_at','requested_by','expected_version']::text[]) <> '{}'::jsonb
+    or jsonb_typeof(p_pending->'type') <> 'string'
+    or jsonb_typeof(p_pending->'action') <> 'object'
+    or jsonb_typeof(p_pending->'status') <> 'string' or p_pending->>'status' <> 'pending'
+    or jsonb_typeof(p_pending->'requested_at') <> 'string' or length(p_pending->>'requested_at') > 40
+    or (p_pending->>'requested_at') !~ '^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    or jsonb_typeof(p_pending->'requested_by') <> 'string'
+    or (p_pending->>'requested_by') !~ '^[UW][A-Z0-9]{2,79}$'
+    or jsonb_typeof(p_pending->'expected_version') <> 'number'
+    or (p_pending->>'expected_version') !~ '^[1-9][0-9]*$' then
+    return false;
+  end if;
+  begin
+    v_expected_version := (p_pending->>'expected_version')::integer;
+    v_requested_at := (p_pending->>'requested_at')::timestamptz;
+  exception when others then
+    return false;
+  end;
+  if p_current_version is null or p_current_version <= 1 or v_expected_version <> p_current_version - 1
+    or not isfinite(v_requested_at) or v_requested_at > now() then
+    return false;
+  end if;
+  v_type := p_pending->>'type';
+  v_action := p_pending->'action';
+  if v_type not in ('progress','snooze','ack_p0','dismiss')
+    or v_action->>'type' is distinct from v_type
+    or (v_type <> 'snooze' and (v_action - 'type') <> '{}'::jsonb)
+    or (v_type = 'snooze' and (
+      not (v_action ?& array['type','snoozedUntil'])
+      or (v_action - array['type','snoozedUntil']::text[]) <> '{}'::jsonb
+      or jsonb_typeof(v_action->'snoozedUntil') <> 'string'
+      or length(v_action->>'snoozedUntil') > 40
+      or (v_action->>'snoozedUntil') !~ '^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'
+    )) then
+    return false;
+  end if;
+  if v_type = 'snooze' then
+    begin
+      v_snoozed_until := (v_action->>'snoozedUntil')::timestamptz;
+    exception when others then
+      return false;
+    end;
+    if not isfinite(v_snoozed_until) or v_snoozed_until <= now() then return false; end if;
+  end if;
+  return true;
+end;
+$$;
+
+create function public.list_pending_work_actions_v2(
+  p_limit integer
+) returns table (
+  id uuid,
+  state text,
+  priority text,
+  actionable_at timestamptz,
+  snoozed_until timestamptz,
+  resolution_kind text,
+  resolution_evidence jsonb,
+  resolved_at timestamptz,
+  resolved_by text,
+  pending_action jsonb,
+  version integer,
+  payload jsonb,
+  updated_at timestamptz
+) language plpgsql stable security invoker set search_path = '' as $$
+begin
+  if p_limit is null or p_limit not between 1 and 50 then
+    raise exception 'invalid pending work action query' using errcode = '22023';
+  end if;
+  return query
+  select w.id, w.state, w.priority, w.actionable_at, w.snoozed_until,
+    w.resolution_kind, w.resolution_evidence, w.resolved_at, w.resolved_by,
+    w.pending_action, w.version, w.payload, w.updated_at
+  from public.work_items_v2 as w
+  where w.state in ('open','in_progress','snoozed')
+    and public.is_processable_pending_work_action_v2(w.pending_action, w.version)
+  order by w.updated_at, w.id
+  limit p_limit;
 end;
 $$;
 
@@ -799,6 +913,17 @@ begin
      (select count(distinct (entry->>'id')::uuid) from jsonb_array_elements(p_item_snapshot) as snapshot(entry)) then
     raise exception 'invalid digest manifest' using errcode = '22023';
   end if;
+
+  for v_entry in
+    select snapshot.entry
+    from jsonb_array_elements(p_item_snapshot) as snapshot(entry)
+    order by snapshot.entry->>'id', (snapshot.entry->>'version')::integer
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(
+      'work-action:' || (v_entry->>'id') || ':' || (v_entry->>'version'),
+      91420260830
+    ));
+  end loop;
 
   for v_part in select value from jsonb_array_elements(p_parts) loop
     if jsonb_typeof(v_part) <> 'object'
@@ -1522,6 +1647,8 @@ revoke execute on function public.claim_message_notification_receipt(text,text,t
 revoke execute on function public.is_effective_p0_ack_v2(jsonb,timestamptz) from public, anon, authenticated;
 revoke execute on function public.upsert_work_item_v2(jsonb) from public, anon, authenticated;
 revoke execute on function public.request_work_item_action_v2(uuid,integer,jsonb,text) from public, anon, authenticated;
+revoke execute on function public.is_processable_pending_work_action_v2(jsonb,integer) from public, anon, authenticated;
+revoke execute on function public.list_pending_work_actions_v2(integer) from public, anon, authenticated;
 revoke execute on function public.list_actionable_work_v2(timestamptz,integer) from public, anon, authenticated;
 revoke execute on function public.claim_digest_run_v2(text,timestamptz,timestamptz,timestamptz,text,integer) from public, anon, authenticated;
 revoke execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,jsonb) from public, anon, authenticated;
@@ -1538,6 +1665,8 @@ grant execute on function public.claim_message_notification_receipt(text,text,te
 grant execute on function public.is_effective_p0_ack_v2(jsonb,timestamptz) to service_role;
 grant execute on function public.upsert_work_item_v2(jsonb) to service_role;
 grant execute on function public.request_work_item_action_v2(uuid,integer,jsonb,text) to service_role;
+grant execute on function public.is_processable_pending_work_action_v2(jsonb,integer) to service_role;
+grant execute on function public.list_pending_work_actions_v2(integer) to service_role;
 grant execute on function public.list_actionable_work_v2(timestamptz,integer) to service_role;
 grant execute on function public.claim_digest_run_v2(text,timestamptz,timestamptz,timestamptz,text,integer) to service_role;
 grant execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,jsonb) to service_role;

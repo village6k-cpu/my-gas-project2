@@ -105,6 +105,8 @@ test('foundation migration executes and exposes only service-role access in Post
           'is_effective_p0_ack_v2',
           'upsert_work_item_v2',
           'request_work_item_action_v2',
+          'is_processable_pending_work_action_v2',
+          'list_pending_work_actions_v2',
           'list_actionable_work_v2',
           'claim_digest_run_v2',
           'prepare_digest_parts_v2',
@@ -127,8 +129,10 @@ test('foundation migration executes and exposes only service-role access in Post
       'fail_digest_run_v2',
       'finalize_digest_run_v2',
       'is_effective_p0_ack_v2',
+      'is_processable_pending_work_action_v2',
       'list_actionable_work_v2',
       'list_digest_cleanup_backlog_v2',
+      'list_pending_work_actions_v2',
       'mark_digest_part_delivered_v2',
       'mark_digest_part_failed_v2',
       'prepare_digest_parts_v2',
@@ -155,6 +159,8 @@ test('foundation migration executes and exposes only service-role access in Post
           'is_effective_p0_ack_v2',
           'upsert_work_item_v2',
           'request_work_item_action_v2',
+          'is_processable_pending_work_action_v2',
+          'list_pending_work_actions_v2',
           'list_actionable_work_v2',
           'claim_digest_run_v2',
           'prepare_digest_parts_v2',
@@ -1156,6 +1162,152 @@ test('foundation migration executes and exposes only service-role access in Post
       listedIds: p0ListRows.slice(2).map((row) => row.id),
       mergeStates: ['open', 'snoozed']
     }, 'SQL uses each operation cutoff for list and upsert wake eligibility');
+  } finally {
+    await db.close();
+  }
+});
+
+test('digest-visible buttons are fenced until delivery and processable pending actions cannot starve', async () => {
+  assert.ok(migrationName, 'the CLI-generated foundation migration must exist');
+  const db = new PGlite({ extensions: { pgcrypto } });
+  try {
+    await db.exec(`
+      create role anon nologin;
+      create role authenticated nologin;
+      create role service_role nologin;
+      create extension if not exists pgcrypto;
+    `);
+    await db.exec(readFileSync(join(migrationsDirectory, migrationName), 'utf8'));
+
+    const { rows: raceRows } = await db.query(`
+      insert into public.work_items_v2 (
+        work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, automation_state, payload
+      ) values (
+        'review:race', 'room:review', 'Race review', '', 'review', 'normal', 'open',
+        now() - interval '1 hour', now() - interval '1 day', now() - interval '1 hour',
+        'needs_human', '{"requires_human_action":true}'::jsonb
+      ) returning id, version, pending_action
+    `);
+    const race = raceRows[0];
+    const { rows: claimedRows } = await db.query(`
+      select public.claim_digest_run_v2(
+        'slack:review-race', now(), now() - interval '3 hours', now(), 'bridge:review-race', 120
+      ) as result
+    `);
+    const claimed = claimedRows[0].result;
+    const digestId = claimed.row.id;
+    const originalToken = claimed.row.lease_token;
+    const snapshot = [{ id: race.id, version: race.version, inclusionReason: 'actionable', priority: 'normal' }];
+    const intent = [{
+      kind: 'ordinary', partNumber: 1, partCount: 1,
+      itemIds: [race.id], payloadHash: 'f'.repeat(64)
+    }];
+    const prepare = async (owner, token) => (await db.query(`
+      select public.prepare_digest_parts_v2($1::uuid, $2::text, $3::uuid, $4::jsonb, $5::jsonb) as result
+    `, [digestId, owner, token, JSON.stringify(snapshot), JSON.stringify(intent)])).rows[0].result;
+    const prepared = await prepare('bridge:review-race', originalToken);
+    assert.equal(prepared.created, true);
+    const originalPart = prepared.parts[0];
+    const { rows: partClaimRows } = await db.query(`
+      select public.claim_digest_part_delivery_v2($1::uuid, $2::uuid, $3::text, $4::uuid) as result
+    `, [digestId, originalPart.id, 'bridge:review-race', originalToken]);
+    assert.equal(partClaimRows[0].result.claimed, true);
+    const { rows: deliveredRows } = await db.query(`
+      select public.mark_digest_part_delivered_v2(
+        $1::uuid, $2::uuid, $3::text, $4::uuid, 1, 'CREVIEW', '200.01', now()
+      ) as result
+    `, [digestId, originalPart.id, 'bridge:review-race', originalToken]);
+    assert.equal(deliveredRows[0].result.applied, true, 'part one is visible while the run remains unfinished');
+
+    const actionSql = `
+      select public.request_work_item_action_v2($1::uuid, $2::integer, $3::jsonb, $4::text) as result
+    `;
+    const blocked = await db.query(actionSql, [race.id, 1, JSON.stringify({ type: 'progress' }), 'UOWNER1']);
+    assert.deepEqual(blocked.rows[0].result, { applied: false, row: null });
+    const { rows: unchangedRows } = await db.query(`
+      select version, pending_action from public.work_items_v2 where id = $1::uuid
+    `, [race.id]);
+    assert.deepEqual(unchangedRows[0], { version: 1, pending_action: {} });
+
+    await db.query(`
+      update public.digest_runs set lease_expires_at = '2000-01-01T00:00:00.000Z' where id = $1::uuid
+    `, [digestId]);
+    const { rows: reclaimedRows } = await db.query(`
+      select public.claim_digest_run_v2(
+        $1::text, $2::timestamptz, $3::timestamptz, $4::timestamptz, 'bridge:review-recovery', 120
+      ) as result
+    `, [claimed.row.destination_key, claimed.row.scheduled_at, claimed.row.window_started_at, claimed.row.window_ended_at]);
+    const reclaimed = reclaimedRows[0].result;
+    assert.equal(reclaimed.claimed, true);
+    assert.equal(reclaimed.created, false);
+    const recovered = await prepare('bridge:review-recovery', reclaimed.row.lease_token);
+    assert.equal(recovered.created, false);
+    assert.deepEqual(
+      recovered.parts.map((part) => [part.id, part.client_message_id, part.payload_hash]),
+      [[originalPart.id, originalPart.client_message_id, originalPart.payload_hash]],
+      'crash/reclaim preserves the exact durable render manifest'
+    );
+    const { rows: finalizedRows } = await db.query(`
+      select public.finalize_digest_run_v2($1::uuid, $2::text, $3::uuid, now()) as result
+    `, [digestId, 'bridge:review-recovery', reclaimed.row.lease_token]);
+    assert.equal(finalizedRows[0].result.applied, true);
+    const applied = await db.query(actionSql, [race.id, 1, JSON.stringify({ type: 'progress' }), 'UOWNER1']);
+    assert.equal(applied.rows[0].result.applied, true, 'the unchanged button applies after the run is delivered');
+    assert.equal(applied.rows[0].result.row.version, 2);
+    await db.query(`
+      update public.work_items_v2 set state = 'dismissed', pending_action = '{}'::jsonb
+      where id = $1::uuid
+    `, [race.id]);
+
+    await db.exec(`
+      insert into public.work_items_v2 (
+        work_key, room_key, title, work_type, state, actionable_at, first_opened_at,
+        last_activity_at, pending_action, version, updated_at
+      )
+      select
+        'review:resolve:' || n, 'room:review', 'Resolve ' || n, 'review', 'open',
+        now() - interval '2 hours', now() - interval '1 day', now() - interval '2 hours',
+        jsonb_build_object(
+          'type', 'request_resolve', 'action', jsonb_build_object('type', 'request_resolve'),
+          'status', 'pending', 'requested_at', now() - interval '2 hours',
+          'requested_by', 'UOWNER1', 'expected_version', 1
+        ),
+        2, now() - interval '2 hours'
+      from generate_series(1, 12) as n;
+
+      insert into public.work_items_v2 (
+        work_key, room_key, title, work_type, state, actionable_at, first_opened_at,
+        last_activity_at, pending_action, version, updated_at
+      ) values (
+        'review:invalid', 'room:review', 'Invalid', 'review', 'open', now() - interval '2 hours',
+        now() - interval '1 day', now() - interval '2 hours', '{"status":"pending"}'::jsonb,
+        2, now() - interval '2 hours'
+      );
+    `);
+    const { rows: progressRows } = await db.query(`
+      insert into public.work_items_v2 (
+        work_key, room_key, title, work_type, state, actionable_at, first_opened_at,
+        last_activity_at, pending_action, version, updated_at
+      ) values (
+        'review:progress', 'room:review', 'Progress', 'review', 'open', now() - interval '1 hour',
+        now() - interval '1 day', now() - interval '1 hour',
+        jsonb_build_object(
+          'type', 'progress', 'action', jsonb_build_object('type', 'progress'),
+          'status', 'pending', 'requested_at', now() - interval '1 minute',
+          'requested_by', 'UOWNER1', 'expected_version', 1
+        ),
+        2, now()
+      ) returning id
+    `);
+    const { rows: pendingRows } = await db.query(`
+      select * from public.list_pending_work_actions_v2(1)
+    `);
+    assert.equal(pendingRows.length, 1);
+    assert.equal(pendingRows[0].id, progressRows[0].id);
+    assert.equal(pendingRows[0].pending_action.type, 'progress');
+    await assert.rejects(db.query(`select * from public.list_pending_work_actions_v2(0)`), /invalid pending work action query/i);
+    await assert.rejects(db.query(`select * from public.list_pending_work_actions_v2(51)`), /invalid pending work action query/i);
   } finally {
     await db.close();
   }

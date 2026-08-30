@@ -82,6 +82,16 @@ export function resolveHermesMaxAttempts(value) {
   return attempts;
 }
 
+export function resolveSlackActionPollIntervalMs(value) {
+  if (value === undefined || value === null || value === '') return 10_000;
+  const parsed = typeof value === 'number'
+    ? value
+    : (/^[0-9]+$/.test(value) ? Number(value) : Number.NaN);
+  return Number.isSafeInteger(parsed) && parsed >= 1_000 && parsed <= 300_000
+    ? parsed
+    : 10_000;
+}
+
 export function kakaoSendAllowedForTransport(value) {
   return resolveHermesTransport(value) !== 'gateway_no_send';
 }
@@ -135,7 +145,7 @@ const CONFIG = {
   supabaseRecoveryErrorRetryMs: Number(process.env.SUPABASE_RECOVERY_ERROR_RETRY_MS || 900_000),
   supabaseRecoveryMaxAttempts: Number(process.env.SUPABASE_RECOVERY_MAX_ATTEMPTS || 2),
   slackActionPollEnabled: readBooleanEnvironment(process.env.SLACK_ACTION_POLL_ENABLED, true),
-  slackActionPollIntervalMs: Number(process.env.SLACK_ACTION_POLL_INTERVAL_MS || 10_000),
+  slackActionPollIntervalMs: resolveSlackActionPollIntervalMs(process.env.SLACK_ACTION_POLL_INTERVAL_MS),
   p0SlackEscalationEnabled: readBooleanEnvironment(process.env.P0_SLACK_ESCALATION_ENABLED, true),
   p0SlackEscalationIntervalMs: Math.max(15_000, Number(process.env.P0_SLACK_ESCALATION_INTERVAL_MS || 60_000)),
   // 재알림은 10분에서 시작해 회차마다 2배(상한 1시간) 백오프. 구 기본값
@@ -769,6 +779,12 @@ function workActionEndpoint(supabaseUrl) {
   return `${base}/rest/v1/work_items_v2`;
 }
 
+function workActionRpcEndpoint(supabaseUrl, functionName) {
+  const base = String(supabaseUrl || '').trim().replace(/\/$/, '');
+  if (!/^https?:\/\/[^\s]+$/i.test(base)) throw new Error('Work Orchestrator action configuration invalid');
+  return `${base}/rest/v1/rpc/${functionName}`;
+}
+
 export async function listPendingWorkActionsV2({
   supabaseUrl,
   serviceRoleKey,
@@ -778,15 +794,10 @@ export async function listPendingWorkActionsV2({
   try {
     const key = String(serviceRoleKey || '').trim();
     if (!key || typeof fetchImpl !== 'function'
-      || !Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new Error('invalid');
-    const url = new URL(workActionEndpoint(supabaseUrl));
-    url.searchParams.set('select', WORK_ACTION_ROW_FIELDS.join(','));
-    url.searchParams.set('state', 'in.(open,in_progress,snoozed)');
-    url.searchParams.set('pending_action->>status', 'eq.pending');
-    url.searchParams.set('order', 'updated_at.asc');
-    url.searchParams.set('limit', String(limit));
-    const data = await workActionFetchJson(url.toString(), {
-      method: 'GET', headers: workActionHeaders(key)
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('invalid');
+    const data = await workActionFetchJson(
+      workActionRpcEndpoint(supabaseUrl, 'list_pending_work_actions_v2'), {
+      method: 'POST', headers: workActionHeaders(key), body: JSON.stringify({ p_limit: limit })
     }, fetchImpl);
     if (!Array.isArray(data) || data.length > limit) throw new Error('invalid');
     return data.map(validatePendingWorkActionRow);

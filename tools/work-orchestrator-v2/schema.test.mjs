@@ -45,6 +45,8 @@ test('foundation migration defines private atomic work and digest RPC contracts'
     'is_effective_p0_ack_v2',
     'upsert_work_item_v2',
     'request_work_item_action_v2',
+    'is_processable_pending_work_action_v2',
+    'list_pending_work_actions_v2',
     'list_actionable_work_v2',
     'claim_digest_run_v2',
     'prepare_digest_parts_v2',
@@ -71,6 +73,16 @@ test('foundation migration defines private atomic work and digest RPC contracts'
   assert.match(sql, /on conflict do nothing/i, 'partial active-key races use target-free conflict handling');
   assert.doesNotMatch(sql, /on conflict\s*\(\s*work_key\s*\)/i, 'partial index is not used as a full unique target');
   assert.match(sql, /for update/i, 'work and digest rows are locked before mutation');
+  assert.match(
+    sql,
+    /request_work_item_action_v2[\s\S]*?pg_advisory_xact_lock[\s\S]*?not exists\s*\([\s\S]*?digest_runs[\s\S]*?state in \('building','delivering','failed'\)[\s\S]*?manifest_prepared_at is not null[\s\S]*?jsonb_array_elements/i,
+    'Slack action requests are atomically fenced from unfinished prepared digest snapshots'
+  );
+  assert.match(
+    sql,
+    /is_processable_pending_work_action_v2[\s\S]*?v_type not in \('progress','snooze','ack_p0','dismiss'\)[\s\S]*?list_pending_work_actions_v2[\s\S]*?p_limit not between 1 and 50[\s\S]*?order by[\s\S]*?limit p_limit/i,
+    'processable pending actions are validated and filtered before the bounded limit'
+  );
   assert.match(sql, /jsonb_array_elements\(p_item_snapshot\)/i);
   assert.match(sql, /jsonb_array_elements\(v_run\.item_snapshot\)/i);
   assert.match(sql, /w\.version\s*=\s*\(s\.entry->>'version'\)::integer/i);
