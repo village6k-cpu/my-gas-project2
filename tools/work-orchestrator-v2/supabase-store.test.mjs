@@ -989,9 +989,11 @@ test('digest part cleanup claim and terminal record carry exact rotating lease g
   const fetch = createFetch([
     response({ data: { claimed: true, row: digestRow({
       state: 'delivered', lease_owner: null, lease_token: null, lease_expires_at: null,
-      delivered_at: '2026-08-29T03:00:05.000Z', previous_cleanup_state: 'deleting'
+      delivered_at: '2026-08-29T03:00:05.000Z', previous_cleanup_state: 'deleting',
+      previous_cleanup_error: null, previous_deleted_at: null
     }), part: deletingPart } }),
-    response({ data: { applied: true, row: cleanedRow, part: deletedPart } })
+    response({ data: { applied: true, row: cleanedRow, part: deletedPart } }),
+    response({ data: { applied: false, row: cleanedRow, part: deletedPart } })
   ]);
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
 
@@ -1004,8 +1006,14 @@ test('digest part cleanup claim and terminal record carry exact rotating lease g
     cleanupOwner: 'bridge:cleanup', cleanupToken: CLEANUP_TOKEN,
     expectedCleanupAttempts: 1, outcome: 'deleted'
   });
+  const retried = await store.recordDigestPartCleanup({
+    id: DIGEST_ID, previousDigestId: PREVIOUS_DIGEST_ID, previousPartId: PREVIOUS_PART_ID,
+    cleanupOwner: 'bridge:cleanup', cleanupToken: CLEANUP_TOKEN,
+    expectedCleanupAttempts: 1, outcome: 'deleted'
+  });
   assert.equal(claimed.claimed, true);
   assert.equal(result.applied, true);
+  assert.equal(retried.applied, false);
   assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/claim_digest_part_cleanup_v2');
   assert.equal(fetch.requests[1].url, 'https://supabase.example/rest/v1/rpc/record_digest_part_cleanup_v2');
   assert.deepEqual(JSON.parse(fetch.requests[1].init.body), {
@@ -1054,6 +1062,50 @@ test('recordDigestPartCleanup records a reviewed failure while the new digest re
   });
   assert.equal(result.row.state, 'delivered');
   assert.equal(result.row.previous_cleanup_error, 'rate_limited');
+});
+
+test('recordDigestPartCleanup accepts finite deleting priority and rejects impossible or content-bearing aggregates', async () => {
+  const input = {
+    id: DIGEST_ID, previousDigestId: PREVIOUS_DIGEST_ID, previousPartId: PREVIOUS_PART_ID,
+    cleanupOwner: 'bridge:cleanup', cleanupToken: CLEANUP_TOKEN,
+    expectedCleanupAttempts: 1, outcome: 'failed', error: 'rate_limited'
+  };
+  const failedPart = digestPartRow({
+    id: PREVIOUS_PART_ID, digest_run_id: PREVIOUS_DIGEST_ID,
+    part_count: 2, delivery_state: 'delivered', delivery_attempts: 1,
+    delivery_claimed_at: '2026-08-29T02:00:01.000Z', slack_channel_id: 'COLD',
+    slack_message_ts: '100.10', delivered_at: '2026-08-29T02:00:05.000Z',
+    cleanup_state: 'failed', cleanup_attempts: 1,
+    cleanup_attempted_at: '2026-08-29T03:00:10.000Z', cleanup_error: 'rate_limited'
+  });
+  const deletingAggregate = digestRow({
+    state: 'delivered', lease_owner: null, lease_token: null, lease_expires_at: null,
+    delivered_at: '2026-08-29T03:00:05.000Z', previous_cleanup_state: 'deleting',
+    previous_cleanup_error: null, previous_deleted_at: null
+  });
+  const fetch = createFetch([
+    response({ data: { applied: true, row: deletingAggregate, part: failedPart } }),
+    response({ data: {
+      applied: true, row: { ...deletingAggregate, previous_cleanup_error: serviceRoleKey }, part: failedPart
+    } }),
+    response({ data: {
+      applied: true, row: { ...deletingAggregate, previous_cleanup_state: 'idle' }, part: failedPart
+    } })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const accepted = await store.recordDigestPartCleanup(input);
+  assert.equal(accepted.row.previous_cleanup_state, 'deleting');
+  await assert.rejects(
+    store.recordDigestPartCleanup(input),
+    (error) => error.message === 'Work Orchestrator Supabase request failed: response invalid'
+      && !error.message.includes(serviceRoleKey)
+  );
+  await assert.rejects(store.recordDigestPartCleanup(input), {
+    message: 'Work Orchestrator Supabase request failed: response invalid'
+  });
 });
 
 test('store rejects missing configuration without revealing the service role key', () => {

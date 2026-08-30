@@ -807,6 +807,21 @@ test('foundation migration executes and exposes only service-role access in Post
     assert.equal(emptyFinalized.rows[0].result.updated_count, 0);
     assert.equal(emptyFinalized.rows[0].result.row.slack_channel_id, null);
     const currentId = emptyDigest.rows[0].result.row.id;
+    const secondSuccessor = await db.query(claimDigestSql, [
+      'slack:CINBOX', '2026-08-29T07:00:00.000Z', '2026-08-29T06:00:00.000Z',
+      '2026-08-29T07:00:00.000Z', 'bridge:second-successor', 120
+    ]);
+    assert.equal(secondSuccessor.rows[0].result.previous_digest.id, digestId);
+    await db.query(prepareSql, [
+      secondSuccessor.rows[0].result.row.id, 'bridge:second-successor',
+      secondSuccessor.rows[0].result.row.lease_token, '[]', '[]'
+    ]);
+    const secondSuccessorFinalized = await db.query(finalizeSql, [
+      secondSuccessor.rows[0].result.row.id, 'bridge:second-successor',
+      secondSuccessor.rows[0].result.row.lease_token, '2026-08-29T07:00:05.000Z'
+    ]);
+    assert.equal(secondSuccessorFinalized.rows[0].result.applied, true);
+    const secondSuccessorId = secondSuccessor.rows[0].result.row.id;
 
     const [cleanupWinner, cleanupLoser] = await Promise.all([
       db.query(claimCleanupSql, [currentId, digestId, ordinaryOne.id, 'bridge:cleanup-a', 120]),
@@ -815,14 +830,46 @@ test('foundation migration executes and exposes only service-role access in Post
     const cleanupClaims = [cleanupWinner.rows[0].result, cleanupLoser.rows[0].result];
     assert.equal(cleanupClaims.filter((result) => result.claimed).length, 1, 'only one cleanup worker wins');
     const winningCleanup = cleanupClaims.find((result) => result.claimed);
+    const expiringCleanup = await db.query(claimCleanupSql, [
+      secondSuccessorId, digestId, ordinaryTwo.id, 'bridge:cleanup-old', 120
+    ]);
     const firstCleanupFailure = await db.query(recordCleanupSql, [
       currentId, digestId, ordinaryOne.id, winningCleanup.part.cleanup_owner,
       winningCleanup.part.cleanup_token, 1, 'failed', 'rate_limited'
     ]);
     assert.equal(firstCleanupFailure.rows[0].result.applied, true);
     assert.equal(firstCleanupFailure.rows[0].result.row.state, 'delivered');
+    assert.equal(
+      firstCleanupFailure.rows[0].result.row.previous_cleanup_state,
+      'deleting',
+      'an in-flight sibling cleanup outranks the failed part in the aggregate'
+    );
     const { rows: priorAfterFailure } = await db.query(`select state from public.digest_runs where id = $1::uuid`, [digestId]);
     assert.equal(priorAfterFailure[0].state, 'delivered');
+    await db.query(`
+      update public.digest_message_parts set cleanup_expires_at = '2000-01-01T00:00:00.000Z'
+      where id = $1::uuid
+    `, [ordinaryTwo.id]);
+    const reclaimedCleanup = await db.query(claimCleanupSql, [
+      secondSuccessorId, digestId, ordinaryTwo.id, 'bridge:cleanup-new', 120
+    ]);
+    assert.equal(reclaimedCleanup.rows[0].result.claimed, true);
+    assert.equal(reclaimedCleanup.rows[0].result.part.cleanup_attempts, 2);
+    assert.notEqual(reclaimedCleanup.rows[0].result.part.cleanup_token, expiringCleanup.rows[0].result.part.cleanup_token);
+    const staleCleanupTerminal = await db.query(recordCleanupSql, [
+      secondSuccessorId, digestId, ordinaryTwo.id, 'bridge:cleanup-old',
+      expiringCleanup.rows[0].result.part.cleanup_token, 1, 'failed', 'cleanup_unconfirmed'
+    ]);
+    assert.equal(staleCleanupTerminal.rows[0].result.applied, false);
+    const secondCleanupTerminal = await db.query(recordCleanupSql, [
+      secondSuccessorId, digestId, ordinaryTwo.id, 'bridge:cleanup-new',
+      reclaimedCleanup.rows[0].result.part.cleanup_token, 2, 'already_absent', null
+    ]);
+    assert.equal(
+      secondCleanupTerminal.rows[0].result.row.previous_cleanup_state,
+      'failed',
+      'the aggregate converges to the remaining failed part once no cleanup is deleting'
+    );
     const retriedCleanup = await db.query(claimCleanupSql, [
       currentId, digestId, ordinaryOne.id, 'bridge:cleanup-retry', 120
     ]);
@@ -832,29 +879,6 @@ test('foundation migration executes and exposes only service-role access in Post
     await db.query(recordCleanupSql, [
       currentId, digestId, ordinaryOne.id, 'bridge:cleanup-retry',
       retriedCleanup.rows[0].result.part.cleanup_token, 2, 'deleted', null
-    ]);
-
-    const expiringCleanup = await db.query(claimCleanupSql, [
-      currentId, digestId, ordinaryTwo.id, 'bridge:cleanup-old', 120
-    ]);
-    await db.query(`
-      update public.digest_message_parts set cleanup_expires_at = '2000-01-01T00:00:00.000Z'
-      where id = $1::uuid
-    `, [ordinaryTwo.id]);
-    const reclaimedCleanup = await db.query(claimCleanupSql, [
-      currentId, digestId, ordinaryTwo.id, 'bridge:cleanup-new', 120
-    ]);
-    assert.equal(reclaimedCleanup.rows[0].result.claimed, true);
-    assert.equal(reclaimedCleanup.rows[0].result.part.cleanup_attempts, 2);
-    assert.notEqual(reclaimedCleanup.rows[0].result.part.cleanup_token, expiringCleanup.rows[0].result.part.cleanup_token);
-    const staleCleanupTerminal = await db.query(recordCleanupSql, [
-      currentId, digestId, ordinaryTwo.id, 'bridge:cleanup-old',
-      expiringCleanup.rows[0].result.part.cleanup_token, 1, 'failed', 'cleanup_unconfirmed'
-    ]);
-    assert.equal(staleCleanupTerminal.rows[0].result.applied, false);
-    await db.query(recordCleanupSql, [
-      currentId, digestId, ordinaryTwo.id, 'bridge:cleanup-new',
-      reclaimedCleanup.rows[0].result.part.cleanup_token, 2, 'already_absent', null
     ]);
     const reminderCleanup = await db.query(claimCleanupSql, [
       currentId, digestId, reminderOne.id, 'bridge:cleanup-final', 120
@@ -867,6 +891,33 @@ test('foundation migration executes and exposes only service-role access in Post
     assert.equal(completedCleanup.rows[0].result.row.previous_cleanup_state, 'deleted');
     const { rows: finalPrior } = await db.query(`select state from public.digest_runs where id = $1::uuid`, [digestId]);
     assert.equal(finalPrior[0].state, 'replaced');
+    const terminalClaimRepair = await db.query(claimCleanupSql, [
+      secondSuccessorId, digestId, reminderOne.id, 'bridge:terminal-repair', 120
+    ]);
+    assert.equal(terminalClaimRepair.rows[0].result.claimed, false);
+    assert.equal(
+      terminalClaimRepair.rows[0].result.row.previous_cleanup_state,
+      'deleted',
+      'a second delivered successor reconciles its aggregate when it encounters a terminal shared part'
+    );
+
+    await db.query(`update public.digest_runs set state = 'delivered' where id = $1::uuid`, [digestId]);
+    await db.query(`
+      update public.digest_runs
+      set previous_cleanup_state = 'deleting', previous_cleanup_error = null, previous_deleted_at = null
+      where id in ($1::uuid, $2::uuid)
+    `, [currentId, secondSuccessorId]);
+    const terminalRecordRepair = await db.query(recordCleanupSql, [
+      currentId, digestId, reminderOne.id, 'bridge:cleanup-final',
+      reminderCleanup.rows[0].result.part.cleanup_token, 1, 'already_absent', null
+    ]);
+    assert.equal(terminalRecordRepair.rows[0].result.applied, false, 'terminal retry remains idempotent');
+    assert.equal(terminalRecordRepair.rows[0].result.part.cleanup_state, 'already_absent');
+    assert.equal(terminalRecordRepair.rows[0].result.part.cleanup_attempts, 1);
+    assert.equal(terminalRecordRepair.rows[0].result.part.cleanup_token, null);
+    assert.equal(terminalRecordRepair.rows[0].result.row.previous_cleanup_state, 'deleted');
+    const { rows: repairedPrior } = await db.query(`select state from public.digest_runs where id = $1::uuid`, [digestId]);
+    assert.equal(repairedPrior[0].state, 'replaced', 'terminal re-entry repairs concurrent-equivalent missed replacement');
 
     assert.deepEqual({
       listedIds: failClosedP0.map((row) => row.id),

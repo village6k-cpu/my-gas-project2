@@ -1177,7 +1177,11 @@ create function public.claim_digest_part_cleanup_v2(
 ) returns jsonb language plpgsql security invoker set search_path = '' as $$
 declare
   v_row public.digest_runs%rowtype;
+  v_previous_row public.digest_runs%rowtype;
   v_part public.digest_message_parts%rowtype;
+  v_claimed boolean := false;
+  v_aggregate_state text;
+  v_aggregate_error text;
 begin
   if p_id is null or p_previous_digest_id is null or p_previous_part_id is null
     or p_id = p_previous_digest_id or p_cleanup_owner is null
@@ -1190,87 +1194,27 @@ begin
     or v_row.previous_digest_id is distinct from p_previous_digest_id then
     return jsonb_build_object('claimed', false, 'row', null, 'part', null);
   end if;
+  select * into v_previous_row from public.digest_runs
+  where id = p_previous_digest_id and state in ('delivered','replaced') for update;
+  if not found then return jsonb_build_object('claimed', false, 'row', null, 'part', null); end if;
   select * into v_part from public.digest_message_parts
   where id = p_previous_part_id and digest_run_id = p_previous_digest_id
     and delivery_state = 'delivered' and slack_channel_id is not null and slack_message_ts is not null
   for update;
   if not found then return jsonb_build_object('claimed', false, 'row', null, 'part', null); end if;
-  if v_part.cleanup_state in ('deleted','already_absent')
-    or (v_part.cleanup_state = 'deleting' and v_part.cleanup_expires_at > now()) then
-    return jsonb_build_object('claimed', false, 'row', to_jsonb(v_row), 'part', to_jsonb(v_part));
+  if v_part.cleanup_state in ('idle','failed')
+    or (v_part.cleanup_state = 'deleting' and v_part.cleanup_expires_at <= now()) then
+    update public.digest_message_parts
+    set cleanup_state = 'deleting', cleanup_attempts = cleanup_attempts + 1,
+        cleanup_owner = p_cleanup_owner, cleanup_token = gen_random_uuid(),
+        cleanup_expires_at = now() + make_interval(secs => p_lease_seconds),
+        cleanup_attempted_at = now(), cleaned_at = null, cleanup_error = null
+    where id = v_part.id and (
+      cleanup_state in ('idle','failed')
+      or (cleanup_state = 'deleting' and cleanup_expires_at <= now())
+    ) returning * into v_part;
+    v_claimed := found;
   end if;
-  if v_part.cleanup_state not in ('idle','failed','deleting') then
-    return jsonb_build_object('claimed', false, 'row', to_jsonb(v_row), 'part', to_jsonb(v_part));
-  end if;
-  update public.digest_message_parts
-  set cleanup_state = 'deleting', cleanup_attempts = cleanup_attempts + 1,
-      cleanup_owner = p_cleanup_owner, cleanup_token = gen_random_uuid(),
-      cleanup_expires_at = now() + make_interval(secs => p_lease_seconds),
-      cleanup_attempted_at = now(), cleaned_at = null, cleanup_error = null
-  where id = v_part.id and (
-    cleanup_state in ('idle','failed')
-    or (cleanup_state = 'deleting' and cleanup_expires_at <= now())
-  ) returning * into v_part;
-  if not found then return jsonb_build_object('claimed', false, 'row', to_jsonb(v_row), 'part', null); end if;
-  update public.digest_runs
-  set previous_cleanup_state = 'deleting', previous_cleanup_error = null
-  where id = v_row.id and state = 'delivered'
-  returning * into v_row;
-  return jsonb_build_object('claimed', true, 'row', to_jsonb(v_row), 'part', to_jsonb(v_part));
-end;
-$$;
-
-create function public.record_digest_part_cleanup_v2(
-  p_id uuid,
-  p_previous_digest_id uuid,
-  p_previous_part_id uuid,
-  p_cleanup_owner text,
-  p_cleanup_token uuid,
-  p_expected_cleanup_attempts integer,
-  p_outcome text,
-  p_error text
-) returns jsonb language plpgsql security invoker set search_path = '' as $$
-declare
-  v_row public.digest_runs%rowtype;
-  v_part public.digest_message_parts%rowtype;
-  v_aggregate_state text;
-  v_aggregate_error text;
-begin
-  if p_id is null or p_previous_digest_id is null or p_previous_part_id is null
-    or p_id = p_previous_digest_id or p_cleanup_owner is null
-    or length(p_cleanup_owner) not between 1 and 200 or p_cleanup_owner <> btrim(p_cleanup_owner)
-    or p_cleanup_token is null or p_expected_cleanup_attempts is null or p_expected_cleanup_attempts < 1
-    or p_outcome is null or p_outcome not in ('deleted','already_absent','failed')
-    or (p_outcome in ('deleted','already_absent') and p_error is not null)
-    or (p_outcome = 'failed' and (
-      p_error is null or p_error not in ('cant_delete_message','rate_limited','cleanup_unconfirmed','slack_api_error')
-    )) then
-    raise exception 'invalid digest part cleanup' using errcode = '22023';
-  end if;
-  select * into v_row from public.digest_runs where id = p_id for update;
-  if not found or v_row.state <> 'delivered'
-    or v_row.previous_digest_id is distinct from p_previous_digest_id then
-    return jsonb_build_object('applied', false, 'row', null, 'part', null);
-  end if;
-  select * into v_part from public.digest_message_parts
-  where id = p_previous_part_id and digest_run_id = p_previous_digest_id for update;
-  if not found or v_part.delivery_state <> 'delivered' or v_part.cleanup_state <> 'deleting'
-    or v_part.cleanup_owner is distinct from p_cleanup_owner
-    or v_part.cleanup_token is distinct from p_cleanup_token
-    or v_part.cleanup_attempts <> p_expected_cleanup_attempts
-    or v_part.cleanup_expires_at is null or v_part.cleanup_expires_at <= now() then
-    return jsonb_build_object('applied', false, 'row', null, 'part', null);
-  end if;
-  update public.digest_message_parts
-  set cleanup_state = p_outcome, cleanup_owner = null, cleanup_token = null,
-      cleanup_expires_at = null,
-      cleaned_at = case when p_outcome in ('deleted','already_absent') then now() else null end,
-      cleanup_error = case when p_outcome = 'failed' then p_error else null end
-  where id = v_part.id and cleanup_state = 'deleting'
-    and cleanup_owner = p_cleanup_owner and cleanup_token = p_cleanup_token
-    and cleanup_attempts = p_expected_cleanup_attempts
-  returning * into v_part;
-  if not found then return jsonb_build_object('applied', false, 'row', null, 'part', null); end if;
 
   if not exists (
     select 1 from public.digest_message_parts
@@ -1284,7 +1228,8 @@ begin
       where digest_run_id = p_previous_digest_id and delivery_state = 'delivered' and cleanup_state = 'deleted'
     ) then 'deleted' else 'already_absent' end into v_aggregate_state;
     update public.digest_runs
-    set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = null, previous_deleted_at = now()
+    set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = null,
+        previous_deleted_at = coalesce(previous_deleted_at, now())
     where id = v_row.id and state = 'delivered' and previous_digest_id = p_previous_digest_id
     returning * into v_row;
   else
@@ -1307,11 +1252,122 @@ begin
       v_aggregate_error := null;
     end if;
     update public.digest_runs
-    set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = v_aggregate_error
+    set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = v_aggregate_error,
+        previous_deleted_at = null
     where id = v_row.id and state = 'delivered' and previous_digest_id = p_previous_digest_id
     returning * into v_row;
   end if;
-  return jsonb_build_object('applied', true, 'row', to_jsonb(v_row), 'part', to_jsonb(v_part));
+  return jsonb_build_object('claimed', v_claimed, 'row', to_jsonb(v_row), 'part', to_jsonb(v_part));
+end;
+$$;
+
+create function public.record_digest_part_cleanup_v2(
+  p_id uuid,
+  p_previous_digest_id uuid,
+  p_previous_part_id uuid,
+  p_cleanup_owner text,
+  p_cleanup_token uuid,
+  p_expected_cleanup_attempts integer,
+  p_outcome text,
+  p_error text
+) returns jsonb language plpgsql security invoker set search_path = '' as $$
+declare
+  v_row public.digest_runs%rowtype;
+  v_previous_row public.digest_runs%rowtype;
+  v_part public.digest_message_parts%rowtype;
+  v_applied boolean := false;
+  v_aggregate_state text;
+  v_aggregate_error text;
+begin
+  if p_id is null or p_previous_digest_id is null or p_previous_part_id is null
+    or p_id = p_previous_digest_id or p_cleanup_owner is null
+    or length(p_cleanup_owner) not between 1 and 200 or p_cleanup_owner <> btrim(p_cleanup_owner)
+    or p_cleanup_token is null or p_expected_cleanup_attempts is null or p_expected_cleanup_attempts < 1
+    or p_outcome is null or p_outcome not in ('deleted','already_absent','failed')
+    or (p_outcome in ('deleted','already_absent') and p_error is not null)
+    or (p_outcome = 'failed' and (
+      p_error is null or p_error not in ('cant_delete_message','rate_limited','cleanup_unconfirmed','slack_api_error')
+    )) then
+    raise exception 'invalid digest part cleanup' using errcode = '22023';
+  end if;
+  select * into v_row from public.digest_runs where id = p_id for update;
+  if not found or v_row.state <> 'delivered'
+    or v_row.previous_digest_id is distinct from p_previous_digest_id then
+    return jsonb_build_object('applied', false, 'row', null, 'part', null);
+  end if;
+  select * into v_previous_row from public.digest_runs
+  where id = p_previous_digest_id and state in ('delivered','replaced') for update;
+  if not found then return jsonb_build_object('applied', false, 'row', null, 'part', null); end if;
+  select * into v_part from public.digest_message_parts
+  where id = p_previous_part_id and digest_run_id = p_previous_digest_id for update;
+  if not found or v_part.delivery_state <> 'delivered' then
+    return jsonb_build_object('applied', false, 'row', null, 'part', null);
+  end if;
+  if v_part.cleanup_state = 'deleting'
+    and v_part.cleanup_owner is not distinct from p_cleanup_owner
+    and v_part.cleanup_token is not distinct from p_cleanup_token
+    and v_part.cleanup_attempts = p_expected_cleanup_attempts
+    and v_part.cleanup_expires_at is not null and v_part.cleanup_expires_at > now() then
+    update public.digest_message_parts
+    set cleanup_state = p_outcome, cleanup_owner = null, cleanup_token = null,
+        cleanup_expires_at = null,
+        cleaned_at = case when p_outcome in ('deleted','already_absent') then now() else null end,
+        cleanup_error = case when p_outcome = 'failed' then p_error else null end
+    where id = v_part.id and cleanup_state = 'deleting'
+      and cleanup_owner = p_cleanup_owner and cleanup_token = p_cleanup_token
+      and cleanup_attempts = p_expected_cleanup_attempts
+    returning * into v_part;
+    if not found then return jsonb_build_object('applied', false, 'row', null, 'part', null); end if;
+    v_applied := true;
+  elsif v_part.cleanup_attempts <> p_expected_cleanup_attempts
+    or v_part.cleanup_state <> p_outcome
+    or (p_outcome = 'failed' and v_part.cleanup_error is distinct from p_error)
+    or (p_outcome in ('deleted','already_absent') and v_part.cleanup_error is not null) then
+    return jsonb_build_object('applied', false, 'row', null, 'part', null);
+  end if;
+
+  if not exists (
+    select 1 from public.digest_message_parts
+    where digest_run_id = p_previous_digest_id and delivery_state = 'delivered'
+      and cleanup_state not in ('deleted','already_absent')
+  ) then
+    update public.digest_runs set state = 'replaced'
+    where id = p_previous_digest_id and state = 'delivered';
+    select case when exists (
+      select 1 from public.digest_message_parts
+      where digest_run_id = p_previous_digest_id and delivery_state = 'delivered' and cleanup_state = 'deleted'
+    ) then 'deleted' else 'already_absent' end into v_aggregate_state;
+    update public.digest_runs
+    set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = null,
+        previous_deleted_at = coalesce(previous_deleted_at, now())
+    where id = v_row.id and state = 'delivered' and previous_digest_id = p_previous_digest_id
+    returning * into v_row;
+  else
+    if exists (
+      select 1 from public.digest_message_parts
+      where digest_run_id = p_previous_digest_id and delivery_state = 'delivered' and cleanup_state = 'deleting'
+    ) then
+      v_aggregate_state := 'deleting';
+      v_aggregate_error := null;
+    elsif exists (
+      select 1 from public.digest_message_parts
+      where digest_run_id = p_previous_digest_id and delivery_state = 'delivered' and cleanup_state = 'failed'
+    ) then
+      v_aggregate_state := 'failed';
+      select cleanup_error into v_aggregate_error from public.digest_message_parts
+      where digest_run_id = p_previous_digest_id and delivery_state = 'delivered' and cleanup_state = 'failed'
+      order by updated_at desc, id limit 1;
+    else
+      v_aggregate_state := 'idle';
+      v_aggregate_error := null;
+    end if;
+    update public.digest_runs
+    set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = v_aggregate_error,
+        previous_deleted_at = null
+    where id = v_row.id and state = 'delivered' and previous_digest_id = p_previous_digest_id
+    returning * into v_row;
+  end if;
+  return jsonb_build_object('applied', v_applied, 'row', to_jsonb(v_row), 'part', to_jsonb(v_part));
 end;
 $$;
 

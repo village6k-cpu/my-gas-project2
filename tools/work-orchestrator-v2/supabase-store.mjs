@@ -32,6 +32,7 @@ const DIGEST_FAILURE_CODES = new Set(['digest_build_failed', 'digest_delivery_fa
 const DIGEST_PART_KINDS = new Set(['ordinary', 'daily_reminder']);
 const DIGEST_PART_DELIVERY_FAILURE_CODES = new Set(['post_rejected', 'rate_limited', 'delivery_unconfirmed', 'slack_api_error']);
 const DIGEST_CLEANUP_FAILURE_CODES = new Set(['cant_delete_message', 'rate_limited', 'cleanup_unconfirmed', 'slack_api_error']);
+const DIGEST_CLEANUP_STATES = new Set(['idle', 'deleting', 'failed', 'deleted', 'already_absent']);
 const WORK_STATES = new Set(['open', 'in_progress', 'snoozed', 'resolved', 'dismissed']);
 const ACTIVE_WORK_STATES = new Set(['open', 'in_progress', 'snoozed']);
 const DIGEST_STATES = new Set(['building', 'delivering', 'delivered', 'failed', 'replaced']);
@@ -550,6 +551,25 @@ function failResponse(data, input) {
   return data;
 }
 
+function responseCleanupAggregate(row) {
+  if (!Object.hasOwn(row, 'previous_cleanup_state')
+    || !Object.hasOwn(row, 'previous_cleanup_error')
+    || !Object.hasOwn(row, 'previous_deleted_at')) throw responseInvalid();
+  const state = row.previous_cleanup_state;
+  if (!DIGEST_CLEANUP_STATES.has(state)) throw responseInvalid();
+  const deletedAt = responseTimestamp(row.previous_deleted_at, { nullable: true });
+  if (state === 'failed') {
+    if (!DIGEST_CLEANUP_FAILURE_CODES.has(row.previous_cleanup_error) || deletedAt !== null) {
+      throw responseInvalid();
+    }
+  } else if (state === 'deleted' || state === 'already_absent') {
+    if (row.previous_cleanup_error !== null || deletedAt === null) throw responseInvalid();
+  } else if (row.previous_cleanup_error !== null || deletedAt !== null) {
+    throw responseInvalid();
+  }
+  return state;
+}
+
 function cleanupClaimResponse(data, input) {
   if (!exactKeys(data, ['claimed', 'part', 'row']) || typeof data.claimed !== 'boolean') throw responseInvalid();
   if (data.row === null || data.part === null) {
@@ -560,16 +580,21 @@ function cleanupClaimResponse(data, input) {
   const part = responseDigestPartRow(data.part);
   if (row.id !== input.id || row.state !== 'delivered' || row.previous_digest_id !== input.previousDigestId
     || part.id !== input.previousPartId || part.digest_run_id !== input.previousDigestId) throw responseInvalid();
+  const aggregateState = responseCleanupAggregate(row);
   if (data.claimed && (part.cleanup_state !== 'deleting' || part.cleanup_owner !== input.cleanupOwner)) {
     throw responseInvalid();
   }
+  if (data.claimed && aggregateState !== 'deleting') throw responseInvalid();
+  if (!data.claimed && (part.cleanup_state === 'idle' || part.cleanup_state === 'failed')) throw responseInvalid();
+  if (!data.claimed && part.cleanup_state === 'deleting' && aggregateState !== 'deleting') throw responseInvalid();
+  if (!data.claimed && part.cleanup_state === 'deleted' && aggregateState === 'already_absent') throw responseInvalid();
   return data;
 }
 
 function cleanupTerminalResponse(data, input) {
   if (!exactKeys(data, ['applied', 'part', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
-  if (!data.applied) {
-    if (data.row !== null || data.part !== null) throw responseInvalid();
+  if (data.row === null || data.part === null) {
+    if (data.applied || data.row !== null || data.part !== null) throw responseInvalid();
     return data;
   }
   const { row } = responseDigestRow(data.row);
@@ -579,10 +604,13 @@ function cleanupTerminalResponse(data, input) {
     || part.cleanup_attempts !== input.expectedCleanupAttempts || part.cleanup_state !== input.outcome) {
     throw responseInvalid();
   }
+  const aggregateState = responseCleanupAggregate(row);
   if (input.outcome === 'failed') {
-    if (part.cleanup_error !== input.error || row.previous_cleanup_state !== 'failed'
-      || row.previous_cleanup_error !== input.error) throw responseInvalid();
-  } else if (part.cleanup_error !== null) {
+    if (part.cleanup_error !== input.error || !['deleting', 'failed'].includes(aggregateState)) {
+      throw responseInvalid();
+    }
+  } else if (part.cleanup_error !== null
+    || input.outcome === 'deleted' && aggregateState === 'already_absent') {
     throw responseInvalid();
   }
   return data;
