@@ -277,7 +277,7 @@ node --test tools\work-orchestrator-v2\digests.test.mjs
 
 - [ ] **Step 3: Implement deterministic pure functions**
 
-Define sections as `p0`, `overdue`, `urgent`, `carry_over`, `actionable`; cap each Slack message at 45 work rows and create additional numbered digest messages only when required. A run snapshot contains all rows across its messages. Escape Slack mrkdwn and reject malformed/unbounded active rows rather than emitting ambiguous actions. Selection and rendering are pure and never read the ambient clock.
+Define sections as `p0`, `overdue`, `urgent`, `carry_over`, `actionable`. Render each work row as one valid Slack `section` block plus one `actions` block, so cap each message part at 24 work rows: one header plus 48 row blocks stays below Slack's 50-block message maximum. Create additional numbered digest messages only when required. A run snapshot contains all rows across its messages. Escape Slack mrkdwn and reject malformed/unbounded active rows rather than emitting ambiguous actions. Selection and rendering are pure and never read the ambient clock.
 
 - [ ] **Step 4: Run GREEN and commit**
 
