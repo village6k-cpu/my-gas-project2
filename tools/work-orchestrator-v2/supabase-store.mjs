@@ -56,6 +56,10 @@ const DIGEST_FAILURE_CODES = new Set([
 const DIGEST_PART_KINDS = new Set(['ordinary', 'daily_reminder']);
 const DIGEST_PART_DELIVERY_FAILURE_CODES = new Set(['post_rejected', 'rate_limited', 'delivery_unconfirmed', 'slack_api_error']);
 const DIGEST_CLEANUP_FAILURE_CODES = new Set(['cant_delete_message', 'rate_limited', 'cleanup_unconfirmed', 'slack_api_error']);
+const NOTICE_CLEANUP_FAILURE_CODES = new Set([
+  'missing_coordinates', 'bot_identity_mismatch', 'cant_delete_message',
+  'rate_limited', 'cleanup_unconfirmed', 'slack_api_error'
+]);
 const DIGEST_CLEANUP_STATES = new Set(['idle', 'deleting', 'failed', 'deleted', 'already_absent']);
 const WORK_STATES = new Set(['open', 'in_progress', 'snoozed', 'resolved', 'dismissed']);
 const ACTIVE_WORK_STATES = new Set(['open', 'in_progress', 'snoozed']);
@@ -865,6 +869,53 @@ function cleanupTerminalResponse(data, input) {
     }
   } else if (part.cleanup_error !== null
     || input.outcome === 'deleted' && aggregateState === 'already_absent') {
+    throw responseInvalid();
+  }
+  return data;
+}
+
+function noticeCleanupClaimResponse(data, input) {
+  if (!Array.isArray(data) || data.length > input.limit) throw responseInvalid();
+  const seen = new Set();
+  return data.map((row) => {
+    if (!isRecord(row)) throw responseInvalid();
+    const id = responseUuid(row.id);
+    if (seen.has(id) || !['pending', 'blocked_p0'].includes(row.cleanup_state)
+      || !Number.isSafeInteger(row.cleanup_attempts) || row.cleanup_attempts < 0) throw responseInvalid();
+    seen.add(id);
+    const channel = responseText(row.slack_channel_id, 80, { nullable: true });
+    const timestamp = responseText(row.slack_message_ts, 100, { nullable: true });
+    if ((channel === null) !== (timestamp === null)
+      || channel !== null && (!SLACK_CHANNEL_ID.test(channel) || !SLACK_MESSAGE_TS.test(timestamp))) {
+      throw responseInvalid();
+    }
+    if (row.cleanup_state === 'pending') {
+      if (row.cleanup_attempts < 1 || responseText(row.cleanup_owner, 200) !== input.cleanupOwner
+        || responseUuid(row.cleanup_token) === null
+        || Date.parse(responseTimestamp(row.cleanup_expires_at)) <= Date.parse(input.now)) throw responseInvalid();
+    } else if (row.cleanup_owner !== null || row.cleanup_token !== null || row.cleanup_expires_at !== null) {
+      throw responseInvalid();
+    }
+    return row;
+  });
+}
+
+function noticeCleanupTerminalResponse(data, input) {
+  if (!isRecord(data) || typeof data.applied !== 'boolean') throw responseInvalid();
+  if (!data.applied) {
+    if (data.row !== null) throw responseInvalid();
+    return data;
+  }
+  const row = data.row;
+  if (!isRecord(row) || responseUuid(row.id) !== input.id
+    || row.cleanup_state !== input.state
+    || row.cleanup_attempts !== input.expectedCleanupAttempts
+    || row.cleanup_owner !== null || row.cleanup_token !== null || row.cleanup_expires_at !== null) {
+    throw responseInvalid();
+  }
+  if (input.state === 'deleted') {
+    if (row.cleanup_error !== null || row.cleanup_already_absent !== input.alreadyAbsent) throw responseInvalid();
+  } else if (row.cleanup_error !== input.error || row.cleanup_already_absent !== false) {
     throw responseInvalid();
   }
   return data;
@@ -1721,6 +1772,80 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         previousPartId: body.p_previous_part_id,
         expectedCleanupAttempts: body.p_expected_cleanup_attempts,
         outcome: body.p_outcome,
+        error: body.p_error
+      });
+    },
+    claimCleanupBatch: async (input = {}) => {
+      let body;
+      try {
+        if (!exactKeys(input, ['now', 'cleanupOwner', 'leaseSeconds', 'limit'])
+          || !Number.isSafeInteger(input.leaseSeconds) || input.leaseSeconds < 1 || input.leaseSeconds > 900
+          || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 25) throw invalidInput();
+        body = {
+          p_now: isoTimestamp(input.now),
+          p_cleanup_owner: exactText(input.cleanupOwner, 200),
+          p_lease_seconds: input.leaseSeconds,
+          p_limit: input.limit
+        };
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/claim_notice_cleanup_batch_v2', {
+        method: 'POST', body: safeJson(body)
+      });
+      return noticeCleanupClaimResponse(data, {
+        now: body.p_now, cleanupOwner: body.p_cleanup_owner, limit: body.p_limit
+      });
+    },
+    markCleanupDeleted: async (input = {}) => {
+      let body;
+      try {
+        if (!exactKeys(input, [
+          'id', 'cleanupOwner', 'cleanupToken', 'expectedCleanupAttempts', 'deletedAt', 'alreadyAbsent'
+        ]) || typeof input.alreadyAbsent !== 'boolean') throw invalidInput();
+        body = {
+          p_id: uuid(input.id),
+          p_cleanup_owner: exactText(input.cleanupOwner, 200),
+          p_cleanup_token: uuid(input.cleanupToken),
+          p_expected_cleanup_attempts: positiveVersion(input.expectedCleanupAttempts),
+          p_deleted_at: isoTimestamp(input.deletedAt),
+          p_already_absent: input.alreadyAbsent
+        };
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/mark_notice_cleanup_deleted_v2', {
+        method: 'POST', body: safeJson(body)
+      });
+      return noticeCleanupTerminalResponse(data, {
+        id: body.p_id, state: 'deleted', expectedCleanupAttempts: body.p_expected_cleanup_attempts,
+        alreadyAbsent: body.p_already_absent
+      });
+    },
+    markCleanupFailed: async (input = {}) => {
+      let body;
+      try {
+        if (!exactKeys(input, [
+          'id', 'cleanupOwner', 'cleanupToken', 'expectedCleanupAttempts', 'failedAt', 'error'
+        ])) throw invalidInput();
+        const error = exactText(input.error, 64);
+        if (!NOTICE_CLEANUP_FAILURE_CODES.has(error)) throw invalidInput();
+        body = {
+          p_id: uuid(input.id),
+          p_cleanup_owner: exactText(input.cleanupOwner, 200),
+          p_cleanup_token: uuid(input.cleanupToken),
+          p_expected_cleanup_attempts: positiveVersion(input.expectedCleanupAttempts),
+          p_failed_at: isoTimestamp(input.failedAt),
+          p_error: error
+        };
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/mark_notice_cleanup_failed_v2', {
+        method: 'POST', body: safeJson(body)
+      });
+      return noticeCleanupTerminalResponse(data, {
+        id: body.p_id, state: 'failed', expectedCleanupAttempts: body.p_expected_cleanup_attempts,
         error: body.p_error
       });
     },

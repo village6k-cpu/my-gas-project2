@@ -1639,3 +1639,87 @@ test('thrown fetch errors are bounded and never reveal the service role key', as
       && !error.message.includes('event-1')
   );
 });
+
+test('notice cleanup uses one durable bounded claim RPC and exact cleanup generations', async () => {
+  const pending = {
+    id: WORK_ID,
+    cleanup_state: 'pending',
+    cleanup_attempts: 2,
+    cleanup_owner: 'bridge:notice-cleanup',
+    cleanup_token: CLEANUP_TOKEN,
+    cleanup_expires_at: '2026-08-31T06:02:00.000Z',
+    slack_channel_id: 'CNOTICE',
+    slack_message_ts: '123.45'
+  };
+  const fetch = createFetch([
+    response({ data: [pending] }),
+    response({ data: { applied: true, row: {
+      ...pending, cleanup_state: 'deleted', cleanup_owner: null, cleanup_token: null,
+      cleanup_expires_at: null, cleanup_error: null, cleanup_already_absent: false
+    } } }),
+    response({ data: { applied: true, row: {
+      ...pending, cleanup_state: 'failed', cleanup_owner: null, cleanup_token: null,
+      cleanup_expires_at: null, cleanup_error: 'cant_delete_message', cleanup_already_absent: false
+    } } })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const claimed = await store.claimCleanupBatch({
+    now: '2026-08-31T06:00:00.000Z', cleanupOwner: 'bridge:notice-cleanup',
+    leaseSeconds: 120, limit: 25
+  });
+  const deleted = await store.markCleanupDeleted({
+    id: WORK_ID, cleanupOwner: 'bridge:notice-cleanup', cleanupToken: CLEANUP_TOKEN, expectedCleanupAttempts: 2,
+    deletedAt: '2026-08-31T06:00:01.000Z', alreadyAbsent: false
+  });
+  const failed = await store.markCleanupFailed({
+    id: WORK_ID, cleanupOwner: 'bridge:notice-cleanup', cleanupToken: CLEANUP_TOKEN, expectedCleanupAttempts: 2,
+    failedAt: '2026-08-31T06:00:01.000Z', error: 'cant_delete_message'
+  });
+
+  assert.equal(claimed.length, 1);
+  assert.equal(deleted.applied, true);
+  assert.equal(failed.applied, true);
+  assert.deepEqual(fetch.requests.map(({ url }) => url), [
+    'https://supabase.example/rest/v1/rpc/claim_notice_cleanup_batch_v2',
+    'https://supabase.example/rest/v1/rpc/mark_notice_cleanup_deleted_v2',
+    'https://supabase.example/rest/v1/rpc/mark_notice_cleanup_failed_v2'
+  ]);
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_now: '2026-08-31T06:00:00.000Z', p_cleanup_owner: 'bridge:notice-cleanup',
+    p_lease_seconds: 120, p_limit: 25
+  });
+  assert.deepEqual(JSON.parse(fetch.requests[1].init.body), {
+    p_id: WORK_ID, p_cleanup_owner: 'bridge:notice-cleanup',
+    p_cleanup_token: CLEANUP_TOKEN, p_expected_cleanup_attempts: 2,
+    p_deleted_at: '2026-08-31T06:00:01.000Z', p_already_absent: false
+  });
+  assert.deepEqual(JSON.parse(fetch.requests[2].init.body), {
+    p_id: WORK_ID, p_cleanup_owner: 'bridge:notice-cleanup',
+    p_cleanup_token: CLEANUP_TOKEN, p_expected_cleanup_attempts: 2,
+    p_failed_at: '2026-08-31T06:00:01.000Z', p_error: 'cant_delete_message'
+  });
+});
+
+test('notice cleanup store rejects unbounded batches and stale or content-bearing generations before fetch', async () => {
+  const fetch = createFetch();
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  await assert.rejects(store.claimCleanupBatch({
+    now: '2026-08-31T06:00:00.000Z', cleanupOwner: 'bridge:notice-cleanup',
+    leaseSeconds: 120, limit: 26
+  }), /input is invalid/i);
+  await assert.rejects(store.markCleanupDeleted({
+    id: WORK_ID, cleanupOwner: 'bridge:notice-cleanup', cleanupToken: 'not-a-token', expectedCleanupAttempts: 2,
+    deletedAt: '2026-08-31T06:00:01.000Z', alreadyAbsent: false
+  }), /input is invalid/i);
+  await assert.rejects(store.markCleanupFailed({
+    id: WORK_ID, cleanupOwner: 'bridge:notice-cleanup', cleanupToken: CLEANUP_TOKEN, expectedCleanupAttempts: 2,
+    failedAt: '2026-08-31T06:00:01.000Z', error: serviceRoleKey
+  }), (error) => /input is invalid/i.test(error.message) && !error.message.includes(serviceRoleKey));
+  assert.equal(fetch.requests.length, 0);
+});

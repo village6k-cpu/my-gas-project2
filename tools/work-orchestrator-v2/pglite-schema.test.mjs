@@ -8,6 +8,8 @@ import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 const migrationsDirectory = join(import.meta.dirname, '..', '..', 'supabase', 'migrations');
 const [migrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_foundation\.sql$/.test(name));
+const [noticeCleanupMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_notice_cleanup\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -18,6 +20,12 @@ async function createFoundationDatabase() {
     create extension if not exists pgcrypto;
   `);
   await db.exec(readFileSync(join(migrationsDirectory, migrationName), 'utf8'));
+  return db;
+}
+
+async function createNoticeCleanupDatabase() {
+  const db = await createFoundationDatabase();
+  await db.exec(readFileSync(join(migrationsDirectory, noticeCleanupMigrationName), 'utf8'));
   return db;
 }
 
@@ -1188,6 +1196,204 @@ test('foundation migration executes and exposes only service-role access in Post
       listedIds: p0ListRows.slice(2).map((row) => row.id),
       mergeStates: ['open', 'snoozed']
     }, 'SQL uses each operation cutoff for list and upsert wake eligibility');
+  } finally {
+    await db.close();
+  }
+});
+
+test('notice cleanup migration is service-role only with invoker and empty-search-path functions', async () => {
+  assert.ok(noticeCleanupMigrationName, 'the additive notice-cleanup migration must exist');
+  const db = await createNoticeCleanupDatabase();
+  try {
+    const { rows } = await db.query(`
+      select p.proname, p.prosecdef,
+        coalesce(array_to_string(p.proconfig, ','), '') as config,
+        has_function_privilege('anon', p.oid, 'execute') as anon_execute,
+        has_function_privilege('authenticated', p.oid, 'execute') as authenticated_execute,
+        has_function_privilege('service_role', p.oid, 'execute') as service_role_execute
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public'
+        and p.proname in (
+          'claim_notice_cleanup_batch_v2',
+          'mark_notice_cleanup_deleted_v2',
+          'mark_notice_cleanup_failed_v2'
+        )
+      order by p.proname
+    `);
+    assert.deepEqual(rows.map((row) => row.proname), [
+      'claim_notice_cleanup_batch_v2',
+      'mark_notice_cleanup_deleted_v2',
+      'mark_notice_cleanup_failed_v2'
+    ]);
+    assert.ok(rows.every((row) => row.prosecdef === false));
+    assert.ok(rows.every((row) => row.config === 'search_path=""'));
+    assert.ok(rows.every((row) => row.anon_execute === false));
+    assert.ok(rows.every((row) => row.authenticated_execute === false));
+    assert.ok(rows.every((row) => row.service_role_execute === true));
+  } finally {
+    await db.close();
+  }
+});
+
+test('notice cleanup atomically gates digest, TTL, and P0 eligibility with reclaimable exact leases', async () => {
+  assert.ok(noticeCleanupMigrationName, 'the additive notice-cleanup migration must exist');
+  const db = await createNoticeCleanupDatabase();
+  const ids = {
+    ordinary: '10000000-0000-4000-8000-000000000001',
+    missingDigest: '10000000-0000-4000-8000-000000000002',
+    autoDue: '10000000-0000-4000-8000-000000000003',
+    autoFuture: '10000000-0000-4000-8000-000000000004',
+    p0: '10000000-0000-4000-8000-000000000005',
+    missingCoordinate: '10000000-0000-4000-8000-000000000006',
+    ordinaryWork: '20000000-0000-4000-8000-000000000001',
+    missingWork: '20000000-0000-4000-8000-000000000002',
+    p0Work: '20000000-0000-4000-8000-000000000005',
+    missingCoordinateWork: '20000000-0000-4000-8000-000000000006'
+  };
+  try {
+    await db.query(`
+      insert into public.message_notification_receipts (
+        id, source, source_event_key, room_key, received_at, urgency,
+        notification_state, client_message_id, slack_channel_id, slack_message_ts,
+        delivered_at, cleanup_after, payload
+      ) values
+        ($1, 'kakao', 'event-ordinary', 'room:1', '2026-08-31T05:00:00Z', 'normal',
+          'delivered', gen_random_uuid(), 'CNOTICE', '101.1', '2026-08-31T05:00:01Z', null, '{}'),
+        ($2, 'kakao', 'event-no-digest', 'room:2', '2026-08-31T05:00:00Z', 'normal',
+          'delivered', gen_random_uuid(), 'CNOTICE', '102.1', '2026-08-31T05:00:01Z', null, '{}'),
+        ($3, 'kakao', 'event-auto-due', 'room:3', '2026-08-31T05:00:00Z', 'normal',
+          'cleanup_pending', gen_random_uuid(), 'CNOTICE', '103.1', '2026-08-31T05:00:01Z',
+          '2026-08-31T05:59:59Z', '{"automation_notice_update":{"status":"updated"}}'),
+        ($4, 'kakao', 'event-auto-future', 'room:4', '2026-08-31T05:00:00Z', 'normal',
+          'cleanup_pending', gen_random_uuid(), 'CNOTICE', '104.1', '2026-08-31T05:00:01Z',
+          '2026-08-31T07:00:00Z', '{"automation_notice_update":{"status":"updated"}}'),
+        ($5, 'kakao', 'event-p0', 'room:5', '2026-08-31T05:00:00Z', 'p0',
+          'delivered', gen_random_uuid(), 'CNOTICE', '105.1', '2026-08-31T05:00:01Z', null, '{}'),
+        ($6, 'kakao', 'event-missing-coordinate', 'room:6', '2026-08-31T05:00:00Z', 'normal',
+          'delivered', gen_random_uuid(), null, null, '2026-08-31T05:00:01Z', null, '{}')
+    `, [ids.ordinary, ids.missingDigest, ids.autoDue, ids.autoFuture, ids.p0, ids.missingCoordinate]);
+
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, source_event_keys, room_key, title, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload
+      ) values
+        ($1, 'work:ordinary', array['event-ordinary'], 'room:1', 'ordinary', 'human_review', 'normal', 'open', now(), now(), now(), '{}'),
+        ($2, 'work:no-digest', array['event-no-digest'], 'room:2', 'missing', 'human_review', 'normal', 'open', now(), now(), now(), '{}'),
+        ($3, 'work:p0', array['event-p0'], 'room:5', 'p0', 'human_review', 'p0', 'open', now(), now(), now(), '{}'),
+        ($4, 'work:missing-coordinate', array['event-missing-coordinate'], 'room:6', 'coordinate', 'human_review', 'normal', 'open', now(), now(), now(), '{}')
+    `, [ids.ordinaryWork, ids.missingWork, ids.p0Work, ids.missingCoordinateWork]);
+
+    await db.query(`
+      insert into public.digest_runs (
+        window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, slack_channel_id, slack_message_ts, delivered_at
+      ) values (
+        '2026-08-31T03:00:00Z', '2026-08-31T06:00:00Z', '2026-08-31T06:00:00Z',
+        'delivered', 'slack:CNOTICE', $1::jsonb, '2026-08-31T06:00:00Z',
+        'CNOTICE', '999.1', '2026-08-31T06:00:00Z'
+      )
+    `, [JSON.stringify([
+      { id: ids.ordinaryWork, version: 1, inclusionReason: 'actionable', priority: 'normal' },
+      { id: ids.p0Work, version: 1, inclusionReason: 'p0', priority: 'p0' },
+      { id: ids.missingCoordinateWork, version: 1, inclusionReason: 'actionable', priority: 'normal' }
+    ])]);
+
+    const first = await db.query(`
+      select public.claim_notice_cleanup_batch_v2(
+        '2026-08-31T06:00:00.000Z'::timestamptz, 'bridge:first', 120, 25
+      ) as result
+    `);
+    const firstRows = first.rows[0].result;
+    assert.deepEqual(firstRows.map((row) => row.id).sort(), [
+      ids.autoDue, ids.missingCoordinate, ids.ordinary, ids.p0
+    ].sort());
+    assert.equal(firstRows.find((row) => row.id === ids.p0).cleanup_state, 'blocked_p0');
+    assert.ok(firstRows.filter((row) => row.cleanup_state === 'pending')
+      .every((row) => row.cleanup_attempts === 1 && row.cleanup_owner === 'bridge:first' && row.cleanup_token));
+
+    const second = await db.query(`
+      select public.claim_notice_cleanup_batch_v2(
+        '2026-08-31T06:00:01.000Z'::timestamptz, 'bridge:second', 120, 25
+      ) as result
+    `);
+    assert.ok(second.rows[0].result.every((row) => row.cleanup_state === 'blocked_p0'));
+
+    const ordinaryClaim = firstRows.find((row) => row.id === ids.ordinary);
+    const reclaimed = await db.query(`
+      select public.claim_notice_cleanup_batch_v2(
+        '2026-08-31T06:02:01.000Z'::timestamptz, 'bridge:reclaim', 120, 25
+      ) as result
+    `);
+    const ordinaryReclaim = reclaimed.rows[0].result.find((row) => row.id === ids.ordinary);
+    assert.equal(ordinaryReclaim.cleanup_attempts, 2);
+    assert.equal(ordinaryReclaim.cleanup_owner, 'bridge:reclaim');
+    assert.notEqual(ordinaryReclaim.cleanup_token, ordinaryClaim.cleanup_token);
+
+    const stale = await db.query(`
+      select public.mark_notice_cleanup_deleted_v2(
+        $1::uuid, 'bridge:first', $2::uuid, 1,
+        '2026-08-31T06:02:02.000Z'::timestamptz, false
+      ) as result
+    `, [ids.ordinary, ordinaryClaim.cleanup_token]);
+    assert.deepEqual(stale.rows[0].result, { applied: false, row: null });
+
+    const settled = await db.query(`
+      select public.mark_notice_cleanup_deleted_v2(
+        $1::uuid, 'bridge:reclaim', $2::uuid, 2,
+        '2026-08-31T06:02:02.000Z'::timestamptz, true
+      ) as result
+    `, [ids.ordinary, ordinaryReclaim.cleanup_token]);
+    assert.equal(settled.rows[0].result.applied, true);
+    assert.equal(settled.rows[0].result.row.cleanup_state, 'deleted');
+    assert.equal(settled.rows[0].result.row.cleanup_already_absent, true);
+
+    const beforeFailure = await db.query(`
+      select notification_state, delivered_at from public.message_notification_receipts where id = $1::uuid
+    `, [ids.autoDue]);
+    const workBefore = await db.query(`select state, version from public.work_items_v2 where id = $1::uuid`, [ids.ordinaryWork]);
+    const autoClaim = reclaimed.rows[0].result.find((row) => row.id === ids.autoDue);
+    const failed = await db.query(`
+      select public.mark_notice_cleanup_failed_v2(
+        $1::uuid, 'bridge:reclaim', $2::uuid, 2,
+        '2026-08-31T06:02:02.000Z'::timestamptz, 'cant_delete_message'
+      ) as result
+    `, [ids.autoDue, autoClaim.cleanup_token]);
+    assert.equal(failed.rows[0].result.applied, true);
+    const afterFailure = await db.query(`
+      select notification_state, delivered_at from public.message_notification_receipts where id = $1::uuid
+    `, [ids.autoDue]);
+    const workAfter = await db.query(`select state, version from public.work_items_v2 where id = $1::uuid`, [ids.ordinaryWork]);
+    assert.deepEqual(afterFailure.rows[0], beforeFailure.rows[0]);
+    assert.deepEqual(workAfter.rows[0], workBefore.rows[0]);
+
+    await assert.rejects(
+      db.query(`select public.claim_notice_cleanup_batch_v2(now(), 'bridge:test', 120, 26)`),
+      /invalid/i
+    );
+    await assert.rejects(
+      db.query(`select public.claim_notice_cleanup_batch_v2(now(), 'bridge:test', 120, null)`),
+      /invalid/i
+    );
+    await assert.rejects(
+      db.query(`select public.claim_notice_cleanup_batch_v2(now(), 'bridge:test', null, 25)`),
+      /invalid/i
+    );
+    await assert.rejects(
+      db.query(`select public.mark_notice_cleanup_failed_v2(
+        $1::uuid, 'bridge:reclaim', $2::uuid, null,
+        '2026-08-31T06:02:02.000Z'::timestamptz, 'cant_delete_message'
+      )`, [ids.missingCoordinate, reclaimed.rows[0].result.find((row) => row.id === ids.missingCoordinate).cleanup_token]),
+      /invalid/i
+    );
+    await assert.rejects(
+      db.query(`select public.mark_notice_cleanup_failed_v2(
+        $1::uuid, 'bridge:reclaim', $2::uuid, 2,
+        '2026-08-31T06:02:02.000Z'::timestamptz, null
+      )`, [ids.missingCoordinate, reclaimed.rows[0].result.find((row) => row.id === ids.missingCoordinate).cleanup_token]),
+      /invalid/i
+    );
   } finally {
     await db.close();
   }

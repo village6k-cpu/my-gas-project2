@@ -5,6 +5,9 @@ const MAX_HISTORY_PAGES = 10;
 const SAFE_SLACK_CODE = /^[a-z0-9_]{1,64}$/;
 const SAFE_SLACK_CHANNEL = /^[A-Z0-9][A-Z0-9_-]{0,79}$/;
 const SLACK_TIMESTAMP = /^\d{1,16}\.\d{1,10}$/;
+const SLACK_USER_ID = /^U[A-Z0-9]{1,79}$/;
+const SLACK_BOT_ID = /^B[A-Z0-9]{1,79}$/;
+const SLACK_TEAM_ID = /^T[A-Z0-9]{1,79}$/;
 const INDETERMINATE_POST_CODES = new Set(['fatal_error', 'internal_error']);
 
 export class SlackApiError extends Error {
@@ -149,6 +152,16 @@ export function createSlackClient({ token, fetchImpl = fetch, timeoutMs = 7_000 
   };
 
   return {
+    async authTest() {
+      const payload = await call('auth.test', {});
+      if (typeof payload.user_id !== 'string' || !SLACK_USER_ID.test(payload.user_id)
+        || typeof payload.bot_id !== 'string' || !SLACK_BOT_ID.test(payload.bot_id)
+        || typeof payload.team_id !== 'string' || !SLACK_TEAM_ID.test(payload.team_id)) {
+        throw errorFor('auth.test', { kind: 'response', code: 'malformed_response' });
+      }
+      return { userId: payload.user_id, botId: payload.bot_id, teamId: payload.team_id };
+    },
+
     async postMessage({ channel, text, blocks, clientMsgId } = {}) {
       requiredString(channel, 'channel');
       requiredString(clientMsgId, 'clientMsgId');

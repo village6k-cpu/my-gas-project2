@@ -349,3 +349,37 @@ test('update and delete validate strict channel, timestamp, text, and blocks bef
   await assert.rejects(client.deleteMessage({ channel: 'CFOCUS', ts: 'bad' }), /timestamp/i);
   assert.equal(calls, 0);
 });
+
+test('authTest returns only the exact configured-token bot identity', async () => {
+  const requests = [];
+  const client = createSlackClient({
+    token,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, body: JSON.parse(init.body) });
+      return jsonResponse(200, { ok: true, user_id: 'UBOT123', bot_id: 'BBOT123', team_id: 'TTEAM123' });
+    }
+  });
+
+  assert.deepEqual(await client.authTest(), {
+    userId: 'UBOT123', botId: 'BBOT123', teamId: 'TTEAM123'
+  });
+  assert.deepEqual(requests, [{ url: 'https://slack.com/api/auth.test', body: {} }]);
+});
+
+test('authTest rejects malformed or human-token identities without leaking response fields', async (t) => {
+  for (const [name, payload] of [
+    ['missing bot id', { ok: true, user_id: 'U123', team_id: 'T123' }],
+    ['malformed user id', { ok: true, user_id: 'bad user', bot_id: 'B123', team_id: 'T123' }],
+    ['extra content does not repair identity', { ok: true, user_id: 'U123', bot_id: '', team_id: 'T123', user: token }]
+  ]) {
+    await t.test(name, async () => {
+      const client = createSlackClient({ token, fetchImpl: async () => jsonResponse(200, payload) });
+      await assert.rejects(
+        client.authTest(),
+        (error) => error instanceof SlackApiError
+          && error.code === 'malformed_response'
+          && !error.message.includes(token)
+      );
+    });
+  }
+});

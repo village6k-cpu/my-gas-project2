@@ -6,6 +6,8 @@ import test from 'node:test';
 const migrationsDirectory = join(import.meta.dirname, '..', '..', 'supabase', 'migrations');
 const migrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_foundation\.sql$/.test(name));
+const noticeCleanupMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_notice_cleanup\.sql$/.test(name));
 
 test('foundation migration enforces the private service-role schema contract', () => {
   assert.equal(migrationFiles.length, 1, 'exactly one foundation migration must exist');
@@ -187,4 +189,42 @@ test('foundation migration defines private atomic work and digest RPC contracts'
     /left\s*\(\s*p_payload->>'p0_acknowledged_at'\s*,\s*4\s*\)\s*=\s*'0000'/i,
     'the shared acknowledgement helper explicitly rejects year zero'
   );
+});
+
+test('additive notice cleanup migration defines a private atomic lease and terminal CAS boundary', () => {
+  assert.equal(noticeCleanupMigrationFiles.length, 1, 'exactly one additive notice-cleanup migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, noticeCleanupMigrationFiles[0]), 'utf8');
+  const functions = [
+    'claim_notice_cleanup_batch_v2',
+    'mark_notice_cleanup_deleted_v2',
+    'mark_notice_cleanup_failed_v2'
+  ];
+
+  assert.match(sql, /alter table public\.message_notification_receipts/i);
+  assert.match(sql, /cleanup_attempts integer/i);
+  assert.match(sql, /cleanup_owner text/i);
+  assert.match(sql, /cleanup_token uuid/i);
+  assert.match(sql, /cleanup_expires_at timestamptz/i);
+  assert.match(sql, /cleanup_attempted_at timestamptz/i);
+  assert.match(sql, /cleaned_at timestamptz/i);
+  assert.match(sql, /cleanup_already_absent boolean/i);
+  assert.match(sql, /p_limit[^;]*?between 1 and 25/i);
+  assert.match(sql, /for update skip locked/i);
+  assert.match(sql, /cleanup_expires_at\s*<=\s*p_now/i);
+  assert.match(sql, /public\.is_effective_p0_ack_v2\(/i, 'cleanup reuses canonical P0 acknowledgement semantics');
+  assert.match(sql, /public\.digest_runs[\s\S]*?jsonb_array_elements[\s\S]*?state in \('delivered','replaced'\)/i);
+  assert.match(sql, /public\.work_items_v2[\s\S]*?source_event_keys/i);
+  assert.match(sql, /notification_state\s*=\s*'cleanup_pending'[\s\S]*?cleanup_after\s*<=\s*p_now/i);
+
+  for (const functionName of functions) {
+    assert.match(sql, new RegExp(`create function public\\.${functionName}\\(`, 'i'));
+    assert.match(sql, new RegExp(
+      `create function public\\.${functionName}\\([\\s\\S]*?security invoker set search_path = ''`,
+      'i'
+    ));
+    assert.match(sql, new RegExp(`revoke execute on function public\\.${functionName}\\(`, 'i'));
+    assert.match(sql, new RegExp(`grant execute on function public\\.${functionName}\\(`, 'i'));
+  }
+  assert.doesNotMatch(sql, /create policy/i);
+  assert.doesNotMatch(sql, /conversations\.(?:history|replies)|search\.messages|admin\./i);
 });
