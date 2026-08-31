@@ -71,7 +71,7 @@ create table public.digest_runs (
   scheduled_at timestamptz not null,
   generation integer not null default 1 check (generation > 0),
   state text not null default 'building'
-    check (state in ('building','delivering','delivered','failed','replaced','retired')),
+    check (state in ('building','delivering','delivered','failed','diverged','replaced','retired')),
   destination_key text not null,
   item_snapshot jsonb not null default '[]'::jsonb check (jsonb_typeof(item_snapshot) = 'array'),
   manifest_prepared_at timestamptz,
@@ -111,7 +111,7 @@ create table public.digest_runs (
   ),
   check (state not in ('building','delivering','failed') or delivered_at is null),
   check (
-    state <> 'retired'
+    state not in ('diverged','retired')
     or (
       manifest_prepared_at is not null and delivered_at is null
       and slack_channel_id is null and slack_message_ts is null
@@ -758,7 +758,6 @@ declare
   v_row public.digest_runs%rowtype;
   v_previous public.digest_runs%rowtype;
   v_previous_json jsonb;
-  v_existing_found boolean;
   v_generation integer;
 begin
   if p_destination_key is null or length(p_destination_key) not between 1 and 500
@@ -773,44 +772,51 @@ begin
   end if;
 
   perform pg_advisory_xact_lock(hashtextextended('digest:' || p_destination_key, 91420260829));
-  select * into v_previous
-  from public.digest_runs
-  where destination_key = p_destination_key
-    and scheduled_at < p_scheduled_at
-    and state = 'delivered'
-    and exists (
-      select 1 from public.digest_message_parts as delivered_part
-      where delivered_part.digest_run_id = public.digest_runs.id
-        and delivered_part.delivery_state = 'delivered'
-    )
-  order by delivered_at desc, scheduled_at desc, id desc
-  limit 1
-  for share;
-  if found then
-    select jsonb_build_object(
-      'id', v_previous.id,
-      'parts', coalesce(jsonb_agg(jsonb_build_object(
-        'id', part.id,
-        'part_kind', part.part_kind,
-        'part_number', part.part_number,
-        'part_count', part.part_count,
-        'slack_channel_id', part.slack_channel_id,
-        'slack_message_ts', part.slack_message_ts
-      ) order by case part.part_kind when 'ordinary' then 0 else 1 end, part.part_number), '[]'::jsonb)
-    ) into v_previous_json
-    from public.digest_message_parts as part
-    where part.digest_run_id = v_previous.id and part.delivery_state = 'delivered';
-  end if;
-
   select * into v_row
   from public.digest_runs
   where destination_key = p_destination_key and scheduled_at = p_scheduled_at
   order by generation desc
   limit 1
   for update;
-  v_existing_found := found;
-  if not v_existing_found or v_row.state = 'retired' then
-    v_generation := case when v_existing_found then v_row.generation + 1 else 1 end;
+  if not found then
+    select * into v_previous
+    from public.digest_runs
+    where destination_key = p_destination_key
+      and scheduled_at < p_scheduled_at
+      and state = 'delivered'
+      and exists (
+        select 1 from public.digest_message_parts as delivered_part
+        where delivered_part.digest_run_id = public.digest_runs.id
+          and delivered_part.delivery_state = 'delivered'
+      )
+    order by delivered_at desc, scheduled_at desc, id desc
+    limit 1
+    for share;
+    v_generation := 1;
+  elsif v_row.state = 'diverged' then
+    v_previous := v_row;
+    v_generation := v_row.generation + 1;
+  else
+    v_generation := null;
+  end if;
+
+  if v_generation is not null then
+    if v_previous.id is not null then
+      select jsonb_build_object(
+        'id', v_previous.id,
+        'state', v_previous.state,
+        'parts', coalesce((select jsonb_agg(jsonb_build_object(
+          'id', part.id,
+          'part_kind', part.part_kind,
+          'part_number', part.part_number,
+          'part_count', part.part_count,
+          'slack_channel_id', part.slack_channel_id,
+          'slack_message_ts', part.slack_message_ts
+        ) order by case part.part_kind when 'ordinary' then 0 else 1 end, part.part_number)
+        from public.digest_message_parts as part
+        where part.digest_run_id = v_previous.id and part.delivery_state = 'delivered'), '[]'::jsonb)
+      ) into v_previous_json;
+    end if;
     insert into public.digest_runs (
       window_started_at, window_ended_at, scheduled_at, generation, state, destination_key,
       previous_digest_id, lease_owner, lease_token, lease_expires_at
@@ -825,20 +831,20 @@ begin
   if v_row.previous_digest_id is not null then
     select jsonb_build_object(
       'id', prior.id,
-      'parts', coalesce(jsonb_agg(jsonb_build_object(
+      'state', prior.state,
+      'parts', coalesce((select jsonb_agg(jsonb_build_object(
         'id', part.id,
         'part_kind', part.part_kind,
         'part_number', part.part_number,
         'part_count', part.part_count,
         'slack_channel_id', part.slack_channel_id,
         'slack_message_ts', part.slack_message_ts
-      ) order by case part.part_kind when 'ordinary' then 0 else 1 end, part.part_number), '[]'::jsonb)
+      ) order by case part.part_kind when 'ordinary' then 0 else 1 end, part.part_number)
+      from public.digest_message_parts as part
+      where part.digest_run_id = prior.id and part.delivery_state = 'delivered'), '[]'::jsonb)
     ) into v_previous_json
     from public.digest_runs as prior
-    join public.digest_message_parts as part on part.digest_run_id = prior.id
-      and part.delivery_state = 'delivered'
-    where prior.id = v_row.previous_digest_id
-    group by prior.id;
+    where prior.id = v_row.previous_digest_id;
   end if;
   if v_row.state in ('building','delivering','failed')
     and v_row.lease_expires_at is not null
@@ -1199,121 +1205,7 @@ begin
 end;
 $$;
 
-create function public.claim_digest_generation_part_cleanup_v2(
-  p_id uuid,
-  p_part_id uuid,
-  p_lease_owner text,
-  p_lease_token uuid,
-  p_cleanup_owner text,
-  p_lease_seconds integer
-) returns jsonb language plpgsql security invoker set search_path = '' as $$
-declare
-  v_run public.digest_runs%rowtype;
-  v_part public.digest_message_parts%rowtype;
-begin
-  if p_id is null or p_part_id is null or p_lease_owner is null
-    or length(p_lease_owner) not between 1 and 200 or p_lease_owner <> btrim(p_lease_owner)
-    or p_lease_token is null or p_cleanup_owner is null
-    or length(p_cleanup_owner) not between 1 and 200 or p_cleanup_owner <> btrim(p_cleanup_owner)
-    or p_lease_seconds is null or p_lease_seconds not between 1 and 900 then
-    raise exception 'invalid digest generation cleanup claim' using errcode = '22023';
-  end if;
-  select * into v_run from public.digest_runs where id = p_id for update;
-  if not found or v_run.state <> 'delivering' or v_run.manifest_prepared_at is null
-    or v_run.lease_owner is distinct from p_lease_owner
-    or v_run.lease_token is distinct from p_lease_token
-    or v_run.lease_expires_at is null or v_run.lease_expires_at <= now() then
-    return jsonb_build_object('claimed', false, 'row', null, 'part', null);
-  end if;
-  select * into v_part from public.digest_message_parts
-  where id = p_part_id and digest_run_id = p_id
-    and delivery_state in ('delivering','delivered')
-  for update;
-  if not found then return jsonb_build_object('claimed', false, 'row', null, 'part', null); end if;
-  if v_part.cleanup_state in ('deleted','already_absent')
-    or (v_part.cleanup_state = 'deleting' and v_part.cleanup_expires_at > now()) then
-    return jsonb_build_object('claimed', false, 'row', to_jsonb(v_run), 'part', to_jsonb(v_part));
-  end if;
-  update public.digest_message_parts
-  set cleanup_state = 'deleting', cleanup_attempts = cleanup_attempts + 1,
-      cleanup_owner = p_cleanup_owner, cleanup_token = gen_random_uuid(),
-      cleanup_expires_at = now() + make_interval(secs => p_lease_seconds),
-      cleanup_attempted_at = now(), cleaned_at = null, cleanup_error = null
-  where id = v_part.id and digest_run_id = p_id
-    and (
-      cleanup_state in ('idle','failed')
-      or (cleanup_state = 'deleting' and cleanup_expires_at <= now())
-    )
-  returning * into v_part;
-  return jsonb_build_object(
-    'claimed', found, 'row', case when found then to_jsonb(v_run) else null end,
-    'part', case when found then to_jsonb(v_part) else null end
-  );
-end;
-$$;
-
-create function public.record_digest_generation_part_cleanup_v2(
-  p_id uuid,
-  p_part_id uuid,
-  p_lease_owner text,
-  p_lease_token uuid,
-  p_cleanup_owner text,
-  p_cleanup_token uuid,
-  p_expected_cleanup_attempts integer,
-  p_outcome text,
-  p_error text
-) returns jsonb language plpgsql security invoker set search_path = '' as $$
-declare
-  v_run public.digest_runs%rowtype;
-  v_part public.digest_message_parts%rowtype;
-begin
-  if p_id is null or p_part_id is null or p_lease_owner is null
-    or length(p_lease_owner) not between 1 and 200 or p_lease_owner <> btrim(p_lease_owner)
-    or p_lease_token is null or p_cleanup_owner is null
-    or length(p_cleanup_owner) not between 1 and 200 or p_cleanup_owner <> btrim(p_cleanup_owner)
-    or p_cleanup_token is null or p_expected_cleanup_attempts is null or p_expected_cleanup_attempts < 1
-    or p_outcome not in ('deleted','already_absent','failed')
-    or (p_outcome = 'failed' and p_error not in (
-      'cant_delete_message','rate_limited','cleanup_unconfirmed','slack_api_error'
-    ))
-    or (p_outcome <> 'failed' and p_error is not null) then
-    raise exception 'invalid digest generation cleanup result' using errcode = '22023';
-  end if;
-  select * into v_run from public.digest_runs where id = p_id for update;
-  if not found or v_run.state <> 'delivering' or v_run.manifest_prepared_at is null
-    or v_run.lease_owner is distinct from p_lease_owner
-    or v_run.lease_token is distinct from p_lease_token
-    or v_run.lease_expires_at is null or v_run.lease_expires_at <= now() then
-    return jsonb_build_object('applied', false, 'row', null, 'part', null);
-  end if;
-  select * into v_part from public.digest_message_parts
-  where id = p_part_id and digest_run_id = p_id for update;
-  if not found or v_part.delivery_state not in ('delivering','delivered')
-    or (p_outcome = 'deleted' and v_part.delivery_state <> 'delivered')
-    or v_part.cleanup_state <> 'deleting'
-    or v_part.cleanup_owner is distinct from p_cleanup_owner
-    or v_part.cleanup_token is distinct from p_cleanup_token
-    or v_part.cleanup_attempts <> p_expected_cleanup_attempts
-    or v_part.cleanup_expires_at is null or v_part.cleanup_expires_at <= now() then
-    return jsonb_build_object('applied', false, 'row', null, 'part', null);
-  end if;
-  update public.digest_message_parts
-  set cleanup_state = p_outcome, cleanup_owner = null, cleanup_token = null,
-      cleanup_expires_at = null,
-      cleaned_at = case when p_outcome in ('deleted','already_absent') then now() else null end,
-      cleanup_error = case when p_outcome = 'failed' then p_error else null end
-  where id = v_part.id and digest_run_id = p_id and cleanup_state = 'deleting'
-    and cleanup_owner = p_cleanup_owner and cleanup_token = p_cleanup_token
-    and cleanup_attempts = p_expected_cleanup_attempts and cleanup_expires_at > now()
-  returning * into v_part;
-  return jsonb_build_object(
-    'applied', found, 'row', case when found then to_jsonb(v_run) else null end,
-    'part', case when found then to_jsonb(v_part) else null end
-  );
-end;
-$$;
-
-create function public.retire_digest_generation_v2(
+create function public.mark_digest_generation_diverged_v2(
   p_id uuid,
   p_lease_owner text,
   p_lease_token uuid,
@@ -1325,7 +1217,7 @@ begin
   if p_id is null or p_lease_owner is null
     or length(p_lease_owner) not between 1 and 200 or p_lease_owner <> btrim(p_lease_owner)
     or p_lease_token is null or p_error <> 'digest_generation_diverged' then
-    raise exception 'invalid digest generation retirement' using errcode = '22023';
+    raise exception 'invalid digest generation divergence' using errcode = '22023';
   end if;
   select * into v_run from public.digest_runs where id = p_id for update;
   if not found or v_run.state <> 'delivering' or v_run.manifest_prepared_at is null
@@ -1335,17 +1227,12 @@ begin
     or exists (
       select 1 from public.digest_message_parts
       where digest_run_id = v_run.id
-        and delivery_state in ('delivering','delivered')
-        and cleanup_state not in ('deleted','already_absent')
-    )
-    or exists (
-      select 1 from public.digest_message_parts
-      where digest_run_id = v_run.id and cleanup_state in ('deleting','failed')
+        and (delivery_state = 'delivering' or cleanup_state <> 'idle')
     ) then
     return jsonb_build_object('applied', false, 'row', null);
   end if;
   update public.digest_runs
-  set state = 'retired', lease_owner = null, lease_token = null, lease_expires_at = null,
+  set state = 'diverged', lease_owner = null, lease_token = null, lease_expires_at = null,
       error = p_error
   where id = v_run.id and state = 'delivering'
     and lease_owner = p_lease_owner and lease_token = p_lease_token
@@ -1363,6 +1250,7 @@ create function public.finalize_digest_run_v2(
 declare
   v_run public.digest_runs%rowtype;
   v_updated_count integer := 0;
+  v_reconciled_count integer;
   v_slack_channel_id text;
   v_slack_message_ts text;
 begin
@@ -1442,6 +1330,40 @@ begin
   where id = v_run.id and state = 'delivering' and lease_owner = p_lease_owner and lease_token = p_lease_token
   returning * into v_run;
   if not found then raise exception 'digest lease changed while locked' using errcode = '40001'; end if;
+  loop
+    with recursive cleanup_chain as (
+      select v_run.previous_digest_id as digest_id, 1 as depth
+      where v_run.previous_digest_id is not null
+      union all
+      select previous.previous_digest_id, chain.depth + 1
+      from cleanup_chain chain
+      join public.digest_runs previous on previous.id = chain.digest_id
+      where previous.state in ('diverged','retired') and previous.previous_digest_id is not null
+        and chain.depth < 50
+    )
+    update public.digest_runs candidate
+    set state = 'retired'
+    where candidate.id in (select digest_id from cleanup_chain)
+      and candidate.state = 'diverged'
+      and not exists (
+        select 1 from public.digest_message_parts own_part
+        where own_part.digest_run_id = candidate.id and own_part.delivery_state = 'delivered'
+          and own_part.cleanup_state not in ('deleted','already_absent')
+      )
+      and (
+        candidate.previous_digest_id is null
+        or (
+          candidate.previous_cleanup_state in ('deleted','already_absent')
+          and exists (
+            select 1 from public.digest_runs inherited
+            where inherited.id = candidate.previous_digest_id
+              and inherited.state in ('replaced','retired')
+          )
+        )
+      );
+    get diagnostics v_reconciled_count = row_count;
+    exit when v_reconciled_count = 0;
+  end loop;
   return jsonb_build_object('applied', true, 'row', to_jsonb(v_run), 'updated_count', v_updated_count);
 end;
 $$;
@@ -1462,7 +1384,7 @@ begin
     or p_error is null
     or p_error not in (
       'digest_build_failed','digest_delivery_failed','delivery_unconfirmed',
-      'digest_eligible_overflow','digest_generation_cleanup_failed'
+      'digest_eligible_overflow'
     ) then
     raise exception 'invalid digest failure' using errcode = '22023';
   end if;
@@ -1498,20 +1420,60 @@ begin
     raise exception 'invalid digest cleanup backlog' using errcode = '22023';
   end if;
 
-  with eligible_successors as (
+  with recursive cleanup_chain as (
     select successor.id as successor_digest_id,
+      successor.id as link_owner_id,
       successor.previous_digest_id,
       successor.previous_cleanup_state,
-      successor.scheduled_at
+      successor.scheduled_at as successor_scheduled_at,
+      successor.generation as successor_generation,
+      1 as depth
     from public.digest_runs successor
-    join public.digest_runs previous on previous.id = successor.previous_digest_id
     where successor.destination_key = p_destination_key
       and successor.state in ('delivered','replaced')
       and successor.delivered_at is not null
       and successor.manifest_prepared_at is not null
-      and successor.id <> successor.previous_digest_id
+      and successor.previous_digest_id is not null
+    union all
+    select chain.successor_digest_id,
+      previous.id as link_owner_id,
+      previous.previous_digest_id,
+      previous.previous_cleanup_state,
+      chain.successor_scheduled_at,
+      chain.successor_generation,
+      chain.depth + 1
+    from cleanup_chain chain
+    join public.digest_runs previous on previous.id = chain.previous_digest_id
+    where previous.state = 'diverged'
+      and previous.previous_digest_id is not null
+      and chain.depth < 50
+  ), eligible_targets as (
+    select chain.successor_digest_id,
+      chain.link_owner_id,
+      chain.previous_digest_id,
+      chain.previous_cleanup_state,
+      chain.successor_scheduled_at,
+      chain.depth
+    from cleanup_chain chain
+    join public.digest_runs previous on previous.id = chain.previous_digest_id
+    where previous.destination_key = p_destination_key
+      and previous.state in ('delivered','diverged','replaced')
+      and previous.manifest_prepared_at is not null
       and (
-        successor.previous_cleanup_state in ('idle','deleting','failed')
+        previous.scheduled_at < chain.successor_scheduled_at
+        or (previous.scheduled_at = chain.successor_scheduled_at
+          and previous.generation < chain.successor_generation)
+      )
+      and (previous.state = 'diverged' or previous.delivered_at is not null)
+      and exists (
+        select 1 from public.digest_message_parts exact_part
+        where exact_part.digest_run_id = previous.id
+          and exact_part.delivery_state = 'delivered'
+          and exact_part.slack_channel_id is not null
+          and exact_part.slack_message_ts is not null
+      )
+      and (
+        chain.previous_cleanup_state in ('idle','deleting','failed')
         or exists (
           select 1 from public.digest_message_parts pending_part
           where pending_part.digest_run_id = previous.id
@@ -1521,24 +1483,12 @@ begin
             and pending_part.cleanup_state in ('idle','deleting','failed')
         )
       )
-      and previous.destination_key = successor.destination_key
-      and previous.state in ('delivered','replaced')
-      and previous.delivered_at is not null
-      and previous.manifest_prepared_at is not null
-      and previous.scheduled_at < successor.scheduled_at
-      and exists (
-        select 1 from public.digest_message_parts pending_part
-        where pending_part.digest_run_id = previous.id
-          and pending_part.delivery_state = 'delivered'
-          and pending_part.slack_channel_id is not null
-          and pending_part.slack_message_ts is not null
-      )
-    order by successor.scheduled_at, successor.id
+    order by chain.successor_scheduled_at, chain.successor_digest_id, chain.depth
     limit p_limit
   ), backlog_entries as (
     select eligible.*,
       parts.payload as parts
-    from eligible_successors eligible
+    from eligible_targets eligible
     cross join lateral (
       select jsonb_agg(bounded_part.payload order by bounded_part.kind_order,
         bounded_part.part_number, bounded_part.previous_part_id) as payload
@@ -1572,7 +1522,7 @@ begin
     'previous_digest_id', entry.previous_digest_id,
     'previous_cleanup_state', entry.previous_cleanup_state,
     'parts', entry.parts
-  ) order by entry.scheduled_at, entry.successor_digest_id), '[]'::jsonb)
+  ) order by entry.successor_scheduled_at, entry.successor_digest_id, entry.depth), '[]'::jsonb)
   into v_result
   from backlog_entries entry;
   return v_result;
@@ -1588,11 +1538,14 @@ create function public.claim_digest_part_cleanup_v2(
 ) returns jsonb language plpgsql security invoker set search_path = '' as $$
 declare
   v_row public.digest_runs%rowtype;
+  v_link_row public.digest_runs%rowtype;
   v_previous_row public.digest_runs%rowtype;
   v_part public.digest_message_parts%rowtype;
+  v_link_owner_id uuid;
   v_claimed boolean := false;
   v_aggregate_state text;
   v_aggregate_error text;
+  v_reconciled_count integer;
 begin
   if p_id is null or p_previous_digest_id is null or p_previous_part_id is null
     or p_id = p_previous_digest_id or p_cleanup_owner is null
@@ -1602,16 +1555,39 @@ begin
   end if;
   select * into v_row from public.digest_runs where id = p_id for update;
   if not found or v_row.state not in ('delivered','replaced')
-    or v_row.delivered_at is null or v_row.manifest_prepared_at is null
-    or v_row.previous_digest_id is distinct from p_previous_digest_id then
+    or v_row.delivered_at is null or v_row.manifest_prepared_at is null then
+    return jsonb_build_object('claimed', false, 'row', null, 'part', null);
+  end if;
+  with recursive cleanup_chain as (
+    select v_row.id as link_owner_id, v_row.previous_digest_id, 1 as depth
+    where v_row.previous_digest_id is not null
+    union all
+    select previous.id, previous.previous_digest_id, chain.depth + 1
+    from cleanup_chain chain
+    join public.digest_runs previous on previous.id = chain.previous_digest_id
+    where previous.state = 'diverged' and previous.previous_digest_id is not null
+      and chain.depth < 50
+  )
+  select link_owner_id into v_link_owner_id from cleanup_chain
+  where previous_digest_id = p_previous_digest_id
+  order by depth limit 1;
+  if v_link_owner_id is null then
+    return jsonb_build_object('claimed', false, 'row', null, 'part', null);
+  end if;
+  select * into v_link_row from public.digest_runs where id = v_link_owner_id for update;
+  if not found or v_link_row.previous_digest_id is distinct from p_previous_digest_id
+    or v_link_row.state not in ('delivered','diverged','replaced') then
     return jsonb_build_object('claimed', false, 'row', null, 'part', null);
   end if;
   select * into v_previous_row from public.digest_runs
-  where id = p_previous_digest_id and state in ('delivered','replaced') for update;
+  where id = p_previous_digest_id and state in ('delivered','diverged','replaced') for update;
   if not found
-    or v_previous_row.delivered_at is null or v_previous_row.manifest_prepared_at is null
+    or (v_previous_row.state <> 'diverged' and v_previous_row.delivered_at is null)
+    or v_previous_row.manifest_prepared_at is null
     or v_previous_row.destination_key is distinct from v_row.destination_key
-    or v_previous_row.scheduled_at >= v_row.scheduled_at then
+    or v_previous_row.scheduled_at > v_row.scheduled_at
+    or (v_previous_row.scheduled_at = v_row.scheduled_at
+      and v_previous_row.generation >= v_row.generation) then
     return jsonb_build_object('claimed', false, 'row', null, 'part', null);
   end if;
   select * into v_part from public.digest_message_parts
@@ -1647,8 +1623,9 @@ begin
     update public.digest_runs
     set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = null,
         previous_deleted_at = coalesce(previous_deleted_at, now())
-    where id = v_row.id and state in ('delivered','replaced') and previous_digest_id = p_previous_digest_id
-    returning * into v_row;
+    where id = v_link_owner_id and state in ('delivered','diverged','replaced')
+      and previous_digest_id = p_previous_digest_id
+    returning * into v_link_row;
   else
     if exists (
       select 1 from public.digest_message_parts
@@ -1671,9 +1648,45 @@ begin
     update public.digest_runs
     set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = v_aggregate_error,
         previous_deleted_at = null
-    where id = v_row.id and state in ('delivered','replaced') and previous_digest_id = p_previous_digest_id
-    returning * into v_row;
+    where id = v_link_owner_id and state in ('delivered','diverged','replaced')
+      and previous_digest_id = p_previous_digest_id
+    returning * into v_link_row;
   end if;
+  loop
+    with recursive cleanup_chain as (
+      select v_row.previous_digest_id as digest_id, 1 as depth
+      where v_row.previous_digest_id is not null
+      union all
+      select previous.previous_digest_id, chain.depth + 1
+      from cleanup_chain chain
+      join public.digest_runs previous on previous.id = chain.digest_id
+      where previous.state in ('diverged','retired') and previous.previous_digest_id is not null
+        and chain.depth < 50
+    )
+    update public.digest_runs candidate
+    set state = 'retired'
+    where candidate.id in (select digest_id from cleanup_chain)
+      and candidate.state = 'diverged'
+      and not exists (
+        select 1 from public.digest_message_parts own_part
+        where own_part.digest_run_id = candidate.id and own_part.delivery_state = 'delivered'
+          and own_part.cleanup_state not in ('deleted','already_absent')
+      )
+      and (
+        candidate.previous_digest_id is null
+        or (
+          candidate.previous_cleanup_state in ('deleted','already_absent')
+          and exists (
+            select 1 from public.digest_runs inherited
+            where inherited.id = candidate.previous_digest_id
+              and inherited.state in ('replaced','retired')
+          )
+        )
+      );
+    get diagnostics v_reconciled_count = row_count;
+    exit when v_reconciled_count = 0;
+  end loop;
+  select * into v_row from public.digest_runs where id = p_id;
   return jsonb_build_object('claimed', v_claimed, 'row', to_jsonb(v_row), 'part', to_jsonb(v_part));
 end;
 $$;
@@ -1690,11 +1703,14 @@ create function public.record_digest_part_cleanup_v2(
 ) returns jsonb language plpgsql security invoker set search_path = '' as $$
 declare
   v_row public.digest_runs%rowtype;
+  v_link_row public.digest_runs%rowtype;
   v_previous_row public.digest_runs%rowtype;
   v_part public.digest_message_parts%rowtype;
+  v_link_owner_id uuid;
   v_applied boolean := false;
   v_aggregate_state text;
   v_aggregate_error text;
+  v_reconciled_count integer;
 begin
   if p_id is null or p_previous_digest_id is null or p_previous_part_id is null
     or p_id = p_previous_digest_id or p_cleanup_owner is null
@@ -1709,16 +1725,39 @@ begin
   end if;
   select * into v_row from public.digest_runs where id = p_id for update;
   if not found or v_row.state not in ('delivered','replaced')
-    or v_row.delivered_at is null or v_row.manifest_prepared_at is null
-    or v_row.previous_digest_id is distinct from p_previous_digest_id then
+    or v_row.delivered_at is null or v_row.manifest_prepared_at is null then
+    return jsonb_build_object('applied', false, 'row', null, 'part', null);
+  end if;
+  with recursive cleanup_chain as (
+    select v_row.id as link_owner_id, v_row.previous_digest_id, 1 as depth
+    where v_row.previous_digest_id is not null
+    union all
+    select previous.id, previous.previous_digest_id, chain.depth + 1
+    from cleanup_chain chain
+    join public.digest_runs previous on previous.id = chain.previous_digest_id
+    where previous.state in ('diverged','retired') and previous.previous_digest_id is not null
+      and chain.depth < 50
+  )
+  select link_owner_id into v_link_owner_id from cleanup_chain
+  where previous_digest_id = p_previous_digest_id
+  order by depth limit 1;
+  if v_link_owner_id is null then
+    return jsonb_build_object('applied', false, 'row', null, 'part', null);
+  end if;
+  select * into v_link_row from public.digest_runs where id = v_link_owner_id for update;
+  if not found or v_link_row.previous_digest_id is distinct from p_previous_digest_id
+    or v_link_row.state not in ('delivered','diverged','replaced','retired') then
     return jsonb_build_object('applied', false, 'row', null, 'part', null);
   end if;
   select * into v_previous_row from public.digest_runs
-  where id = p_previous_digest_id and state in ('delivered','replaced') for update;
+  where id = p_previous_digest_id and state in ('delivered','diverged','replaced','retired') for update;
   if not found
-    or v_previous_row.delivered_at is null or v_previous_row.manifest_prepared_at is null
+    or (v_previous_row.state not in ('diverged','retired') and v_previous_row.delivered_at is null)
+    or v_previous_row.manifest_prepared_at is null
     or v_previous_row.destination_key is distinct from v_row.destination_key
-    or v_previous_row.scheduled_at >= v_row.scheduled_at then
+    or v_previous_row.scheduled_at > v_row.scheduled_at
+    or (v_previous_row.scheduled_at = v_row.scheduled_at
+      and v_previous_row.generation >= v_row.generation) then
     return jsonb_build_object('applied', false, 'row', null, 'part', null);
   end if;
   select * into v_part from public.digest_message_parts
@@ -1763,8 +1802,9 @@ begin
     update public.digest_runs
     set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = null,
         previous_deleted_at = coalesce(previous_deleted_at, now())
-    where id = v_row.id and state in ('delivered','replaced') and previous_digest_id = p_previous_digest_id
-    returning * into v_row;
+    where id = v_link_owner_id and state in ('delivered','diverged','replaced','retired')
+      and previous_digest_id = p_previous_digest_id
+    returning * into v_link_row;
   else
     if exists (
       select 1 from public.digest_message_parts
@@ -1787,9 +1827,45 @@ begin
     update public.digest_runs
     set previous_cleanup_state = v_aggregate_state, previous_cleanup_error = v_aggregate_error,
         previous_deleted_at = null
-    where id = v_row.id and state in ('delivered','replaced') and previous_digest_id = p_previous_digest_id
-    returning * into v_row;
+    where id = v_link_owner_id and state in ('delivered','diverged','replaced','retired')
+      and previous_digest_id = p_previous_digest_id
+    returning * into v_link_row;
   end if;
+  loop
+    with recursive cleanup_chain as (
+      select v_row.previous_digest_id as digest_id, 1 as depth
+      where v_row.previous_digest_id is not null
+      union all
+      select previous.previous_digest_id, chain.depth + 1
+      from cleanup_chain chain
+      join public.digest_runs previous on previous.id = chain.digest_id
+      where previous.state in ('diverged','retired') and previous.previous_digest_id is not null
+        and chain.depth < 50
+    )
+    update public.digest_runs candidate
+    set state = 'retired'
+    where candidate.id in (select digest_id from cleanup_chain)
+      and candidate.state = 'diverged'
+      and not exists (
+        select 1 from public.digest_message_parts own_part
+        where own_part.digest_run_id = candidate.id and own_part.delivery_state = 'delivered'
+          and own_part.cleanup_state not in ('deleted','already_absent')
+      )
+      and (
+        candidate.previous_digest_id is null
+        or (
+          candidate.previous_cleanup_state in ('deleted','already_absent')
+          and exists (
+            select 1 from public.digest_runs inherited
+            where inherited.id = candidate.previous_digest_id
+              and inherited.state in ('replaced','retired')
+          )
+        )
+      );
+    get diagnostics v_reconciled_count = row_count;
+    exit when v_reconciled_count = 0;
+  end loop;
+  select * into v_row from public.digest_runs where id = p_id;
   return jsonb_build_object('applied', v_applied, 'row', to_jsonb(v_row), 'part', to_jsonb(v_part));
 end;
 $$;
@@ -1821,9 +1897,7 @@ revoke execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,j
 revoke execute on function public.claim_digest_part_delivery_v2(uuid,uuid,text,uuid) from public, anon, authenticated;
 revoke execute on function public.mark_digest_part_delivered_v2(uuid,uuid,text,uuid,integer,text,text,timestamptz) from public, anon, authenticated;
 revoke execute on function public.mark_digest_part_failed_v2(uuid,uuid,text,uuid,integer,text,timestamptz,timestamptz) from public, anon, authenticated;
-revoke execute on function public.claim_digest_generation_part_cleanup_v2(uuid,uuid,text,uuid,text,integer) from public, anon, authenticated;
-revoke execute on function public.record_digest_generation_part_cleanup_v2(uuid,uuid,text,uuid,text,uuid,integer,text,text) from public, anon, authenticated;
-revoke execute on function public.retire_digest_generation_v2(uuid,text,uuid,text) from public, anon, authenticated;
+revoke execute on function public.mark_digest_generation_diverged_v2(uuid,text,uuid,text) from public, anon, authenticated;
 revoke execute on function public.finalize_digest_run_v2(uuid,text,uuid,timestamptz) from public, anon, authenticated;
 revoke execute on function public.fail_digest_run_v2(uuid,text,uuid,text) from public, anon, authenticated;
 revoke execute on function public.list_digest_cleanup_backlog_v2(text,integer) from public, anon, authenticated;
@@ -1842,9 +1916,7 @@ grant execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,js
 grant execute on function public.claim_digest_part_delivery_v2(uuid,uuid,text,uuid) to service_role;
 grant execute on function public.mark_digest_part_delivered_v2(uuid,uuid,text,uuid,integer,text,text,timestamptz) to service_role;
 grant execute on function public.mark_digest_part_failed_v2(uuid,uuid,text,uuid,integer,text,timestamptz,timestamptz) to service_role;
-grant execute on function public.claim_digest_generation_part_cleanup_v2(uuid,uuid,text,uuid,text,integer) to service_role;
-grant execute on function public.record_digest_generation_part_cleanup_v2(uuid,uuid,text,uuid,text,uuid,integer,text,text) to service_role;
-grant execute on function public.retire_digest_generation_v2(uuid,text,uuid,text) to service_role;
+grant execute on function public.mark_digest_generation_diverged_v2(uuid,text,uuid,text) to service_role;
 grant execute on function public.finalize_digest_run_v2(uuid,text,uuid,timestamptz) to service_role;
 grant execute on function public.fail_digest_run_v2(uuid,text,uuid,text) to service_role;
 grant execute on function public.list_digest_cleanup_backlog_v2(text,integer) to service_role;

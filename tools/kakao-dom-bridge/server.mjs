@@ -306,8 +306,8 @@ export function buildWorkOrchestratorHealthState(value = {}) {
       result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed',
         'digest_delivery_unconfirmed', 'digest_cycle_failed',
         'digest_omission_detected', 'digest_cleanup_failed', 'digest_eligible_overflow',
-        'digest_history_incomplete', 'digest_generation_cleanup_failed',
-        'digest_generation_retired'].includes(run.error)
+        'digest_history_incomplete', 'digest_generation_handoff_failed',
+        'digest_generation_diverged'].includes(run.error)
         ? run.error
         : 'digest_cycle_failed';
     }
@@ -681,7 +681,7 @@ export function createWorkOrchestratorImmediateRuntime({
 const DIGEST_STORE_METHODS = [
   'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
   'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
-  'claimDigestGenerationPartCleanup', 'recordDigestGenerationPartCleanup', 'retireDigestGeneration',
+  'markDigestGenerationDiverged',
   'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
 ];
 
@@ -1047,8 +1047,8 @@ function safeDigestRuntimeResult(value, scheduledAt) {
   if (value.status === 'failed') {
     result.error = [
       'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
-      'digest_eligible_overflow', 'digest_history_incomplete', 'digest_generation_cleanup_failed',
-      'digest_generation_retired'
+      'digest_eligible_overflow', 'digest_history_incomplete', 'digest_generation_handoff_failed',
+      'digest_generation_diverged'
     ].includes(value.error)
       ? value.error
       : 'digest_cycle_failed';
@@ -1111,7 +1111,7 @@ export function createWorkOrchestratorDigestRuntime({
     const safeError = [
       'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
       'digest_omission_detected', 'digest_cleanup_failed', 'digest_eligible_overflow',
-      'digest_history_incomplete', 'digest_generation_cleanup_failed', 'digest_generation_retired'
+      'digest_history_incomplete', 'digest_generation_handoff_failed', 'digest_generation_diverged'
     ].includes(error) ? error : 'digest_cycle_failed';
     runtimeState.digestFailureCount += 1;
     runtimeState.lastDigestFailureAt = at;
@@ -1278,7 +1278,7 @@ function safeMaintenanceDigestResult(value) {
     result.error = [
       'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
       'digest_omission_detected', 'digest_cleanup_failed', 'digest_eligible_overflow',
-      'digest_history_incomplete', 'digest_generation_cleanup_failed', 'digest_generation_retired'
+      'digest_history_incomplete', 'digest_generation_handoff_failed', 'digest_generation_diverged'
     ].includes(value.error) ? value.error : 'digest_cycle_failed';
   }
   return result;

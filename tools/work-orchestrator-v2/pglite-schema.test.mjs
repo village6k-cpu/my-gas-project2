@@ -125,9 +125,7 @@ test('foundation migration executes and exposes only service-role access in Post
           'claim_digest_part_delivery_v2',
           'mark_digest_part_delivered_v2',
           'mark_digest_part_failed_v2',
-          'claim_digest_generation_part_cleanup_v2',
-          'record_digest_generation_part_cleanup_v2',
-          'retire_digest_generation_v2',
+          'mark_digest_generation_diverged_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
           'list_digest_cleanup_backlog_v2',
@@ -137,7 +135,6 @@ test('foundation migration executes and exposes only service-role access in Post
       order by p.proname
     `);
     assert.deepEqual(functions.map((row) => row.proname), [
-      'claim_digest_generation_part_cleanup_v2',
       'claim_digest_part_cleanup_v2',
       'claim_digest_part_delivery_v2',
       'claim_digest_run_v2',
@@ -149,13 +146,12 @@ test('foundation migration executes and exposes only service-role access in Post
       'list_actionable_work_v2',
       'list_digest_cleanup_backlog_v2',
       'list_pending_work_actions_v2',
+      'mark_digest_generation_diverged_v2',
       'mark_digest_part_delivered_v2',
       'mark_digest_part_failed_v2',
       'prepare_digest_parts_v2',
-      'record_digest_generation_part_cleanup_v2',
       'record_digest_part_cleanup_v2',
       'request_work_item_action_v2',
-      'retire_digest_generation_v2',
       'touch_work_orchestrator_v2_updated_at',
       'upsert_work_item_v2',
     ]);
@@ -185,9 +181,7 @@ test('foundation migration executes and exposes only service-role access in Post
           'claim_digest_part_delivery_v2',
           'mark_digest_part_delivered_v2',
           'mark_digest_part_failed_v2',
-          'claim_digest_generation_part_cleanup_v2',
-          'record_digest_generation_part_cleanup_v2',
-          'retire_digest_generation_v2',
+          'mark_digest_generation_diverged_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
           'list_digest_cleanup_backlog_v2',
@@ -1342,6 +1336,71 @@ test('digest-visible buttons are fenced until delivery and processable pending a
   }
 });
 
+test('SQL hands a divergent partial to one same-slot successor without touching its exact coordinate', async () => {
+  const db = await createFoundationDatabase();
+  try {
+    await db.exec(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, automation_state, payload
+      ) values (
+        '92000000-0000-4000-8000-000000000001', 'successor:1', 'room:successor',
+        'Successor handoff', 'Immutable partial evidence', 'human_review', 'normal', 'open',
+        '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z',
+        'needs_human', '{"requires_human_action":true}'::jsonb
+      )
+    `);
+    const claimSql = `select public.claim_digest_run_v2(
+      'slack:CSUCCESSOR', '2026-08-29T03:00:00Z', '2026-08-29T00:00:00Z',
+      '2026-08-29T03:00:00Z', $1::text, 120
+    ) as result`;
+    const first = (await db.query(claimSql, ['bridge:first'])).rows[0].result.row;
+    const snapshot = [{
+      id: '92000000-0000-4000-8000-000000000001', version: 1,
+      inclusionReason: 'actionable', priority: 'normal'
+    }];
+    const intent = [{
+      kind: 'ordinary', partNumber: 1, partCount: 1,
+      itemIds: ['92000000-0000-4000-8000-000000000001'], payloadHash: 'a'.repeat(64)
+    }];
+    const prepared = (await db.query(`select public.prepare_digest_parts_v2(
+      $1::uuid, 'bridge:first', $2::uuid, $3::jsonb, $4::jsonb
+    ) as result`, [first.id, first.lease_token, JSON.stringify(snapshot), JSON.stringify(intent)]))
+      .rows[0].result;
+    const part = prepared.parts[0];
+    await db.query(`select public.claim_digest_part_delivery_v2(
+      $1::uuid, $2::uuid, 'bridge:first', $3::uuid
+    )`, [first.id, part.id, first.lease_token]);
+    await db.query(`select public.mark_digest_part_delivered_v2(
+      $1::uuid, $2::uuid, 'bridge:first', $3::uuid, 1, 'CSUCCESSOR', '920.1', now()
+    )`, [first.id, part.id, first.lease_token]);
+
+    const handedOff = (await db.query(`select public.mark_digest_generation_diverged_v2(
+      $1::uuid, 'bridge:first', $2::uuid, 'digest_generation_diverged'
+    ) as result`, [first.id, first.lease_token])).rows[0].result;
+    assert.equal(handedOff.applied, true);
+    assert.equal(handedOff.row.state, 'diverged');
+    const beforeSuccessor = await db.query(`select delivery_state, slack_channel_id, slack_message_ts,
+      cleanup_state from public.digest_message_parts where id = $1::uuid`, [part.id]);
+    assert.deepEqual(beforeSuccessor.rows[0], {
+      delivery_state: 'delivered', slack_channel_id: 'CSUCCESSOR', slack_message_ts: '920.1',
+      cleanup_state: 'idle'
+    });
+
+    const winner = (await db.query(claimSql, ['bridge:successor-a'])).rows[0].result;
+    const loser = (await db.query(claimSql, ['bridge:successor-b'])).rows[0].result;
+    assert.equal(winner.claimed, true);
+    assert.equal(winner.created, true);
+    assert.equal(winner.row.generation, 2);
+    assert.equal(winner.row.previous_digest_id, first.id);
+    assert.equal(loser.claimed, false);
+    assert.equal(loser.created, false);
+    assert.equal(loser.row.id, winner.row.id);
+  } finally {
+    await db.close();
+  }
+});
+
 test('SQL proves 500/501 completeness and divergent partial generations converge without losing immutable audit', async () => {
   const db = await createFoundationDatabase();
   try {
@@ -1420,6 +1479,30 @@ test('SQL proves 500/501 completeness and divergent partial generations converge
         itemIds: snapshotOne.slice(24).map(({ id }) => id), payloadHash: 'b'.repeat(64)
       }
     ];
+    const inheritedPriorId = '93000000-0000-4000-8000-000000000001';
+    const inheritedPriorPartId = '93000000-0000-4000-8000-000000000002';
+    await db.query(`
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, generation, state,
+        destination_key, item_snapshot, manifest_prepared_at, slack_channel_id,
+        slack_message_ts, delivered_at
+      ) values (
+        $1::uuid, '2026-08-28T21:00:00Z', '2026-08-29T00:00:00Z',
+        '2026-08-29T00:00:00Z', 1, 'delivered', 'slack:CGEN', $2::jsonb,
+        '2026-08-29T00:00:01Z', 'CGEN', '600.1', '2026-08-29T00:00:02Z'
+      )
+    `, [inheritedPriorId, JSON.stringify([snapshotOne[0]])]);
+    await db.query(`
+      insert into public.digest_message_parts (
+        id, digest_run_id, part_kind, part_number, part_count, item_ids, payload_hash,
+        client_message_id, delivery_state, delivery_attempts, delivery_claimed_at,
+        slack_channel_id, slack_message_ts, delivered_at
+      ) values (
+        $2::uuid, $1::uuid, 'ordinary', 1, 1, array[$3::uuid], $4::text,
+        '93000000-0000-4000-8000-000000000003', 'delivered', 1,
+        '2026-08-29T00:00:01Z', 'CGEN', '600.1', '2026-08-29T00:00:02Z'
+      )
+    `, [inheritedPriorId, inheritedPriorPartId, snapshotOne[0].id, 'f'.repeat(64)]);
     const claimSql = `
       select public.claim_digest_run_v2(
         $1::text, $2::timestamptz, $3::timestamptz, $4::timestamptz, $5::text, $6::integer
@@ -1432,6 +1515,7 @@ test('SQL proves 500/501 completeness and divergent partial generations converge
     const firstClaim = await db.query(claimSql, digestArgs);
     const firstRun = firstClaim.rows[0].result.row;
     assert.equal(firstRun.generation, 1);
+    assert.equal(firstRun.previous_digest_id, inheritedPriorId);
     const preparedOne = await db.query(`
       select public.prepare_digest_parts_v2(
         $1::uuid, $2::text, $3::uuid, $4::jsonb, $5::jsonb
@@ -1496,29 +1580,24 @@ test('SQL proves 500/501 completeness and divergent partial generations converge
     assert.equal(mismatch.rows[0].result.reason, 'manifest_mismatch');
     assert.deepEqual(mismatch.rows[0].result.parts.map((part) => part.client_message_id), oldClientIds);
 
-    const cleanupClaim = await db.query(`
-      select public.claim_digest_generation_part_cleanup_v2(
-        $1::uuid, $2::uuid, $3::text, $4::uuid, $5::text, 120
-      ) as result
-    `, [firstRun.id, deliveredPart.id, 'bridge:generation-recovery', reclaimedRun.lease_token,
-      'bridge:generation-cleanup']);
-    assert.equal(cleanupClaim.rows[0].result.claimed, true);
-    const cleanupPart = cleanupClaim.rows[0].result.part;
-    const cleanupRecorded = await db.query(`
-      select public.record_digest_generation_part_cleanup_v2(
-        $1::uuid, $2::uuid, $3::text, $4::uuid, $5::text, $6::uuid,
-        $7::integer, 'deleted', null
-      ) as result
-    `, [firstRun.id, deliveredPart.id, 'bridge:generation-recovery', reclaimedRun.lease_token,
-      'bridge:generation-cleanup', cleanupPart.cleanup_token, cleanupPart.cleanup_attempts]);
-    assert.equal(cleanupRecorded.rows[0].result.applied, true);
-    const retired = await db.query(`
-      select public.retire_digest_generation_v2(
+    const handedOff = await db.query(`
+      select public.mark_digest_generation_diverged_v2(
         $1::uuid, $2::text, $3::uuid, 'digest_generation_diverged'
       ) as result
     `, [firstRun.id, 'bridge:generation-recovery', reclaimedRun.lease_token]);
-    assert.equal(retired.rows[0].result.applied, true);
-    assert.equal(retired.rows[0].result.row.state, 'retired');
+    assert.equal(handedOff.rows[0].result.applied, true);
+    assert.equal(handedOff.rows[0].result.row.state, 'diverged');
+    const oldBeforeSuccessor = await db.query(`
+      select state, error from public.digest_runs where id = $1::uuid
+    `, [firstRun.id]);
+    assert.equal(oldBeforeSuccessor.rows[0].state, 'diverged');
+    const exactBeforeSuccessor = await db.query(`
+      select slack_channel_id, slack_message_ts, cleanup_state
+      from public.digest_message_parts where id = $1::uuid
+    `, [deliveredPart.id]);
+    assert.deepEqual(exactBeforeSuccessor.rows[0], {
+      slack_channel_id: 'CGEN', slack_message_ts: '700.1', cleanup_state: 'idle'
+    });
 
     const nextClaim = await db.query(claimSql, [
       ...digestArgs.slice(0, 4), 'bridge:generation-two', 120
@@ -1556,6 +1635,53 @@ test('SQL proves 500/501 completeness and divergent partial generations converge
     `, [secondRun.id, 'bridge:generation-two', secondRun.lease_token]);
     assert.equal(finalized.rows[0].result.applied, true);
     assert.equal(finalized.rows[0].result.row.state, 'delivered');
+
+    const backlog = await db.query(`
+      select public.list_digest_cleanup_backlog_v2('slack:CGEN', 10) as result
+    `);
+    assert.deepEqual(backlog.rows[0].result.map((entry) => [
+      entry.successor_digest_id, entry.previous_digest_id
+    ]), [
+      [secondRun.id, firstRun.id],
+      [secondRun.id, inheritedPriorId]
+    ]);
+    const cleanupClaim = await db.query(`
+      select public.claim_digest_part_cleanup_v2(
+        $1::uuid, $2::uuid, $3::uuid, 'bridge:generation-cleanup', 120
+      ) as result
+    `, [secondRun.id, firstRun.id, deliveredPart.id]);
+    assert.equal(cleanupClaim.rows[0].result.claimed, true);
+    const cleanupPart = cleanupClaim.rows[0].result.part;
+    const cleanupRecorded = await db.query(`
+      select public.record_digest_part_cleanup_v2(
+        $1::uuid, $2::uuid, $3::uuid, 'bridge:generation-cleanup', $4::uuid,
+        $5::integer, 'deleted', null
+      ) as result
+    `, [secondRun.id, firstRun.id, deliveredPart.id,
+      cleanupPart.cleanup_token, cleanupPart.cleanup_attempts]);
+    assert.equal(cleanupRecorded.rows[0].result.applied, true);
+    const stillAuthorized = await db.query(`
+      select state, previous_cleanup_state from public.digest_runs where id = $1::uuid
+    `, [firstRun.id]);
+    assert.deepEqual(stillAuthorized.rows[0], {
+      state: 'diverged', previous_cleanup_state: 'idle'
+    }, 'N cannot retire after its own partial is cleaned while inherited A remains outstanding');
+
+    const inheritedClaim = await db.query(`
+      select public.claim_digest_part_cleanup_v2(
+        $1::uuid, $2::uuid, $3::uuid, 'bridge:inherited-cleanup', 120
+      ) as result
+    `, [secondRun.id, inheritedPriorId, inheritedPriorPartId]);
+    assert.equal(inheritedClaim.rows[0].result.claimed, true);
+    const inheritedPart = inheritedClaim.rows[0].result.part;
+    const inheritedRecorded = await db.query(`
+      select public.record_digest_part_cleanup_v2(
+        $1::uuid, $2::uuid, $3::uuid, 'bridge:inherited-cleanup', $4::uuid,
+        $5::integer, 'already_absent', null
+      ) as result
+    `, [secondRun.id, inheritedPriorId, inheritedPriorPartId,
+      inheritedPart.cleanup_token, inheritedPart.cleanup_attempts]);
+    assert.equal(inheritedRecorded.rows[0].result.applied, true);
 
     const audit = await db.query(`
       select state, generation, item_snapshot, error

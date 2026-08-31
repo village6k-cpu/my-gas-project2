@@ -30,7 +30,7 @@ test('foundation migration enforces the private service-role schema contract', (
   );
   assert.match(sql, /cleanup_state in \('idle','deleting','deleted','already_absent','failed'\)/i);
   assert.match(sql, /generation integer not null default 1 check \(generation > 0\)/i);
-  assert.match(sql, /state in \('building','delivering','delivered','failed','replaced','retired'\)/i);
+  assert.match(sql, /state in \('building','delivering','delivered','failed','diverged','replaced','retired'\)/i);
   assert.match(sql, /unique\s*\(destination_key,\s*scheduled_at,\s*generation\)/i);
   assert.match(sql, /payload_hash.*\^\[0-9a-f\]\{64\}\$/i);
   assert.match(sql, /unique\s*\(digest_run_id,\s*part_kind,\s*part_number\)/i);
@@ -56,9 +56,7 @@ test('foundation migration defines private atomic work and digest RPC contracts'
     'claim_digest_part_delivery_v2',
     'mark_digest_part_delivered_v2',
     'mark_digest_part_failed_v2',
-    'claim_digest_generation_part_cleanup_v2',
-    'record_digest_generation_part_cleanup_v2',
-    'retire_digest_generation_v2',
+    'mark_digest_generation_diverged_v2',
     'finalize_digest_run_v2',
     'fail_digest_run_v2',
     'list_digest_cleanup_backlog_v2',
@@ -95,6 +93,11 @@ test('foundation migration defines private atomic work and digest RPC contracts'
   assert.match(sql, /w\.state in \('open','in_progress','snoozed'\)/i);
   assert.match(sql, /lease_token uuid/i);
   assert.match(sql, /pg_advisory_xact_lock\s*\(\s*hashtextextended/i);
+  assert.match(
+    sql,
+    /create function public\.claim_digest_run_v2\([\s\S]*?pg_advisory_xact_lock[\s\S]*?select \* into v_row[\s\S]*?insert into public\.digest_runs/i,
+    'the destination advisory transaction lock is acquired before same-slot lookup and insertion'
+  );
   assert.match(sql, /isfinite\s*\(/i, 'all RPC timestamps reject infinity');
   assert.match(sql, /count\(distinct \(entry->>'id'\)::uuid\)/i, 'snapshot UUID duplicates use canonical UUID identity');
   assert.match(sql, /previous_digest_id/i);
@@ -122,14 +125,26 @@ test('foundation migration defines private atomic work and digest RPC contracts'
   assert.match(sql, /manifest_prepared_at/i);
   assert.match(
     sql,
-    /prepare_digest_parts_v2[\s\S]*?'manifest_mismatch'[\s\S]*?retire_digest_generation_v2[\s\S]*?digest_generation_diverged/i,
-    'immutable manifest divergence has a typed cleanup-and-retirement path'
+    /prepare_digest_parts_v2[\s\S]*?'manifest_mismatch'[\s\S]*?mark_digest_generation_diverged_v2[\s\S]*?state = 'diverged'[\s\S]*?digest_generation_diverged/i,
+    'immutable manifest divergence has a typed no-cleanup successor handoff path'
   );
   assert.match(
     sql,
-    /retire_digest_generation_v2[\s\S]*?cleanup_state not in \('deleted','already_absent'\)[\s\S]*?state = 'retired'/i,
-    'a generation cannot retire while a possibly posted part lacks terminal cleanup evidence'
+    /claim_digest_run_v2[\s\S]*?v_row\.state = 'diverged'[\s\S]*?v_row\.generation \+ 1[\s\S]*?v_row\.id/i,
+    'a same-slot successor is generation N+1 and durably links to divergent N'
   );
+  assert.match(
+    sql,
+    /list_digest_cleanup_backlog_v2[\s\S]*?with recursive[\s\S]*?previous_digest_id[\s\S]*?state in \('delivered','replaced'\)/i,
+    'only a delivered successor exposes its bounded inherited cleanup chain'
+  );
+  assert.match(
+    sql,
+    /record_digest_part_cleanup_v2[\s\S]*?state = 'retired'[\s\S]*?previous_cleanup_state in \('deleted','already_absent'\)/i,
+    'divergent ancestors retire only after their own and inherited cleanup links converge'
+  );
+  assert.doesNotMatch(sql, /create function public\.(?:claim|record)_digest_generation_part_cleanup_v2\(/i);
+  assert.doesNotMatch(sql, /create function public\.retire_digest_generation_v2\(/i);
   assert.match(sql, /delivery_attempts.*between 0 and 3/is);
   assert.match(
     sql,

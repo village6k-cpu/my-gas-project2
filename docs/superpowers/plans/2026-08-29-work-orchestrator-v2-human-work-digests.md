@@ -475,6 +475,61 @@ git commit -m "feat: expose v2 work items to staff dashboard"
 
 ---
 
+### Task 8: Make divergent digest recovery successor-first
+
+**Files:**
+- Modify: `tools/work-orchestrator-v2/digest-runner.mjs`
+- Modify: `tools/work-orchestrator-v2/digest-runner.test.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
+- Modify: `supabase/migrations/20260829030730_work_orchestrator_v2_foundation.sql`
+- Modify: `tools/work-orchestrator-v2/schema.test.mjs`
+- Modify: `tools/work-orchestrator-v2/pglite-schema.test.mjs`
+- Modify other existing digest-state consumer tests only when the new durable state/link requires it.
+
+**Interfaces and binding ruling:**
+- A prepared generation whose current re-render no longer matches is immutable audit evidence, not content that may be reconstructed or overwritten.
+- Its confirmed exact bot coordinates remain visible and untouched while a successor generation is built, posted, settled, and finalized. Temporary overlap is acceptable; a zero-digest visibility gap is not.
+- The successor durably inherits cleanup responsibility for both the divergent partial generation and that generation's prior full digest. Cleanup starts only after the successor is durably delivered, uses only persisted exact bot coordinates/client IDs, and converges idempotently across restarts.
+- Same `{destination_key,scheduled_at}` first-generation and successor-generation claims are conflict-safe: concurrent callers produce one winner and a clean `claimed:false` loser, never a uniqueness error. Verify the existing destination advisory lock before changing claim SQL.
+- Preserve the authoritative 500/501 fail-closed contract, typed `history_incomplete` no-repost contract, action fencing, default-OFF flags, and all content-free error/health shapes.
+
+- [ ] **Step 1: Write strict RED regressions before production edits**
+
+Prove with real runner/store behavior:
+
+1. a partially posted divergent generation is not deleted or retired before its successor is durably finalized;
+2. successor post, settlement, or finalization failure leaves every old exact coordinate untouched and retryable;
+3. after successor finalization, exact cleanup covers the divergent partial and inherited prior full digest without deleting foreign/human coordinates, then terminally retires/replaces the old generation;
+4. crash/reclaim at each cleanup boundary neither reposts the successor nor loses cleanup responsibility;
+5. two independent database sessions contending for the same first or successor generation yield exactly one `claimed:true`, one `claimed:false`, and no unique violation. If the local PostgreSQL harness cannot supply two real sessions, record that limitation explicitly and add the strongest executable transaction/lock-order coverage available without pretending it proves multi-backend contention;
+6. every SQL/store/runner consumer of digest state remains fail-closed for the new transition/link.
+
+- [ ] **Step 2: Run RED and record the exact failures**
+
+```powershell
+node --test tools\work-orchestrator-v2\digest-runner.test.mjs tools\work-orchestrator-v2\supabase-store.test.mjs tools\work-orchestrator-v2\schema.test.mjs tools\work-orchestrator-v2\pglite-schema.test.mjs
+```
+
+- [ ] **Step 3: Implement the smallest durable successor-first transition**
+
+Do not mutate or delete old Slack state to make preparation pass. Add only the durable generation/link/state and CAS operations needed to let generation N+1 deliver first and to transfer exact cleanup responsibility afterward. Keep all RPCs `SECURITY INVOKER`, service-role-only, finite, exact-shape, and lease/generation fenced.
+
+- [ ] **Step 4: Run focused and full offline verification and commit locally**
+
+```powershell
+node --test tools\work-orchestrator-v2\digest-runner.test.mjs tools\work-orchestrator-v2\supabase-store.test.mjs tools\work-orchestrator-v2\schema.test.mjs tools\work-orchestrator-v2\pglite-schema.test.mjs
+npm --prefix tools\work-orchestrator-v2 test
+npm --prefix tools\kakao-dom-bridge test
+npm --prefix tools\work-orchestrator-v2 run check
+npm --prefix tools\kakao-dom-bridge run check
+git diff --check
+```
+
+Do not use network access, linked/live Supabase, Slack sends/deletes, timers, deployment, push, or customer/business mutations. Commit locally on the feature branch only.
+
+---
+
 ## Human-work and digest completion gate
 
 Do not disable legacy rows/cards until:

@@ -80,8 +80,7 @@ function validateDependencies(store, slack, cleanupEnabled) {
   for (const method of [
     'claimDigestRun', 'listActionableWork', 'prepareDigestParts',
     'claimDigestPartDelivery', 'markDigestPartDelivered', 'markDigestPartFailed',
-    'claimDigestGenerationPartCleanup', 'recordDigestGenerationPartCleanup',
-    'retireDigestGeneration',
+    'markDigestGenerationDiverged',
     'finalizeDigestRun', 'failDigestRun'
   ]) requireMethod(store, method);
   for (const method of ['postMessage', 'findMessageByClientId', 'deleteMessage']) requireMethod(slack, method);
@@ -443,53 +442,7 @@ function cleanupFailureCode(error) {
   return 'slack_api_error';
 }
 
-async function claimGenerationCleanup({ store, run, part, config, leaseOwner }) {
-  const claim = await store.claimDigestGenerationPartCleanup({
-    id: run.id,
-    partId: part.id,
-    leaseOwner,
-    leaseToken: run.lease_token,
-    cleanupOwner: leaseOwner,
-    leaseSeconds: config.cleanupLeaseSeconds
-  });
-  if (!isRecord(claim) || typeof claim.claimed !== 'boolean' || !isRecord(claim.part)) {
-    throw new Error('digest_generation_cleanup_failed');
-  }
-  if (!claim.claimed) {
-    if (['deleted', 'already_absent'].includes(claim.part.cleanup_state)) {
-      return { claimed: false, part: claim.part };
-    }
-    throw new Error('digest_generation_cleanup_failed');
-  }
-  const claimedPart = claim.part;
-  if (!Number.isSafeInteger(claimedPart.cleanup_attempts) || claimedPart.cleanup_attempts < 1
-    || typeof claimedPart.cleanup_token !== 'string' || !UUID.test(claimedPart.cleanup_token)) {
-    throw new Error('digest_generation_cleanup_failed');
-  }
-  return { claimed: true, part: claimedPart };
-}
-
-async function recordGenerationCleanup({
-  store, run, part, claimedPart, leaseOwner, outcome, error
-}) {
-  const recorded = await store.recordDigestGenerationPartCleanup({
-    id: run.id,
-    partId: part.id,
-    leaseOwner,
-    leaseToken: run.lease_token,
-    cleanupOwner: leaseOwner,
-    cleanupToken: claimedPart.cleanup_token,
-    expectedCleanupAttempts: claimedPart.cleanup_attempts,
-    outcome,
-    ...(outcome === 'failed' ? { error } : {})
-  });
-  if (!isRecord(recorded) || recorded.applied !== true || !isRecord(recorded.part)
-    || recorded.part.cleanup_state !== outcome) throw new Error('digest_generation_cleanup_failed');
-  return recorded.part;
-}
-
-async function cleanupDivergentPart({ store, slack, run, persisted, config, now, leaseOwner }) {
-  if (['deleted', 'already_absent'].includes(persisted.cleanup_state)) return persisted;
+async function settleDivergentEvidence({ store, slack, run, persisted, config, now, leaseOwner }) {
   let part = persisted;
   if (part.delivery_state === 'delivering') {
     let found;
@@ -497,62 +450,33 @@ async function cleanupDivergentPart({ store, slack, run, persisted, config, now,
       found = await reconcilePart(slack, part, config.channelId, config.reconcileWindowSeconds);
     } catch (error) {
       if (historyIncomplete(error)) throw digestHistoryIncomplete();
-      throw new Error('digest_generation_cleanup_failed');
+      throw new Error('digest_generation_handoff_failed');
     }
     if (found === null) {
-      const cleanup = await claimGenerationCleanup({ store, run, part, config, leaseOwner });
-      if (!cleanup.claimed) return cleanup.part;
-      return recordGenerationCleanup({
-        store, run, part, claimedPart: cleanup.part, leaseOwner, outcome: 'already_absent'
+      return settleFailed({
+        store, run, part, code: 'delivery_unconfirmed', retryAt: null, now, leaseOwner
       });
     }
     part = await settleDelivered({ store, run, part, coordinate: found, config, now, leaseOwner });
   }
-  if (part.delivery_state !== 'delivered') return part;
-  if (part.slack_channel_id !== config.channelId
-    || typeof part.slack_message_ts !== 'string' || !SLACK_TS.test(part.slack_message_ts)) {
-    throw new Error('digest_generation_cleanup_failed');
-  }
-  const cleanup = await claimGenerationCleanup({ store, run, part, config, leaseOwner });
-  if (!cleanup.claimed) return cleanup.part;
-  let outcome;
-  let errorCode = null;
-  try {
-    const deletion = await slack.deleteMessage({
-      channel: part.slack_channel_id,
-      ts: part.slack_message_ts
-    });
-    if (!isRecord(deletion) || !['deleted', 'already_absent'].includes(deletion.status)) {
-      throw Object.assign(new Error('cleanup_unconfirmed'), { code: 'cleanup_unconfirmed' });
-    }
-    outcome = deletion.status;
-  } catch (error) {
-    outcome = 'failed';
-    errorCode = cleanupFailureCode(error);
-  }
-  await recordGenerationCleanup({
-    store, run, part, claimedPart: cleanup.part, leaseOwner, outcome,
-    ...(outcome === 'failed' ? { error: errorCode } : {})
-  });
-  if (outcome === 'failed') throw new Error('digest_generation_cleanup_failed');
   return part;
 }
 
-async function retireDivergentGeneration({ store, slack, run, parts, config, now, leaseOwner }) {
+async function handoffDivergentGeneration({ store, slack, run, parts, config, now, leaseOwner }) {
   for (const persisted of parts) {
-    await cleanupDivergentPart({ store, slack, run, persisted, config, now, leaseOwner });
+    await settleDivergentEvidence({ store, slack, run, persisted, config, now, leaseOwner });
   }
-  const retired = await store.retireDigestGeneration({
+  const handedOff = await store.markDigestGenerationDiverged({
     id: run.id,
     leaseOwner,
     leaseToken: run.lease_token,
     error: 'digest_generation_diverged'
   });
-  if (!isRecord(retired) || retired.applied !== true || !isRecord(retired.row)
-    || retired.row.id !== run.id || retired.row.state !== 'retired') {
-    throw new Error('digest_generation_cleanup_failed');
+  if (!isRecord(handedOff) || handedOff.applied !== true || !isRecord(handedOff.row)
+    || handedOff.row.id !== run.id || handedOff.row.state !== 'diverged') {
+    throw new Error('digest_generation_handoff_failed');
   }
-  return retired.row;
+  return handedOff.row;
 }
 
 const CLEANUP_BACKLOG_KEYS = [
@@ -800,18 +724,15 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
     persistedParts = validated.parts;
     if (validated.mismatch) {
       try {
-        await retireDivergentGeneration({
+        await handoffDivergentGeneration({
           store, slack, run, parts: persistedParts, config, now: timestamp, leaseOwner: owner
         });
       } catch (error) {
         const incomplete = error?.code === 'digest_history_incomplete';
-        await markRunFailed(
-          store, run, owner,
-          incomplete ? 'delivery_unconfirmed' : 'digest_generation_cleanup_failed'
-        );
+        if (incomplete) await markRunFailed(store, run, owner, 'delivery_unconfirmed');
         return finish({
           status: 'failed',
-          error: incomplete ? 'digest_history_incomplete' : 'digest_generation_cleanup_failed',
+          error: incomplete ? 'digest_history_incomplete' : 'digest_generation_handoff_failed',
           retryable: true,
           scheduledAt: window.scheduledAt, runId: run.id,
           selectedCount, renderedCount, partCount: persistedParts.length,
@@ -819,7 +740,7 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
         });
       }
       return finish({
-        status: 'failed', error: 'digest_generation_retired', retryable: true,
+        status: 'failed', error: 'digest_generation_diverged', retryable: true,
         scheduledAt: window.scheduledAt, runId: run.id,
         selectedCount, renderedCount, partCount: persistedParts.length,
         deliveredPartCount: persistedParts.filter(({ delivery_state }) => delivery_state === 'delivered').length

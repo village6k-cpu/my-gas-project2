@@ -30,7 +30,7 @@ const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{
 const DIGEST_INCLUSION_REASONS = new Set(['p0', 'overdue', 'urgent', 'carry_over', 'actionable', 'daily_reminder']);
 const DIGEST_FAILURE_CODES = new Set([
   'digest_build_failed', 'digest_delivery_failed', 'delivery_unconfirmed',
-  'digest_eligible_overflow', 'digest_generation_cleanup_failed'
+  'digest_eligible_overflow'
 ]);
 const DIGEST_PART_KINDS = new Set(['ordinary', 'daily_reminder']);
 const DIGEST_PART_DELIVERY_FAILURE_CODES = new Set(['post_rejected', 'rate_limited', 'delivery_unconfirmed', 'slack_api_error']);
@@ -38,7 +38,7 @@ const DIGEST_CLEANUP_FAILURE_CODES = new Set(['cant_delete_message', 'rate_limit
 const DIGEST_CLEANUP_STATES = new Set(['idle', 'deleting', 'failed', 'deleted', 'already_absent']);
 const WORK_STATES = new Set(['open', 'in_progress', 'snoozed', 'resolved', 'dismissed']);
 const ACTIVE_WORK_STATES = new Set(['open', 'in_progress', 'snoozed']);
-const DIGEST_STATES = new Set(['building', 'delivering', 'delivered', 'failed', 'replaced', 'retired']);
+const DIGEST_STATES = new Set(['building', 'delivering', 'delivered', 'failed', 'diverged', 'replaced', 'retired']);
 const SLACK_CHANNEL_ID = /^[A-Z0-9][A-Z0-9_-]{0,79}$/;
 const SLACK_MESSAGE_TS = /^[0-9]{1,20}\.[0-9]{1,20}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -291,7 +291,9 @@ function responsePreviousDigest(value, previousDigestId) {
     if (previousDigestId !== null && previousDigestId !== undefined) throw responseInvalid();
     return null;
   }
-  if (!exactKeys(value, ['id', 'parts']) || !Array.isArray(value.parts) || value.parts.length < 1 || value.parts.length > 50) {
+  if (!exactKeys(value, ['id', 'parts', 'state']) || !Array.isArray(value.parts)
+    || value.parts.length > 50 || value.parts.length < (value.state === 'diverged' ? 0 : 1)
+    || !['delivered', 'diverged', 'replaced'].includes(value.state)) {
     throw responseInvalid();
   }
   const id = responseUuid(value.id);
@@ -318,7 +320,8 @@ function responsePreviousDigest(value, previousDigestId) {
     priorOrder = order;
   }
   for (const parts of kindParts.values()) {
-    if (parts.some((part, index) => part.part_number !== index + 1 || part.part_count !== parts.length)) {
+    if (value.state !== 'diverged'
+      && parts.some((part, index) => part.part_number !== index + 1 || part.part_count !== parts.length)) {
       throw responseInvalid();
     }
   }
@@ -362,7 +365,7 @@ function responseDigestRow(row) {
       }
     }
   }
-  if (row.state === 'retired') {
+  if (row.state === 'diverged' || row.state === 'retired') {
     if (row.lease_owner !== null || row.lease_token !== null || row.lease_expires_at !== null
       || row.delivered_at !== null || row.slack_channel_id !== null || row.slack_message_ts !== null
       || manifestPreparedAt === null || row.error !== 'digest_generation_diverged') {
@@ -590,6 +593,19 @@ function finalizeResponse(data, input) {
   return data;
 }
 
+function divergenceResponse(data, input) {
+  if (!exactKeys(data, ['applied', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
+  if (!data.applied) {
+    if (data.row !== null) throw responseInvalid();
+    return data;
+  }
+  const { row } = responseDigestRow(data.row);
+  if (row.id !== input.id || row.state !== 'diverged'
+    || row.lease_owner !== null || row.lease_token !== null || row.lease_expires_at !== null
+    || row.error !== input.error) throw responseInvalid();
+  return data;
+}
+
 function failResponse(data, input) {
   if (!exactKeys(data, ['applied', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
   if (!data.applied) {
@@ -624,7 +640,9 @@ function responseCleanupAggregate(row) {
 
 function cleanupBacklogResponse(data, limit) {
   if (!Array.isArray(data) || data.length > limit) throw responseInvalid();
-  const entryKeys = ['successor_digest_id', 'previous_digest_id', 'previous_cleanup_state', 'parts'];
+  const entryKeys = [
+    'successor_digest_id', 'previous_digest_id', 'previous_cleanup_state', 'parts'
+  ];
   const partKeys = [
     'previous_part_id', 'part_kind', 'part_number', 'part_count',
     'slack_channel_id', 'slack_message_ts', 'cleanup_state'
@@ -669,15 +687,16 @@ function cleanupClaimResponse(data, input) {
   const { row } = responseDigestRow(data.row);
   const part = responseDigestPartRow(data.part);
   if (row.id !== input.id || !['delivered', 'replaced'].includes(row.state)
-    || row.previous_digest_id !== input.previousDigestId
     || part.id !== input.previousPartId || part.digest_run_id !== input.previousDigestId) throw responseInvalid();
-  const aggregateState = responseCleanupAggregate(row);
+  const aggregateState = row.previous_digest_id === input.previousDigestId
+    ? responseCleanupAggregate(row) : null;
   if (data.claimed && (part.cleanup_state !== 'deleting' || part.cleanup_owner !== input.cleanupOwner)) {
     throw responseInvalid();
   }
-  if (data.claimed && aggregateState !== 'deleting') throw responseInvalid();
+  if (data.claimed && aggregateState !== null && aggregateState !== 'deleting') throw responseInvalid();
   if (!data.claimed && (part.cleanup_state === 'idle' || part.cleanup_state === 'failed')) throw responseInvalid();
-  if (!data.claimed && part.cleanup_state === 'deleting' && aggregateState !== 'deleting') throw responseInvalid();
+  if (!data.claimed && part.cleanup_state === 'deleting'
+    && aggregateState !== null && aggregateState !== 'deleting') throw responseInvalid();
   if (!data.claimed && part.cleanup_state === 'deleted' && aggregateState === 'already_absent') throw responseInvalid();
   return data;
 }
@@ -691,73 +710,21 @@ function cleanupTerminalResponse(data, input) {
   const { row } = responseDigestRow(data.row);
   const part = responseDigestPartRow(data.part);
   if (row.id !== input.id || !['delivered', 'replaced'].includes(row.state)
-    || row.previous_digest_id !== input.previousDigestId
     || part.id !== input.previousPartId || part.digest_run_id !== input.previousDigestId
     || part.cleanup_attempts !== input.expectedCleanupAttempts || part.cleanup_state !== input.outcome) {
     throw responseInvalid();
   }
-  const aggregateState = responseCleanupAggregate(row);
+  const aggregateState = row.previous_digest_id === input.previousDigestId
+    ? responseCleanupAggregate(row) : null;
   if (input.outcome === 'failed') {
-    if (part.cleanup_error !== input.error || !['deleting', 'failed'].includes(aggregateState)) {
+    if (part.cleanup_error !== input.error
+      || aggregateState !== null && !['deleting', 'failed'].includes(aggregateState)) {
       throw responseInvalid();
     }
   } else if (part.cleanup_error !== null
     || input.outcome === 'deleted' && aggregateState === 'already_absent') {
     throw responseInvalid();
   }
-  return data;
-}
-
-function generationCleanupClaimResponse(data, input) {
-  if (!exactKeys(data, ['claimed', 'part', 'row']) || typeof data.claimed !== 'boolean') throw responseInvalid();
-  if (data.row === null || data.part === null) {
-    if (data.claimed || data.row !== null || data.part !== null) throw responseInvalid();
-    return data;
-  }
-  const { row } = responseDigestRow(data.row);
-  const part = responseDigestPartRow(data.part);
-  if (row.id !== input.id || row.state !== 'delivering'
-    || row.lease_owner !== input.leaseOwner || row.lease_token !== input.leaseToken
-    || part.id !== input.partId || part.digest_run_id !== input.id
-    || !['delivering', 'delivered'].includes(part.delivery_state)) throw responseInvalid();
-  if (data.claimed && (part.cleanup_state !== 'deleting' || part.cleanup_owner !== input.cleanupOwner)) {
-    throw responseInvalid();
-  }
-  if (!data.claimed && !['deleting', 'deleted', 'already_absent'].includes(part.cleanup_state)) {
-    throw responseInvalid();
-  }
-  return data;
-}
-
-function generationCleanupTerminalResponse(data, input) {
-  if (!exactKeys(data, ['applied', 'part', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
-  if (data.row === null || data.part === null) {
-    if (data.applied || data.row !== null || data.part !== null) throw responseInvalid();
-    return data;
-  }
-  const { row } = responseDigestRow(data.row);
-  const part = responseDigestPartRow(data.part);
-  if (row.id !== input.id || row.state !== 'delivering'
-    || row.lease_owner !== input.leaseOwner || row.lease_token !== input.leaseToken
-    || part.id !== input.partId || part.digest_run_id !== input.id
-    || part.cleanup_attempts !== input.expectedCleanupAttempts
-    || part.cleanup_state !== input.outcome) throw responseInvalid();
-  if (input.outcome === 'failed') {
-    if (part.cleanup_error !== input.error) throw responseInvalid();
-  } else if (part.cleanup_error !== null) {
-    throw responseInvalid();
-  }
-  return data;
-}
-
-function retireGenerationResponse(data, input) {
-  if (!exactKeys(data, ['applied', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
-  if (!data.applied) {
-    if (data.row !== null) throw responseInvalid();
-    return data;
-  }
-  const { row } = responseDigestRow(data.row);
-  if (row.id !== input.id || row.state !== 'retired' || row.error !== input.error) throw responseInvalid();
   return data;
 }
 
@@ -1201,6 +1168,23 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         id: body.p_id, leaseOwner: body.p_lease_owner, leaseToken: body.p_lease_token
       }, snapshot, parts);
     },
+    markDigestGenerationDiverged: async (input = {}) => {
+      let body;
+      try {
+        if (!exactKeys(input, ['id', 'leaseOwner', 'leaseToken', 'error'])
+          || input.error !== 'digest_generation_diverged') throw invalidInput();
+        body = {
+          p_id: uuid(input.id), p_lease_owner: exactText(input.leaseOwner, 200),
+          p_lease_token: uuid(input.leaseToken), p_error: input.error
+        };
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/mark_digest_generation_diverged_v2', {
+        method: 'POST', body: safeJson(body)
+      });
+      return divergenceResponse(data, { id: body.p_id, error: body.p_error });
+    },
     claimDigestPartDelivery: async (input = {}) => {
       let body;
       try {
@@ -1285,80 +1269,6 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         error: body.p_error, retryAt: body.p_retry_at
       }, 'failed');
     },
-    claimDigestGenerationPartCleanup: async (input = {}) => {
-      let body;
-      try {
-        if (!exactKeys(input, [
-          'id', 'partId', 'leaseOwner', 'leaseToken', 'cleanupOwner', 'leaseSeconds'
-        ]) || !Number.isSafeInteger(input.leaseSeconds)
-          || input.leaseSeconds < 1 || input.leaseSeconds > 900) throw invalidInput();
-        body = {
-          p_id: uuid(input.id), p_part_id: uuid(input.partId),
-          p_lease_owner: exactText(input.leaseOwner, 200), p_lease_token: uuid(input.leaseToken),
-          p_cleanup_owner: exactText(input.cleanupOwner, 200), p_lease_seconds: input.leaseSeconds
-        };
-      } catch {
-        throw invalidInput();
-      }
-      const { data } = await request('rpc/claim_digest_generation_part_cleanup_v2', {
-        method: 'POST', body: safeJson(body)
-      });
-      return generationCleanupClaimResponse(data, {
-        id: body.p_id, partId: body.p_part_id,
-        leaseOwner: body.p_lease_owner, leaseToken: body.p_lease_token,
-        cleanupOwner: body.p_cleanup_owner
-      });
-    },
-    recordDigestGenerationPartCleanup: async (input = {}) => {
-      let body;
-      try {
-        const expectedAttempts = positiveVersion(input.expectedCleanupAttempts);
-        const outcome = exactText(input.outcome, 30);
-        if (!exactKeys(input, outcome === 'failed' ? [
-          'id', 'partId', 'leaseOwner', 'leaseToken', 'cleanupOwner', 'cleanupToken',
-          'expectedCleanupAttempts', 'outcome', 'error'
-        ] : [
-          'id', 'partId', 'leaseOwner', 'leaseToken', 'cleanupOwner', 'cleanupToken',
-          'expectedCleanupAttempts', 'outcome'
-        ]) || !['deleted', 'already_absent', 'failed'].includes(outcome)) throw invalidInput();
-        const error = outcome === 'failed' ? exactText(input.error, 50) : null;
-        if (error !== null && !DIGEST_CLEANUP_FAILURE_CODES.has(error)) throw invalidInput();
-        body = {
-          p_id: uuid(input.id), p_part_id: uuid(input.partId),
-          p_lease_owner: exactText(input.leaseOwner, 200), p_lease_token: uuid(input.leaseToken),
-          p_cleanup_owner: exactText(input.cleanupOwner, 200), p_cleanup_token: uuid(input.cleanupToken),
-          p_expected_cleanup_attempts: expectedAttempts, p_outcome: outcome, p_error: error
-        };
-      } catch {
-        throw invalidInput();
-      }
-      const { data } = await request('rpc/record_digest_generation_part_cleanup_v2', {
-        method: 'POST', body: safeJson(body)
-      });
-      return generationCleanupTerminalResponse(data, {
-        id: body.p_id, partId: body.p_part_id,
-        leaseOwner: body.p_lease_owner, leaseToken: body.p_lease_token,
-        expectedCleanupAttempts: body.p_expected_cleanup_attempts,
-        outcome: body.p_outcome, error: body.p_error
-      });
-    },
-    retireDigestGeneration: async (input = {}) => {
-      let body;
-      try {
-        if (!exactKeys(input, ['id', 'leaseOwner', 'leaseToken', 'error'])
-          || input.error !== 'digest_generation_diverged') throw invalidInput();
-        body = {
-          p_id: uuid(input.id), p_lease_owner: exactText(input.leaseOwner, 200),
-          p_lease_token: uuid(input.leaseToken), p_error: input.error
-        };
-      } catch {
-        throw invalidInput();
-      }
-      const { data } = await request('rpc/retire_digest_generation_v2', {
-        method: 'POST', body: safeJson(body)
-      });
-      return retireGenerationResponse(data, { id: body.p_id, error: body.p_error });
-    },
     finalizeDigestRun: async (input = {}) => {
       let body;
       try {
@@ -1429,7 +1339,8 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
           throw invalidInput();
         }
         body = {
-          p_id: uuid(input.id), p_previous_digest_id: uuid(input.previousDigestId),
+          p_id: uuid(input.id),
+          p_previous_digest_id: uuid(input.previousDigestId),
           p_previous_part_id: uuid(input.previousPartId),
           p_cleanup_owner: exactText(input.cleanupOwner, 200), p_lease_seconds: input.leaseSeconds
         };
@@ -1441,7 +1352,8 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         method: 'POST', body: safeJson(body)
       });
       return cleanupClaimResponse(data, {
-        id: body.p_id, previousDigestId: body.p_previous_digest_id,
+        id: body.p_id,
+        previousDigestId: body.p_previous_digest_id,
         previousPartId: body.p_previous_part_id, cleanupOwner: body.p_cleanup_owner
       });
     },
@@ -1503,7 +1415,7 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const [pendingNotifications, activeWorkItems, unfinishedDigests] = await Promise.all([
         count('message_notification_receipts', { notification_state: 'in.(pending,delivering,failed,cleanup_pending)' }),
         count('work_items_v2', { state: 'in.(open,in_progress,snoozed)' }),
-        count('digest_runs', { state: 'in.(building,delivering,failed)' })
+        count('digest_runs', { state: 'in.(building,delivering,failed,diverged)' })
       ]);
       return { pendingNotifications, activeWorkItems, unfinishedDigests };
     }

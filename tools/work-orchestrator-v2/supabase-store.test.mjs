@@ -130,6 +130,7 @@ function digestPartRow(overrides = {}) {
 function previousDigest() {
   return {
     id: PREVIOUS_DIGEST_ID,
+    state: 'delivered',
     parts: [{
       id: PREVIOUS_PART_ID,
       part_kind: 'ordinary',
@@ -429,7 +430,7 @@ test('counts uses HEAD requests with URL-encoded state filters', async () => {
   assert.deepEqual(fetch.requests.map(({ url, init }) => [url, init.method, init.headers.range, init.headers.prefer]), [
     ['https://supabase.example/rest/v1/message_notification_receipts?select=id&notification_state=in.%28pending%2Cdelivering%2Cfailed%2Ccleanup_pending%29', 'HEAD', '0-0', 'count=exact'],
     ['https://supabase.example/rest/v1/work_items_v2?select=id&state=in.%28open%2Cin_progress%2Csnoozed%29', 'HEAD', '0-0', 'count=exact'],
-    ['https://supabase.example/rest/v1/digest_runs?select=id&state=in.%28building%2Cdelivering%2Cfailed%29', 'HEAD', '0-0', 'count=exact']
+    ['https://supabase.example/rest/v1/digest_runs?select=id&state=in.%28building%2Cdelivering%2Cfailed%2Cdiverged%29', 'HEAD', '0-0', 'count=exact']
   ]);
 });
 
@@ -604,7 +605,7 @@ test('prepareDigestParts sends only an exact content-free snapshot and immutable
   assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/prepare_digest_parts_v2');
 });
 
-test('divergent prepared intent is typed and generation cleanup plus retirement preserve exact lease fencing', async () => {
+test('divergent prepared intent hands off immutably to a successor without generation cleanup', async () => {
   const oldSnapshot = [{ id: WORK_ID, version: 1, inclusionReason: 'actionable', priority: 'normal' }];
   const newSnapshot = [{ id: WORK_ID, version: 2, inclusionReason: 'actionable', priority: 'normal' }];
   const activeRow = digestRow({
@@ -616,20 +617,8 @@ test('divergent prepared intent is typed and generation cleanup plus retirement 
     delivery_claimed_at: '2026-08-29T03:00:01.000Z', delivered_at: '2026-08-29T03:00:02.000Z',
     slack_channel_id: 'CINBOX', slack_message_ts: '100.20'
   });
-  const deletingPart = digestPartRow({
-    ...deliveredPart,
-    cleanup_state: 'deleting', cleanup_attempts: 1, cleanup_owner: 'bridge:cleanup',
-    cleanup_token: CLEANUP_TOKEN, cleanup_expires_at: '2026-08-29T03:02:00.000Z',
-    cleanup_attempted_at: '2026-08-29T03:00:03.000Z'
-  });
-  const deletedPart = digestPartRow({
-    ...deliveredPart,
-    cleanup_state: 'deleted', cleanup_attempts: 1,
-    cleanup_attempted_at: '2026-08-29T03:00:03.000Z',
-    cleaned_at: '2026-08-29T03:00:04.000Z'
-  });
-  const retiredRow = digestRow({
-    state: 'retired', generation: 1, item_snapshot: oldSnapshot,
+  const divergedRow = digestRow({
+    state: 'diverged', generation: 1, item_snapshot: oldSnapshot,
     manifest_prepared_at: '2026-08-29T03:00:01.000Z',
     lease_owner: null, lease_token: null, lease_expires_at: null,
     error: 'digest_generation_diverged'
@@ -638,9 +627,7 @@ test('divergent prepared intent is typed and generation cleanup plus retirement 
     response({ data: {
       applied: false, created: false, reason: 'manifest_mismatch', row: activeRow, parts: [deliveredPart]
     } }),
-    response({ data: { claimed: true, row: activeRow, part: deletingPart } }),
-    response({ data: { applied: true, row: activeRow, part: deletedPart } }),
-    response({ data: { applied: true, row: retiredRow } })
+    response({ data: { applied: true, row: divergedRow } })
   ]);
   const store = createWorkOrchestratorStore({
     supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
@@ -659,34 +646,20 @@ test('divergent prepared intent is typed and generation cleanup plus retirement 
   assert.equal(mismatch.reason, 'manifest_mismatch');
   assert.equal(mismatch.parts[0].client_message_id, CLIENT_MESSAGE_ID);
 
-  const cleanupClaim = await store.claimDigestGenerationPartCleanup({
-    id: DIGEST_ID, partId: PART_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
-    cleanupOwner: 'bridge:cleanup', leaseSeconds: 120
-  });
-  assert.equal(cleanupClaim.claimed, true);
-  const cleanupRecord = await store.recordDigestGenerationPartCleanup({
-    id: DIGEST_ID, partId: PART_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
-    cleanupOwner: 'bridge:cleanup', cleanupToken: CLEANUP_TOKEN,
-    expectedCleanupAttempts: 1, outcome: 'deleted'
-  });
-  assert.equal(cleanupRecord.applied, true);
-  const retirement = await store.retireDigestGeneration({
+  const handoff = await store.markDigestGenerationDiverged({
     id: DIGEST_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
     error: 'digest_generation_diverged'
   });
-  assert.equal(retirement.row.state, 'retired');
+  assert.equal(handoff.row.state, 'diverged');
+  assert.equal(handoff.row.lease_token, null);
+  assert.equal(handoff.row.item_snapshot[0].version, 1);
+  assert.equal(mismatch.parts[0].slack_message_ts, '100.20');
 
   assert.deepEqual(fetch.requests.map(({ url }) => url), [
     'https://supabase.example/rest/v1/rpc/prepare_digest_parts_v2',
-    'https://supabase.example/rest/v1/rpc/claim_digest_generation_part_cleanup_v2',
-    'https://supabase.example/rest/v1/rpc/record_digest_generation_part_cleanup_v2',
-    'https://supabase.example/rest/v1/rpc/retire_digest_generation_v2'
+    'https://supabase.example/rest/v1/rpc/mark_digest_generation_diverged_v2'
   ]);
   assert.deepEqual(JSON.parse(fetch.requests[1].init.body), {
-    p_id: DIGEST_ID, p_part_id: PART_ID, p_lease_owner: 'bridge:test', p_lease_token: LEASE_TOKEN,
-    p_cleanup_owner: 'bridge:cleanup', p_lease_seconds: 120
-  });
-  assert.deepEqual(JSON.parse(fetch.requests[3].init.body), {
     p_id: DIGEST_ID, p_lease_owner: 'bridge:test', p_lease_token: LEASE_TOKEN,
     p_error: 'digest_generation_diverged'
   });

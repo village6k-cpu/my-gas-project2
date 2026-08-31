@@ -3415,7 +3415,7 @@ function digestStoreStub() {
   return Object.fromEntries([
     'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
     'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
-    'claimDigestGenerationPartCleanup', 'recordDigestGenerationPartCleanup', 'retireDigestGeneration',
+    'markDigestGenerationDiverged',
     'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
   ].map((name) => [name, () => {}]));
 }
@@ -3769,6 +3769,51 @@ test('digest runtime preserves authoritative 501 overflow evidence and its finit
   assert.equal(health.lastDigestRun.error, 'digest_eligible_overflow');
   assert.equal(health.lastDigestRun.selectedCount, 501);
   assert.equal(health.omittedEligibleCount, 501);
+});
+
+test('digest runtime, maintenance, and health preserve only successor-first generation errors', async () => {
+  const scheduledAt = '2026-08-29T06:00:00.000Z';
+  const failedResult = (error) => ({
+    status: 'failed', error, retryable: true, scheduledAt,
+    runId: '10000000-0000-4000-8000-000000000001',
+    selectedCount: 1, renderedCount: 1, omittedEligibleCount: 0,
+    partCount: 1, deliveredPartCount: 1,
+    cleanup: { attempted: 0, settled: 0, failed: 0 }
+  });
+
+  for (const error of ['digest_generation_diverged', 'digest_generation_handoff_failed']) {
+    const sharedState = {};
+    const runtime = createWorkOrchestratorDigestRuntime({
+      config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
+      store: digestStoreStub(),
+      slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+      state: sharedState,
+      now: () => '2026-08-29T06:01:00.000Z',
+      run: async () => failedResult(error),
+      setIntervalImpl: () => ({})
+    });
+    const result = await runtime.runNow('manual');
+    assert.equal(result.error, error);
+    assert.equal(buildWorkOrchestratorHealthState(sharedState).lastDigestRun.error, error);
+    const maintenance = await handleWorkOrchestratorDigestMaintenance({
+      runNow: async () => failedResult(error)
+    });
+    assert.equal(maintenance.body.result.error, error);
+  }
+
+  for (const retiredError of ['digest_generation_cleanup_failed', 'digest_generation_retired']) {
+    const health = buildWorkOrchestratorHealthState({
+      lastDigestRun: {
+        at: '2026-08-29T06:01:00.000Z', trigger: 'manual', status: 'failed',
+        scheduledAt, error: retiredError
+      }
+    });
+    assert.equal(health.lastDigestRun.error, 'digest_cycle_failed');
+    const maintenance = await handleWorkOrchestratorDigestMaintenance({
+      runNow: async () => failedResult(retiredError)
+    });
+    assert.equal(maintenance.body.result.error, 'digest_cycle_failed');
+  }
 });
 
 test('maintenance digest handler uses the injectable runtime and returns finite status only', async () => {

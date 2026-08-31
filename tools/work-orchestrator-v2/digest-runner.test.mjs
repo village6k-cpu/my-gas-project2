@@ -85,10 +85,23 @@ class FakeStore {
     this.leaseGeneration = 0;
     this.digestGeneration = 1;
     this.retiredRuns = [];
+    this.divergentRuns = [];
   }
 
   async claimDigestRun(input) {
     this.calls.push(['claimDigestRun', structuredClone(input)]);
+    if (this.claimAvailable && this.run?.state === 'diverged') {
+      this.divergentRuns.push({
+        run: structuredClone(this.run),
+        parts: structuredClone(this.parts),
+        previous: structuredClone(this.previous)
+      });
+      this.digestGeneration += 1;
+      this.run = null;
+      this.parts = [];
+      this.prepared = false;
+      this.finalized = false;
+    }
     if (!this.claimAvailable || this.run?.state === 'delivered') {
       return { claimed: false, created: false, row: this.run, previous_digest: this.previous };
     }
@@ -237,26 +250,58 @@ class FakeStore {
     return { applied: true, row: structuredClone(this.run) };
   }
 
+  async markDigestGenerationDiverged(input) {
+    this.calls.push(['markDigestGenerationDiverged', structuredClone(input)]);
+    if (!this.run || this.run.id !== input.id || this.run.lease_token !== input.leaseToken
+      || this.run.state !== 'delivering') return { applied: false, row: null };
+    this.run.state = 'diverged';
+    this.run.error = input.error;
+    this.run.lease_token = null;
+    this.claimAvailable = true;
+    return { applied: true, row: structuredClone(this.run) };
+  }
+
+  cleanupTargetParts(previousDigestId) {
+    if (this.previous?.id === previousDigestId) return this.previous.parts;
+    return this.divergentRuns.find(({ run }) => run.id === previousDigestId)?.parts || [];
+  }
+
+  cleanupTargets() {
+    if (!this.finalized || this.divergentRuns.length === 0) {
+      return this.previous ? [{ ...this.previous }] : [];
+    }
+    const latest = this.divergentRuns.at(-1);
+    return [
+      {
+        id: latest.run.id,
+        parts: latest.parts.filter((part) => part.delivery_state === 'delivered')
+      },
+      ...(latest.previous ? [{ ...latest.previous }] : [])
+    ];
+  }
+
   async listDigestCleanupBacklog(input) {
     this.calls.push(['listDigestCleanupBacklog', structuredClone(input)]);
-    if (!this.finalized || !this.previous) return [];
-    const parts = this.previous.parts
-      .filter((part) => !['deleted', 'already_absent'].includes(this.cleanup.get(part.id)?.state))
-      .map((part) => ({
-        previous_part_id: part.id,
-        part_kind: part.part_kind,
-        part_number: part.part_number,
-        part_count: part.part_count,
-        slack_channel_id: part.slack_channel_id,
-        slack_message_ts: part.slack_message_ts,
-        cleanup_state: this.cleanup.get(part.id)?.state || 'idle'
-      }));
-    return parts.length === 0 ? [] : [{
-      successor_digest_id: RUN_ID,
-      previous_digest_id: this.previous.id,
-      previous_cleanup_state: parts.some(({ cleanup_state }) => cleanup_state === 'failed') ? 'failed' : 'idle',
-      parts
-    }].slice(0, input.limit);
+    if (!this.finalized) return [];
+    return this.cleanupTargets().map((target) => {
+      const parts = target.parts
+        .filter((part) => !['deleted', 'already_absent'].includes(this.cleanup.get(part.id)?.state))
+        .map((part) => ({
+          previous_part_id: part.id,
+          part_kind: part.part_kind,
+          part_number: part.part_number,
+          part_count: part.part_count,
+          slack_channel_id: part.slack_channel_id,
+          slack_message_ts: part.slack_message_ts,
+          cleanup_state: this.cleanup.get(part.id)?.state || 'idle'
+        }));
+      return parts.length === 0 ? null : {
+        successor_digest_id: this.run.id,
+        previous_digest_id: target.id,
+        previous_cleanup_state: parts.some(({ cleanup_state }) => cleanup_state === 'failed') ? 'failed' : 'idle',
+        parts
+      };
+    }).filter(Boolean).slice(0, input.limit);
   }
 
   async claimDigestPartCleanup(input) {
@@ -269,7 +314,8 @@ class FakeStore {
     const attempt = (current?.attempt || 0) + 1;
     const value = { state: 'deleting', attempt, token: `70000000-0000-4000-8000-${String(attempt).padStart(12, '0')}` };
     this.cleanup.set(input.previousPartId, value);
-    const target = this.previous.parts.find(({ id }) => id === input.previousPartId);
+    const target = this.cleanupTargetParts(input.previousDigestId)
+      .find(({ id }) => id === input.previousPartId);
     return {
       claimed: true,
       row: { state: 'delivered' },
@@ -289,6 +335,12 @@ class FakeStore {
       return { applied: false, row: null, part: null };
     }
     value.state = input.outcome;
+    const allSettled = this.cleanupTargets().every((target) => target.parts.every((part) =>
+      ['deleted', 'already_absent'].includes(this.cleanup.get(part.id)?.state)));
+    if (allSettled && this.divergentRuns.length > 0) {
+      for (const divergent of this.divergentRuns) divergent.run.state = 'retired';
+      this.retiredRuns = this.divergentRuns.map((entry) => structuredClone(entry));
+    }
     return { applied: true, row: { state: 'delivered' }, part: { cleanup_state: input.outcome } };
   }
 
@@ -364,6 +416,63 @@ function slackFake({ post, find, remove } = {}) {
       return remove ? remove(input, calls) : { status: 'deleted' };
     }
   };
+}
+
+function seededDivergentStore() {
+  const inheritedPrior = priorPart(1);
+  const store = new FakeStore({
+    items: Array.from({ length: 25 }, (_, index) => workItem(index + 1, {
+      title: `Current work ${index + 1}`,
+      version: 2
+    })),
+    previousParts: [inheritedPrior]
+  });
+  store.run = {
+    id: RUN_ID,
+    generation: 1,
+    state: 'diverged',
+    scheduled_at: SCHEDULED,
+    lease_token: null,
+    item_snapshot: [{ id: uuid(1), version: 1, inclusionReason: 'actionable', priority: 'normal' }],
+    manifest_prepared_at: SCHEDULED,
+    error: 'digest_generation_diverged'
+  };
+  store.parts = [{
+    id: '50000000-0000-4000-8000-000000000001',
+    digest_run_id: RUN_ID,
+    part_kind: 'ordinary',
+    part_number: 1,
+    part_count: 2,
+    item_ids: Array.from({ length: 24 }, (_, index) => uuid(index + 1)),
+    payload_hash: 'a'.repeat(64),
+    client_message_id: '60000000-0000-4000-8000-000000000001',
+    delivery_state: 'delivered',
+    delivery_attempts: 1,
+    slack_channel_id: 'CFOCUS',
+    slack_message_ts: '310.1',
+    delivered_at: SCHEDULED,
+    cleanup_state: 'idle',
+    cleanup_attempts: 0
+  }, {
+    id: '50000000-0000-4000-8000-000000000002',
+    digest_run_id: RUN_ID,
+    part_kind: 'ordinary',
+    part_number: 2,
+    part_count: 2,
+    item_ids: [uuid(25)],
+    payload_hash: 'b'.repeat(64),
+    client_message_id: '60000000-0000-4000-8000-000000000002',
+    delivery_state: 'failed',
+    delivery_attempts: 1,
+    slack_channel_id: null,
+    slack_message_ts: null,
+    delivered_at: null,
+    cleanup_state: 'idle',
+    cleanup_attempts: 0
+  }];
+  store.prepared = true;
+  store.claimAvailable = true;
+  return { store, inheritedPrior };
 }
 
 test('schedule uses the latest exact epoch-aligned boundary and one preceding window', () => {
@@ -532,8 +641,12 @@ test('history_incomplete keeps an ambiguous digest part delivering across reclai
   assert.equal(store.parts[0].delivery_attempts, 1);
 });
 
-test('mutated included work retires a partial generation only after exact cleanup, then converges with new IDs and hashes', async () => {
-  const store = new FakeStore({ items: Array.from({ length: 25 }, (_, index) => workItem(index + 1)) });
+test('mutated included work keeps the partial generation visible until a successor is durably finalized', async () => {
+  const inheritedPrior = priorPart(1);
+  const store = new FakeStore({
+    items: Array.from({ length: 25 }, (_, index) => workItem(index + 1)),
+    previousParts: [inheritedPrior]
+  });
   const firstSlack = slackFake({
     post(input, calls) {
       const postNumber = calls.filter(([name]) => name === 'postMessage').length;
@@ -555,44 +668,169 @@ test('mutated included work retires a partial generation only after exact cleanu
 
   store.items[0] = { ...store.items[0], title: 'Work 1 changed after partial delivery', version: 2 };
   store.allowReclaim();
-  const deleted = [];
-  const cleanupSlack = slackFake({
-    remove(input) {
-      assert.equal(store.calls.at(-1)[0], 'claimDigestGenerationPartCleanup',
-        'the rotating cleanup CAS is durable before an exact Slack delete');
-      deleted.push(structuredClone(input));
-      return { status: 'deleted' };
-    }
+  const successorSlack = slackFake();
+  const handoff = await runDigestCycle({
+    store, slack: successorSlack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:b'
   });
-  const retired = await runDigestCycle({
-    store, slack: cleanupSlack, config: config(), now: NOW, leaseOwner: 'runner:b'
+  assert.equal(handoff.status, 'failed');
+  assert.equal(handoff.error, 'digest_generation_diverged');
+  assert.equal(handoff.retryable, true);
+  assert.equal(successorSlack.calls.some(([name]) => name === 'deleteMessage'), false,
+    'generation N remains visible while N+1 is not finalized');
+  assert.equal(store.retiredRuns.length, 0, 'generation N is not terminally retired before N+1 delivery');
+  assert.equal(store.run.state, 'diverged');
+  assert.deepEqual(store.parts.map((part) => part.client_message_id), oldClientIds);
+  assert.deepEqual(store.parts.map((part) => part.payload_hash), oldHashes);
+
+  const converged = await runDigestCycle({
+    store, slack: successorSlack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:c'
   });
-  assert.equal(retired.status, 'failed');
-  assert.equal(retired.error, 'digest_generation_retired');
-  assert.equal(retired.retryable, true);
-  assert.deepEqual(deleted, [{ channel: 'CFOCUS', ts: '310.1' }]);
-  assert.equal(cleanupSlack.calls.some(([name]) => name === 'postMessage'), false);
+  assert.equal(converged.status, 'delivered');
+  assert.equal(store.run.generation, 2);
+  assert.deepEqual(converged.cleanup, { attempted: 2, settled: 2, failed: 0 });
+  assert.deepEqual(successorSlack.calls.filter(([name]) => name === 'deleteMessage').map(([, input]) => input), [
+    { channel: 'CFOCUS', ts: '310.1' },
+    { channel: 'COLD', ts: '100.1' }
+  ]);
   assert.equal(store.retiredRuns.length, 1);
   assert.equal(store.retiredRuns[0].run.state, 'retired');
   assert.deepEqual(store.retiredRuns[0].parts.map((part) => part.client_message_id), oldClientIds);
   assert.deepEqual(store.retiredRuns[0].parts.map((part) => part.payload_hash), oldHashes);
-
-  const nextSlack = slackFake();
-  const converged = await runDigestCycle({
-    store, slack: nextSlack, config: config(), now: NOW, leaseOwner: 'runner:c'
-  });
-  assert.equal(converged.status, 'delivered');
-  assert.equal(store.run.generation, 2);
-  const newClientIds = store.parts.map((part) => part.client_message_id);
-  assert.ok(newClientIds.every((id) => !oldClientIds.includes(id)));
+  const successorClientIds = store.parts.map((part) => part.client_message_id);
+  assert.ok(successorClientIds.every((id) => !oldClientIds.includes(id)));
   assert.notEqual(store.parts[0].payload_hash, oldHashes[0]);
-  const allPostIds = [
-    ...firstSlack.calls.filter(([name]) => name === 'postMessage').map(([, input]) => input.clientMsgId),
-    ...nextSlack.calls.filter(([name]) => name === 'postMessage').map(([, input]) => input.clientMsgId)
-  ];
-  assert.equal(allPostIds.filter((id) => id === oldClientIds[0]).length, 1,
-    'the already-posted partial coordinate is deleted, never reposted');
-  assert.deepEqual(nextSlack.calls.filter(([name]) => name === 'postMessage').map(([, input]) => input.clientMsgId), newClientIds);
+  const finalizeIndex = store.calls.findIndex(([name]) => name === 'finalizeDigestRun');
+  const cleanupIndex = store.calls.findIndex(([name]) => name === 'claimDigestPartCleanup');
+  assert.ok(finalizeIndex >= 0 && finalizeIndex < cleanupIndex,
+    'the successor is durably finalized before any old exact coordinate is claimed for cleanup');
+});
+
+test('successor post, settlement, and finalization failures leave every old exact coordinate untouched', async (t) => {
+  for (const boundary of ['post', 'settlement', 'finalization']) {
+    await t.test(boundary, async () => {
+      const { store } = seededDivergentStore();
+      if (boundary === 'settlement') {
+        store.markDigestPartDelivered = async (input) => {
+          store.calls.push(['markDigestPartDelivered', structuredClone(input)]);
+          throw new Error('offline settlement transport failure');
+        };
+      }
+      if (boundary === 'finalization') {
+        store.finalizeDigestRun = async (input) => {
+          store.calls.push(['finalizeDigestRun', structuredClone(input)]);
+          throw new Error('offline finalization transport failure');
+        };
+      }
+      const slack = slackFake({
+        post(input) {
+          if (boundary === 'post') {
+            const error = new Error('offline post rejection');
+            error.code = 'channel_not_found';
+            error.ambiguous = false;
+            throw error;
+          }
+          return { ok: true, channel: input.channel, ts: '320.1', message: {} };
+        }
+      });
+
+      const result = await runDigestCycle({
+        store, slack, config: config({ cleanupEnabled: true }), now: NOW,
+        leaseOwner: `runner:${boundary}`
+      });
+
+      assert.equal(result.status, 'failed');
+      assert.equal(slack.calls.some(([name]) => name === 'deleteMessage'), false);
+      assert.equal(store.calls.some(([name]) => name === 'claimDigestPartCleanup'), false);
+      assert.equal(store.divergentRuns[0].run.state, 'diverged');
+      assert.equal(store.retiredRuns.length, 0);
+      assert.deepEqual(
+        store.divergentRuns[0].parts.filter(({ delivery_state }) => delivery_state === 'delivered')
+          .map(({ slack_channel_id, slack_message_ts }) => ({ channel: slack_channel_id, ts: slack_message_ts })),
+        [{ channel: 'CFOCUS', ts: '310.1' }]
+      );
+    });
+  }
+});
+
+test('finalization retry never reposts the successor and only then cleans the full inherited chain', async () => {
+  const { store } = seededDivergentStore();
+  const finalize = store.finalizeDigestRun.bind(store);
+  let failFinalization = true;
+  store.finalizeDigestRun = async (input) => {
+    if (failFinalization) {
+      store.calls.push(['finalizeDigestRun', structuredClone(input)]);
+      failFinalization = false;
+      throw new Error('offline finalization transport failure');
+    }
+    return finalize(input);
+  };
+  const slack = slackFake();
+
+  const failed = await runDigestCycle({
+    store, slack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:finalize-a'
+  });
+  assert.equal(failed.error, 'digest_delivery_unconfirmed');
+  const postsAfterFailure = slack.calls.filter(([name]) => name === 'postMessage').length;
+  assert.equal(slack.calls.some(([name]) => name === 'deleteMessage'), false);
+
+  store.allowReclaim();
+  const recovered = await runDigestCycle({
+    store, slack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:finalize-b'
+  });
+  assert.equal(recovered.status, 'delivered');
+  assert.equal(slack.calls.filter(([name]) => name === 'postMessage').length, postsAfterFailure,
+    'durably settled successor coordinates are never reposted');
+  assert.deepEqual(slack.calls.filter(([name]) => name === 'deleteMessage').map(([, input]) => input), [
+    { channel: 'CFOCUS', ts: '310.1' },
+    { channel: 'COLD', ts: '100.1' }
+  ]);
+  assert.equal(store.divergentRuns[0].run.state, 'retired');
+});
+
+test('cleanup crash can settle inherited prior first without retiring the divergent authorization chain', async () => {
+  const { store, inheritedPrior } = seededDivergentStore();
+  const record = store.recordDigestPartCleanup.bind(store);
+  const divergentPartId = store.parts[0].id;
+  let crashBeforeDivergentRecord = true;
+  store.recordDigestPartCleanup = async (input) => {
+    if (input.previousPartId === divergentPartId && crashBeforeDivergentRecord) {
+      crashBeforeDivergentRecord = false;
+      store.calls.push(['recordDigestPartCleanup', structuredClone(input)]);
+      throw new Error('offline crash after exact delete before durable record');
+    }
+    return record(input);
+  };
+  const deleted = new Set();
+  const slack = slackFake({
+    remove(input) {
+      const identity = `${input.channel}:${input.ts}`;
+      if (deleted.has(identity)) return { status: 'already_absent' };
+      deleted.add(identity);
+      return { status: 'deleted' };
+    }
+  });
+
+  const first = await runDigestCycle({
+    store, slack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:cleanup-a'
+  });
+  assert.equal(first.status, 'delivered');
+  assert.deepEqual(first.cleanup, { attempted: 2, settled: 1, failed: 1 });
+  assert.equal(store.cleanup.get(inheritedPrior.id).state, 'deleted',
+    'out-of-order cleanup may settle the inherited prior first');
+  assert.equal(store.divergentRuns[0].run.state, 'diverged',
+    'N remains an authorized durable link until both N and inherited A converge');
+  assert.equal(store.retiredRuns.length, 0);
+
+  store.allowReclaim();
+  const postsBeforeRecovery = slack.calls.filter(([name]) => name === 'postMessage').length;
+  const recovered = await runDigestCycle({
+    store, slack, config: config({ cleanupEnabled: true }), now: NOW, leaseOwner: 'runner:cleanup-b'
+  });
+  assert.equal(recovered.status, 'not_claimed');
+  assert.deepEqual(recovered.cleanup, { attempted: 1, settled: 1, failed: 0 });
+  assert.equal(slack.calls.filter(([name]) => name === 'postMessage').length, postsBeforeRecovery);
+  assert.equal(store.divergentRuns[0].run.state, 'retired');
+  assert.deepEqual([...deleted].sort(), ['CFOCUS:310.1', 'COLD:100.1']);
 });
 
 test('subset crash reclaims immutable client IDs, skips delivered parts, reconciles delivering, and completes all parts', async () => {
@@ -920,13 +1158,15 @@ test('durable backlog still cleans A through replaced B after C has already clea
   const aPartId = '91000000-0000-4000-8000-000000000004';
   const bPartId = '91000000-0000-4000-8000-000000000005';
   const entries = [{
-    successor_digest_id: cId, previous_digest_id: bId, previous_cleanup_state: 'idle',
+    successor_digest_id: cId,
+    previous_digest_id: bId, previous_cleanup_state: 'idle',
     parts: [{
       previous_part_id: bPartId, part_kind: 'ordinary', part_number: 1, part_count: 1,
       slack_channel_id: 'CBACKLOG', slack_message_ts: '910.02', cleanup_state: 'idle'
     }]
   }, {
-    successor_digest_id: bId, previous_digest_id: aId, previous_cleanup_state: 'failed',
+    successor_digest_id: bId,
+    previous_digest_id: aId, previous_cleanup_state: 'failed',
     parts: [{
       previous_part_id: aPartId, part_kind: 'ordinary', part_number: 1, part_count: 1,
       slack_channel_id: 'CBACKLOG', slack_message_ts: '910.01', cleanup_state: 'failed'
@@ -983,9 +1223,7 @@ test('durable backlog still cleans A through replaced B after C has already clea
     async claimDigestPartDelivery() { throw new Error('not called'); },
     async markDigestPartDelivered() { throw new Error('not called'); },
     async markDigestPartFailed() { throw new Error('not called'); },
-    async claimDigestGenerationPartCleanup() { throw new Error('not called'); },
-    async recordDigestGenerationPartCleanup() { throw new Error('not called'); },
-    async retireDigestGeneration() { throw new Error('not called'); },
+    async markDigestGenerationDiverged() { throw new Error('not called'); },
     async finalizeDigestRun() { throw new Error('not called'); },
     async failDigestRun() { throw new Error('not called'); }
   };
@@ -1078,9 +1316,7 @@ test('shared-prior successors each reconcile aggregate state while one exact Sla
     async claimDigestPartDelivery() { throw new Error('not called'); },
     async markDigestPartDelivered() { throw new Error('not called'); },
     async markDigestPartFailed() { throw new Error('not called'); },
-    async claimDigestGenerationPartCleanup() { throw new Error('not called'); },
-    async recordDigestGenerationPartCleanup() { throw new Error('not called'); },
-    async retireDigestGeneration() { throw new Error('not called'); },
+    async markDigestGenerationDiverged() { throw new Error('not called'); },
     async finalizeDigestRun() { throw new Error('not called'); },
     async failDigestRun() { throw new Error('not called'); }
   };
