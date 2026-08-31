@@ -679,7 +679,7 @@ export function createWorkOrchestratorImmediateRuntime({
 }
 
 const DIGEST_STORE_METHODS = [
-  'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
+  'claimDivergentDigestRun', 'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
   'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
   'markDigestGenerationDiverged',
   'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'

@@ -88,6 +88,11 @@ class FakeStore {
     this.divergentRuns = [];
   }
 
+  async claimDivergentDigestRun(input) {
+    this.calls.push(['claimDivergentDigestRun', structuredClone(input)]);
+    return { claimed: false, created: false, row: null, previous_digest: null };
+  }
+
   async claimDigestRun(input) {
     this.calls.push(['claimDigestRun', structuredClone(input)]);
     if (this.claimAvailable && this.run?.state === 'diverged') {
@@ -506,6 +511,86 @@ test('two concurrent runners race on one database claim and only one lists or po
   assert.equal(results.find(({ status }) => status === 'not_claimed').retryable, true);
   assert.equal(store.calls.filter(([name]) => name === 'listActionableWork').length, 1);
   assert.equal(slack.calls.filter(([name]) => name === 'postMessage').length, 1);
+});
+
+test('restart across an interval drains one old divergent slot before still delivering the current boundary', async () => {
+  const oldScheduledAt = '2026-08-29T03:00:00.000Z';
+  const oldId = '11000000-0000-4000-8000-000000000001';
+  const currentId = '11000000-0000-4000-8000-000000000002';
+  const calls = [];
+  const rows = new Map([
+    [oldId, {
+      id: oldId, generation: 2, state: 'building', scheduled_at: oldScheduledAt,
+      window_started_at: '2026-08-29T00:00:00.000Z', window_ended_at: oldScheduledAt,
+      lease_token: '11000000-0000-4000-8000-000000000011', item_snapshot: [],
+      manifest_prepared_at: null
+    }],
+    [currentId, {
+      id: currentId, generation: 1, state: 'building', scheduled_at: SCHEDULED,
+      window_started_at: oldScheduledAt, window_ended_at: SCHEDULED,
+      lease_token: '11000000-0000-4000-8000-000000000012', item_snapshot: [],
+      manifest_prepared_at: null
+    }]
+  ]);
+  const claim = (row) => ({
+    claimed: true, created: true, row: structuredClone(row), previous_digest: null
+  });
+  const store = {
+    async claimDivergentDigestRun(input) {
+      calls.push(['claimDivergentDigestRun', structuredClone(input)]);
+      return claim(rows.get(oldId));
+    },
+    async claimDigestRun(input) {
+      calls.push(['claimDigestRun', structuredClone(input)]);
+      return claim(rows.get(currentId));
+    },
+    async listActionableWork(input) {
+      calls.push(['listActionableWork', structuredClone(input)]);
+      const result = [];
+      Object.defineProperty(result, 'eligibleCount', { value: 0, enumerable: false });
+      return result;
+    },
+    async prepareDigestParts(input) {
+      calls.push(['prepareDigestParts', structuredClone(input)]);
+      const row = rows.get(input.id);
+      row.state = 'delivering';
+      row.item_snapshot = [];
+      row.manifest_prepared_at = input.id === oldId ? oldScheduledAt : SCHEDULED;
+      return { applied: true, created: true, row: structuredClone(row), parts: [] };
+    },
+    async finalizeDigestRun(input) {
+      calls.push(['finalizeDigestRun', structuredClone(input)]);
+      const row = rows.get(input.id);
+      row.state = 'delivered';
+      return { applied: true, row: structuredClone(row), updated_count: 0 };
+    },
+    async listDigestCleanupBacklog() { return []; },
+    async claimDigestPartDelivery() { throw new Error('not called'); },
+    async markDigestPartDelivered() { throw new Error('not called'); },
+    async markDigestPartFailed() { throw new Error('not called'); },
+    async markDigestGenerationDiverged() { throw new Error('not called'); },
+    async failDigestRun() { throw new Error('not called'); },
+    async claimDigestPartCleanup() { throw new Error('not called'); },
+    async recordDigestPartCleanup() { throw new Error('not called'); }
+  };
+
+  const result = await runDigestCycle({
+    store, slack: slackFake(), config: config(),
+    now: '2026-08-29T06:00:00.001Z', leaseOwner: 'runner:restart'
+  });
+
+  assert.equal(result.status, 'delivered');
+  assert.equal(result.scheduledAt, SCHEDULED);
+  assert.equal(result.retryable, true, 'the bounded recovery backlog is polled again before the next interval');
+  assert.deepEqual(calls.filter(([name]) => name === 'finalizeDigestRun').map(([, input]) => input.id), [
+    oldId, currentId
+  ]);
+  assert.deepEqual(calls.filter(([name]) => name.startsWith('claim')).map(([name]) => name), [
+    'claimDivergentDigestRun', 'claimDigestRun'
+  ]);
+  assert.deepEqual(calls.filter(([name]) => name === 'listActionableWork').map(([, input]) => input.now), [
+    oldScheduledAt, SCHEDULED
+  ]);
 });
 
 test('claim accepts an equivalent PostgreSQL timestamptz representation and sanitizes claim failures', async () => {
@@ -1177,6 +1262,9 @@ test('durable backlog still cleans A through replaced B after C has already clea
   }])));
   const calls = [];
   const store = {
+    async claimDivergentDigestRun() {
+      return { claimed: false, created: false, row: null, previous_digest: null };
+    },
     async claimDigestRun(input) {
       return {
         claimed: false, created: false, previous_digest: null,
@@ -1268,6 +1356,9 @@ test('shared-prior successors each reconcile aggregate state while one exact Sla
   const part = { state: 'idle', attempts: 0, token: null };
   const calls = [];
   const store = {
+    async claimDivergentDigestRun() {
+      return { claimed: false, created: false, row: null, previous_digest: null };
+    },
     async claimDigestRun(input) {
       return {
         claimed: false, created: false, previous_digest: null,

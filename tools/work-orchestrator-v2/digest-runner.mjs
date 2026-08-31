@@ -78,7 +78,7 @@ function requireMethod(value, method) {
 
 function validateDependencies(store, slack, cleanupEnabled) {
   for (const method of [
-    'claimDigestRun', 'listActionableWork', 'prepareDigestParts',
+    'claimDivergentDigestRun', 'claimDigestRun', 'listActionableWork', 'prepareDigestParts',
     'claimDigestPartDelivery', 'markDigestPartDelivered', 'markDigestPartFailed',
     'markDigestGenerationDiverged',
     'finalizeDigestRun', 'failDigestRun'
@@ -174,6 +174,36 @@ function validateClaim(value, expected) {
     throw new Error('digest_claim_invalid');
   }
   return value;
+}
+
+function validateDivergentClaim(value, beforeScheduledAt) {
+  if (!isRecord(value) || typeof value.claimed !== 'boolean' || typeof value.created !== 'boolean'
+    || value.created && !value.claimed) throw new Error('digest_claim_invalid');
+  if (value.row === null) {
+    if (value.claimed || value.created || value.previous_digest !== null) {
+      throw new Error('digest_claim_invalid');
+    }
+    return { claim: value, window: null };
+  }
+  if (!isRecord(value.row)) throw new Error('digest_claim_invalid');
+  const row = value.row;
+  const scheduledMs = Date.parse(String(row.scheduled_at || ''));
+  const windowStartedMs = Date.parse(String(row.window_started_at || ''));
+  const windowEndedMs = Date.parse(String(row.window_ended_at || ''));
+  if (!Number.isFinite(scheduledMs) || !Number.isFinite(windowStartedMs)
+    || !Number.isFinite(windowEndedMs) || scheduledMs >= Date.parse(beforeScheduledAt)
+    || windowStartedMs > windowEndedMs || windowEndedMs !== scheduledMs) {
+    throw new Error('digest_claim_invalid');
+  }
+  validateClaim(value, { scheduledAt: new Date(scheduledMs).toISOString() });
+  return {
+    claim: value,
+    window: {
+      scheduledAt: new Date(scheduledMs).toISOString(),
+      windowStartedAt: new Date(windowStartedMs).toISOString(),
+      windowEndedAt: new Date(windowEndedMs).toISOString()
+    }
+  };
 }
 
 function sameArray(left, right) {
@@ -639,12 +669,7 @@ function baseResult({ status, scheduledAt, runId, selectedCount = 0, renderedCou
   return result;
 }
 
-export async function runDigestCycle({ store, slack, config: rawConfig, now, leaseOwner } = {}) {
-  const timestamp = canonicalIso(now);
-  const config = normalizeConfig(rawConfig);
-  const owner = requiredText(leaseOwner, 200);
-  validateDependencies(store, slack, config.cleanupEnabled);
-  const window = digestScheduleWindow(timestamp, config.intervalMinutes);
+async function runDigestWindow({ store, slack, config, timestamp, owner, window, preclaimed = null }) {
   const finish = async (input) => {
     const cleanup = await cleanupBacklog({ store, slack, config, leaseOwner: owner });
     return baseResult({
@@ -656,14 +681,16 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
 
   let claimed;
   try {
-    claimed = validateClaim(await store.claimDigestRun({
-      destinationKey: config.destinationKey,
-      scheduledAt: window.scheduledAt,
-      windowStartedAt: window.windowStartedAt,
-      windowEndedAt: window.windowEndedAt,
-      leaseOwner: owner,
-      leaseSeconds: config.leaseSeconds
-    }), window);
+    claimed = preclaimed === null
+      ? validateClaim(await store.claimDigestRun({
+        destinationKey: config.destinationKey,
+        scheduledAt: window.scheduledAt,
+        windowStartedAt: window.windowStartedAt,
+        windowEndedAt: window.windowEndedAt,
+        leaseOwner: owner,
+        leaseSeconds: config.leaseSeconds
+      }), window)
+      : validateClaim(preclaimed, window);
   } catch {
     return finish({
       status: 'failed', error: 'digest_claim_failed', scheduledAt: window.scheduledAt,
@@ -826,4 +853,53 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
     status: 'delivered', scheduledAt: window.scheduledAt, runId: run.id,
     selectedCount, renderedCount, partCount: persistedParts.length, deliveredPartCount: delivered.length
   });
+}
+
+export async function runDigestCycle({ store, slack, config: rawConfig, now, leaseOwner } = {}) {
+  const timestamp = canonicalIso(now);
+  const config = normalizeConfig(rawConfig);
+  const owner = requiredText(leaseOwner, 200);
+  validateDependencies(store, slack, config.cleanupEnabled);
+  const currentWindow = digestScheduleWindow(timestamp, config.intervalMinutes);
+  let recovery = null;
+  let recoveryClaimFailed = false;
+  try {
+    recovery = validateDivergentClaim(await store.claimDivergentDigestRun({
+      destinationKey: config.destinationKey,
+      beforeScheduledAt: currentWindow.scheduledAt,
+      leaseOwner: owner,
+      leaseSeconds: config.leaseSeconds
+    }), currentWindow.scheduledAt);
+  } catch {
+    recoveryClaimFailed = true;
+  }
+
+  let recoveryResult = null;
+  if (recovery?.claim.claimed) {
+    recoveryResult = await runDigestWindow({
+      store, slack, config, timestamp, owner,
+      window: recovery.window,
+      preclaimed: recovery.claim
+    });
+  }
+  const currentResult = await runDigestWindow({
+    store, slack, config, timestamp, owner, window: currentWindow
+  });
+
+  if (recoveryResult && recoveryResult.status !== 'delivered') return recoveryResult;
+  if (recoveryClaimFailed && currentResult.status === 'delivered') {
+    return {
+      ...currentResult,
+      status: 'failed',
+      error: 'digest_claim_failed',
+      retryable: true
+    };
+  }
+  if (recoveryResult
+    || recoveryClaimFailed
+    || recovery?.claim.row && !recovery.claim.claimed
+      && ['building', 'delivering', 'failed'].includes(recovery.claim.row.state)) {
+    return { ...currentResult, retryable: true };
+  }
+  return currentResult;
 }

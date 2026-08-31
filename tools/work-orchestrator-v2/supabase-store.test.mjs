@@ -556,6 +556,40 @@ test('claimDigestRun sends exact lease inputs and preserves the one-winner resul
   });
 });
 
+test('claimDivergentDigestRun returns one exact old window below the current boundary', async () => {
+  const recovered = digestRow({
+    generation: 2,
+    window_started_at: '2026-08-29T00:00:00.000Z',
+    window_ended_at: '2026-08-29T03:00:00.000Z'
+  });
+  const fetch = createFetch([response({ data: {
+    claimed: true, created: true, row: recovered, previous_digest: previousDigest()
+  } })]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const result = await store.claimDivergentDigestRun({
+    destinationKey: 'slack:CINBOX',
+    beforeScheduledAt: '2026-08-29T06:00:00.000Z',
+    leaseOwner: 'bridge:test',
+    leaseSeconds: 120
+  });
+
+  assert.equal(result.claimed, true);
+  assert.equal(result.row.scheduled_at, '2026-08-29T03:00:00.000Z');
+  assert.equal(result.row.window_started_at, '2026-08-29T00:00:00.000Z');
+  assert.equal(result.row.window_ended_at, '2026-08-29T03:00:00.000Z');
+  assert.equal(fetch.requests[0].url,
+    'https://supabase.example/rest/v1/rpc/claim_divergent_digest_run_v2');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_destination_key: 'slack:CINBOX',
+    p_before_scheduled_at: '2026-08-29T06:00:00.000Z',
+    p_lease_owner: 'bridge:test',
+    p_lease_seconds: 120
+  });
+});
+
 test('claimDigestRun rejects an incomplete previous part coordinate manifest', async () => {
   const incomplete = previousDigest();
   incomplete.parts[0].part_count = 2;

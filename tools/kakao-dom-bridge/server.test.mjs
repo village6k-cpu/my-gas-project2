@@ -3413,7 +3413,7 @@ test('Work Orchestrator shadow health fails closed on arbitrary internal receipt
 
 function digestStoreStub() {
   return Object.fromEntries([
-    'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
+    'claimDivergentDigestRun', 'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
     'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
     'markDigestGenerationDiverged',
     'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
@@ -3438,10 +3438,17 @@ test('digest runtime is default-off and creates no timer or runner work while di
 });
 
 test('enabled digest runtime requires local store, Slack client, and one exact channel', () => {
+  const missingRecoveryClaim = digestStoreStub();
+  delete missingRecoveryClaim.claimDivergentDigestRun;
   for (const input of [
     { config: { digestEnabled: true, digestChannelId: 'CFOCUS' } },
     { config: { digestEnabled: true, digestChannelId: 'CFOCUS' }, store: {} },
-    { config: { digestEnabled: true, digestChannelId: '' }, store: {}, slack: {} }
+    { config: { digestEnabled: true, digestChannelId: '' }, store: {}, slack: {} },
+    {
+      config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
+      store: missingRecoveryClaim,
+      slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} }
+    }
   ]) {
     assert.throws(
       () => createWorkOrchestratorDigestRuntime(input),

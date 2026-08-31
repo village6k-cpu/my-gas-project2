@@ -52,6 +52,7 @@ test('foundation migration defines private atomic work and digest RPC contracts'
     'list_pending_work_actions_v2',
     'list_actionable_work_v2',
     'claim_digest_run_v2',
+    'claim_divergent_digest_run_v2',
     'prepare_digest_parts_v2',
     'claim_digest_part_delivery_v2',
     'mark_digest_part_delivered_v2',
@@ -98,6 +99,11 @@ test('foundation migration defines private atomic work and digest RPC contracts'
     /create function public\.claim_digest_run_v2\([\s\S]*?pg_advisory_xact_lock[\s\S]*?select \* into v_row[\s\S]*?insert into public\.digest_runs/i,
     'the destination advisory transaction lock is acquired before same-slot lookup and insertion'
   );
+  assert.match(
+    sql,
+    /create function public\.claim_divergent_digest_run_v2\([\s\S]*?pg_advisory_xact_lock[\s\S]*?scheduled_at\s*<\s*p_before_scheduled_at[\s\S]*?return public\.claim_digest_run_v2/i,
+    'the same destination lock protects selection before the serialized same-slot claim creates the successor'
+  );
   assert.match(sql, /isfinite\s*\(/i, 'all RPC timestamps reject infinity');
   assert.match(sql, /count\(distinct \(entry->>'id'\)::uuid\)/i, 'snapshot UUID duplicates use canonical UUID identity');
   assert.match(sql, /previous_digest_id/i);
@@ -137,6 +143,16 @@ test('foundation migration defines private atomic work and digest RPC contracts'
     sql,
     /list_digest_cleanup_backlog_v2[\s\S]*?with recursive[\s\S]*?previous_digest_id[\s\S]*?state in \('delivered','replaced'\)/i,
     'only a delivered successor exposes its bounded inherited cleanup chain'
+  );
+  assert.doesNotMatch(
+    sql,
+    /chain\.depth\s*<\s*50/i,
+    'cleanup authorization and retirement never silently hide a chain tail at depth fifty'
+  );
+  assert.match(
+    sql,
+    /with recursive cleanup_chain[\s\S]*?uuid\[\][\s\S]*?not\s+[^;]*?=\s*any\s*\(\s*chain\.[a-z_]+\s*\)/i,
+    'recursive cleanup traversal terminates by UUID cycle detection'
   );
   assert.match(
     sql,

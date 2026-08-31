@@ -485,6 +485,28 @@ function claimResponse(data, input) {
   return data;
 }
 
+function divergentClaimResponse(data, input) {
+  if (!exactKeys(data, ['claimed', 'created', 'previous_digest', 'row'])
+    || typeof data.claimed !== 'boolean' || typeof data.created !== 'boolean'
+    || data.created && !data.claimed || !data.claimed && data.created) throw responseInvalid();
+  if (data.row === null) {
+    if (data.claimed || data.created || data.previous_digest !== null) throw responseInvalid();
+    return data;
+  }
+  const result = claimResponse(data, {
+    destinationKey: input.destinationKey,
+    scheduledAt: data.row.scheduled_at,
+    leaseOwner: input.leaseOwner
+  });
+  const windowStartedAt = responseTimestamp(result.row.window_started_at);
+  const windowEndedAt = responseTimestamp(result.row.window_ended_at);
+  if (Date.parse(result.row.scheduled_at) >= Date.parse(input.beforeScheduledAt)
+    || Date.parse(windowStartedAt) > Date.parse(windowEndedAt)
+    || Date.parse(windowEndedAt) !== Date.parse(result.row.scheduled_at)
+    || result.row.previous_digest_id === null) throw responseInvalid();
+  return result;
+}
+
 function prepareResponse(data, input, snapshot, intent) {
   const mismatch = exactKeys(data, ['applied', 'created', 'parts', 'reason', 'row'])
     && data.reason === 'manifest_mismatch';
@@ -1140,6 +1162,31 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       return claimResponse(data, {
         destinationKey: body.p_destination_key,
         scheduledAt: body.p_scheduled_at,
+        leaseOwner: body.p_lease_owner
+      });
+    },
+    claimDivergentDigestRun: async (input = {}) => {
+      let body;
+      try {
+        if (!exactKeys(input, [
+          'destinationKey', 'beforeScheduledAt', 'leaseOwner', 'leaseSeconds'
+        ]) || !Number.isSafeInteger(input.leaseSeconds)
+          || input.leaseSeconds < 1 || input.leaseSeconds > 900) throw invalidInput();
+        body = {
+          p_destination_key: exactText(input.destinationKey, 500),
+          p_before_scheduled_at: isoTimestamp(input.beforeScheduledAt),
+          p_lease_owner: exactText(input.leaseOwner, 200),
+          p_lease_seconds: input.leaseSeconds
+        };
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/claim_divergent_digest_run_v2', {
+        method: 'POST', body: safeJson(body)
+      });
+      return divergentClaimResponse(data, {
+        destinationKey: body.p_destination_key,
+        beforeScheduledAt: body.p_before_scheduled_at,
         leaseOwner: body.p_lease_owner
       });
     },

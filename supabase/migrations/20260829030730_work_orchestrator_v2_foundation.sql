@@ -870,6 +870,68 @@ begin
 end;
 $$;
 
+create function public.claim_divergent_digest_run_v2(
+  p_destination_key text,
+  p_before_scheduled_at timestamptz,
+  p_lease_owner text,
+  p_lease_seconds integer
+) returns jsonb language plpgsql security invoker set search_path = '' as $$
+declare
+  v_row public.digest_runs%rowtype;
+begin
+  if p_destination_key is null or length(p_destination_key) not between 1 and 500
+    or p_destination_key <> btrim(p_destination_key)
+    or p_before_scheduled_at is null or not isfinite(p_before_scheduled_at)
+    or p_lease_owner is null or length(p_lease_owner) not between 1 and 200
+    or p_lease_owner <> btrim(p_lease_owner)
+    or p_lease_seconds is null or p_lease_seconds not between 1 and 900 then
+    raise exception 'invalid divergent digest claim' using errcode = '22023';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('digest:' || p_destination_key, 91420260829));
+  select * into v_row
+  from public.digest_runs candidate
+  where candidate.destination_key = p_destination_key
+    and candidate.scheduled_at < p_before_scheduled_at
+    and not exists (
+      select 1 from public.digest_runs newer
+      where newer.destination_key = candidate.destination_key
+        and newer.scheduled_at = candidate.scheduled_at
+        and newer.generation > candidate.generation
+    )
+    and (
+      candidate.state = 'diverged'
+      or (
+        candidate.state in ('building','delivering','failed')
+        and exists (
+          select 1 from public.digest_runs previous
+          where previous.id = candidate.previous_digest_id
+            and previous.destination_key = candidate.destination_key
+            and previous.scheduled_at = candidate.scheduled_at
+            and previous.generation < candidate.generation
+            and previous.state = 'diverged'
+        )
+      )
+    )
+  order by candidate.scheduled_at, candidate.generation desc, candidate.id
+  limit 1
+  for update;
+  if not found then
+    return jsonb_build_object(
+      'claimed', false, 'created', false, 'row', null, 'previous_digest', null
+    );
+  end if;
+  return public.claim_digest_run_v2(
+    p_destination_key,
+    v_row.scheduled_at,
+    v_row.window_started_at,
+    v_row.window_ended_at,
+    p_lease_owner,
+    p_lease_seconds
+  );
+end;
+$$;
+
 create function public.prepare_digest_parts_v2(
   p_id uuid,
   p_lease_owner text,
@@ -1332,14 +1394,15 @@ begin
   if not found then raise exception 'digest lease changed while locked' using errcode = '40001'; end if;
   loop
     with recursive cleanup_chain as (
-      select v_run.previous_digest_id as digest_id, 1 as depth
+      select v_run.previous_digest_id as digest_id,
+        array[v_run.id, v_run.previous_digest_id]::uuid[] as path
       where v_run.previous_digest_id is not null
       union all
-      select previous.previous_digest_id, chain.depth + 1
+      select previous.previous_digest_id, chain.path || previous.previous_digest_id
       from cleanup_chain chain
       join public.digest_runs previous on previous.id = chain.digest_id
       where previous.state in ('diverged','retired') and previous.previous_digest_id is not null
-        and chain.depth < 50
+        and not previous.previous_digest_id = any(chain.path)
     )
     update public.digest_runs candidate
     set state = 'retired'
@@ -1427,7 +1490,8 @@ begin
       successor.previous_cleanup_state,
       successor.scheduled_at as successor_scheduled_at,
       successor.generation as successor_generation,
-      1 as depth
+      1 as depth,
+      array[successor.id, successor.previous_digest_id]::uuid[] as path
     from public.digest_runs successor
     where successor.destination_key = p_destination_key
       and successor.state in ('delivered','replaced')
@@ -1441,12 +1505,13 @@ begin
       previous.previous_cleanup_state,
       chain.successor_scheduled_at,
       chain.successor_generation,
-      chain.depth + 1
+      chain.depth + 1,
+      chain.path || previous.previous_digest_id
     from cleanup_chain chain
     join public.digest_runs previous on previous.id = chain.previous_digest_id
     where previous.state = 'diverged'
       and previous.previous_digest_id is not null
-      and chain.depth < 50
+      and not previous.previous_digest_id = any(chain.path)
   ), eligible_targets as (
     select chain.successor_digest_id,
       chain.link_owner_id,
@@ -1559,14 +1624,16 @@ begin
     return jsonb_build_object('claimed', false, 'row', null, 'part', null);
   end if;
   with recursive cleanup_chain as (
-    select v_row.id as link_owner_id, v_row.previous_digest_id, 1 as depth
+    select v_row.id as link_owner_id, v_row.previous_digest_id, 1 as depth,
+      array[v_row.id, v_row.previous_digest_id]::uuid[] as path
     where v_row.previous_digest_id is not null
     union all
-    select previous.id, previous.previous_digest_id, chain.depth + 1
+    select previous.id, previous.previous_digest_id, chain.depth + 1,
+      chain.path || previous.previous_digest_id
     from cleanup_chain chain
     join public.digest_runs previous on previous.id = chain.previous_digest_id
     where previous.state = 'diverged' and previous.previous_digest_id is not null
-      and chain.depth < 50
+      and not previous.previous_digest_id = any(chain.path)
   )
   select link_owner_id into v_link_owner_id from cleanup_chain
   where previous_digest_id = p_previous_digest_id
@@ -1654,14 +1721,15 @@ begin
   end if;
   loop
     with recursive cleanup_chain as (
-      select v_row.previous_digest_id as digest_id, 1 as depth
+      select v_row.previous_digest_id as digest_id,
+        array[v_row.id, v_row.previous_digest_id]::uuid[] as path
       where v_row.previous_digest_id is not null
       union all
-      select previous.previous_digest_id, chain.depth + 1
+      select previous.previous_digest_id, chain.path || previous.previous_digest_id
       from cleanup_chain chain
       join public.digest_runs previous on previous.id = chain.digest_id
       where previous.state in ('diverged','retired') and previous.previous_digest_id is not null
-        and chain.depth < 50
+        and not previous.previous_digest_id = any(chain.path)
     )
     update public.digest_runs candidate
     set state = 'retired'
@@ -1729,14 +1797,16 @@ begin
     return jsonb_build_object('applied', false, 'row', null, 'part', null);
   end if;
   with recursive cleanup_chain as (
-    select v_row.id as link_owner_id, v_row.previous_digest_id, 1 as depth
+    select v_row.id as link_owner_id, v_row.previous_digest_id, 1 as depth,
+      array[v_row.id, v_row.previous_digest_id]::uuid[] as path
     where v_row.previous_digest_id is not null
     union all
-    select previous.id, previous.previous_digest_id, chain.depth + 1
+    select previous.id, previous.previous_digest_id, chain.depth + 1,
+      chain.path || previous.previous_digest_id
     from cleanup_chain chain
     join public.digest_runs previous on previous.id = chain.previous_digest_id
     where previous.state in ('diverged','retired') and previous.previous_digest_id is not null
-      and chain.depth < 50
+      and not previous.previous_digest_id = any(chain.path)
   )
   select link_owner_id into v_link_owner_id from cleanup_chain
   where previous_digest_id = p_previous_digest_id
@@ -1833,14 +1903,15 @@ begin
   end if;
   loop
     with recursive cleanup_chain as (
-      select v_row.previous_digest_id as digest_id, 1 as depth
+      select v_row.previous_digest_id as digest_id,
+        array[v_row.id, v_row.previous_digest_id]::uuid[] as path
       where v_row.previous_digest_id is not null
       union all
-      select previous.previous_digest_id, chain.depth + 1
+      select previous.previous_digest_id, chain.path || previous.previous_digest_id
       from cleanup_chain chain
       join public.digest_runs previous on previous.id = chain.digest_id
       where previous.state in ('diverged','retired') and previous.previous_digest_id is not null
-        and chain.depth < 50
+        and not previous.previous_digest_id = any(chain.path)
     )
     update public.digest_runs candidate
     set state = 'retired'
@@ -1893,6 +1964,7 @@ revoke execute on function public.is_processable_pending_work_action_v2(jsonb,in
 revoke execute on function public.list_pending_work_actions_v2(integer) from public, anon, authenticated;
 revoke execute on function public.list_actionable_work_v2(timestamptz,integer) from public, anon, authenticated;
 revoke execute on function public.claim_digest_run_v2(text,timestamptz,timestamptz,timestamptz,text,integer) from public, anon, authenticated;
+revoke execute on function public.claim_divergent_digest_run_v2(text,timestamptz,text,integer) from public, anon, authenticated;
 revoke execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,jsonb) from public, anon, authenticated;
 revoke execute on function public.claim_digest_part_delivery_v2(uuid,uuid,text,uuid) from public, anon, authenticated;
 revoke execute on function public.mark_digest_part_delivered_v2(uuid,uuid,text,uuid,integer,text,text,timestamptz) from public, anon, authenticated;
@@ -1912,6 +1984,7 @@ grant execute on function public.is_processable_pending_work_action_v2(jsonb,int
 grant execute on function public.list_pending_work_actions_v2(integer) to service_role;
 grant execute on function public.list_actionable_work_v2(timestamptz,integer) to service_role;
 grant execute on function public.claim_digest_run_v2(text,timestamptz,timestamptz,timestamptz,text,integer) to service_role;
+grant execute on function public.claim_divergent_digest_run_v2(text,timestamptz,text,integer) to service_role;
 grant execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,jsonb) to service_role;
 grant execute on function public.claim_digest_part_delivery_v2(uuid,uuid,text,uuid) to service_role;
 grant execute on function public.mark_digest_part_delivered_v2(uuid,uuid,text,uuid,integer,text,text,timestamptz) to service_role;

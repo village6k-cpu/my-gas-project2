@@ -121,6 +121,7 @@ test('foundation migration executes and exposes only service-role access in Post
           'list_pending_work_actions_v2',
           'list_actionable_work_v2',
           'claim_digest_run_v2',
+          'claim_divergent_digest_run_v2',
           'prepare_digest_parts_v2',
           'claim_digest_part_delivery_v2',
           'mark_digest_part_delivered_v2',
@@ -138,6 +139,7 @@ test('foundation migration executes and exposes only service-role access in Post
       'claim_digest_part_cleanup_v2',
       'claim_digest_part_delivery_v2',
       'claim_digest_run_v2',
+      'claim_divergent_digest_run_v2',
       'claim_message_notification_receipt',
       'fail_digest_run_v2',
       'finalize_digest_run_v2',
@@ -177,6 +179,7 @@ test('foundation migration executes and exposes only service-role access in Post
           'list_pending_work_actions_v2',
           'list_actionable_work_v2',
           'claim_digest_run_v2',
+          'claim_divergent_digest_run_v2',
           'prepare_digest_parts_v2',
           'claim_digest_part_delivery_v2',
           'mark_digest_part_delivered_v2',
@@ -1387,15 +1390,129 @@ test('SQL hands a divergent partial to one same-slot successor without touching 
       cleanup_state: 'idle'
     });
 
-    const winner = (await db.query(claimSql, ['bridge:successor-a'])).rows[0].result;
-    const loser = (await db.query(claimSql, ['bridge:successor-b'])).rows[0].result;
+    const recoverySql = `select public.claim_divergent_digest_run_v2(
+      'slack:CSUCCESSOR', '2026-08-29T06:00:00Z', $1::text, 120
+    ) as result`;
+    const winner = (await db.query(recoverySql, ['bridge:successor-a'])).rows[0].result;
+    const loser = (await db.query(recoverySql, ['bridge:successor-b'])).rows[0].result;
     assert.equal(winner.claimed, true);
     assert.equal(winner.created, true);
     assert.equal(winner.row.generation, 2);
     assert.equal(winner.row.previous_digest_id, first.id);
+    assert.equal(new Date(winner.row.scheduled_at).toISOString(), '2026-08-29T03:00:00.000Z');
+    assert.equal(new Date(winner.row.window_started_at).toISOString(), '2026-08-29T00:00:00.000Z');
+    assert.equal(new Date(winner.row.window_ended_at).toISOString(), '2026-08-29T03:00:00.000Z');
     assert.equal(loser.claimed, false);
     assert.equal(loser.created, false);
     assert.equal(loser.row.id, winner.row.id);
+
+    const current = (await db.query(`select public.claim_digest_run_v2(
+      'slack:CSUCCESSOR', '2026-08-29T06:00:00Z', '2026-08-29T03:00:00Z',
+      '2026-08-29T06:00:00Z', 'bridge:current', 120
+    ) as result`)).rows[0].result;
+    assert.equal(current.claimed, true, 'the recovery claim does not starve the current boundary');
+    assert.equal(new Date(current.row.scheduled_at).toISOString(), '2026-08-29T06:00:00.000Z');
+  } finally {
+    await db.close();
+  }
+});
+
+test('SQL cleanup keeps an inherited full digest reachable beyond fifty divergent generations', async () => {
+  const db = await createFoundationDatabase();
+  try {
+    await db.exec(`
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, generation, state,
+        destination_key, item_snapshot, manifest_prepared_at, delivered_at
+      ) values (
+        '95000000-0000-4000-8000-000000000001',
+        '2026-08-28T21:00:00Z', '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z',
+        1, 'delivered', 'slack:CDEEP', '[]'::jsonb,
+        '2026-08-29T00:00:01Z', '2026-08-29T00:00:02Z'
+      );
+      insert into public.digest_message_parts (
+        id, digest_run_id, part_kind, part_number, part_count, item_ids, payload_hash,
+        client_message_id, delivery_state, delivery_attempts, delivery_claimed_at,
+        slack_channel_id, slack_message_ts, delivered_at
+      ) values (
+        '95000000-0000-4000-8000-000000000002',
+        '95000000-0000-4000-8000-000000000001',
+        'ordinary', 1, 1, array['96000000-0000-4000-8000-000000000001'::uuid],
+        repeat('a', 64), '95000000-0000-4000-8000-000000000003',
+        'delivered', 1, '2026-08-29T00:00:01Z', 'CDEEP', '950.1',
+        '2026-08-29T00:00:02Z'
+      );
+
+      do $$
+      declare
+        v_generation integer;
+        v_id uuid;
+        v_previous_id uuid := '95000000-0000-4000-8000-000000000001';
+      begin
+        for v_generation in 1..51 loop
+          v_id := ('95000000-0000-4000-8000-'
+            || lpad((100 + v_generation)::text, 12, '0'))::uuid;
+          insert into public.digest_runs (
+            id, window_started_at, window_ended_at, scheduled_at, generation, state,
+            destination_key, item_snapshot, manifest_prepared_at, previous_digest_id, error
+          ) values (
+            v_id, '2026-08-29T00:00:00Z', '2026-08-29T03:00:00Z',
+            '2026-08-29T03:00:00Z', v_generation, 'diverged', 'slack:CDEEP',
+            '[]'::jsonb, '2026-08-29T03:00:01Z', v_previous_id,
+            'digest_generation_diverged'
+          );
+          v_previous_id := v_id;
+        end loop;
+        insert into public.digest_runs (
+          id, window_started_at, window_ended_at, scheduled_at, generation, state,
+          destination_key, item_snapshot, manifest_prepared_at, delivered_at,
+          previous_digest_id
+        ) values (
+          '95000000-0000-4000-8000-000000000999',
+          '2026-08-29T00:00:00Z', '2026-08-29T03:00:00Z', '2026-08-29T03:00:00Z',
+          52, 'delivered', 'slack:CDEEP', '[]'::jsonb,
+          '2026-08-29T03:00:02Z', '2026-08-29T03:00:03Z', v_previous_id
+        );
+      end
+      $$;
+    `);
+
+    const backlog = await db.query(`
+      select public.list_digest_cleanup_backlog_v2('slack:CDEEP', 1) as result
+    `);
+    assert.deepEqual(backlog.rows[0].result.map((entry) => [
+      entry.successor_digest_id, entry.previous_digest_id,
+      entry.parts.map((part) => part.previous_part_id)
+    ]), [[
+      '95000000-0000-4000-8000-000000000999',
+      '95000000-0000-4000-8000-000000000001',
+      ['95000000-0000-4000-8000-000000000002']
+    ]]);
+
+    const claimed = await db.query(`
+      select public.claim_digest_part_cleanup_v2(
+        '95000000-0000-4000-8000-000000000999',
+        '95000000-0000-4000-8000-000000000001',
+        '95000000-0000-4000-8000-000000000002',
+        'bridge:deep-cleanup', 120
+      ) as result
+    `);
+    assert.equal(claimed.rows[0].result.claimed, true);
+    const part = claimed.rows[0].result.part;
+    const recorded = await db.query(`
+      select public.record_digest_part_cleanup_v2(
+        '95000000-0000-4000-8000-000000000999',
+        '95000000-0000-4000-8000-000000000001',
+        '95000000-0000-4000-8000-000000000002',
+        'bridge:deep-cleanup', $1::uuid, $2::integer, 'already_absent', null
+      ) as result
+    `, [part.cleanup_token, part.cleanup_attempts]);
+    assert.equal(recorded.rows[0].result.applied, true);
+    const tail = await db.query(`
+      select state from public.digest_runs
+      where id = '95000000-0000-4000-8000-000000000001'
+    `);
+    assert.equal(tail.rows[0].state, 'replaced');
   } finally {
     await db.close();
   }
