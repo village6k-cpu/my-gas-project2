@@ -10531,8 +10531,8 @@ async function applyAutomationResolution({ config, job, prepared, autoReplyResul
     return { result, store: null };
   }
 
+  const workReference = automationWorkReference(job);
   if (resolution.state === 'succeeded') {
-    const workReference = automationWorkReference(job);
     if (workReference) {
       try {
         const resolved = await store.resolveWorkItem({
@@ -10562,6 +10562,17 @@ async function applyAutomationResolution({ config, job, prepared, autoReplyResul
         : { status: 'conflict', code: 'notice_update_request_conflict' };
     } catch {
       result.noticeUpdate = { status: 'error', code: 'notice_update_request_failed' };
+    }
+  } else if (workReference) {
+    try {
+      const marked = await store.markAutomationState({
+        id: workReference.id, expectedVersion: workReference.version, resolution
+      });
+      result.work = marked?.applied
+        ? { status: 'open' }
+        : { status: 'conflict', code: 'stale_work_version' };
+    } catch {
+      result.work = { status: 'error', code: 'work_state_record_failed' };
     }
   }
   return { result, store };
@@ -10623,10 +10634,6 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
       followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
     }
   }
-  const deliverLegacyRows = dependencies.deliverSlackFollowUpRows || deliverSlackFollowUpRows;
-  const slackDeliveryResult = config.followUpRowsEnabled === false
-    ? { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] }
-    : await deliverLegacyRows(config, followUpResult.rows || []);
   const automationApplied = await applyAutomationResolution({
     config, job, prepared, autoReplyResult, dependencies
   });
@@ -10642,12 +10649,25 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
       resolution: automationApplied.result,
       store: automationApplied.store
     });
-    if (workOrchestratorResult.rows.length && !workOrchestratorResult.error) {
+    if (workOrchestratorResult.rows.length && !workOrchestratorResult.error
+      && automationApplied.result.work.status === 'not_applicable') {
       automationApplied.result.work = { status: 'open' };
-    } else if (workOrchestratorResult.error) {
+    } else if (workOrchestratorResult.error
+      && automationApplied.result.work.status === 'not_applicable') {
       automationApplied.result.work = {
         status: 'error', code: 'work_orchestrator_v2_store_failed'
       };
+    }
+  }
+  const deliverLegacyRows = dependencies.deliverSlackFollowUpRows || deliverSlackFollowUpRows;
+  let slackDeliveryResult;
+  if (config.followUpRowsEnabled === false) {
+    slackDeliveryResult = { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] };
+  } else {
+    try {
+      slackDeliveryResult = await deliverLegacyRows(config, followUpResult.rows || []);
+    } catch {
+      slackDeliveryResult = { skipped: false, error: 'legacy_slack_delivery_failed', results: [] };
     }
   }
   return {

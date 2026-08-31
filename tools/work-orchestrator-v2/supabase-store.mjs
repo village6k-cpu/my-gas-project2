@@ -211,6 +211,39 @@ function validNoticeUpdateRow(row, { pendingOnly = false } = {}) {
   return row;
 }
 
+function exactNoticeMutationResponse(updated, observed, expected) {
+  validNoticeUpdateRow(updated);
+  if (updated.id !== observed.id
+    || updated.source_event_key !== observed.source_event_key
+    || updated.slack_channel_id !== observed.slack_channel_id
+    || updated.slack_message_ts !== observed.slack_message_ts
+    || updated.notification_state !== 'cleanup_pending'
+    || updated.cleanup_after !== expected.cleanupAfter
+    || !sameJsonValue(updated.payload, expected.payload)) throw responseInvalid();
+  const update = updated.payload.automation_notice_update;
+  if (!isRecord(update) || update.status !== expected.status) throw responseInvalid();
+  if (expected.status === 'pending') {
+    if (!exactKeys(update, ['status', 'resolution_kind', 'evidence', 'notice_text'])) throw responseInvalid();
+    try {
+      normalizeAutomationResolution({
+        state: 'succeeded', resolutionKind: update.resolution_kind,
+        evidence: update.evidence, noticeText: update.notice_text
+      }, 'succeeded');
+    } catch {
+      throw responseInvalid();
+    }
+  } else {
+    if (!exactKeys(update, ['status', 'resolution_kind', 'evidence', 'notice_text', 'readback'])
+      || !isRecord(update.readback)
+      || !exactKeys(update.readback, ['channel_id', 'message_ts', 'updated_at', 'content_sha256'])
+      || update.readback.channel_id !== observed.slack_channel_id
+      || update.readback.message_ts !== observed.slack_message_ts
+      || update.readback.updated_at !== expected.readbackAt
+      || update.readback.content_sha256 !== expected.contentHash) throw responseInvalid();
+  }
+  return updated;
+}
+
 function normalizeWorkPayload(payload) {
   if (!isRecord(payload) || payload.requires_human_action !== true) throw invalidInput();
   const allowed = new Set(['requires_human_action', ...Object.keys(WORK_PAYLOAD_TEXT_LIMITS)]);
@@ -1293,9 +1326,13 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
           evidence: resolution.evidence, notice_text: resolution.noticeText
         }
       };
-      return patchNoticeByObservedReceipt(receiptData, {
+      const result = await patchNoticeByObservedReceipt(receiptData, {
         notification_state: 'cleanup_pending', cleanup_after: cleanupAfter, payload
       });
+      if (result.applied) exactNoticeMutationResponse(result.row, receiptData, {
+        cleanupAfter, payload, status: 'pending'
+      });
+      return result;
     },
     listImmediateNoticeUpdateRequests: async (input = {}) => {
       if (!exactKeys(input, ['limit']) || !Number.isSafeInteger(input.limit)
@@ -1316,16 +1353,19 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       let channelId;
       let messageTs;
       let updatedAt;
+      let contentHash;
       try {
         if (!exactKeys(input, [
-          'sourceEventKey', 'expectedUpdatedAt', 'channelId', 'messageTs', 'updatedAt'
+          'sourceEventKey', 'expectedUpdatedAt', 'channelId', 'messageTs', 'updatedAt', 'contentHash'
         ])) throw invalidInput();
         sourceEventKey = notificationEventKey(input.sourceEventKey);
         expectedUpdatedAt = isoTimestamp(input.expectedUpdatedAt);
         channelId = exactText(input.channelId, 80);
         messageTs = exactText(input.messageTs, 100);
         updatedAt = isoTimestamp(input.updatedAt);
-        if (!SLACK_CHANNEL_ID.test(channelId) || !SLACK_MESSAGE_TS.test(messageTs)) throw invalidInput();
+        contentHash = exactText(input.contentHash, 64);
+        if (!SLACK_CHANNEL_ID.test(channelId) || !SLACK_MESSAGE_TS.test(messageTs)
+          || !SHA256.test(contentHash)) throw invalidInput();
       } catch {
         throw invalidInput();
       }
@@ -1343,11 +1383,17 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         automation_notice_update: {
           ...receipt.payload.automation_notice_update,
           status: 'updated',
-          readback: { channel_id: channelId, message_ts: messageTs, updated_at: updatedAt }
+          readback: {
+            channel_id: channelId, message_ts: messageTs,
+            updated_at: updatedAt, content_sha256: contentHash
+          }
         }
       };
       const result = await patchNoticeByObservedReceipt(receipt, { payload });
-      if (result.applied) validNoticeUpdateRow(result.row);
+      if (result.applied) exactNoticeMutationResponse(result.row, receipt, {
+        cleanupAfter: receipt.cleanup_after, payload, status: 'updated',
+        readbackAt: updatedAt, contentHash
+      });
       return result;
     },
     listActionableWork: async (input = {}) => {

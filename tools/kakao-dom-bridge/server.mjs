@@ -970,6 +970,24 @@ function immediateNoticeUpdateRow(row) {
   return { row, update };
 }
 
+function immediateNoticeRequestedContent(update) {
+  const text = `✅ 자동 처리 완료 · ${IMMEDIATE_NOTICE_RESOLUTION_TEXT[update.resolution_kind]}`;
+  return {
+    text,
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }]
+  };
+}
+
+function authoritativeImmediateNoticeReadback(delivery, row, requested) {
+  if (delivery?.channel !== row.slack_channel_id || delivery?.ts !== row.slack_message_ts
+    || !workActionRecord(delivery.message)
+    || delivery.message.text !== requested.text
+    || !workActionSameJson(delivery.message.blocks, requested.blocks)) {
+    throw new Error('Immediate notice update readback is invalid');
+  }
+  return sha256(JSON.stringify(requested));
+}
+
 export function createImmediateNoticeUpdatePoller({
   config = {}, store = null, slack = null, now = () => new Date()
 } = {}) {
@@ -999,16 +1017,13 @@ export function createImmediateNoticeUpdatePoller({
       for (const candidate of rows) {
         try {
           const { row, update } = immediateNoticeUpdateRow(candidate);
-          const text = `✅ 자동 처리 완료 · ${IMMEDIATE_NOTICE_RESOLUTION_TEXT[update.resolution_kind]}`;
+          const requested = immediateNoticeRequestedContent(update);
           const delivery = await slack.updateMessage({
             channel: row.slack_channel_id,
             ts: row.slack_message_ts,
-            text,
-            blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }]
+            ...requested
           });
-          if (delivery?.channel !== row.slack_channel_id || delivery?.ts !== row.slack_message_ts) {
-            throw new Error('update readback mismatch');
-          }
+          const contentHash = authoritativeImmediateNoticeReadback(delivery, row, requested);
           const supplied = typeof now === 'function' ? now() : now;
           const updatedAt = new Date(supplied);
           if (Number.isNaN(updatedAt.getTime())) throw new Error('clock unavailable');
@@ -1017,7 +1032,8 @@ export function createImmediateNoticeUpdatePoller({
             expectedUpdatedAt: row.updated_at,
             channelId: delivery.channel,
             messageTs: delivery.ts,
-            updatedAt: updatedAt.toISOString()
+            updatedAt: updatedAt.toISOString(),
+            contentHash
           });
           if (recorded?.applied) result.updated += 1;
           else result.conflicts += 1;

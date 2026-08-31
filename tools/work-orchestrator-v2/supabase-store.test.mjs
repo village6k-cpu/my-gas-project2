@@ -585,6 +585,7 @@ test('authoritative automation resolution notice queue and readback stay fenced 
     payload: {
       automation_notice_update: {
         status: 'pending', resolution_kind: 'operation_readback',
+        evidence: {},
         notice_text: 'The automated operation was confirmed by authoritative readback.'
       }
     }
@@ -602,17 +603,92 @@ test('authoritative automation resolution notice queue and readback stay fenced 
   const queued = await store.listImmediateNoticeUpdateRequests({ limit: 5 });
   const recorded = await store.markImmediateNoticeUpdated({
     sourceEventKey: 'event-exact-8', expectedUpdatedAt: pending.updated_at,
-    channelId: 'CINBOX', messageTs: '456.78', updatedAt: '2026-08-31T01:00:01.000Z'
+    channelId: 'CINBOX', messageTs: '456.78', updatedAt: '2026-08-31T01:00:01.000Z',
+    contentHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   });
 
   assert.equal(queued.length, 1);
   assert.equal(recorded.applied, true);
   assert.equal(requests[2].body.payload.automation_notice_update.status, 'updated');
   assert.deepEqual(requests[2].body.payload.automation_notice_update.readback, {
-    channel_id: 'CINBOX', message_ts: '456.78', updated_at: '2026-08-31T01:00:01.000Z'
+    channel_id: 'CINBOX', message_ts: '456.78', updated_at: '2026-08-31T01:00:01.000Z',
+    content_sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   });
   assert.match(requests[2].url, /slack_channel_id=eq\.CINBOX/);
   assert.match(requests[2].url, /slack_message_ts=eq\.456\.78/);
+});
+
+test('authoritative automation resolution rejects mismatched durable notice mutation responses', async (t) => {
+  const existing = {
+    id: '99999999-9999-4999-8999-999999999996', source_event_key: 'event-exact-9',
+    notification_state: 'delivered', slack_channel_id: 'CINBOX', slack_message_ts: '789.12',
+    cleanup_after: null, updated_at: '2026-08-31T01:00:00.000Z', payload: { existing: 'preserved' }
+  };
+  const cases = [
+    ['identity', (row) => ({ ...row, source_event_key: 'event-wrong' })],
+    ['state', (row) => ({ ...row, notification_state: 'delivered' })],
+    ['cleanup TTL', (row) => ({ ...row, cleanup_after: '2026-08-31T05:00:00.000Z' })],
+    ['pending payload', (row) => ({ ...row, payload: { ...row.payload, automation_notice_update: { status: 'pending', resolution_kind: 'operation_readback' } } })]
+  ];
+
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const store = createWorkOrchestratorStore({
+        supabaseUrl: 'https://supabase.example', serviceRoleKey,
+        fetchImpl: async (_url, init = {}) => {
+          if (!init.body) return response({ data: [existing] });
+          const body = JSON.parse(init.body);
+          return response({ data: [mutate({ ...existing, ...body, updated_at: '2026-08-31T01:00:01.000Z' })] });
+        }
+      });
+      await assert.rejects(store.requestImmediateNoticeUpdate({
+        sourceEventKey: existing.source_event_key, resolution: authoritativeResolution,
+        cleanupAfter: '2026-08-31T04:00:00.000Z'
+      }), /response invalid/i);
+    });
+  }
+});
+
+test('authoritative automation resolution rejects mismatched notice readback mutation responses', async (t) => {
+  const pending = {
+    id: '99999999-9999-4999-8999-999999999995', source_event_key: 'event-exact-10',
+    notification_state: 'cleanup_pending', slack_channel_id: 'CINBOX', slack_message_ts: '790.13',
+    cleanup_after: '2026-08-31T04:00:00.000Z', updated_at: '2026-08-31T01:00:00.000Z',
+    payload: { automation_notice_update: {
+      status: 'pending', resolution_kind: 'auto_reply_readback',
+      evidence: {},
+      notice_text: 'The automated reply was confirmed by authoritative readback.'
+    } }
+  };
+  const cases = [
+    ['identity', (row) => ({ ...row, slack_message_ts: '791.14' })],
+    ['status', (row) => ({ ...row, payload: pending.payload })],
+    ['authoritative hash', (row) => ({ ...row, payload: { automation_notice_update: {
+      ...row.payload.automation_notice_update,
+      readback: { ...row.payload.automation_notice_update.readback, content_sha256: 'b'.repeat(64) }
+    } } })]
+  ];
+
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      let requestCount = 0;
+      const store = createWorkOrchestratorStore({
+        supabaseUrl: 'https://supabase.example', serviceRoleKey,
+        fetchImpl: async (_url, init = {}) => {
+          requestCount += 1;
+          if (requestCount === 1) return response({ data: [pending] });
+          const body = JSON.parse(init.body);
+          return response({ data: [mutate({ ...pending, ...body, updated_at: '2026-08-31T01:00:01.000Z' })] });
+        }
+      });
+      await assert.rejects(store.markImmediateNoticeUpdated({
+        sourceEventKey: pending.source_event_key, expectedUpdatedAt: pending.updated_at,
+        channelId: pending.slack_channel_id, messageTs: pending.slack_message_ts,
+        updatedAt: '2026-08-31T01:00:01.000Z',
+        contentHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      }), /response invalid/i);
+    });
+  }
 });
 
 test('authoritative automation resolution store rejects content-bearing evidence generically before fetch', async () => {

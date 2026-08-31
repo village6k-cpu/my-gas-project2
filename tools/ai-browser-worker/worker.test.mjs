@@ -2105,6 +2105,122 @@ test('authoritative automation resolution notice update failure retries independ
   assert.equal(JSON.stringify(result.automationResolutionResult).includes(privateError), false);
 });
 
+test('authoritative automation resolution marks referenced human-required work even when no candidate is created', async () => {
+  const calls = [];
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [],
+    workItem: { id: '11111111-1111-4111-8111-111111111112', version: 6 },
+    autoReplyResult: { attempted: true, sent: true, readbackConfirmed: false },
+    dependencies: { workOrchestratorStore: {
+      upsertWorkItem: async () => assert.fail('no candidate must be created'),
+      markAutomationState: async (input) => {
+        calls.push(input);
+        return { applied: true, row: { id: input.id, version: 7, state: 'open', automation_state: 'needs_human' } };
+      }
+    } }
+  }));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].id, '11111111-1111-4111-8111-111111111112');
+  assert.equal(calls[0].expectedVersion, 6);
+  assert.equal(result.automationResolutionResult.work.status, 'open');
+  assert.equal(result.workOrchestratorResult.rows.length, 0);
+});
+
+test('authoritative automation resolution marks referenced work independently from a different candidate key', async () => {
+  const calls = [];
+  const candidateKeys = [];
+  const referencedId = '11111111-1111-4111-8111-111111111113';
+  const candidateId = '22222222-2222-4222-8222-222222222223';
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow({ follow_up_key: 'room:different-candidate' })],
+    workItem: { id: referencedId, version: 8, workKey: 'referenced-work-key' },
+    autoReplyResult: { attempted: true, sent: true, readbackConfirmed: false },
+    dependencies: { workOrchestratorStore: {
+      upsertWorkItem: async (candidate) => {
+        candidateKeys.push(candidate.work_key);
+        return { applied: true, created: true, row: { id: candidateId, version: 1, work_key: candidate.work_key } };
+      },
+      markAutomationState: async (input) => {
+        calls.push(input);
+        return { applied: true, row: { id: input.id, version: input.expectedVersion + 1, state: 'open', automation_state: 'needs_human' } };
+      }
+    } }
+  }));
+
+  assert.deepEqual(calls.map(({ id, expectedVersion }) => ({ id, expectedVersion })), [
+    { id: referencedId, expectedVersion: 8 },
+    { id: candidateId, expectedVersion: 1 }
+  ]);
+  assert.equal(candidateKeys.length, 1);
+  assert.notEqual(candidateKeys[0], 'referenced-work-key');
+  assert.equal(result.automationResolutionResult.work.status, 'open');
+});
+
+test('authoritative automation resolution treats stale referenced human-required work as a finite conflict', async () => {
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [],
+    workItem: { id: '11111111-1111-4111-8111-111111111114', version: 9 },
+    autoReplyResult: { attempted: true, sent: true, readbackConfirmed: false },
+    dependencies: { workOrchestratorStore: {
+      markAutomationState: async () => ({ applied: false, row: null })
+    } }
+  }));
+
+  assert.deepEqual(result.automationResolutionResult.work, {
+    status: 'conflict', code: 'stale_work_version'
+  });
+  assert.equal(result.workOrchestratorResult.error, null);
+});
+
+test('authoritative automation resolution persists v2 work and update request before legacy Slack delivery', async () => {
+  const order = [];
+  await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    workItem: { id: '11111111-1111-4111-8111-111111111115', version: 2 },
+    autoReplyResult: { sent: true, readbackConfirmed: true, transportMessageId: 'kakao-33' },
+    config: { followUpRowsEnabled: true },
+    dependencies: {
+      now: () => new Date('2026-08-31T01:00:00.000Z'),
+      upsertFollowUpRows: async () => ({ inserted: 1, rows: [{ id: 'legacy-row' }] }),
+      deliverSlackFollowUpRows: async () => { order.push('legacy'); return { skipped: false, results: [] }; },
+      workOrchestratorStore: {
+        resolveWorkItem: async () => { order.push('resolve'); return { applied: true, row: { state: 'resolved' } }; },
+        requestImmediateNoticeUpdate: async () => { order.push('notice'); return { applied: true, row: {} }; },
+        upsertWorkItem: async () => assert.fail('safe success must not create human work')
+      }
+    }
+  }));
+
+  assert.deepEqual(order, ['resolve', 'notice', 'legacy']);
+});
+
+test('authoritative automation resolution survives throwing legacy Slack delivery with finite isolated status', async () => {
+  const privateError = 'customer-private legacy-slack-error';
+  let resolved = false;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    workItem: { id: '11111111-1111-4111-8111-111111111116', version: 3 },
+    autoReplyResult: { sent: true, readbackConfirmed: true, transportMessageId: 'kakao-34' },
+    config: { followUpRowsEnabled: true },
+    dependencies: {
+      now: () => new Date('2026-08-31T01:00:00.000Z'),
+      upsertFollowUpRows: async () => ({ inserted: 1, rows: [{ id: 'legacy-row' }] }),
+      deliverSlackFollowUpRows: async () => { throw new Error(privateError); },
+      workOrchestratorStore: {
+        resolveWorkItem: async () => { resolved = true; return { applied: true, row: { state: 'resolved' } }; },
+        requestImmediateNoticeUpdate: async () => ({ applied: true, row: {} }),
+        upsertWorkItem: async () => assert.fail('safe success must not create human work')
+      }
+    }
+  }));
+
+  assert.equal(resolved, true);
+  assert.deepEqual(result.slackDeliveryResult, {
+    skipped: false, error: 'legacy_slack_delivery_failed', results: []
+  });
+  assert.equal(JSON.stringify(result).includes(privateError), false);
+});
+
 test('Work Orchestrator v2 work item approval candidate inserts one exact stable key', async () => {
   const candidates = [];
   const storedRow = { id: 'work-item-1', work_key: 'trade:260829-001:reservation-approval', version: 1 };

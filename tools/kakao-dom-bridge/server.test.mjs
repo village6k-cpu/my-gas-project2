@@ -95,7 +95,10 @@ test('authoritative automation resolution bridge updates exact coordinates and r
     slack: {
       updateMessage: async (input) => {
         updates.push(input);
-        return { ok: true, channel: input.channel, ts: input.ts, message: { text: input.text } };
+        return {
+          ok: true, channel: input.channel, ts: input.ts,
+          message: { text: input.text, blocks: input.blocks }
+        };
       }
     },
     now: () => new Date('2026-08-31T01:00:01.000Z')
@@ -109,6 +112,71 @@ test('authoritative automation resolution bridge updates exact coordinates and r
   assert.equal(readbacks[0].sourceEventKey, 'event-authoritative-bridge-1');
   assert.equal(readbacks[0].channelId, 'CINBOX');
   assert.equal(readbacks[0].messageTs, '123.45');
+  assert.equal(readbacks[0].contentHash, 'b05d0e2c5e96484a6fe9c03d6405ceccdf79ae05bfeab5ded4c952e93aa32221');
+});
+
+test('authoritative automation resolution bridge rejects matching coordinates with mismatched updated content', async () => {
+  const secret = 'customer-private response';
+  let readbacks = 0;
+  const receipt = {
+    id: '99999999-9999-4999-8999-999999999994', source_event_key: 'event-authoritative-bridge-3',
+    slack_channel_id: 'CINBOX', slack_message_ts: '124.46', updated_at: '2026-08-31T01:00:00.000Z',
+    payload: { automation_notice_update: { status: 'pending', resolution_kind: 'auto_reply_readback' } }
+  };
+  const runtime = createImmediateNoticeUpdatePoller({
+    config: { immediateEnabled: true, workItemsEnabled: true },
+    store: {
+      listImmediateNoticeUpdateRequests: async () => [receipt],
+      markImmediateNoticeUpdated: async () => { readbacks += 1; return { applied: true, row: receipt }; }
+    },
+    slack: { updateMessage: async (input) => ({
+      ok: true, channel: input.channel, ts: input.ts,
+      message: { text: `${input.text} ${secret}`, blocks: input.blocks }
+    }) }
+  });
+
+  const result = await runtime.poll('manual');
+
+  assert.deepEqual(result, { status: 'ok', trigger: 'manual', scanned: 1, updated: 0, failed: 1, conflicts: 0 });
+  assert.equal(readbacks, 0);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+});
+
+test('authoritative automation resolution bridge rejects missing or unsafe update readback without leaking content', async (t) => {
+  const secret = 'customer-private unsafe-response';
+  const responses = [
+    ['missing', {}],
+    ['unsafe', { text: secret, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: secret } }] }]
+  ];
+  for (const [name, message] of responses) {
+    await t.test(name, async () => {
+      let readbacks = 0;
+      const receipt = {
+        id: '99999999-9999-4999-8999-999999999993',
+        source_event_key: `event-authoritative-bridge-${name}`,
+        slack_channel_id: 'CINBOX', slack_message_ts: '125.47',
+        updated_at: '2026-08-31T01:00:00.000Z',
+        payload: { automation_notice_update: { status: 'pending', resolution_kind: 'operation_readback' } }
+      };
+      const runtime = createImmediateNoticeUpdatePoller({
+        config: { immediateEnabled: true, workItemsEnabled: true },
+        store: {
+          listImmediateNoticeUpdateRequests: async () => [receipt],
+          markImmediateNoticeUpdated: async () => { readbacks += 1; return { applied: true, row: receipt }; }
+        },
+        slack: { updateMessage: async (input) => ({
+          ok: true, channel: input.channel, ts: input.ts, message
+        }) }
+      });
+
+      const result = await runtime.poll('interval');
+
+      assert.equal(result.failed, 1);
+      assert.equal(result.updated, 0);
+      assert.equal(readbacks, 0);
+      assert.equal(JSON.stringify(result).includes(secret), false);
+    });
+  }
 });
 
 test('authoritative automation resolution bridge leaves failed update pending for bounded retry without touching work', async () => {
@@ -136,7 +204,10 @@ test('authoritative automation resolution bridge leaves failed update pending fo
       updateMessage: async (input) => {
         attempts += 1;
         if (attempts === 1) throw new Error('customer-private transport failure');
-        return { ok: true, channel: input.channel, ts: input.ts, message: {} };
+        return {
+          ok: true, channel: input.channel, ts: input.ts,
+          message: { text: input.text, blocks: input.blocks }
+        };
       }
     }
   });
