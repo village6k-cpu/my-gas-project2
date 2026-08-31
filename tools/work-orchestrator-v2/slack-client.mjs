@@ -199,10 +199,10 @@ export function createSlackClient({ token, fetchImpl = fetch, timeoutMs = 7_000 
         if (typeof nextCursor !== 'string' || nextCursor.length > MAX_CURSOR_LENGTH) {
           throw errorFor('conversations.history', { kind: 'response', code: 'invalid_cursor' });
         }
-        if (nextCursor === '') break;
+        if (nextCursor === '') return null;
         cursor = nextCursor;
       }
-      return null;
+      throw errorFor('conversations.history', { kind: 'response', code: 'history_incomplete' });
     },
 
     async updateMessage(input = {}) {

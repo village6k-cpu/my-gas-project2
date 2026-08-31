@@ -80,9 +80,11 @@ function validateDependencies(store, slack, cleanupEnabled) {
   for (const method of [
     'claimDigestRun', 'listActionableWork', 'prepareDigestParts',
     'claimDigestPartDelivery', 'markDigestPartDelivered', 'markDigestPartFailed',
+    'claimDigestGenerationPartCleanup', 'recordDigestGenerationPartCleanup',
+    'retireDigestGeneration',
     'finalizeDigestRun', 'failDigestRun'
   ]) requireMethod(store, method);
-  for (const method of ['postMessage', 'findMessageByClientId']) requireMethod(slack, method);
+  for (const method of ['postMessage', 'findMessageByClientId', 'deleteMessage']) requireMethod(slack, method);
   if (cleanupEnabled) {
     for (const method of [
       'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
@@ -182,8 +184,16 @@ function sameArray(left, right) {
 }
 
 function validatePrepared(value, runId, localParts) {
-  if (!isRecord(value) || value.applied !== true || !Array.isArray(value.parts)
-    || value.parts.length !== localParts.length) throw new Error('digest_manifest_invalid');
+  const mismatch = isRecord(value) && value.applied === false
+    && value.created === false && value.reason === 'manifest_mismatch';
+  if (!isRecord(value) || !Array.isArray(value.parts)
+    || mismatch && value.parts.length > 50
+    || !mismatch && (value.applied !== true || value.parts.length !== localParts.length)) {
+    throw new Error('digest_manifest_invalid');
+  }
+  if (mismatch && (!isRecord(value.row) || value.row.id !== runId || value.row.state !== 'delivering')) {
+    throw new Error('digest_manifest_invalid');
+  }
   const localByKey = new Map(localParts.map((entry) => [entry.key, entry]));
   const seen = new Set();
   for (const part of value.parts) {
@@ -198,14 +208,14 @@ function validatePrepared(value, runId, localParts) {
     }
     const key = `${part.part_kind}:${part.part_number}`;
     const local = localByKey.get(key);
-    if (!local || seen.has(key) || part.part_count !== local.intent.partCount
-      || part.payload_hash !== local.intent.payloadHash || !sameArray(part.item_ids, local.intent.itemIds)) {
+    if (seen.has(key) || !mismatch && (!local || part.part_count !== local.intent.partCount
+      || part.payload_hash !== local.intent.payloadHash || !sameArray(part.item_ids, local.intent.itemIds))) {
       throw new Error('digest_manifest_invalid');
     }
     seen.add(key);
   }
-  if (seen.size !== localParts.length) throw new Error('digest_manifest_invalid');
-  return value.parts;
+  if (!mismatch && seen.size !== localParts.length) throw new Error('digest_manifest_invalid');
+  return { mismatch, parts: value.parts };
 }
 
 function validMessageCoordinate(value, channelId) {
@@ -223,6 +233,16 @@ function reconciliationWindow(part, seconds) {
     oldest: Math.max(0.001, claimedSeconds - seconds),
     latest: Math.max(0.001, claimedSeconds + seconds)
   };
+}
+
+function historyIncomplete(error) {
+  return error?.code === 'history_incomplete';
+}
+
+function digestHistoryIncomplete() {
+  const error = new Error('digest_history_incomplete');
+  error.code = 'digest_history_incomplete';
+  return error;
 }
 
 function deliveryFailure(error, ambiguous, now) {
@@ -366,7 +386,8 @@ async function deliverPart({ store, slack, run, persisted, local, config, now, l
         try {
           const found = await reconcilePart(slack, part, config.channelId, config.reconcileWindowSeconds);
           if (found) coordinate = found;
-        } catch {
+        } catch (reconcileError) {
+          if (historyIncomplete(reconcileError)) throw digestHistoryIncomplete();
           // The finite reconciliation attempt did not produce an exact coordinate.
         }
       }
@@ -386,7 +407,8 @@ async function deliverPart({ store, slack, run, persisted, local, config, now, l
     try {
       const found = await reconcilePart(slack, part, config.channelId, config.reconcileWindowSeconds);
       if (found) coordinate = found;
-    } catch {
+    } catch (error) {
+      if (historyIncomplete(error)) throw digestHistoryIncomplete();
       // Fall through to durable failure evidence; never repost an unreconciled in-flight attempt.
     }
     if (coordinate) {
@@ -419,6 +441,118 @@ function cleanupFailureCode(error) {
   if (error?.code === 'ratelimited' || error?.kind === 'rate_limit') return 'rate_limited';
   if (error?.code === 'cleanup_unconfirmed') return 'cleanup_unconfirmed';
   return 'slack_api_error';
+}
+
+async function claimGenerationCleanup({ store, run, part, config, leaseOwner }) {
+  const claim = await store.claimDigestGenerationPartCleanup({
+    id: run.id,
+    partId: part.id,
+    leaseOwner,
+    leaseToken: run.lease_token,
+    cleanupOwner: leaseOwner,
+    leaseSeconds: config.cleanupLeaseSeconds
+  });
+  if (!isRecord(claim) || typeof claim.claimed !== 'boolean' || !isRecord(claim.part)) {
+    throw new Error('digest_generation_cleanup_failed');
+  }
+  if (!claim.claimed) {
+    if (['deleted', 'already_absent'].includes(claim.part.cleanup_state)) {
+      return { claimed: false, part: claim.part };
+    }
+    throw new Error('digest_generation_cleanup_failed');
+  }
+  const claimedPart = claim.part;
+  if (!Number.isSafeInteger(claimedPart.cleanup_attempts) || claimedPart.cleanup_attempts < 1
+    || typeof claimedPart.cleanup_token !== 'string' || !UUID.test(claimedPart.cleanup_token)) {
+    throw new Error('digest_generation_cleanup_failed');
+  }
+  return { claimed: true, part: claimedPart };
+}
+
+async function recordGenerationCleanup({
+  store, run, part, claimedPart, leaseOwner, outcome, error
+}) {
+  const recorded = await store.recordDigestGenerationPartCleanup({
+    id: run.id,
+    partId: part.id,
+    leaseOwner,
+    leaseToken: run.lease_token,
+    cleanupOwner: leaseOwner,
+    cleanupToken: claimedPart.cleanup_token,
+    expectedCleanupAttempts: claimedPart.cleanup_attempts,
+    outcome,
+    ...(outcome === 'failed' ? { error } : {})
+  });
+  if (!isRecord(recorded) || recorded.applied !== true || !isRecord(recorded.part)
+    || recorded.part.cleanup_state !== outcome) throw new Error('digest_generation_cleanup_failed');
+  return recorded.part;
+}
+
+async function cleanupDivergentPart({ store, slack, run, persisted, config, now, leaseOwner }) {
+  if (['deleted', 'already_absent'].includes(persisted.cleanup_state)) return persisted;
+  let part = persisted;
+  if (part.delivery_state === 'delivering') {
+    let found;
+    try {
+      found = await reconcilePart(slack, part, config.channelId, config.reconcileWindowSeconds);
+    } catch (error) {
+      if (historyIncomplete(error)) throw digestHistoryIncomplete();
+      throw new Error('digest_generation_cleanup_failed');
+    }
+    if (found === null) {
+      const cleanup = await claimGenerationCleanup({ store, run, part, config, leaseOwner });
+      if (!cleanup.claimed) return cleanup.part;
+      return recordGenerationCleanup({
+        store, run, part, claimedPart: cleanup.part, leaseOwner, outcome: 'already_absent'
+      });
+    }
+    part = await settleDelivered({ store, run, part, coordinate: found, config, now, leaseOwner });
+  }
+  if (part.delivery_state !== 'delivered') return part;
+  if (part.slack_channel_id !== config.channelId
+    || typeof part.slack_message_ts !== 'string' || !SLACK_TS.test(part.slack_message_ts)) {
+    throw new Error('digest_generation_cleanup_failed');
+  }
+  const cleanup = await claimGenerationCleanup({ store, run, part, config, leaseOwner });
+  if (!cleanup.claimed) return cleanup.part;
+  let outcome;
+  let errorCode = null;
+  try {
+    const deletion = await slack.deleteMessage({
+      channel: part.slack_channel_id,
+      ts: part.slack_message_ts
+    });
+    if (!isRecord(deletion) || !['deleted', 'already_absent'].includes(deletion.status)) {
+      throw Object.assign(new Error('cleanup_unconfirmed'), { code: 'cleanup_unconfirmed' });
+    }
+    outcome = deletion.status;
+  } catch (error) {
+    outcome = 'failed';
+    errorCode = cleanupFailureCode(error);
+  }
+  await recordGenerationCleanup({
+    store, run, part, claimedPart: cleanup.part, leaseOwner, outcome,
+    ...(outcome === 'failed' ? { error: errorCode } : {})
+  });
+  if (outcome === 'failed') throw new Error('digest_generation_cleanup_failed');
+  return part;
+}
+
+async function retireDivergentGeneration({ store, slack, run, parts, config, now, leaseOwner }) {
+  for (const persisted of parts) {
+    await cleanupDivergentPart({ store, slack, run, persisted, config, now, leaseOwner });
+  }
+  const retired = await store.retireDigestGeneration({
+    id: run.id,
+    leaseOwner,
+    leaseToken: run.lease_token,
+    error: 'digest_generation_diverged'
+  });
+  if (!isRecord(retired) || retired.applied !== true || !isRecord(retired.row)
+    || retired.row.id !== run.id || retired.row.state !== 'retired') {
+    throw new Error('digest_generation_cleanup_failed');
+  }
+  return retired.row;
 }
 
 const CLEANUP_BACKLOG_KEYS = [
@@ -631,6 +765,20 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
   let persistedParts = [];
   try {
     const rows = await store.listActionableWork({ now: window.scheduledAt, limit: 500 });
+    const eligibleCount = rows?.eligibleCount;
+    if (!Array.isArray(rows) || !Number.isSafeInteger(eligibleCount)
+      || eligibleCount < rows.length || rows.length !== Math.min(eligibleCount, 500)) {
+      throw new Error('digest_manifest_invalid');
+    }
+    if (eligibleCount > 500) {
+      selectedCount = eligibleCount;
+      await markRunFailed(store, run, owner, 'digest_eligible_overflow');
+      return finish({
+        status: 'failed', error: 'digest_eligible_overflow', retryable: true,
+        scheduledAt: window.scheduledAt, runId: run.id,
+        selectedCount, renderedCount: 0, partCount: 0, deliveredPartCount: 0
+      });
+    }
     const selected = selectDigestItems(rows, window.scheduledAt);
     const snapshot = buildDigestSnapshot(selected);
     const rendered = buildDigestSlackMessage(selected, {
@@ -648,7 +796,35 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
       itemSnapshot: snapshot,
       parts: localParts.map(({ intent }) => intent)
     });
-    persistedParts = validatePrepared(prepared, run.id, localParts);
+    const validated = validatePrepared(prepared, run.id, localParts);
+    persistedParts = validated.parts;
+    if (validated.mismatch) {
+      try {
+        await retireDivergentGeneration({
+          store, slack, run, parts: persistedParts, config, now: timestamp, leaseOwner: owner
+        });
+      } catch (error) {
+        const incomplete = error?.code === 'digest_history_incomplete';
+        await markRunFailed(
+          store, run, owner,
+          incomplete ? 'delivery_unconfirmed' : 'digest_generation_cleanup_failed'
+        );
+        return finish({
+          status: 'failed',
+          error: incomplete ? 'digest_history_incomplete' : 'digest_generation_cleanup_failed',
+          retryable: true,
+          scheduledAt: window.scheduledAt, runId: run.id,
+          selectedCount, renderedCount, partCount: persistedParts.length,
+          deliveredPartCount: persistedParts.filter(({ delivery_state }) => delivery_state === 'delivered').length
+        });
+      }
+      return finish({
+        status: 'failed', error: 'digest_generation_retired', retryable: true,
+        scheduledAt: window.scheduledAt, runId: run.id,
+        selectedCount, renderedCount, partCount: persistedParts.length,
+        deliveredPartCount: persistedParts.filter(({ delivery_state }) => delivery_state === 'delivered').length
+      });
+    }
   } catch {
     await markRunFailed(store, run, owner, 'digest_build_failed');
     return finish({
@@ -690,6 +866,15 @@ export async function runDigestCycle({ store, slack, config: rawConfig, now, lea
       throw error;
     }
   } catch (error) {
+    if (error?.code === 'digest_history_incomplete') {
+      await markRunFailed(store, run, owner, 'delivery_unconfirmed');
+      return finish({
+        status: 'failed', error: 'digest_history_incomplete', retryable: true,
+        scheduledAt: window.scheduledAt, runId: run.id, selectedCount, renderedCount,
+        partCount: persistedParts.length,
+        deliveredPartCount: delivered.filter(({ delivery_state }) => delivery_state === 'delivered').length
+      });
+    }
     if (error?.code === 'digest_delivery_unconfirmed') {
       return finish({
         status: 'failed', error: 'digest_delivery_unconfirmed', retryable: true,

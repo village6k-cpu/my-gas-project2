@@ -214,18 +214,28 @@ test('client validates required identifiers and positive time bounds before fetc
   assert.equal(calls, 0);
 });
 
-test('findMessageByClientId stops after ten pages and rejects an oversized next cursor', async () => {
+test('findMessageByClientId reports typed history_incomplete when a page-eleven match remains beyond the finite cap', async () => {
   let pages = 0;
   const boundedClient = createSlackClient({
     token,
     fetchImpl: async () => {
       pages += 1;
-      return jsonResponse(200, { ok: true, messages: [], response_metadata: { next_cursor: `cursor-${pages}` } });
+      return jsonResponse(200, {
+        ok: true,
+        messages: pages === 11 ? [{ client_msg_id: 'client-7', ts: '100.11' }] : [],
+        response_metadata: { next_cursor: `cursor-${pages}` }
+      });
     }
   });
-  assert.equal(await boundedClient.findMessageByClientId({ channel: 'CINBOX', clientMsgId: 'client-7', oldest: 1, latest: 2 }), null);
+  await assert.rejects(
+    () => boundedClient.findMessageByClientId({ channel: 'CINBOX', clientMsgId: 'client-7', oldest: 1, latest: 2 }),
+    (error) => error instanceof SlackApiError && error.code === 'history_incomplete'
+      && error.kind === 'response' && error.ambiguous === false
+  );
   assert.equal(pages, 10);
+});
 
+test('findMessageByClientId rejects an oversized next cursor', async () => {
   let cursorCalls = 0;
   const cursorClient = createSlackClient({
     token,

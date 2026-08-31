@@ -70,8 +70,9 @@ function config(overrides = {}) {
 }
 
 class FakeStore {
-  constructor({ items = [], previousParts = [], claim = true } = {}) {
+  constructor({ items = [], previousParts = [], claim = true, eligibleCount = items.length } = {}) {
     this.items = structuredClone(items);
+    this.eligibleCount = eligibleCount;
     this.previous = previousParts.length ? { id: PREVIOUS_ID, parts: structuredClone(previousParts) } : null;
     this.claimAvailable = claim;
     this.run = null;
@@ -82,6 +83,8 @@ class FakeStore {
     this.failures = [];
     this.cleanup = new Map();
     this.leaseGeneration = 0;
+    this.digestGeneration = 1;
+    this.retiredRuns = [];
   }
 
   async claimDigestRun(input) {
@@ -93,8 +96,12 @@ class FakeStore {
     this.leaseGeneration += 1;
     const leaseToken = `40000000-0000-4000-8000-${String(this.leaseGeneration).padStart(12, '0')}`;
     if (!this.run) {
+      const runId = this.digestGeneration === 1
+        ? RUN_ID
+        : `10000000-0000-4000-8000-${String(100 + this.digestGeneration).padStart(12, '0')}`;
       this.run = {
-        id: RUN_ID,
+        id: runId,
+        generation: this.digestGeneration,
         state: 'building',
         scheduled_at: input.scheduledAt,
         lease_token: leaseToken,
@@ -110,7 +117,9 @@ class FakeStore {
 
   async listActionableWork(input) {
     this.calls.push(['listActionableWork', structuredClone(input)]);
-    return structuredClone(this.items);
+    const rows = structuredClone(this.items);
+    Object.defineProperty(rows, 'eligibleCount', { value: this.eligibleCount, enumerable: false });
+    return rows;
   }
 
   async prepareDigestParts(input) {
@@ -120,33 +129,50 @@ class FakeStore {
       this.run.item_snapshot = structuredClone(input.itemSnapshot);
       this.run.manifest_prepared_at = SCHEDULED;
       this.run.state = 'delivering';
-      this.parts = input.parts.map((part, index) => ({
-        id: `50000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
-        digest_run_id: RUN_ID,
+      this.parts = input.parts.map((part, index) => {
+        const identity = ((this.digestGeneration - 1) * 100) + index + 1;
+        return {
+        id: `50000000-0000-4000-8000-${String(identity).padStart(12, '0')}`,
+        digest_run_id: this.run.id,
         part_kind: part.kind,
         part_number: part.partNumber,
         part_count: part.partCount,
         item_ids: [...part.itemIds],
         payload_hash: part.payloadHash,
-        client_message_id: `60000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+        client_message_id: `60000000-0000-4000-8000-${String(identity).padStart(12, '0')}`,
         delivery_state: 'planned',
         delivery_attempts: 0,
         delivery_claimed_at: null,
         delivery_retry_at: null,
         slack_channel_id: null,
         slack_message_ts: null,
-        delivered_at: null
-      }));
+        delivered_at: null,
+        cleanup_state: 'idle',
+        cleanup_attempts: 0
+      };
+      });
       return { applied: true, created: true, row: structuredClone(this.run), parts: structuredClone(this.parts) };
     }
-    assert.deepEqual(input.itemSnapshot, this.run.item_snapshot, 'reclaimed snapshot must be immutable');
-    assert.deepEqual(input.parts.map(({ kind, partNumber, partCount, itemIds, payloadHash }) => ({ kind, partNumber, partCount, itemIds, payloadHash })), this.parts.map((part) => ({
+    const existingIntent = this.parts.map((part) => ({
       kind: part.part_kind,
       partNumber: part.part_number,
       partCount: part.part_count,
       itemIds: part.item_ids,
       payloadHash: part.payload_hash
-    })), 'reclaimed manifest must be immutable');
+    }));
+    const requestedIntent = input.parts.map(({ kind, partNumber, partCount, itemIds, payloadHash }) => ({
+      kind, partNumber, partCount, itemIds, payloadHash
+    }));
+    if (JSON.stringify(input.itemSnapshot) !== JSON.stringify(this.run.item_snapshot)
+      || JSON.stringify(requestedIntent) !== JSON.stringify(existingIntent)) {
+      return {
+        applied: false,
+        created: false,
+        reason: 'manifest_mismatch',
+        row: structuredClone(this.run),
+        parts: structuredClone(this.parts)
+      };
+    }
     return { applied: true, created: false, row: structuredClone(this.run), parts: structuredClone(this.parts) };
   }
 
@@ -266,6 +292,56 @@ class FakeStore {
     return { applied: true, row: { state: 'delivered' }, part: { cleanup_state: input.outcome } };
   }
 
+  async claimDigestGenerationPartCleanup(input) {
+    this.calls.push(['claimDigestGenerationPartCleanup', structuredClone(input)]);
+    const part = this.parts.find(({ id }) => id === input.partId);
+    const current = this.cleanup.get(part.id);
+    if (['deleted', 'already_absent'].includes(current?.state)) {
+      return { claimed: false, row: structuredClone(this.run), part: structuredClone(part) };
+    }
+    const attempt = (current?.attempt || 0) + 1;
+    const token = `71000000-0000-4000-8000-${String(attempt).padStart(12, '0')}`;
+    this.cleanup.set(part.id, { state: 'deleting', attempt, token });
+    Object.assign(part, {
+      cleanup_state: 'deleting', cleanup_attempts: attempt, cleanup_owner: input.cleanupOwner,
+      cleanup_token: token
+    });
+    return { claimed: true, row: structuredClone(this.run), part: structuredClone(part) };
+  }
+
+  async recordDigestGenerationPartCleanup(input) {
+    this.calls.push(['recordDigestGenerationPartCleanup', structuredClone(input)]);
+    const part = this.parts.find(({ id }) => id === input.partId);
+    const current = this.cleanup.get(part.id);
+    if (!current || current.attempt !== input.expectedCleanupAttempts || current.token !== input.cleanupToken) {
+      return { applied: false, row: null, part: null };
+    }
+    current.state = input.outcome;
+    Object.assign(part, {
+      cleanup_state: input.outcome, cleanup_owner: null, cleanup_token: null,
+      cleanup_error: input.outcome === 'failed' ? input.error : null
+    });
+    return { applied: true, row: structuredClone(this.run), part: structuredClone(part) };
+  }
+
+  async retireDigestGeneration(input) {
+    this.calls.push(['retireDigestGeneration', structuredClone(input)]);
+    if (this.parts.some((part) => ['delivering', 'delivered'].includes(part.delivery_state)
+      && !['deleted', 'already_absent'].includes(part.cleanup_state))) {
+      return { applied: false, row: null };
+    }
+    this.run.state = 'retired';
+    this.run.error = input.error;
+    const retired = { run: structuredClone(this.run), parts: structuredClone(this.parts) };
+    this.retiredRuns.push(retired);
+    this.digestGeneration += 1;
+    this.run = null;
+    this.parts = [];
+    this.prepared = false;
+    this.claimAvailable = true;
+    return { applied: true, row: retired.run };
+  }
+
   allowReclaim() {
     this.claimAvailable = true;
   }
@@ -383,6 +459,140 @@ test('complete content-free manifest is persisted before first post and posts us
   ]);
   assert.equal(result.partCount, 2);
   assert.equal(result.omittedEligibleCount, 0);
+});
+
+test('authoritative eligible counts deliver 500 rows but fail 501 closed before manifest preparation', async (t) => {
+  await t.test('500 is complete', async () => {
+    const store = new FakeStore({
+      items: Array.from({ length: 500 }, (_, index) => workItem(index + 1)),
+      eligibleCount: 500
+    });
+    const slack = slackFake();
+    const result = await runDigestCycle({ store, slack, config: config(), now: NOW, leaseOwner: 'runner:500' });
+
+    assert.equal(result.status, 'delivered');
+    assert.equal(result.selectedCount, 500);
+    assert.equal(result.renderedCount, 500);
+    assert.equal(result.omittedEligibleCount, 0);
+    assert.equal(store.calls.find(([name]) => name === 'listActionableWork')[1].limit, 500);
+    assert.equal(store.calls.filter(([name]) => name === 'prepareDigestParts').length, 1);
+  });
+
+  await t.test('501 is authoritative overflow', async () => {
+    const store = new FakeStore({
+      items: Array.from({ length: 500 }, (_, index) => workItem(index + 1)),
+      eligibleCount: 501
+    });
+    const slack = slackFake();
+    const result = await runDigestCycle({ store, slack, config: config(), now: NOW, leaseOwner: 'runner:501' });
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error, 'digest_eligible_overflow');
+    assert.equal(result.selectedCount, 501);
+    assert.equal(result.renderedCount, 0);
+    assert.equal(result.omittedEligibleCount, 501);
+    assert.equal(result.retryable, true);
+    assert.equal(store.calls.some(([name]) => name === 'prepareDigestParts'), false);
+    assert.equal(store.calls.some(([name]) => name === 'finalizeDigestRun'), false);
+    assert.equal(slack.calls.length, 0);
+  });
+});
+
+test('history_incomplete keeps an ambiguous digest part delivering across reclaims and never authorizes repost', async () => {
+  const store = new FakeStore({ items: [workItem()] });
+  const incomplete = Object.assign(new Error('private page-eleven history body'), {
+    code: 'history_incomplete', kind: 'response'
+  });
+  const firstSlack = slackFake({
+    post() {
+      const error = new Error('private ambiguous post body');
+      error.ambiguous = true;
+      throw error;
+    },
+    find() { throw incomplete; }
+  });
+
+  const first = await runDigestCycle({ store, slack: firstSlack, config: config(), now: NOW, leaseOwner: 'runner:a' });
+  assert.equal(first.status, 'failed');
+  assert.equal(first.error, 'digest_history_incomplete');
+  assert.equal(store.parts[0].delivery_state, 'delivering');
+  assert.equal(store.parts[0].delivery_attempts, 1);
+  assert.equal(store.calls.some(([name]) => name === 'markDigestPartFailed'), false);
+
+  store.allowReclaim();
+  const reclaimedSlack = slackFake({ find() { throw incomplete; } });
+  const second = await runDigestCycle({
+    store, slack: reclaimedSlack, config: config(), now: NOW, leaseOwner: 'runner:b'
+  });
+  assert.equal(second.status, 'failed');
+  assert.equal(second.error, 'digest_history_incomplete');
+  assert.equal(reclaimedSlack.calls.filter(([name]) => name === 'postMessage').length, 0);
+  assert.equal(reclaimedSlack.calls.filter(([name]) => name === 'findMessageByClientId').length, 1);
+  assert.equal(store.parts[0].delivery_state, 'delivering');
+  assert.equal(store.parts[0].delivery_attempts, 1);
+});
+
+test('mutated included work retires a partial generation only after exact cleanup, then converges with new IDs and hashes', async () => {
+  const store = new FakeStore({ items: Array.from({ length: 25 }, (_, index) => workItem(index + 1)) });
+  const firstSlack = slackFake({
+    post(input, calls) {
+      const postNumber = calls.filter(([name]) => name === 'postMessage').length;
+      if (postNumber === 2) {
+        const error = new Error('definite channel rejection');
+        error.code = 'channel_not_found';
+        error.ambiguous = false;
+        throw error;
+      }
+      return { ok: true, channel: input.channel, ts: '310.1', message: {} };
+    }
+  });
+  const first = await runDigestCycle({ store, slack: firstSlack, config: config(), now: NOW, leaseOwner: 'runner:a' });
+  assert.equal(first.status, 'failed');
+  assert.equal(store.parts[0].delivery_state, 'delivered');
+  assert.equal(store.parts[1].delivery_state, 'failed');
+  const oldClientIds = store.parts.map((part) => part.client_message_id);
+  const oldHashes = store.parts.map((part) => part.payload_hash);
+
+  store.items[0] = { ...store.items[0], title: 'Work 1 changed after partial delivery', version: 2 };
+  store.allowReclaim();
+  const deleted = [];
+  const cleanupSlack = slackFake({
+    remove(input) {
+      assert.equal(store.calls.at(-1)[0], 'claimDigestGenerationPartCleanup',
+        'the rotating cleanup CAS is durable before an exact Slack delete');
+      deleted.push(structuredClone(input));
+      return { status: 'deleted' };
+    }
+  });
+  const retired = await runDigestCycle({
+    store, slack: cleanupSlack, config: config(), now: NOW, leaseOwner: 'runner:b'
+  });
+  assert.equal(retired.status, 'failed');
+  assert.equal(retired.error, 'digest_generation_retired');
+  assert.equal(retired.retryable, true);
+  assert.deepEqual(deleted, [{ channel: 'CFOCUS', ts: '310.1' }]);
+  assert.equal(cleanupSlack.calls.some(([name]) => name === 'postMessage'), false);
+  assert.equal(store.retiredRuns.length, 1);
+  assert.equal(store.retiredRuns[0].run.state, 'retired');
+  assert.deepEqual(store.retiredRuns[0].parts.map((part) => part.client_message_id), oldClientIds);
+  assert.deepEqual(store.retiredRuns[0].parts.map((part) => part.payload_hash), oldHashes);
+
+  const nextSlack = slackFake();
+  const converged = await runDigestCycle({
+    store, slack: nextSlack, config: config(), now: NOW, leaseOwner: 'runner:c'
+  });
+  assert.equal(converged.status, 'delivered');
+  assert.equal(store.run.generation, 2);
+  const newClientIds = store.parts.map((part) => part.client_message_id);
+  assert.ok(newClientIds.every((id) => !oldClientIds.includes(id)));
+  assert.notEqual(store.parts[0].payload_hash, oldHashes[0]);
+  const allPostIds = [
+    ...firstSlack.calls.filter(([name]) => name === 'postMessage').map(([, input]) => input.clientMsgId),
+    ...nextSlack.calls.filter(([name]) => name === 'postMessage').map(([, input]) => input.clientMsgId)
+  ];
+  assert.equal(allPostIds.filter((id) => id === oldClientIds[0]).length, 1,
+    'the already-posted partial coordinate is deleted, never reposted');
+  assert.deepEqual(nextSlack.calls.filter(([name]) => name === 'postMessage').map(([, input]) => input.clientMsgId), newClientIds);
 });
 
 test('subset crash reclaims immutable client IDs, skips delivered parts, reconciles delivering, and completes all parts', async () => {
@@ -773,6 +983,9 @@ test('durable backlog still cleans A through replaced B after C has already clea
     async claimDigestPartDelivery() { throw new Error('not called'); },
     async markDigestPartDelivered() { throw new Error('not called'); },
     async markDigestPartFailed() { throw new Error('not called'); },
+    async claimDigestGenerationPartCleanup() { throw new Error('not called'); },
+    async recordDigestGenerationPartCleanup() { throw new Error('not called'); },
+    async retireDigestGeneration() { throw new Error('not called'); },
     async finalizeDigestRun() { throw new Error('not called'); },
     async failDigestRun() { throw new Error('not called'); }
   };
@@ -865,6 +1078,9 @@ test('shared-prior successors each reconcile aggregate state while one exact Sla
     async claimDigestPartDelivery() { throw new Error('not called'); },
     async markDigestPartDelivered() { throw new Error('not called'); },
     async markDigestPartFailed() { throw new Error('not called'); },
+    async claimDigestGenerationPartCleanup() { throw new Error('not called'); },
+    async recordDigestGenerationPartCleanup() { throw new Error('not called'); },
+    async retireDigestGeneration() { throw new Error('not called'); },
     async finalizeDigestRun() { throw new Error('not called'); },
     async failDigestRun() { throw new Error('not called'); }
   };

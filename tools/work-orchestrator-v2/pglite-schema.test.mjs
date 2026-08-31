@@ -9,6 +9,18 @@ const migrationsDirectory = join(import.meta.dirname, '..', '..', 'supabase', 'm
 const [migrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_foundation\.sql$/.test(name));
 
+async function createFoundationDatabase() {
+  const db = new PGlite({ extensions: { pgcrypto } });
+  await db.exec(`
+    create role anon nologin;
+    create role authenticated nologin;
+    create role service_role nologin;
+    create extension if not exists pgcrypto;
+  `);
+  await db.exec(readFileSync(join(migrationsDirectory, migrationName), 'utf8'));
+  return db;
+}
+
 test('foundation migration executes and exposes only service-role access in PostgreSQL', async () => {
   assert.ok(migrationName, 'the CLI-generated foundation migration must exist');
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -113,6 +125,9 @@ test('foundation migration executes and exposes only service-role access in Post
           'claim_digest_part_delivery_v2',
           'mark_digest_part_delivered_v2',
           'mark_digest_part_failed_v2',
+          'claim_digest_generation_part_cleanup_v2',
+          'record_digest_generation_part_cleanup_v2',
+          'retire_digest_generation_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
           'list_digest_cleanup_backlog_v2',
@@ -122,6 +137,7 @@ test('foundation migration executes and exposes only service-role access in Post
       order by p.proname
     `);
     assert.deepEqual(functions.map((row) => row.proname), [
+      'claim_digest_generation_part_cleanup_v2',
       'claim_digest_part_cleanup_v2',
       'claim_digest_part_delivery_v2',
       'claim_digest_run_v2',
@@ -136,8 +152,10 @@ test('foundation migration executes and exposes only service-role access in Post
       'mark_digest_part_delivered_v2',
       'mark_digest_part_failed_v2',
       'prepare_digest_parts_v2',
+      'record_digest_generation_part_cleanup_v2',
       'record_digest_part_cleanup_v2',
       'request_work_item_action_v2',
+      'retire_digest_generation_v2',
       'touch_work_orchestrator_v2_updated_at',
       'upsert_work_item_v2',
     ]);
@@ -167,6 +185,9 @@ test('foundation migration executes and exposes only service-role access in Post
           'claim_digest_part_delivery_v2',
           'mark_digest_part_delivered_v2',
           'mark_digest_part_failed_v2',
+          'claim_digest_generation_part_cleanup_v2',
+          'record_digest_generation_part_cleanup_v2',
+          'retire_digest_generation_v2',
           'finalize_digest_run_v2',
           'fail_digest_run_v2',
           'list_digest_cleanup_backlog_v2',
@@ -506,9 +527,10 @@ test('foundation migration executes and exposes only service-role access in Post
       update public.work_items_v2 set priority = 'normal'
       where id <> all($1::uuid[])
     `, [p0ListRows.map((row) => row.id)]);
-    const { rows: failClosedP0 } = await db.query(`
-      select id from public.list_actionable_work_v2($1::timestamptz, $2::integer)
+    const { rows: failClosedP0Result } = await db.query(`
+      select public.list_actionable_work_v2($1::timestamptz, $2::integer) as result
     `, ['2000-01-01T00:00:00.000Z', 3]);
+    const failClosedP0 = failClosedP0Result[0].result.rows;
 
     const futureAckCandidate = {
       ...candidate,
@@ -670,10 +692,17 @@ test('foundation migration executes and exposes only service-role access in Post
     assert.equal(exactRetry.rows[0].result.created, false);
     assert.deepEqual(exactRetry.rows[0].result.parts.map((part) => part.id), preparedPartIds);
     assert.deepEqual(exactRetry.rows[0].result.parts.map((part) => part.client_message_id), preparedClientIds);
-    await assert.rejects(db.query(prepareSql, [
+    const divergentRetry = await db.query(prepareSql, [
       digestId, 'bridge:pglite', originalLeaseToken, JSON.stringify(snapshot),
       JSON.stringify([{ ...parts[0], payloadHash: 'd'.repeat(64) }, parts[1], parts[2]])
-    ]), /digest manifest mismatch/i, 'a divergent retry cannot rewrite durable intent');
+    ]);
+    assert.equal(divergentRetry.rows[0].result.applied, false,
+      'a divergent retry cannot rewrite durable intent');
+    assert.equal(divergentRetry.rows[0].result.reason, 'manifest_mismatch');
+    assert.deepEqual(divergentRetry.rows[0].result.parts.map((part) => part.id), preparedPartIds);
+    assert.deepEqual(
+      divergentRetry.rows[0].result.parts.map((part) => part.client_message_id), preparedClientIds
+    );
 
     const ordinaryOne = prepared.rows[0].result.parts.find((part) =>
       part.part_kind === 'ordinary' && part.part_number === 1);
@@ -1308,6 +1337,247 @@ test('digest-visible buttons are fenced until delivery and processable pending a
     assert.equal(pendingRows[0].pending_action.type, 'progress');
     await assert.rejects(db.query(`select * from public.list_pending_work_actions_v2(0)`), /invalid pending work action query/i);
     await assert.rejects(db.query(`select * from public.list_pending_work_actions_v2(51)`), /invalid pending work action query/i);
+  } finally {
+    await db.close();
+  }
+});
+
+test('SQL proves 500/501 completeness and divergent partial generations converge without losing immutable audit', async () => {
+  const db = await createFoundationDatabase();
+  try {
+    await db.exec(`
+      insert into public.work_items_v2 (
+        work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, automation_state, payload
+      )
+      select
+        'overflow:' || value::text,
+        'room:overflow',
+        'Overflow ' || value::text,
+        'Bounded render input',
+        'human_review',
+        'normal',
+        'open',
+        '2026-08-29T00:00:00.000Z'::timestamptz,
+        '2026-08-29T00:00:00.000Z'::timestamptz,
+        '2026-08-29T00:00:00.000Z'::timestamptz,
+        'needs_human',
+        '{"requires_human_action":true}'::jsonb
+      from generate_series(1, 501) as value;
+    `);
+    let listed = await db.query(`
+      select public.list_actionable_work_v2(
+        '2026-08-29T03:00:00.000Z'::timestamptz, 500
+      ) as result
+    `);
+    assert.equal(listed.rows.length, 1);
+    assert.equal(listed.rows[0].result.rows.length, 500);
+    assert.equal(listed.rows[0].result.eligible_count, 501);
+
+    await db.exec(`delete from public.work_items_v2 where work_key = 'overflow:501'`);
+    listed = await db.query(`
+      select public.list_actionable_work_v2(
+        '2026-08-29T03:00:00.000Z'::timestamptz, 500
+      ) as result
+    `);
+    assert.equal(listed.rows[0].result.rows.length, 500);
+    assert.equal(listed.rows[0].result.eligible_count, 500);
+
+    await db.exec(`delete from public.work_items_v2`);
+    const inserted = await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, automation_state, payload
+      )
+      select
+        ('91000000-0000-4000-8000-' || lpad(value::text, 12, '0'))::uuid,
+        'generation:' || value::text,
+        'room:generation',
+        'Generation ' || value::text,
+        'Versioned bounded render input ' || value::text,
+        'human_review',
+        'normal',
+        'open',
+        '2026-08-29T00:00:00.000Z'::timestamptz,
+        '2026-08-29T00:00:00.000Z'::timestamptz,
+        '2026-08-29T00:00:00.000Z'::timestamptz,
+        'needs_human',
+        '{"requires_human_action":true}'::jsonb
+      from generate_series(1, 25) as value
+      returning id, version
+    `);
+    const ordered = inserted.rows.sort((left, right) => left.id.localeCompare(right.id));
+    const snapshotOne = ordered.map(({ id, version }) => ({
+      id, version, inclusionReason: 'actionable', priority: 'normal'
+    }));
+    const partsOne = [
+      {
+        kind: 'ordinary', partNumber: 1, partCount: 2,
+        itemIds: snapshotOne.slice(0, 24).map(({ id }) => id), payloadHash: 'a'.repeat(64)
+      },
+      {
+        kind: 'ordinary', partNumber: 2, partCount: 2,
+        itemIds: snapshotOne.slice(24).map(({ id }) => id), payloadHash: 'b'.repeat(64)
+      }
+    ];
+    const claimSql = `
+      select public.claim_digest_run_v2(
+        $1::text, $2::timestamptz, $3::timestamptz, $4::timestamptz, $5::text, $6::integer
+      ) as result
+    `;
+    const digestArgs = [
+      'slack:CGEN', '2026-08-29T03:00:00.000Z', '2026-08-29T00:00:00.000Z',
+      '2026-08-29T03:00:00.000Z', 'bridge:generation-one', 120
+    ];
+    const firstClaim = await db.query(claimSql, digestArgs);
+    const firstRun = firstClaim.rows[0].result.row;
+    assert.equal(firstRun.generation, 1);
+    const preparedOne = await db.query(`
+      select public.prepare_digest_parts_v2(
+        $1::uuid, $2::text, $3::uuid, $4::jsonb, $5::jsonb
+      ) as result
+    `, [firstRun.id, 'bridge:generation-one', firstRun.lease_token,
+      JSON.stringify(snapshotOne), JSON.stringify(partsOne)]);
+    const oldParts = preparedOne.rows[0].result.parts;
+    const oldClientIds = oldParts.map((part) => part.client_message_id);
+    const oldPartIds = oldParts.map((part) => part.id);
+    const deliveredPart = oldParts.find((part) => part.part_number === 1);
+    const deliveryClaim = await db.query(`
+      select public.claim_digest_part_delivery_v2($1::uuid, $2::uuid, $3::text, $4::uuid) as result
+    `, [firstRun.id, deliveredPart.id, 'bridge:generation-one', firstRun.lease_token]);
+    assert.equal(deliveryClaim.rows[0].result.claimed, true);
+    const delivery = await db.query(`
+      select public.mark_digest_part_delivered_v2(
+        $1::uuid, $2::uuid, $3::text, $4::uuid, 1, 'CGEN', '700.1',
+        '2026-08-29T03:00:01.000Z'::timestamptz
+      ) as result
+    `, [firstRun.id, deliveredPart.id, 'bridge:generation-one', firstRun.lease_token]);
+    assert.equal(delivery.rows[0].result.applied, true);
+
+    await db.query(`
+      update public.work_items_v2
+      set title = 'Mutated after partial delivery', version = version + 1
+      where id = $1::uuid
+    `, [snapshotOne[0].id]);
+    await db.query(`
+      update public.digest_runs set lease_expires_at = '2000-01-01T00:00:00.000Z'
+      where id = $1::uuid
+    `, [firstRun.id]);
+    const reclaimed = await db.query(claimSql, [
+      ...digestArgs.slice(0, 4), 'bridge:generation-recovery', 120
+    ]);
+    const reclaimedRun = reclaimed.rows[0].result.row;
+    assert.equal(reclaimedRun.id, firstRun.id);
+    assert.equal(reclaimedRun.generation, 1);
+    assert.notEqual(reclaimedRun.lease_token, firstRun.lease_token);
+    const currentRows = await db.query(`
+      select id, version from public.work_items_v2 order by id
+    `);
+    const snapshotTwo = currentRows.rows.map(({ id, version }) => ({
+      id, version, inclusionReason: 'actionable', priority: 'normal'
+    }));
+    const partsTwo = [
+      {
+        kind: 'ordinary', partNumber: 1, partCount: 2,
+        itemIds: snapshotTwo.slice(0, 24).map(({ id }) => id), payloadHash: 'd'.repeat(64)
+      },
+      {
+        kind: 'ordinary', partNumber: 2, partCount: 2,
+        itemIds: snapshotTwo.slice(24).map(({ id }) => id), payloadHash: 'e'.repeat(64)
+      }
+    ];
+    const mismatch = await db.query(`
+      select public.prepare_digest_parts_v2(
+        $1::uuid, $2::text, $3::uuid, $4::jsonb, $5::jsonb
+      ) as result
+    `, [firstRun.id, 'bridge:generation-recovery', reclaimedRun.lease_token,
+      JSON.stringify(snapshotTwo), JSON.stringify(partsTwo)]);
+    assert.equal(mismatch.rows[0].result.applied, false);
+    assert.equal(mismatch.rows[0].result.reason, 'manifest_mismatch');
+    assert.deepEqual(mismatch.rows[0].result.parts.map((part) => part.client_message_id), oldClientIds);
+
+    const cleanupClaim = await db.query(`
+      select public.claim_digest_generation_part_cleanup_v2(
+        $1::uuid, $2::uuid, $3::text, $4::uuid, $5::text, 120
+      ) as result
+    `, [firstRun.id, deliveredPart.id, 'bridge:generation-recovery', reclaimedRun.lease_token,
+      'bridge:generation-cleanup']);
+    assert.equal(cleanupClaim.rows[0].result.claimed, true);
+    const cleanupPart = cleanupClaim.rows[0].result.part;
+    const cleanupRecorded = await db.query(`
+      select public.record_digest_generation_part_cleanup_v2(
+        $1::uuid, $2::uuid, $3::text, $4::uuid, $5::text, $6::uuid,
+        $7::integer, 'deleted', null
+      ) as result
+    `, [firstRun.id, deliveredPart.id, 'bridge:generation-recovery', reclaimedRun.lease_token,
+      'bridge:generation-cleanup', cleanupPart.cleanup_token, cleanupPart.cleanup_attempts]);
+    assert.equal(cleanupRecorded.rows[0].result.applied, true);
+    const retired = await db.query(`
+      select public.retire_digest_generation_v2(
+        $1::uuid, $2::text, $3::uuid, 'digest_generation_diverged'
+      ) as result
+    `, [firstRun.id, 'bridge:generation-recovery', reclaimedRun.lease_token]);
+    assert.equal(retired.rows[0].result.applied, true);
+    assert.equal(retired.rows[0].result.row.state, 'retired');
+
+    const nextClaim = await db.query(claimSql, [
+      ...digestArgs.slice(0, 4), 'bridge:generation-two', 120
+    ]);
+    const secondRun = nextClaim.rows[0].result.row;
+    assert.notEqual(secondRun.id, firstRun.id);
+    assert.equal(secondRun.generation, 2);
+    const preparedTwo = await db.query(`
+      select public.prepare_digest_parts_v2(
+        $1::uuid, $2::text, $3::uuid, $4::jsonb, $5::jsonb
+      ) as result
+    `, [secondRun.id, 'bridge:generation-two', secondRun.lease_token,
+      JSON.stringify(snapshotTwo), JSON.stringify(partsTwo)]);
+    assert.equal(preparedTwo.rows[0].result.applied, true);
+    assert.deepEqual(preparedTwo.rows[0].result.parts.map((part) => part.payload_hash), ['d'.repeat(64), 'e'.repeat(64)]);
+    assert.ok(preparedTwo.rows[0].result.parts.every((part) => !oldClientIds.includes(part.client_message_id)));
+
+    for (const [index, part] of preparedTwo.rows[0].result.parts.entries()) {
+      const claim = await db.query(`
+        select public.claim_digest_part_delivery_v2($1::uuid, $2::uuid, $3::text, $4::uuid) as result
+      `, [secondRun.id, part.id, 'bridge:generation-two', secondRun.lease_token]);
+      assert.equal(claim.rows[0].result.claimed, true);
+      const settled = await db.query(`
+        select public.mark_digest_part_delivered_v2(
+          $1::uuid, $2::uuid, $3::text, $4::uuid, 1, 'CGEN', $5::text,
+          '2026-08-29T03:00:02.000Z'::timestamptz
+        ) as result
+      `, [secondRun.id, part.id, 'bridge:generation-two', secondRun.lease_token, `800.${index + 1}`]);
+      assert.equal(settled.rows[0].result.applied, true);
+    }
+    const finalized = await db.query(`
+      select public.finalize_digest_run_v2(
+        $1::uuid, $2::text, $3::uuid, '2026-08-29T03:00:03.000Z'::timestamptz
+      ) as result
+    `, [secondRun.id, 'bridge:generation-two', secondRun.lease_token]);
+    assert.equal(finalized.rows[0].result.applied, true);
+    assert.equal(finalized.rows[0].result.row.state, 'delivered');
+
+    const audit = await db.query(`
+      select state, generation, item_snapshot, error
+      from public.digest_runs where id = $1::uuid
+    `, [firstRun.id]);
+    assert.equal(audit.rows[0].state, 'retired');
+    assert.equal(audit.rows[0].generation, 1);
+    assert.deepEqual(audit.rows[0].item_snapshot, snapshotOne);
+    assert.equal(audit.rows[0].error, 'digest_generation_diverged');
+    const oldAuditParts = await db.query(`
+      select id, payload_hash, client_message_id, cleanup_state
+      from public.digest_message_parts where digest_run_id = $1::uuid
+      order by part_number
+    `, [firstRun.id]);
+    assert.deepEqual(oldAuditParts.rows.map((part) => part.id), oldPartIds);
+    assert.deepEqual(oldAuditParts.rows.map((part) => part.payload_hash), ['a'.repeat(64), 'b'.repeat(64)]);
+    assert.equal(oldAuditParts.rows[0].cleanup_state, 'deleted');
+    const unfinished = await db.query(`
+      select count(*)::integer as count from public.digest_runs
+      where state in ('building','delivering','failed')
+    `);
+    assert.equal(unfinished.rows[0].count, 0);
   } finally {
     await db.close();
   }

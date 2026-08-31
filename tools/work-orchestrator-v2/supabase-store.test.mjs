@@ -67,11 +67,16 @@ function workRow(overrides = {}) {
   };
 }
 
+function actionablePayload(rows, eligibleCount = rows.length) {
+  return { rows, eligible_count: eligibleCount };
+}
+
 function digestRow(overrides = {}) {
   const row = {
     id: DIGEST_ID,
     destination_key: 'slack:CINBOX',
     scheduled_at: '2026-08-29T03:00:00.000Z',
+    generation: 1,
     state: 'building',
     lease_owner: 'bridge:test',
     lease_token: LEASE_TOKEN,
@@ -474,9 +479,9 @@ test('requestWorkAction preserves exact id/version action CAS and exposes stale 
 });
 
 test('listActionableWork selects a bounded deterministic digest surface including unresolved P0', async () => {
-  const fetch = createFetch([response({ data: [workRow({
+  const fetch = createFetch([response({ data: actionablePayload([workRow({
     priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z', payload: { requires_human_action: true }
-  })] })]);
+  })]) })]);
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
 
   const rows = await store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 50 });
@@ -487,6 +492,29 @@ test('listActionableWork selects a bounded deterministic digest surface includin
   assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
     p_now: '2026-08-29T03:00:00.000Z', p_limit: 50
   });
+});
+
+test('listActionableWork returns an authoritative eligible count at the 500/501 boundary', async () => {
+  const rows = Array.from({ length: 500 }, (_, index) => workRow({
+    id: `90000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    work_key: `work:${index + 1}`
+  }));
+  const fetch = createFetch([
+    response({ data: actionablePayload(rows, 500) }),
+    response({ data: actionablePayload(rows, 501) })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const exact = await store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 500 });
+  const overflow = await store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 500 });
+
+  assert.equal(exact.length, 500);
+  assert.equal(exact.eligibleCount, 500);
+  assert.equal(overflow.length, 500);
+  assert.equal(overflow.eligibleCount, 501);
+  assert.ok(fetch.requests.every(({ init }) => JSON.parse(init.body).p_limit === 500));
 });
 
 test('claimDigestRun sends exact lease inputs and preserves the one-winner result shape', async () => {
@@ -574,6 +602,94 @@ test('prepareDigestParts sends only an exact content-free snapshot and immutable
     p_parts: parts
   });
   assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/prepare_digest_parts_v2');
+});
+
+test('divergent prepared intent is typed and generation cleanup plus retirement preserve exact lease fencing', async () => {
+  const oldSnapshot = [{ id: WORK_ID, version: 1, inclusionReason: 'actionable', priority: 'normal' }];
+  const newSnapshot = [{ id: WORK_ID, version: 2, inclusionReason: 'actionable', priority: 'normal' }];
+  const activeRow = digestRow({
+    state: 'delivering', generation: 1, item_snapshot: oldSnapshot,
+    manifest_prepared_at: '2026-08-29T03:00:01.000Z'
+  });
+  const deliveredPart = digestPartRow({
+    delivery_state: 'delivered', delivery_attempts: 1,
+    delivery_claimed_at: '2026-08-29T03:00:01.000Z', delivered_at: '2026-08-29T03:00:02.000Z',
+    slack_channel_id: 'CINBOX', slack_message_ts: '100.20'
+  });
+  const deletingPart = digestPartRow({
+    ...deliveredPart,
+    cleanup_state: 'deleting', cleanup_attempts: 1, cleanup_owner: 'bridge:cleanup',
+    cleanup_token: CLEANUP_TOKEN, cleanup_expires_at: '2026-08-29T03:02:00.000Z',
+    cleanup_attempted_at: '2026-08-29T03:00:03.000Z'
+  });
+  const deletedPart = digestPartRow({
+    ...deliveredPart,
+    cleanup_state: 'deleted', cleanup_attempts: 1,
+    cleanup_attempted_at: '2026-08-29T03:00:03.000Z',
+    cleaned_at: '2026-08-29T03:00:04.000Z'
+  });
+  const retiredRow = digestRow({
+    state: 'retired', generation: 1, item_snapshot: oldSnapshot,
+    manifest_prepared_at: '2026-08-29T03:00:01.000Z',
+    lease_owner: null, lease_token: null, lease_expires_at: null,
+    error: 'digest_generation_diverged'
+  });
+  const fetch = createFetch([
+    response({ data: {
+      applied: false, created: false, reason: 'manifest_mismatch', row: activeRow, parts: [deliveredPart]
+    } }),
+    response({ data: { claimed: true, row: activeRow, part: deletingPart } }),
+    response({ data: { applied: true, row: activeRow, part: deletedPart } }),
+    response({ data: { applied: true, row: retiredRow } })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const mismatch = await store.prepareDigestParts({
+    id: DIGEST_ID,
+    leaseOwner: 'bridge:test',
+    leaseToken: LEASE_TOKEN,
+    itemSnapshot: newSnapshot,
+    parts: [{
+      kind: 'ordinary', partNumber: 1, partCount: 1,
+      itemIds: [WORK_ID], payloadHash: 'b'.repeat(64)
+    }]
+  });
+  assert.equal(mismatch.reason, 'manifest_mismatch');
+  assert.equal(mismatch.parts[0].client_message_id, CLIENT_MESSAGE_ID);
+
+  const cleanupClaim = await store.claimDigestGenerationPartCleanup({
+    id: DIGEST_ID, partId: PART_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
+    cleanupOwner: 'bridge:cleanup', leaseSeconds: 120
+  });
+  assert.equal(cleanupClaim.claimed, true);
+  const cleanupRecord = await store.recordDigestGenerationPartCleanup({
+    id: DIGEST_ID, partId: PART_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
+    cleanupOwner: 'bridge:cleanup', cleanupToken: CLEANUP_TOKEN,
+    expectedCleanupAttempts: 1, outcome: 'deleted'
+  });
+  assert.equal(cleanupRecord.applied, true);
+  const retirement = await store.retireDigestGeneration({
+    id: DIGEST_ID, leaseOwner: 'bridge:test', leaseToken: LEASE_TOKEN,
+    error: 'digest_generation_diverged'
+  });
+  assert.equal(retirement.row.state, 'retired');
+
+  assert.deepEqual(fetch.requests.map(({ url }) => url), [
+    'https://supabase.example/rest/v1/rpc/prepare_digest_parts_v2',
+    'https://supabase.example/rest/v1/rpc/claim_digest_generation_part_cleanup_v2',
+    'https://supabase.example/rest/v1/rpc/record_digest_generation_part_cleanup_v2',
+    'https://supabase.example/rest/v1/rpc/retire_digest_generation_v2'
+  ]);
+  assert.deepEqual(JSON.parse(fetch.requests[1].init.body), {
+    p_id: DIGEST_ID, p_part_id: PART_ID, p_lease_owner: 'bridge:test', p_lease_token: LEASE_TOKEN,
+    p_cleanup_owner: 'bridge:cleanup', p_lease_seconds: 120
+  });
+  assert.deepEqual(JSON.parse(fetch.requests[3].init.body), {
+    p_id: DIGEST_ID, p_lease_owner: 'bridge:test', p_lease_token: LEASE_TOKEN,
+    p_error: 'digest_generation_diverged'
+  });
 });
 
 test('part delivery methods preserve exact run lease and attempt generation fencing', async () => {
@@ -884,11 +1000,11 @@ test('action and prepare responses compare JSON structurally across JSONB key or
 
 test('listActionableWork rejects malformed and future acknowledged P0 rows from a bad response', async () => {
   const fetch = createFetch([
-    response({ data: [{ ...workRow(), version: '1' }] }),
-    response({ data: [workRow({
+    response({ data: actionablePayload([{ ...workRow(), version: '1' }]) }),
+    response({ data: actionablePayload([workRow({
       priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z',
       payload: { requires_human_action: true, p0_acknowledged_at: '2026-08-29T00:00:00.000Z' }
-    })] })
+    })]) })
   ]);
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
   await assert.rejects(
@@ -904,7 +1020,7 @@ test('listActionableWork rejects malformed and future acknowledged P0 rows from 
 test('listActionableWork keeps missing or malformed P0 acknowledgements visible', async () => {
   const missingId = '55555555-5555-4555-8555-555555555555';
   const malformedId = '66666666-6666-4666-8666-666666666666';
-  const fetch = createFetch([response({ data: [
+  const fetch = createFetch([response({ data: actionablePayload([
     workRow({
       id: missingId, priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z',
       payload: { requires_human_action: true }
@@ -913,7 +1029,7 @@ test('listActionableWork keeps missing or malformed P0 acknowledgements visible'
       id: malformedId, priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z',
       payload: { requires_human_action: true, p0_acknowledged_at: 'not-a-timestamp' }
     })
-  ] })]);
+  ]) })]);
   const store = createWorkOrchestratorStore({
     supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
   });
@@ -926,20 +1042,20 @@ test('listActionableWork keeps missing or malformed P0 acknowledgements visible'
 test('listActionableWork uses the supplied cutoff for future and boundary P0 acknowledgements', async () => {
   const futureId = '88888888-8888-4888-8888-888888888888';
   const fetch = createFetch([
-    response({ data: [workRow({
+    response({ data: actionablePayload([workRow({
       id: futureId, priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z',
       payload: {
         requires_human_action: true,
         p0_acknowledged_at: '2026-08-29T03:00:00.001Z'
       }
-    })] }),
-    response({ data: [workRow({
+    })]) }),
+    response({ data: actionablePayload([workRow({
       priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z',
       payload: {
         requires_human_action: true,
         p0_acknowledged_at: '2026-08-29T03:00:00.000Z'
       }
-    })] })
+    })]) })
   ]);
   const store = createWorkOrchestratorStore({
     supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
@@ -979,7 +1095,7 @@ test('listActionableWork validates the exact effective P0 acknowledgement timest
 
   for (const [name, rowFactory, now, outcome] of cases) {
     await t.test(name, async () => {
-      const fetch = createFetch([response({ data: [rowFactory()] })]);
+      const fetch = createFetch([response({ data: actionablePayload([rowFactory()]) })]);
       const store = createWorkOrchestratorStore({
         supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
       });

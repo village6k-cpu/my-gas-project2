@@ -138,8 +138,8 @@ async function reconcileDelivery({ receipt, config, store, slack, attemptedAt })
       clientMsgId: receipt.client_message_id,
       ...window
     });
-  } catch {
-    throw typedError('history_unavailable');
+  } catch (error) {
+    throw typedError(error?.code === 'history_incomplete' ? 'history_incomplete' : 'history_unavailable');
   }
 
   if (match?.client_msg_id === receipt.client_message_id) {

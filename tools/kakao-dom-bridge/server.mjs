@@ -295,9 +295,9 @@ export function buildWorkOrchestratorHealthState(value = {}) {
       trigger,
       status,
       scheduledAt: safeShadowTimestamp(run.scheduledAt),
-      selectedCount: count(run.selectedCount, 500),
+      selectedCount: count(run.selectedCount, Number.MAX_SAFE_INTEGER),
       renderedCount: count(run.renderedCount, 500),
-      omittedEligibleCount: count(run.omittedEligibleCount, 500),
+      omittedEligibleCount: count(run.omittedEligibleCount, Number.MAX_SAFE_INTEGER),
       partCount: count(run.partCount, 50),
       deliveredPartCount: count(run.deliveredPartCount, 50),
       cleanupFailed: count(run.cleanupFailed, 500)
@@ -305,7 +305,9 @@ export function buildWorkOrchestratorHealthState(value = {}) {
     if (run.error) {
       result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed',
         'digest_delivery_unconfirmed', 'digest_cycle_failed',
-        'digest_omission_detected', 'digest_cleanup_failed'].includes(run.error)
+        'digest_omission_detected', 'digest_cleanup_failed', 'digest_eligible_overflow',
+        'digest_history_incomplete', 'digest_generation_cleanup_failed',
+        'digest_generation_retired'].includes(run.error)
         ? run.error
         : 'digest_cycle_failed';
     }
@@ -319,7 +321,7 @@ export function buildWorkOrchestratorHealthState(value = {}) {
     lastDigestFailureAt: safeShadowTimestamp(value.lastDigestFailureAt) || null,
     nextScheduledAt: safeShadowTimestamp(value.nextScheduledAt) || null,
     digestFailureCount: count(value.digestFailureCount, Number.MAX_SAFE_INTEGER),
-    omittedEligibleCount: count(value.omittedEligibleCount, 500)
+    omittedEligibleCount: count(value.omittedEligibleCount, Number.MAX_SAFE_INTEGER)
   };
 }
 
@@ -679,6 +681,7 @@ export function createWorkOrchestratorImmediateRuntime({
 const DIGEST_STORE_METHODS = [
   'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
   'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
+  'claimDigestGenerationPartCleanup', 'recordDigestGenerationPartCleanup', 'retireDigestGeneration',
   'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
 ];
 
@@ -1008,7 +1011,7 @@ function safeDigestRuntimeResult(value, scheduledAt) {
     || !['delivered', 'not_claimed', 'failed'].includes(value.status)) {
     throw new Error('Work Orchestrator digest result is invalid');
   }
-  const selectedCount = digestRuntimeCount(value.selectedCount, 500);
+  const selectedCount = digestRuntimeCount(value.selectedCount, Number.MAX_SAFE_INTEGER);
   const renderedCount = digestRuntimeCount(value.renderedCount, 500);
   const partCount = digestRuntimeCount(value.partCount, 50);
   const deliveredPartCount = digestRuntimeCount(value.deliveredPartCount, 50);
@@ -1043,7 +1046,9 @@ function safeDigestRuntimeResult(value, scheduledAt) {
   if (value.retryable === true) result.retryable = true;
   if (value.status === 'failed') {
     result.error = [
-      'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed'
+      'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
+      'digest_eligible_overflow', 'digest_history_incomplete', 'digest_generation_cleanup_failed',
+      'digest_generation_retired'
     ].includes(value.error)
       ? value.error
       : 'digest_cycle_failed';
@@ -1070,7 +1075,7 @@ export function createWorkOrchestratorDigestRuntime({
   const slackReady = Boolean(slack
     && typeof slack.postMessage === 'function'
     && typeof slack.findMessageByClientId === 'function'
-    && (!cleanupEnabled || typeof slack.deleteMessage === 'function'));
+    && typeof slack.deleteMessage === 'function');
   const localConfigReady = Boolean(enabled
     && storeReady
     && slackReady
@@ -1105,7 +1110,8 @@ export function createWorkOrchestratorDigestRuntime({
   const recordFailure = (at, trigger, scheduledAt, error = 'digest_cycle_failed') => {
     const safeError = [
       'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
-      'digest_omission_detected', 'digest_cleanup_failed'
+      'digest_omission_detected', 'digest_cleanup_failed', 'digest_eligible_overflow',
+      'digest_history_incomplete', 'digest_generation_cleanup_failed', 'digest_generation_retired'
     ].includes(error) ? error : 'digest_cycle_failed';
     runtimeState.digestFailureCount += 1;
     runtimeState.lastDigestFailureAt = at;
@@ -1251,7 +1257,8 @@ function safeMaintenanceDigestResult(value) {
   if (['startup', 'interval', 'manual'].includes(value.trigger)) result.trigger = value.trigger;
   if (value.retryable === true) result.retryable = true;
   for (const [key, maximum] of Object.entries({
-    selectedCount: 500, renderedCount: 500, omittedEligibleCount: 500,
+    selectedCount: Number.MAX_SAFE_INTEGER, renderedCount: 500,
+    omittedEligibleCount: Number.MAX_SAFE_INTEGER,
     partCount: 50, deliveredPartCount: 50
   })) {
     const numeric = Number(value[key]);
@@ -1270,7 +1277,8 @@ function safeMaintenanceDigestResult(value) {
   if (result.status === 'failed') {
     result.error = [
       'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
-      'digest_omission_detected', 'digest_cleanup_failed'
+      'digest_omission_detected', 'digest_cleanup_failed', 'digest_eligible_overflow',
+      'digest_history_incomplete', 'digest_generation_cleanup_failed', 'digest_generation_retired'
     ].includes(value.error) ? value.error : 'digest_cycle_failed';
   }
   return result;

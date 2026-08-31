@@ -3415,6 +3415,7 @@ function digestStoreStub() {
   return Object.fromEntries([
     'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
     'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
+    'claimDigestGenerationPartCleanup', 'recordDigestGenerationPartCleanup', 'retireDigestGeneration',
     'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
   ].map((name) => [name, () => {}]));
 }
@@ -3461,7 +3462,7 @@ test('digest startup catches up only the latest boundary and checks once per min
       cleanupEnabled: false
     },
     store: digestStoreStub(),
-    slack: { postMessage() {}, findMessageByClientId() {} },
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
     now: () => currentNow,
     leaseOwner: 'bridge:test',
     run: async (input) => {
@@ -3545,7 +3546,7 @@ test('minute checks retry an unfinished not-claimed run after its database lease
   const runtime = createWorkOrchestratorDigestRuntime({
     config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
     store: digestStoreStub(),
-    slack: { postMessage() {}, findMessageByClientId() {} },
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
     now: () => currentNow,
     run: async (input) => {
       runs += 1;
@@ -3588,7 +3589,7 @@ test('minute checks respect a durable delivery Retry-After without burning an in
   const runtime = createWorkOrchestratorDigestRuntime({
     config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
     store: digestStoreStub(),
-    slack: { postMessage() {}, findMessageByClientId() {} },
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
     now: () => currentNow,
     run: async ({ now }) => {
       const due = Date.parse(now) >= Date.parse('2026-08-29T06:30:00.000Z');
@@ -3658,7 +3659,7 @@ test('cleanup backlog is picked up when cleanup turns on after a same-boundary r
   const off = createWorkOrchestratorDigestRuntime({
     config: { digestEnabled: true, digestChannelId: 'CFOCUS', cleanupEnabled: false },
     store: digestStoreStub(),
-    slack: { postMessage() {}, findMessageByClientId() {} },
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
     now: () => currentNow,
     run: async () => {
       disabledRuns += 1;
@@ -3707,7 +3708,7 @@ test('digest health is content-free, finite, and derives exact omission without 
   const runtime = createWorkOrchestratorDigestRuntime({
     config: { digestEnabled: true, digestChannelId: 'CFOCUS', digestIntervalMinutes: 180 },
     store: digestStoreStub(),
-    slack: { postMessage() {}, findMessageByClientId() {} },
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
     state: sharedState,
     now: () => fail ? '2026-08-29T09:01:00.000Z' : '2026-08-29T06:01:00.000Z',
     run: async () => {
@@ -3738,6 +3739,36 @@ test('digest health is content-free, finite, and derives exact omission without 
   assert.equal(health.lastDigestFailureAt, '2026-08-29T09:01:00.000Z');
   assert.equal(health.lastDigestRun.error, 'digest_cycle_failed');
   assert.doesNotMatch(JSON.stringify(health), new RegExp(privateValue));
+});
+
+test('digest runtime preserves authoritative 501 overflow evidence and its finite typed health error', async () => {
+  const sharedState = {};
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS', digestIntervalMinutes: 180 },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    state: sharedState,
+    now: () => '2026-08-29T06:01:00.000Z',
+    run: async () => ({
+      status: 'failed', error: 'digest_eligible_overflow', retryable: true,
+      scheduledAt: '2026-08-29T06:00:00.000Z',
+      runId: '10000000-0000-4000-8000-000000000001',
+      selectedCount: 501, renderedCount: 0, omittedEligibleCount: 501,
+      partCount: 0, deliveredPartCount: 0,
+      cleanup: { attempted: 0, settled: 0, failed: 0 }
+    }),
+    setIntervalImpl: () => ({})
+  });
+
+  const result = await runtime.runNow('manual');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error, 'digest_eligible_overflow');
+  assert.equal(result.selectedCount, 501);
+  assert.equal(result.omittedEligibleCount, 501);
+  const health = buildWorkOrchestratorHealthState(sharedState);
+  assert.equal(health.lastDigestRun.error, 'digest_eligible_overflow');
+  assert.equal(health.lastDigestRun.selectedCount, 501);
+  assert.equal(health.omittedEligibleCount, 501);
 });
 
 test('maintenance digest handler uses the injectable runtime and returns finite status only', async () => {
@@ -3845,7 +3876,7 @@ test('digest runtime work is independent from immediate notification delivery or
   const digest = createWorkOrchestratorDigestRuntime({
     config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
     store: digestStoreStub(),
-    slack: { postMessage() {}, findMessageByClientId() {} },
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
     now: () => '2026-08-29T06:01:00.000Z',
     run: async () => {
       order.push('digest-start');

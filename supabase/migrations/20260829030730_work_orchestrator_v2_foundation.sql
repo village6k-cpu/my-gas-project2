@@ -69,8 +69,9 @@ create table public.digest_runs (
   window_started_at timestamptz not null,
   window_ended_at timestamptz not null,
   scheduled_at timestamptz not null,
+  generation integer not null default 1 check (generation > 0),
   state text not null default 'building'
-    check (state in ('building','delivering','delivered','failed','replaced')),
+    check (state in ('building','delivering','delivered','failed','replaced','retired')),
   destination_key text not null,
   item_snapshot jsonb not null default '[]'::jsonb check (jsonb_typeof(item_snapshot) = 'array'),
   manifest_prepared_at timestamptz,
@@ -88,7 +89,7 @@ create table public.digest_runs (
   error text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (destination_key, scheduled_at),
+  unique (destination_key, scheduled_at, generation),
   check (
     state not in ('building','delivering','failed')
     or (lease_owner is not null and lease_token is not null and lease_expires_at is not null)
@@ -108,7 +109,16 @@ create table public.digest_runs (
       )
     )
   ),
-  check (state not in ('building','delivering','failed') or delivered_at is null)
+  check (state not in ('building','delivering','failed') or delivered_at is null),
+  check (
+    state <> 'retired'
+    or (
+      manifest_prepared_at is not null and delivered_at is null
+      and slack_channel_id is null and slack_message_ts is null
+      and lease_owner is null and lease_token is null and lease_expires_at is null
+      and error = 'digest_generation_diverged'
+    )
+  )
 );
 
 create table public.digest_message_parts (
@@ -698,49 +708,41 @@ $$;
 create function public.list_actionable_work_v2(
   p_now timestamptz,
   p_limit integer
-) returns table (
-  id uuid,
-  work_key text,
-  room_key text,
-  title text,
-  summary text,
-  work_type text,
-  priority text,
-  state text,
-  owner_id text,
-  actionable_at timestamptz,
-  due_at timestamptz,
-  snoozed_until timestamptz,
-  first_opened_at timestamptz,
-  last_activity_at timestamptz,
-  digest_inclusion_count integer,
-  consecutive_unhandled_digests integer,
-  last_digest_at timestamptz,
-  next_reminder_at timestamptz,
-  version integer,
-  payload jsonb
-) language plpgsql stable security invoker set search_path = '' as $$
+) returns jsonb language plpgsql stable security invoker set search_path = '' as $$
+declare
+  v_result jsonb;
 begin
   if p_now is null or not isfinite(p_now) or p_limit is null or p_limit not between 1 and 500 then
     raise exception 'invalid actionable work query' using errcode = '22023';
   end if;
-  return query
-  select
-    w.id, w.work_key, w.room_key, w.title, w.summary, w.work_type, w.priority, w.state,
-    w.owner_id, w.actionable_at, w.due_at, w.snoozed_until, w.first_opened_at,
-    w.last_activity_at, w.digest_inclusion_count, w.consecutive_unhandled_digests,
-    w.last_digest_at, w.next_reminder_at, w.version, w.payload
-  from public.work_items_v2 as w
-  where w.state in ('open','in_progress','snoozed')
-    and (
-      w.actionable_at <= p_now
-      or (
-        w.priority = 'p0'
-        and not public.is_effective_p0_ack_v2(w.payload, p_now)
+  with eligible as materialized (
+    select
+      w.id, w.work_key, w.room_key, w.title, w.summary, w.work_type, w.priority, w.state,
+      w.owner_id, w.actionable_at, w.due_at, w.snoozed_until, w.first_opened_at,
+      w.last_activity_at, w.digest_inclusion_count, w.consecutive_unhandled_digests,
+      w.last_digest_at, w.next_reminder_at, w.version, w.payload
+    from public.work_items_v2 as w
+    where w.state in ('open','in_progress','snoozed')
+      and (
+        w.actionable_at <= p_now
+        or (
+          w.priority = 'p0'
+          and not public.is_effective_p0_ack_v2(w.payload, p_now)
+        )
       )
-    )
-  order by w.actionable_at, w.first_opened_at, w.id
-  limit p_limit;
+  ), bounded as (
+    select * from eligible
+    order by actionable_at, first_opened_at, id
+    limit p_limit
+  )
+  select jsonb_build_object(
+    'eligible_count', (select count(*) from eligible),
+    'rows', coalesce((
+      select jsonb_agg(to_jsonb(row_value) order by row_value.actionable_at, row_value.first_opened_at, row_value.id)
+      from bounded as row_value
+    ), '[]'::jsonb)
+  ) into v_result;
+  return v_result;
 end;
 $$;
 
@@ -756,6 +758,8 @@ declare
   v_row public.digest_runs%rowtype;
   v_previous public.digest_runs%rowtype;
   v_previous_json jsonb;
+  v_existing_found boolean;
+  v_generation integer;
 begin
   if p_destination_key is null or length(p_destination_key) not between 1 and 500
     or p_destination_key <> btrim(p_destination_key)
@@ -798,25 +802,26 @@ begin
     where part.digest_run_id = v_previous.id and part.delivery_state = 'delivered';
   end if;
 
-  insert into public.digest_runs (
-    window_started_at, window_ended_at, scheduled_at, state, destination_key,
-    previous_digest_id, lease_owner, lease_token, lease_expires_at
-  ) values (
-    p_window_started_at, p_window_ended_at, p_scheduled_at, 'building', p_destination_key,
-    v_previous.id, p_lease_owner, gen_random_uuid(), now() + make_interval(secs => p_lease_seconds)
-  )
-  on conflict (destination_key, scheduled_at) do nothing
-  returning * into v_row;
-  if found then
+  select * into v_row
+  from public.digest_runs
+  where destination_key = p_destination_key and scheduled_at = p_scheduled_at
+  order by generation desc
+  limit 1
+  for update;
+  v_existing_found := found;
+  if not v_existing_found or v_row.state = 'retired' then
+    v_generation := case when v_existing_found then v_row.generation + 1 else 1 end;
+    insert into public.digest_runs (
+      window_started_at, window_ended_at, scheduled_at, generation, state, destination_key,
+      previous_digest_id, lease_owner, lease_token, lease_expires_at
+    ) values (
+      p_window_started_at, p_window_ended_at, p_scheduled_at, v_generation, 'building', p_destination_key,
+      v_previous.id, p_lease_owner, gen_random_uuid(), now() + make_interval(secs => p_lease_seconds)
+    ) returning * into v_row;
     return jsonb_build_object(
       'claimed', true, 'created', true, 'row', to_jsonb(v_row), 'previous_digest', v_previous_json
     );
   end if;
-
-  select * into strict v_row
-  from public.digest_runs
-  where destination_key = p_destination_key and scheduled_at = p_scheduled_at
-  for update;
   if v_row.previous_digest_id is not null then
     select jsonb_build_object(
       'id', prior.id,
@@ -1038,11 +1043,14 @@ begin
     into v_existing_intent
     from public.digest_message_parts as part
     where part.digest_run_id = v_run.id;
-    if v_run.item_snapshot <> p_item_snapshot or v_existing_intent <> p_parts then
-      raise exception 'digest manifest mismatch' using errcode = '22023';
-    end if;
     select coalesce(jsonb_agg(to_jsonb(part) order by case part.part_kind when 'ordinary' then 0 else 1 end, part.part_number), '[]'::jsonb)
     into v_parts_json from public.digest_message_parts as part where part.digest_run_id = v_run.id;
+    if v_run.item_snapshot <> p_item_snapshot or v_existing_intent <> p_parts then
+      return jsonb_build_object(
+        'applied', false, 'created', false, 'reason', 'manifest_mismatch',
+        'row', to_jsonb(v_run), 'parts', v_parts_json
+      );
+    end if;
     return jsonb_build_object('applied', true, 'created', false, 'row', to_jsonb(v_run), 'parts', v_parts_json);
   end if;
 
@@ -1191,6 +1199,161 @@ begin
 end;
 $$;
 
+create function public.claim_digest_generation_part_cleanup_v2(
+  p_id uuid,
+  p_part_id uuid,
+  p_lease_owner text,
+  p_lease_token uuid,
+  p_cleanup_owner text,
+  p_lease_seconds integer
+) returns jsonb language plpgsql security invoker set search_path = '' as $$
+declare
+  v_run public.digest_runs%rowtype;
+  v_part public.digest_message_parts%rowtype;
+begin
+  if p_id is null or p_part_id is null or p_lease_owner is null
+    or length(p_lease_owner) not between 1 and 200 or p_lease_owner <> btrim(p_lease_owner)
+    or p_lease_token is null or p_cleanup_owner is null
+    or length(p_cleanup_owner) not between 1 and 200 or p_cleanup_owner <> btrim(p_cleanup_owner)
+    or p_lease_seconds is null or p_lease_seconds not between 1 and 900 then
+    raise exception 'invalid digest generation cleanup claim' using errcode = '22023';
+  end if;
+  select * into v_run from public.digest_runs where id = p_id for update;
+  if not found or v_run.state <> 'delivering' or v_run.manifest_prepared_at is null
+    or v_run.lease_owner is distinct from p_lease_owner
+    or v_run.lease_token is distinct from p_lease_token
+    or v_run.lease_expires_at is null or v_run.lease_expires_at <= now() then
+    return jsonb_build_object('claimed', false, 'row', null, 'part', null);
+  end if;
+  select * into v_part from public.digest_message_parts
+  where id = p_part_id and digest_run_id = p_id
+    and delivery_state in ('delivering','delivered')
+  for update;
+  if not found then return jsonb_build_object('claimed', false, 'row', null, 'part', null); end if;
+  if v_part.cleanup_state in ('deleted','already_absent')
+    or (v_part.cleanup_state = 'deleting' and v_part.cleanup_expires_at > now()) then
+    return jsonb_build_object('claimed', false, 'row', to_jsonb(v_run), 'part', to_jsonb(v_part));
+  end if;
+  update public.digest_message_parts
+  set cleanup_state = 'deleting', cleanup_attempts = cleanup_attempts + 1,
+      cleanup_owner = p_cleanup_owner, cleanup_token = gen_random_uuid(),
+      cleanup_expires_at = now() + make_interval(secs => p_lease_seconds),
+      cleanup_attempted_at = now(), cleaned_at = null, cleanup_error = null
+  where id = v_part.id and digest_run_id = p_id
+    and (
+      cleanup_state in ('idle','failed')
+      or (cleanup_state = 'deleting' and cleanup_expires_at <= now())
+    )
+  returning * into v_part;
+  return jsonb_build_object(
+    'claimed', found, 'row', case when found then to_jsonb(v_run) else null end,
+    'part', case when found then to_jsonb(v_part) else null end
+  );
+end;
+$$;
+
+create function public.record_digest_generation_part_cleanup_v2(
+  p_id uuid,
+  p_part_id uuid,
+  p_lease_owner text,
+  p_lease_token uuid,
+  p_cleanup_owner text,
+  p_cleanup_token uuid,
+  p_expected_cleanup_attempts integer,
+  p_outcome text,
+  p_error text
+) returns jsonb language plpgsql security invoker set search_path = '' as $$
+declare
+  v_run public.digest_runs%rowtype;
+  v_part public.digest_message_parts%rowtype;
+begin
+  if p_id is null or p_part_id is null or p_lease_owner is null
+    or length(p_lease_owner) not between 1 and 200 or p_lease_owner <> btrim(p_lease_owner)
+    or p_lease_token is null or p_cleanup_owner is null
+    or length(p_cleanup_owner) not between 1 and 200 or p_cleanup_owner <> btrim(p_cleanup_owner)
+    or p_cleanup_token is null or p_expected_cleanup_attempts is null or p_expected_cleanup_attempts < 1
+    or p_outcome not in ('deleted','already_absent','failed')
+    or (p_outcome = 'failed' and p_error not in (
+      'cant_delete_message','rate_limited','cleanup_unconfirmed','slack_api_error'
+    ))
+    or (p_outcome <> 'failed' and p_error is not null) then
+    raise exception 'invalid digest generation cleanup result' using errcode = '22023';
+  end if;
+  select * into v_run from public.digest_runs where id = p_id for update;
+  if not found or v_run.state <> 'delivering' or v_run.manifest_prepared_at is null
+    or v_run.lease_owner is distinct from p_lease_owner
+    or v_run.lease_token is distinct from p_lease_token
+    or v_run.lease_expires_at is null or v_run.lease_expires_at <= now() then
+    return jsonb_build_object('applied', false, 'row', null, 'part', null);
+  end if;
+  select * into v_part from public.digest_message_parts
+  where id = p_part_id and digest_run_id = p_id for update;
+  if not found or v_part.delivery_state not in ('delivering','delivered')
+    or (p_outcome = 'deleted' and v_part.delivery_state <> 'delivered')
+    or v_part.cleanup_state <> 'deleting'
+    or v_part.cleanup_owner is distinct from p_cleanup_owner
+    or v_part.cleanup_token is distinct from p_cleanup_token
+    or v_part.cleanup_attempts <> p_expected_cleanup_attempts
+    or v_part.cleanup_expires_at is null or v_part.cleanup_expires_at <= now() then
+    return jsonb_build_object('applied', false, 'row', null, 'part', null);
+  end if;
+  update public.digest_message_parts
+  set cleanup_state = p_outcome, cleanup_owner = null, cleanup_token = null,
+      cleanup_expires_at = null,
+      cleaned_at = case when p_outcome in ('deleted','already_absent') then now() else null end,
+      cleanup_error = case when p_outcome = 'failed' then p_error else null end
+  where id = v_part.id and digest_run_id = p_id and cleanup_state = 'deleting'
+    and cleanup_owner = p_cleanup_owner and cleanup_token = p_cleanup_token
+    and cleanup_attempts = p_expected_cleanup_attempts and cleanup_expires_at > now()
+  returning * into v_part;
+  return jsonb_build_object(
+    'applied', found, 'row', case when found then to_jsonb(v_run) else null end,
+    'part', case when found then to_jsonb(v_part) else null end
+  );
+end;
+$$;
+
+create function public.retire_digest_generation_v2(
+  p_id uuid,
+  p_lease_owner text,
+  p_lease_token uuid,
+  p_error text
+) returns jsonb language plpgsql security invoker set search_path = '' as $$
+declare
+  v_run public.digest_runs%rowtype;
+begin
+  if p_id is null or p_lease_owner is null
+    or length(p_lease_owner) not between 1 and 200 or p_lease_owner <> btrim(p_lease_owner)
+    or p_lease_token is null or p_error <> 'digest_generation_diverged' then
+    raise exception 'invalid digest generation retirement' using errcode = '22023';
+  end if;
+  select * into v_run from public.digest_runs where id = p_id for update;
+  if not found or v_run.state <> 'delivering' or v_run.manifest_prepared_at is null
+    or v_run.lease_owner is distinct from p_lease_owner
+    or v_run.lease_token is distinct from p_lease_token
+    or v_run.lease_expires_at is null or v_run.lease_expires_at <= now()
+    or exists (
+      select 1 from public.digest_message_parts
+      where digest_run_id = v_run.id
+        and delivery_state in ('delivering','delivered')
+        and cleanup_state not in ('deleted','already_absent')
+    )
+    or exists (
+      select 1 from public.digest_message_parts
+      where digest_run_id = v_run.id and cleanup_state in ('deleting','failed')
+    ) then
+    return jsonb_build_object('applied', false, 'row', null);
+  end if;
+  update public.digest_runs
+  set state = 'retired', lease_owner = null, lease_token = null, lease_expires_at = null,
+      error = p_error
+  where id = v_run.id and state = 'delivering'
+    and lease_owner = p_lease_owner and lease_token = p_lease_token
+  returning * into v_run;
+  return jsonb_build_object('applied', found, 'row', case when found then to_jsonb(v_run) else null end);
+end;
+$$;
+
 create function public.finalize_digest_run_v2(
   p_id uuid,
   p_lease_owner text,
@@ -1297,7 +1460,10 @@ begin
     or p_lease_owner <> btrim(p_lease_owner)
     or p_lease_token is null
     or p_error is null
-    or p_error not in ('digest_build_failed','digest_delivery_failed','delivery_unconfirmed') then
+    or p_error not in (
+      'digest_build_failed','digest_delivery_failed','delivery_unconfirmed',
+      'digest_eligible_overflow','digest_generation_cleanup_failed'
+    ) then
     raise exception 'invalid digest failure' using errcode = '22023';
   end if;
   select * into v_row from public.digest_runs where id = p_id for update;
@@ -1655,6 +1821,9 @@ revoke execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,j
 revoke execute on function public.claim_digest_part_delivery_v2(uuid,uuid,text,uuid) from public, anon, authenticated;
 revoke execute on function public.mark_digest_part_delivered_v2(uuid,uuid,text,uuid,integer,text,text,timestamptz) from public, anon, authenticated;
 revoke execute on function public.mark_digest_part_failed_v2(uuid,uuid,text,uuid,integer,text,timestamptz,timestamptz) from public, anon, authenticated;
+revoke execute on function public.claim_digest_generation_part_cleanup_v2(uuid,uuid,text,uuid,text,integer) from public, anon, authenticated;
+revoke execute on function public.record_digest_generation_part_cleanup_v2(uuid,uuid,text,uuid,text,uuid,integer,text,text) from public, anon, authenticated;
+revoke execute on function public.retire_digest_generation_v2(uuid,text,uuid,text) from public, anon, authenticated;
 revoke execute on function public.finalize_digest_run_v2(uuid,text,uuid,timestamptz) from public, anon, authenticated;
 revoke execute on function public.fail_digest_run_v2(uuid,text,uuid,text) from public, anon, authenticated;
 revoke execute on function public.list_digest_cleanup_backlog_v2(text,integer) from public, anon, authenticated;
@@ -1673,6 +1842,9 @@ grant execute on function public.prepare_digest_parts_v2(uuid,text,uuid,jsonb,js
 grant execute on function public.claim_digest_part_delivery_v2(uuid,uuid,text,uuid) to service_role;
 grant execute on function public.mark_digest_part_delivered_v2(uuid,uuid,text,uuid,integer,text,text,timestamptz) to service_role;
 grant execute on function public.mark_digest_part_failed_v2(uuid,uuid,text,uuid,integer,text,timestamptz,timestamptz) to service_role;
+grant execute on function public.claim_digest_generation_part_cleanup_v2(uuid,uuid,text,uuid,text,integer) to service_role;
+grant execute on function public.record_digest_generation_part_cleanup_v2(uuid,uuid,text,uuid,text,uuid,integer,text,text) to service_role;
+grant execute on function public.retire_digest_generation_v2(uuid,text,uuid,text) to service_role;
 grant execute on function public.finalize_digest_run_v2(uuid,text,uuid,timestamptz) to service_role;
 grant execute on function public.fail_digest_run_v2(uuid,text,uuid,text) to service_role;
 grant execute on function public.list_digest_cleanup_backlog_v2(text,integer) to service_role;

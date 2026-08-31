@@ -295,6 +295,31 @@ test('a delivering receipt stays delivering when history readback fails', async 
   assert.equal(store.row.notification_state, 'delivering');
 });
 
+test('a delivering receipt preserves typed history_incomplete without failure settlement or repost', async () => {
+  const unsafe = 'page-eleven customer room message token';
+  const incomplete = Object.assign(new Error(unsafe), {
+    name: 'SlackApiError',
+    code: 'history_incomplete',
+    kind: 'response'
+  });
+  const store = createStore({ initial: receipt({ notification_state: 'delivering', delivery_attempts: 1 }) });
+  const slack = createSlack({ historyError: incomplete });
+
+  await assert.rejects(
+    ensureImmediateNotification({ event, config, store, slack, now }),
+    (error) => isTypedError('history_incomplete', 'unconfirmed')(error)
+      && !error.message.includes(unsafe)
+  );
+  await assert.rejects(
+    ensureImmediateNotification({ event, config, store, slack, now }),
+    (error) => isTypedError('history_incomplete', 'unconfirmed')(error)
+  );
+  assert.equal(slack.posts.length, 0);
+  assert.equal(slack.searches.length, 2);
+  assert.equal(store.calls.failed.length, 0);
+  assert.equal(store.row.notification_state, 'delivering');
+});
+
 test('an ambiguous post reconciles an exact match and never reposts', async () => {
   const ambiguous = Object.assign(new Error('unsafe arbitrary Slack body'), { ambiguous: true });
   const store = createStore();
