@@ -90,6 +90,20 @@ test('contradictory execution and readback evidence needs human review', async (
   assert.equal(result.resolutionKind, 'contradictory_evidence');
 });
 
+test('failed receipt state with completed receipt status needs human review', async () => {
+  const result = await derive({
+    operationReceipt: {
+      state: 'failed',
+      status: 'completed',
+      authoritativeReadback: true,
+      operationId: 'operation-1'
+    }
+  });
+
+  assert.equal(result.state, 'needs_human');
+  assert.equal(result.resolutionKind, 'contradictory_evidence');
+});
+
 test('post action execution success alone needs human review', async () => {
   const result = await derive({ postActionResult: { success: true } });
 
@@ -120,6 +134,42 @@ test('evidence excludes unrecognized receipt status text', async () => {
   assert.deepEqual(result.evidence, {
     operationReceipt: { id: 'op-2' }
   });
+});
+
+test('auto reply evidence omits unsafe transport message identifiers', async () => {
+  for (const transportMessageId of [
+    ' kakao-3',
+    'customer asked for a discount',
+    'xoxb-1234567890-secret-token',
+    'kakao-3\n',
+    'kakao-3<script>'
+  ]) {
+    const result = await derive({
+      autoReplyResult: { sent: true, readbackConfirmed: true, transportMessageId }
+    });
+
+    assert.equal(result.state, 'needs_human');
+    assert.deepEqual(result.evidence, {
+      autoReply: { status: 'readback_confirmed' }
+    });
+    assert.equal(JSON.stringify(result).includes(transportMessageId), false);
+  }
+});
+
+test('operation evidence omits unsafe receipt identifiers', async () => {
+  const result = await derive({
+    operationReceipt: {
+      state: 'failed',
+      authoritativeReadback: true,
+      operationId: 'Bearer customer-secret-token'
+    }
+  });
+
+  assert.equal(result.state, 'failed');
+  assert.deepEqual(result.evidence, {
+    operationReceipt: { status: 'failed' }
+  });
+  assert.equal(JSON.stringify(result).includes('customer-secret-token'), false);
 });
 
 test('evidence removes customer bodies, secrets, and arbitrary nested payloads', async () => {
