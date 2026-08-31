@@ -67,6 +67,17 @@ const DIGEST_STATES = new Set(['building', 'delivering', 'delivered', 'failed', 
 const SLACK_CHANNEL_ID = /^[A-Z0-9][A-Z0-9_-]{0,79}$/;
 const SLACK_MESSAGE_TS = /^[0-9]{1,20}\.[0-9]{1,20}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const NOTICE_CLEANUP_CLAIM_RESPONSE_KEYS = [
+  'id', 'notification_state', 'cleanup_state', 'cleanup_attempts', 'cleanup_owner',
+  'cleanup_token', 'cleanup_expires_at', 'cleanup_attempted_at', 'cleaned_at',
+  'cleanup_error', 'cleanup_already_absent', 'coordinate_status',
+  'slack_channel_id', 'slack_message_ts'
+];
+const NOTICE_CLEANUP_TERMINAL_RESPONSE_KEYS = [
+  'id', 'notification_state', 'cleanup_state', 'cleanup_attempts', 'cleanup_owner',
+  'cleanup_token', 'cleanup_expires_at', 'cleanup_attempted_at', 'cleaned_at',
+  'cleanup_error', 'cleanup_already_absent'
+];
 const DIGEST_PART_RESPONSE_KEYS = [
   'id', 'digest_run_id', 'part_kind', 'part_number', 'part_count', 'item_ids',
   'payload_hash', 'client_message_id', 'delivery_state', 'delivery_attempts',
@@ -878,22 +889,34 @@ function noticeCleanupClaimResponse(data, input) {
   if (!Array.isArray(data) || data.length > input.limit) throw responseInvalid();
   const seen = new Set();
   return data.map((row) => {
-    if (!isRecord(row)) throw responseInvalid();
+    if (!exactKeys(row, NOTICE_CLEANUP_CLAIM_RESPONSE_KEYS)) throw responseInvalid();
     const id = responseUuid(row.id);
     if (seen.has(id) || !['pending', 'blocked_p0'].includes(row.cleanup_state)
-      || !Number.isSafeInteger(row.cleanup_attempts) || row.cleanup_attempts < 0) throw responseInvalid();
+      || !['delivered', 'cleanup_pending'].includes(row.notification_state)
+      || !Number.isSafeInteger(row.cleanup_attempts) || row.cleanup_attempts < 0
+      || typeof row.cleanup_already_absent !== 'boolean') throw responseInvalid();
     seen.add(id);
     const channel = responseText(row.slack_channel_id, 80, { nullable: true });
     const timestamp = responseText(row.slack_message_ts, 100, { nullable: true });
-    if ((channel === null) !== (timestamp === null)
-      || channel !== null && (!SLACK_CHANNEL_ID.test(channel) || !SLACK_MESSAGE_TS.test(timestamp))) {
+    if (!['valid', 'missing_coordinates'].includes(row.coordinate_status)
+      || row.coordinate_status === 'valid' && (
+        channel === null || timestamp === null
+        || !SLACK_CHANNEL_ID.test(channel) || !SLACK_MESSAGE_TS.test(timestamp)
+      )
+      || row.coordinate_status === 'missing_coordinates' && (channel !== null || timestamp !== null)) {
       throw responseInvalid();
     }
     if (row.cleanup_state === 'pending') {
       if (row.cleanup_attempts < 1 || responseText(row.cleanup_owner, 200) !== input.cleanupOwner
         || responseUuid(row.cleanup_token) === null
-        || Date.parse(responseTimestamp(row.cleanup_expires_at)) <= Date.parse(input.now)) throw responseInvalid();
-    } else if (row.cleanup_owner !== null || row.cleanup_token !== null || row.cleanup_expires_at !== null) {
+        || Date.parse(responseTimestamp(row.cleanup_expires_at)) <= Date.parse(input.now)
+        || responseTimestamp(row.cleanup_attempted_at) === null
+        || row.cleaned_at !== null || row.cleanup_error !== null || row.cleanup_already_absent !== false) {
+        throw responseInvalid();
+      }
+    } else if (row.cleanup_owner !== null || row.cleanup_token !== null || row.cleanup_expires_at !== null
+      || row.cleanup_attempted_at !== null || row.cleaned_at !== null
+      || row.cleanup_error !== null || row.cleanup_already_absent !== false) {
       throw responseInvalid();
     }
     return row;
@@ -901,21 +924,25 @@ function noticeCleanupClaimResponse(data, input) {
 }
 
 function noticeCleanupTerminalResponse(data, input) {
-  if (!isRecord(data) || typeof data.applied !== 'boolean') throw responseInvalid();
+  if (!exactKeys(data, ['applied', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
   if (!data.applied) {
     if (data.row !== null) throw responseInvalid();
     return data;
   }
   const row = data.row;
-  if (!isRecord(row) || responseUuid(row.id) !== input.id
+  if (!exactKeys(row, NOTICE_CLEANUP_TERMINAL_RESPONSE_KEYS) || responseUuid(row.id) !== input.id
     || row.cleanup_state !== input.state
     || row.cleanup_attempts !== input.expectedCleanupAttempts
-    || row.cleanup_owner !== null || row.cleanup_token !== null || row.cleanup_expires_at !== null) {
+    || row.cleanup_owner !== null || row.cleanup_token !== null || row.cleanup_expires_at !== null
+    || typeof row.cleanup_already_absent !== 'boolean') {
     throw responseInvalid();
   }
+  responseTimestamp(row.cleanup_attempted_at);
   if (input.state === 'deleted') {
-    if (row.cleanup_error !== null || row.cleanup_already_absent !== input.alreadyAbsent) throw responseInvalid();
-  } else if (row.cleanup_error !== input.error || row.cleanup_already_absent !== false) {
+    if (row.notification_state !== 'deleted' || responseTimestamp(row.cleaned_at) === null
+      || row.cleanup_error !== null || row.cleanup_already_absent !== input.alreadyAbsent) throw responseInvalid();
+  } else if (!['delivered', 'cleanup_pending'].includes(row.notification_state)
+    || row.cleaned_at !== null || row.cleanup_error !== input.error || row.cleanup_already_absent !== false) {
     throw responseInvalid();
   }
   return data;
@@ -1801,14 +1828,13 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       let body;
       try {
         if (!exactKeys(input, [
-          'id', 'cleanupOwner', 'cleanupToken', 'expectedCleanupAttempts', 'deletedAt', 'alreadyAbsent'
+          'id', 'cleanupOwner', 'cleanupToken', 'expectedCleanupAttempts', 'alreadyAbsent'
         ]) || typeof input.alreadyAbsent !== 'boolean') throw invalidInput();
         body = {
           p_id: uuid(input.id),
           p_cleanup_owner: exactText(input.cleanupOwner, 200),
           p_cleanup_token: uuid(input.cleanupToken),
           p_expected_cleanup_attempts: positiveVersion(input.expectedCleanupAttempts),
-          p_deleted_at: isoTimestamp(input.deletedAt),
           p_already_absent: input.alreadyAbsent
         };
       } catch {
@@ -1826,7 +1852,7 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       let body;
       try {
         if (!exactKeys(input, [
-          'id', 'cleanupOwner', 'cleanupToken', 'expectedCleanupAttempts', 'failedAt', 'error'
+          'id', 'cleanupOwner', 'cleanupToken', 'expectedCleanupAttempts', 'error'
         ])) throw invalidInput();
         const error = exactText(input.error, 64);
         if (!NOTICE_CLEANUP_FAILURE_CODES.has(error)) throw invalidInput();
@@ -1835,7 +1861,6 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
           p_cleanup_owner: exactText(input.cleanupOwner, 200),
           p_cleanup_token: uuid(input.cleanupToken),
           p_expected_cleanup_attempts: positiveVersion(input.expectedCleanupAttempts),
-          p_failed_at: isoTimestamp(input.failedAt),
           p_error: error
         };
       } catch {

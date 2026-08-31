@@ -2,6 +2,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SLACK_CHANNEL = /^[A-Z0-9][A-Z0-9_-]{0,79}$/;
 const SLACK_TIMESTAMP = /^\d{1,20}\.\d{1,20}$/;
 const SLACK_USER = /^U[A-Z0-9]{1,79}$/;
+const SLACK_BOT = /^B[A-Z0-9]{1,79}$/;
+const SLACK_TEAM = /^T[A-Z0-9]{1,79}$/;
 const FAILURE_CODES = new Set([
   'cant_delete_message', 'rate_limited', 'cleanup_unconfirmed', 'slack_api_error'
 ]);
@@ -29,27 +31,31 @@ function canonicalTimestamp(value) {
 function validatedConfig(config) {
   if (!isRecord(config)) throw new Error('notice cleanup input is invalid');
   const botUserId = exactText(config.botUserId, 80);
+  const botId = exactText(config.botId, 80);
+  const teamId = exactText(config.teamId, 80);
   const cleanupOwner = exactText(config.cleanupOwner, 200);
-  if (!SLACK_USER.test(botUserId)
+  if (!SLACK_USER.test(botUserId) || !SLACK_BOT.test(botId) || !SLACK_TEAM.test(teamId)
     || !Number.isSafeInteger(config.cleanupLeaseSeconds)
     || config.cleanupLeaseSeconds < 1
     || config.cleanupLeaseSeconds > 900) {
     throw new Error('notice cleanup input is invalid');
   }
-  return { botUserId, cleanupOwner, cleanupLeaseSeconds: config.cleanupLeaseSeconds };
+  return { botUserId, botId, teamId, cleanupOwner, cleanupLeaseSeconds: config.cleanupLeaseSeconds };
 }
 
 function claimedGeneration(row) {
   if (!isRecord(row) || typeof row.id !== 'string' || !UUID.test(row.id)
     || row.cleanup_state !== 'pending'
     || !Number.isSafeInteger(row.cleanup_attempts) || row.cleanup_attempts < 1
-    || typeof row.cleanup_token !== 'string' || !UUID.test(row.cleanup_token)) {
+    || typeof row.cleanup_token !== 'string' || !UUID.test(row.cleanup_token)
+    || !['valid', 'missing_coordinates'].includes(row.coordinate_status)) {
     return null;
   }
   return {
     id: row.id.toLowerCase(),
     cleanupToken: row.cleanup_token.toLowerCase(),
     expectedCleanupAttempts: row.cleanup_attempts,
+    coordinateStatus: row.coordinate_status,
     channel: row.slack_channel_id,
     ts: row.slack_message_ts
   };
@@ -112,7 +118,6 @@ export async function runNoticeCleanupSweep({ store, slack, config, now } = {}) 
         cleanupOwner: normalized.cleanupOwner,
         cleanupToken: target.cleanupToken,
         expectedCleanupAttempts: target.expectedCleanupAttempts,
-        failedAt: when,
         error
       });
       return isRecord(recorded) && recorded.applied === true;
@@ -131,7 +136,8 @@ export async function runNoticeCleanupSweep({ store, slack, config, now } = {}) 
     }
     return result;
   }
-  if (!isRecord(identity) || identity.userId !== normalized.botUserId) {
+  if (!isRecord(identity) || identity.userId !== normalized.botUserId
+    || identity.botId !== normalized.botId || identity.teamId !== normalized.teamId) {
     for (const target of targets) {
       await markFailed(target, 'bot_identity_mismatch');
       result.excluded += 1;
@@ -140,7 +146,8 @@ export async function runNoticeCleanupSweep({ store, slack, config, now } = {}) 
   }
 
   for (const target of targets) {
-    if (typeof target.channel !== 'string' || !SLACK_CHANNEL.test(target.channel)
+    if (target.coordinateStatus !== 'valid'
+      || typeof target.channel !== 'string' || !SLACK_CHANNEL.test(target.channel)
       || typeof target.ts !== 'string' || !SLACK_TIMESTAMP.test(target.ts)) {
       await markFailed(target, 'missing_coordinates');
       result.failed += 1;
@@ -167,7 +174,6 @@ export async function runNoticeCleanupSweep({ store, slack, config, now } = {}) 
         cleanupOwner: normalized.cleanupOwner,
         cleanupToken: target.cleanupToken,
         expectedCleanupAttempts: target.expectedCleanupAttempts,
-        deletedAt: when,
         alreadyAbsent: deletion.status === 'already_absent'
       });
       if (!isRecord(recorded) || recorded.applied !== true) {

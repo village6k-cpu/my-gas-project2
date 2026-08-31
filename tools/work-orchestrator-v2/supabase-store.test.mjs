@@ -1643,23 +1643,33 @@ test('thrown fetch errors are bounded and never reveal the service role key', as
 test('notice cleanup uses one durable bounded claim RPC and exact cleanup generations', async () => {
   const pending = {
     id: WORK_ID,
+    notification_state: 'delivered',
     cleanup_state: 'pending',
     cleanup_attempts: 2,
     cleanup_owner: 'bridge:notice-cleanup',
     cleanup_token: CLEANUP_TOKEN,
     cleanup_expires_at: '2026-08-31T06:02:00.000Z',
+    cleanup_attempted_at: '2026-08-31T06:00:00.000Z',
+    cleaned_at: null,
+    cleanup_error: null,
+    cleanup_already_absent: false,
+    coordinate_status: 'valid',
     slack_channel_id: 'CNOTICE',
     slack_message_ts: '123.45'
   };
   const fetch = createFetch([
     response({ data: [pending] }),
     response({ data: { applied: true, row: {
-      ...pending, cleanup_state: 'deleted', cleanup_owner: null, cleanup_token: null,
-      cleanup_expires_at: null, cleanup_error: null, cleanup_already_absent: false
+      id: WORK_ID, notification_state: 'deleted', cleanup_state: 'deleted', cleanup_attempts: 2,
+      cleanup_owner: null, cleanup_token: null, cleanup_expires_at: null,
+      cleanup_attempted_at: '2026-08-31T06:00:00.000Z', cleaned_at: '2026-08-31T06:00:01.000Z',
+      cleanup_error: null, cleanup_already_absent: false
     } } }),
     response({ data: { applied: true, row: {
-      ...pending, cleanup_state: 'failed', cleanup_owner: null, cleanup_token: null,
-      cleanup_expires_at: null, cleanup_error: 'cant_delete_message', cleanup_already_absent: false
+      id: WORK_ID, notification_state: 'delivered', cleanup_state: 'failed', cleanup_attempts: 2,
+      cleanup_owner: null, cleanup_token: null, cleanup_expires_at: null,
+      cleanup_attempted_at: '2026-08-31T06:00:00.000Z', cleaned_at: null,
+      cleanup_error: 'cant_delete_message', cleanup_already_absent: false
     } } })
   ]);
   const store = createWorkOrchestratorStore({
@@ -1672,11 +1682,11 @@ test('notice cleanup uses one durable bounded claim RPC and exact cleanup genera
   });
   const deleted = await store.markCleanupDeleted({
     id: WORK_ID, cleanupOwner: 'bridge:notice-cleanup', cleanupToken: CLEANUP_TOKEN, expectedCleanupAttempts: 2,
-    deletedAt: '2026-08-31T06:00:01.000Z', alreadyAbsent: false
+    alreadyAbsent: false
   });
   const failed = await store.markCleanupFailed({
     id: WORK_ID, cleanupOwner: 'bridge:notice-cleanup', cleanupToken: CLEANUP_TOKEN, expectedCleanupAttempts: 2,
-    failedAt: '2026-08-31T06:00:01.000Z', error: 'cant_delete_message'
+    error: 'cant_delete_message'
   });
 
   assert.equal(claimed.length, 1);
@@ -1694,12 +1704,12 @@ test('notice cleanup uses one durable bounded claim RPC and exact cleanup genera
   assert.deepEqual(JSON.parse(fetch.requests[1].init.body), {
     p_id: WORK_ID, p_cleanup_owner: 'bridge:notice-cleanup',
     p_cleanup_token: CLEANUP_TOKEN, p_expected_cleanup_attempts: 2,
-    p_deleted_at: '2026-08-31T06:00:01.000Z', p_already_absent: false
+    p_already_absent: false
   });
   assert.deepEqual(JSON.parse(fetch.requests[2].init.body), {
     p_id: WORK_ID, p_cleanup_owner: 'bridge:notice-cleanup',
     p_cleanup_token: CLEANUP_TOKEN, p_expected_cleanup_attempts: 2,
-    p_failed_at: '2026-08-31T06:00:01.000Z', p_error: 'cant_delete_message'
+    p_error: 'cant_delete_message'
   });
 });
 
@@ -1715,11 +1725,70 @@ test('notice cleanup store rejects unbounded batches and stale or content-bearin
   }), /input is invalid/i);
   await assert.rejects(store.markCleanupDeleted({
     id: WORK_ID, cleanupOwner: 'bridge:notice-cleanup', cleanupToken: 'not-a-token', expectedCleanupAttempts: 2,
-    deletedAt: '2026-08-31T06:00:01.000Z', alreadyAbsent: false
+    alreadyAbsent: false
   }), /input is invalid/i);
   await assert.rejects(store.markCleanupFailed({
     id: WORK_ID, cleanupOwner: 'bridge:notice-cleanup', cleanupToken: CLEANUP_TOKEN, expectedCleanupAttempts: 2,
-    failedAt: '2026-08-31T06:00:01.000Z', error: serviceRoleKey
+    error: serviceRoleKey
   }), (error) => /input is invalid/i.test(error.message) && !error.message.includes(serviceRoleKey));
   assert.equal(fetch.requests.length, 0);
+});
+
+test('notice cleanup rejects extra, missing, state-mismatched, and non-finite RPC response facts', async () => {
+  const pending = {
+    id: WORK_ID,
+    notification_state: 'delivered',
+    cleanup_state: 'pending',
+    cleanup_attempts: 2,
+    cleanup_owner: 'bridge:notice-cleanup',
+    cleanup_token: CLEANUP_TOKEN,
+    cleanup_expires_at: '2026-08-31T06:02:00.000Z',
+    cleanup_attempted_at: '2026-08-31T06:00:00.000Z',
+    cleaned_at: null,
+    cleanup_error: null,
+    cleanup_already_absent: false,
+    coordinate_status: 'valid',
+    slack_channel_id: 'CNOTICE',
+    slack_message_ts: '123.45'
+  };
+  const terminal = {
+    id: WORK_ID,
+    notification_state: 'deleted',
+    cleanup_state: 'deleted',
+    cleanup_attempts: 2,
+    cleanup_owner: null,
+    cleanup_token: null,
+    cleanup_expires_at: null,
+    cleanup_attempted_at: '2026-08-31T06:00:00.000Z',
+    cleaned_at: '2026-08-31T06:00:01.000Z',
+    cleanup_error: null,
+    cleanup_already_absent: false
+  };
+  const claimInput = {
+    now: '2026-08-31T06:00:00.000Z', cleanupOwner: 'bridge:notice-cleanup', leaseSeconds: 120, limit: 25
+  };
+  const deleteInput = {
+    id: WORK_ID, cleanupOwner: 'bridge:notice-cleanup', cleanupToken: CLEANUP_TOKEN,
+    expectedCleanupAttempts: 2, alreadyAbsent: false
+  };
+  const invalidBodies = [
+    { method: 'claim', data: [{ ...pending, unexpected: serviceRoleKey }] },
+    { method: 'claim', data: [{ ...pending, cleanup_attempted_at: 'infinity' }] },
+    { method: 'delete', data: { applied: true, row: { ...terminal, notification_state: 'delivered' } } },
+    { method: 'delete', data: { applied: true, row: Object.fromEntries(
+      Object.entries(terminal).filter(([key]) => key !== 'cleaned_at')
+    ) } }
+  ];
+
+  for (const invalid of invalidBodies) {
+    const fetch = createFetch([response({ data: invalid.data })]);
+    const store = createWorkOrchestratorStore({
+      supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+    });
+    const operation = invalid.method === 'claim'
+      ? store.claimCleanupBatch(claimInput)
+      : store.markCleanupDeleted(deleteInput);
+    await assert.rejects(operation, (error) => error.message === 'Work Orchestrator Supabase request failed: response invalid'
+      && !error.message.includes(serviceRoleKey));
+  }
 });

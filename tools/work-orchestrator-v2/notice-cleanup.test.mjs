@@ -13,6 +13,7 @@ function claimedReceipt(overrides = {}) {
     cleanup_state: 'pending',
     cleanup_attempts: 1,
     cleanup_token: CLEANUP_TOKEN,
+    coordinate_status: 'valid',
     slack_channel_id: 'CNOTICE',
     slack_message_ts: '123.45',
     ...overrides
@@ -41,10 +42,16 @@ function fakeStore(rows) {
 function config(overrides = {}) {
   return {
     botUserId: 'UBOT',
+    botId: 'BAPP',
+    teamId: 'TTEAM',
     cleanupOwner: 'bridge:notice-cleanup',
     cleanupLeaseSeconds: 120,
     ...overrides
   };
+}
+
+function botIdentity(overrides = {}) {
+  return { userId: 'UBOT', botId: 'BAPP', teamId: 'TTEAM', ...overrides };
 }
 
 test('ordinary notice stays untouched until a delivered digest snapshot contains its linked work outcome', async () => {
@@ -53,7 +60,7 @@ test('ordinary notice stays untouched until a delivered digest snapshot contains
   const result = await runNoticeCleanupSweep({
     store,
     slack: {
-      async authTest() { return { userId: 'UBOT' }; },
+      async authTest() { return botIdentity(); },
       async deleteMessage() { deletes += 1; return { status: 'deleted' }; }
     },
     config: config(),
@@ -74,7 +81,7 @@ test('auto-processed notice is deleted only after cleanup_after made it claimabl
   const afterStore = fakeStore([claimedReceipt()]);
   const deletedCoordinates = [];
   const slack = {
-    async authTest() { return { userId: 'UBOT' }; },
+    async authTest() { return botIdentity(); },
     async deleteMessage(coordinate) {
       deletedCoordinates.push(coordinate);
       return { status: 'deleted' };
@@ -92,7 +99,6 @@ test('auto-processed notice is deleted only after cleanup_after made it claimabl
     cleanupOwner: 'bridge:notice-cleanup',
     cleanupToken: CLEANUP_TOKEN,
     expectedCleanupAttempts: 1,
-    deletedAt: NOW,
     alreadyAbsent: false
   }]);
 });
@@ -106,7 +112,7 @@ test('unacknowledged P0 is counted as blocked and never reaches Slack deletion',
   const result = await runNoticeCleanupSweep({
     store,
     slack: {
-      async authTest() { return { userId: 'UBOT' }; },
+      async authTest() { return botIdentity(); },
       async deleteMessage() { deletes += 1; return { status: 'deleted' }; }
     },
     config: config(),
@@ -121,10 +127,12 @@ test('unacknowledged P0 is counted as blocked and never reaches Slack deletion',
 });
 
 test('missing coordinates become a failed audit without any broad Slack search', async () => {
-  const store = fakeStore([claimedReceipt({ slack_channel_id: null, slack_message_ts: null })]);
+  const store = fakeStore([claimedReceipt({
+    coordinate_status: 'missing_coordinates', slack_channel_id: null, slack_message_ts: null
+  })]);
   let deletes = 0;
   const slack = {
-    async authTest() { return { userId: 'UBOT' }; },
+    async authTest() { return botIdentity(); },
     async deleteMessage() { deletes += 1; return { status: 'deleted' }; },
     async findMessageByClientId() { throw new Error('broad search must not run'); }
   };
@@ -138,34 +146,54 @@ test('missing coordinates become a failed audit without any broad Slack search',
     cleanupOwner: 'bridge:notice-cleanup',
     cleanupToken: CLEANUP_TOKEN,
     expectedCleanupAttempts: 1,
-    failedAt: NOW,
     error: 'missing_coordinates'
   }]);
 });
 
-test('auth.test identity mismatch excludes exact targets without deletion', async () => {
-  const store = fakeStore([claimedReceipt()]);
-  let deletes = 0;
-  const result = await runNoticeCleanupSweep({
-    store,
-    slack: {
-      async authTest() { return { userId: 'UOTHER' }; },
-      async deleteMessage() { deletes += 1; return { status: 'deleted' }; }
-    },
-    config: config(),
-    now: NOW
-  });
+test('auth.test must match the configured user, bot, and team before any exact delete', async () => {
+  for (const mismatch of [
+    { userId: 'UOTHER' },
+    { botId: 'BOTHER' },
+    { teamId: 'TOTHER' }
+  ]) {
+    const store = fakeStore([claimedReceipt()]);
+    let deletes = 0;
+    const result = await runNoticeCleanupSweep({
+      store,
+      slack: {
+        async authTest() { return botIdentity(mismatch); },
+        async deleteMessage() { deletes += 1; return { status: 'deleted' }; }
+      },
+      config: config(),
+      now: NOW
+    });
 
-  assert.equal(result.excluded, 1);
-  assert.equal(deletes, 0);
-  assert.deepEqual(store.calls.failed, [{
-    id: RECEIPT_ID,
-    cleanupOwner: 'bridge:notice-cleanup',
-    cleanupToken: CLEANUP_TOKEN,
-    expectedCleanupAttempts: 1,
-    failedAt: NOW,
-    error: 'bot_identity_mismatch'
-  }]);
+    assert.equal(result.excluded, 1);
+    assert.equal(deletes, 0);
+    assert.deepEqual(store.calls.failed, [{
+      id: RECEIPT_ID,
+      cleanupOwner: 'bridge:notice-cleanup',
+      cleanupToken: CLEANUP_TOKEN,
+      expectedCleanupAttempts: 1,
+      error: 'bot_identity_mismatch'
+    }]);
+  }
+});
+
+test('cleanup config requires the complete content-free Slack bot identity', async () => {
+  const secret = 'xoxb-review-secret';
+  for (const missing of ['botUserId', 'botId', 'teamId']) {
+    const input = config({ [missing]: undefined, token: secret });
+    await assert.rejects(
+      runNoticeCleanupSweep({
+        store: fakeStore([]),
+        slack: { async authTest() { return botIdentity(); }, async deleteMessage() {} },
+        config: input,
+        now: NOW
+      }),
+      (error) => error.message === 'notice cleanup input is invalid' && !error.message.includes(secret)
+    );
+  }
 });
 
 test('message_not_found settles the exact receipt as deleted and already absent', async () => {
@@ -173,7 +201,7 @@ test('message_not_found settles the exact receipt as deleted and already absent'
   const result = await runNoticeCleanupSweep({
     store,
     slack: {
-      async authTest() { return { userId: 'UBOT' }; },
+      async authTest() { return botIdentity(); },
       async deleteMessage() { return { status: 'already_absent' }; }
     },
     config: config(),
@@ -187,7 +215,6 @@ test('message_not_found settles the exact receipt as deleted and already absent'
     cleanupOwner: 'bridge:notice-cleanup',
     cleanupToken: CLEANUP_TOKEN,
     expectedCleanupAttempts: 1,
-    deletedAt: NOW,
     alreadyAbsent: true
   }]);
 });
@@ -199,7 +226,7 @@ test('cant_delete_message remains failed and never falls back to another deletio
   const result = await runNoticeCleanupSweep({
     store,
     slack: {
-      async authTest() { return { userId: 'UBOT' }; },
+      async authTest() { return botIdentity(); },
       async deleteMessage() { deletes += 1; throw error; },
       async adminDeleteMessage() { throw new Error('admin fallback must not run'); },
       async findMessageByClientId() { throw new Error('search fallback must not run'); }
@@ -215,7 +242,6 @@ test('cant_delete_message remains failed and never falls back to another deletio
     cleanupOwner: 'bridge:notice-cleanup',
     cleanupToken: CLEANUP_TOKEN,
     expectedCleanupAttempts: 1,
-    failedAt: NOW,
     error: 'cant_delete_message'
   }]);
   assert.equal(store.calls.deleted.length, 0);

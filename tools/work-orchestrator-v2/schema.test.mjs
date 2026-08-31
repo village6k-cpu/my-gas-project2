@@ -196,6 +196,8 @@ test('additive notice cleanup migration defines a private atomic lease and termi
   const sql = readFileSync(join(migrationsDirectory, noticeCleanupMigrationFiles[0]), 'utf8');
   const functions = [
     'claim_notice_cleanup_batch_v2',
+    'link_notice_cleanup_from_receipt_v2',
+    'link_notice_cleanup_from_work_v2',
     'mark_notice_cleanup_deleted_v2',
     'mark_notice_cleanup_failed_v2'
   ];
@@ -208,13 +210,20 @@ test('additive notice cleanup migration defines a private atomic lease and termi
   assert.match(sql, /cleanup_attempted_at timestamptz/i);
   assert.match(sql, /cleaned_at timestamptz/i);
   assert.match(sql, /cleanup_already_absent boolean/i);
+  assert.match(sql, /cleanup_work_id uuid/i);
+  assert.match(sql, /cleanup_work_version integer/i);
   assert.match(sql, /p_limit[^;]*?between 1 and 25/i);
   assert.match(sql, /for update skip locked/i);
   assert.match(sql, /cleanup_expires_at\s*<=\s*p_now/i);
+  assert.match(sql, /snapshot\.entry->>'id'\s*=\s*receipt\.cleanup_work_id::text[\s\S]*?snapshot\.entry->>'version'\)::integer\s*=\s*receipt\.cleanup_work_version/i);
   assert.match(sql, /public\.is_effective_p0_ack_v2\(/i, 'cleanup reuses canonical P0 acknowledgement semantics');
   assert.match(sql, /public\.digest_runs[\s\S]*?jsonb_array_elements[\s\S]*?state in \('delivered','replaced'\)/i);
   assert.match(sql, /public\.work_items_v2[\s\S]*?source_event_keys/i);
   assert.match(sql, /notification_state\s*=\s*'cleanup_pending'[\s\S]*?cleanup_after\s*<=\s*p_now/i);
+  assert.match(sql, /cleanup_expires_at\s*>\s*v_completed_at/i);
+  assert.match(sql, /v_completed_at[^;]*?clock_timestamp\(\)/i);
+  assert.doesNotMatch(sql, /p_(?:deleted|failed)_at timestamptz/i,
+    'terminal time is owned by the database and cannot be supplied by a caller');
 
   for (const functionName of functions) {
     assert.match(sql, new RegExp(`create function public\\.${functionName}\\(`, 'i'));

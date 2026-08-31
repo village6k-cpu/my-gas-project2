@@ -7,7 +7,92 @@ alter table public.message_notification_receipts
   add column cleanup_expires_at timestamptz,
   add column cleanup_attempted_at timestamptz,
   add column cleaned_at timestamptz,
-  add column cleanup_already_absent boolean not null default false;
+  add column cleanup_already_absent boolean not null default false,
+  add column cleanup_work_id uuid,
+  add column cleanup_work_version integer,
+  add constraint message_notification_receipts_cleanup_work_link_check check (
+    (cleanup_work_id is null and cleanup_work_version is null)
+    or (cleanup_work_id is not null and cleanup_work_version > 0)
+  );
+
+with unique_links as (
+  select receipt.id as receipt_id,
+    (array_agg(work.id order by work.id))[1] as work_id,
+    (array_agg(work.version order by work.id))[1] as work_version
+  from public.message_notification_receipts as receipt
+  join public.work_items_v2 as work
+    on receipt.source_event_key = any(work.source_event_keys)
+  group by receipt.id
+  having count(*) = 1
+)
+update public.message_notification_receipts as receipt
+set cleanup_work_id = link.work_id,
+    cleanup_work_version = link.work_version
+from unique_links as link
+where receipt.id = link.receipt_id;
+
+create function public.link_notice_cleanup_from_work_v2()
+returns trigger
+language plpgsql
+security invoker set search_path = ''
+as $$
+declare
+  v_added_source_keys text[];
+begin
+  if tg_op = 'INSERT' then
+    v_added_source_keys := new.source_event_keys;
+  else
+    select coalesce(array_agg(source_key), '{}'::text[])
+    into v_added_source_keys
+    from unnest(new.source_event_keys) as source_key
+    where not (source_key = any(old.source_event_keys));
+  end if;
+
+  update public.message_notification_receipts as receipt
+  set cleanup_work_id = new.id,
+      cleanup_work_version = new.version
+  where receipt.source_event_key = any(v_added_source_keys)
+    and receipt.cleanup_work_id is null
+    and receipt.cleanup_work_version is null;
+  return new;
+end;
+$$;
+
+create trigger link_notice_cleanup_from_work_v2
+after insert or update of source_event_keys, version on public.work_items_v2
+for each row execute function public.link_notice_cleanup_from_work_v2();
+
+create function public.link_notice_cleanup_from_receipt_v2()
+returns trigger
+language plpgsql
+security invoker set search_path = ''
+as $$
+declare
+  v_work_id uuid;
+  v_work_version integer;
+  v_match_count integer;
+begin
+  select (array_agg(work.id order by work.id))[1],
+    (array_agg(work.version order by work.id))[1], count(*)::integer
+  into v_work_id, v_work_version, v_match_count
+  from public.work_items_v2 as work
+  where new.source_event_key = any(work.source_event_keys);
+
+  if v_match_count = 1 then
+    update public.message_notification_receipts
+    set cleanup_work_id = v_work_id,
+        cleanup_work_version = v_work_version
+    where id = new.id
+      and cleanup_work_id is null
+      and cleanup_work_version is null;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger link_notice_cleanup_from_receipt_v2
+after insert on public.message_notification_receipts
+for each row execute function public.link_notice_cleanup_from_receipt_v2();
 
 create index message_notification_receipts_cleanup_claim_idx
   on public.message_notification_receipts (cleanup_state, cleanup_expires_at, updated_at)
@@ -43,7 +128,17 @@ begin
       and receipt.cleanup_state in ('idle','pending','failed','blocked_p0')
       and (
         receipt.cleanup_state <> 'pending'
-        or receipt.cleanup_expires_at <= p_now
+        or (
+          receipt.cleanup_owner is null
+          and receipt.cleanup_token is null
+          and receipt.cleanup_expires_at is null
+        )
+        or (
+          receipt.cleanup_owner is not null
+          and receipt.cleanup_token is not null
+          and receipt.cleanup_expires_at is not null
+          and receipt.cleanup_expires_at <= p_now
+        )
       )
       and (
         (
@@ -53,18 +148,20 @@ begin
         )
         or (
           receipt.notification_state = 'delivered'
+          and receipt.cleanup_work_id is not null
+          and receipt.cleanup_work_version is not null
           and exists (
             select 1
-            from public.work_items_v2 as work
-            where receipt.source_event_key = any(work.source_event_keys)
-              and exists (
-                select 1
-                from public.digest_runs as digest
-                cross join lateral jsonb_array_elements(digest.item_snapshot) as snapshot(entry)
-                where digest.state in ('delivered','replaced')
-                  and digest.delivered_at is not null
-                  and snapshot.entry->>'id' = work.id::text
-              )
+            from public.digest_runs as digest
+            cross join lateral jsonb_array_elements(digest.item_snapshot) as snapshot(entry)
+            where digest.state in ('delivered','replaced')
+              and digest.delivered_at is not null
+              and snapshot.entry->>'id' = receipt.cleanup_work_id::text
+              and case
+                when snapshot.entry->>'version' ~ '^[1-9][0-9]*$'
+                  then (snapshot.entry->>'version')::integer = receipt.cleanup_work_version
+                else false
+              end
           )
         )
         or (
@@ -72,7 +169,8 @@ begin
           and not exists (
             select 1
             from public.work_items_v2 as acknowledged_work
-            where receipt.source_event_key = any(acknowledged_work.source_event_keys)
+            where acknowledged_work.id = receipt.cleanup_work_id
+              and receipt.source_event_key = any(acknowledged_work.source_event_keys)
               and acknowledged_work.priority = 'p0'
               and public.is_effective_p0_ack_v2(acknowledged_work.payload, p_now)
           )
@@ -88,7 +186,8 @@ begin
     select exists (
       select 1
       from public.work_items_v2 as work
-      where v_row.source_event_key = any(work.source_event_keys)
+      where work.id = v_row.cleanup_work_id
+        and v_row.source_event_key = any(work.source_event_keys)
         and work.priority = 'p0'
         and public.is_effective_p0_ack_v2(work.payload, p_now)
     ) into v_acknowledged;
@@ -96,7 +195,8 @@ begin
     if v_row.urgency = 'p0' and not v_acknowledged then
       update public.message_notification_receipts
       set cleanup_state = 'blocked_p0', cleanup_owner = null, cleanup_token = null,
-          cleanup_expires_at = null, cleanup_error = null,
+          cleanup_expires_at = null, cleanup_attempted_at = null, cleaned_at = null,
+          cleanup_error = null,
           cleanup_already_absent = false
       where id = v_row.id
       returning * into v_claimed;
@@ -110,7 +210,19 @@ begin
       where id = v_row.id
         and (
           cleanup_state in ('idle','failed','blocked_p0')
-          or (cleanup_state = 'pending' and cleanup_expires_at <= p_now)
+          or (
+            cleanup_state = 'pending'
+            and cleanup_owner is null
+            and cleanup_token is null
+            and cleanup_expires_at is null
+          )
+          or (
+            cleanup_state = 'pending'
+            and cleanup_owner is not null
+            and cleanup_token is not null
+            and cleanup_expires_at is not null
+            and cleanup_expires_at <= p_now
+          )
         )
       returning * into v_claimed;
     end if;
@@ -118,13 +230,34 @@ begin
     if found then
       v_result := v_result || jsonb_build_array(jsonb_build_object(
         'id', v_claimed.id,
+        'notification_state', v_claimed.notification_state,
         'cleanup_state', v_claimed.cleanup_state,
         'cleanup_attempts', v_claimed.cleanup_attempts,
         'cleanup_owner', v_claimed.cleanup_owner,
         'cleanup_token', v_claimed.cleanup_token,
         'cleanup_expires_at', v_claimed.cleanup_expires_at,
-        'slack_channel_id', v_claimed.slack_channel_id,
-        'slack_message_ts', v_claimed.slack_message_ts
+        'cleanup_attempted_at', v_claimed.cleanup_attempted_at,
+        'cleaned_at', v_claimed.cleaned_at,
+        'cleanup_error', v_claimed.cleanup_error,
+        'cleanup_already_absent', v_claimed.cleanup_already_absent,
+        'coordinate_status', case
+          when v_claimed.slack_channel_id ~ '^[A-Z0-9][A-Z0-9_-]{0,79}$'
+            and v_claimed.slack_message_ts ~ '^[0-9]{1,20}\.[0-9]{1,20}$'
+            then 'valid'
+          else 'missing_coordinates'
+        end,
+        'slack_channel_id', case
+          when v_claimed.slack_channel_id ~ '^[A-Z0-9][A-Z0-9_-]{0,79}$'
+            and v_claimed.slack_message_ts ~ '^[0-9]{1,20}\.[0-9]{1,20}$'
+            then v_claimed.slack_channel_id
+          else null
+        end,
+        'slack_message_ts', case
+          when v_claimed.slack_channel_id ~ '^[A-Z0-9][A-Z0-9_-]{0,79}$'
+            and v_claimed.slack_message_ts ~ '^[0-9]{1,20}\.[0-9]{1,20}$'
+            then v_claimed.slack_message_ts
+          else null
+        end
       ));
     end if;
   end loop;
@@ -138,7 +271,6 @@ create function public.mark_notice_cleanup_deleted_v2(
   p_cleanup_owner text,
   p_cleanup_token uuid,
   p_expected_cleanup_attempts integer,
-  p_deleted_at timestamptz,
   p_already_absent boolean
 ) returns jsonb
 language plpgsql
@@ -146,26 +278,26 @@ security invoker set search_path = ''
 as $$
 declare
   v_row public.message_notification_receipts%rowtype;
+  v_completed_at timestamptz := clock_timestamp();
 begin
   if p_id is null or p_cleanup_token is null or p_already_absent is null
     or p_cleanup_owner is null or p_cleanup_owner <> btrim(p_cleanup_owner)
     or length(p_cleanup_owner) not between 1 and 200
-    or p_expected_cleanup_attempts is null or p_expected_cleanup_attempts < 1
-    or p_deleted_at is null or not isfinite(p_deleted_at) then
+    or p_expected_cleanup_attempts is null or p_expected_cleanup_attempts < 1 then
     raise exception 'invalid notice cleanup input';
   end if;
 
   update public.message_notification_receipts
   set notification_state = 'deleted', cleanup_state = 'deleted',
       cleanup_owner = null, cleanup_token = null, cleanup_expires_at = null,
-      cleaned_at = p_deleted_at, cleanup_error = null,
+      cleaned_at = v_completed_at, cleanup_error = null,
       cleanup_already_absent = p_already_absent
   where id = p_id
     and cleanup_state = 'pending'
     and cleanup_owner = p_cleanup_owner
     and cleanup_token = p_cleanup_token
     and cleanup_attempts = p_expected_cleanup_attempts
-    and cleanup_expires_at > p_deleted_at
+    and cleanup_expires_at > v_completed_at
   returning * into v_row;
 
   if not found then
@@ -175,11 +307,14 @@ begin
     'applied', true,
     'row', jsonb_build_object(
       'id', v_row.id,
+      'notification_state', v_row.notification_state,
       'cleanup_state', v_row.cleanup_state,
       'cleanup_attempts', v_row.cleanup_attempts,
       'cleanup_owner', v_row.cleanup_owner,
       'cleanup_token', v_row.cleanup_token,
       'cleanup_expires_at', v_row.cleanup_expires_at,
+      'cleanup_attempted_at', v_row.cleanup_attempted_at,
+      'cleaned_at', v_row.cleaned_at,
       'cleanup_error', v_row.cleanup_error,
       'cleanup_already_absent', v_row.cleanup_already_absent
     )
@@ -192,7 +327,6 @@ create function public.mark_notice_cleanup_failed_v2(
   p_cleanup_owner text,
   p_cleanup_token uuid,
   p_expected_cleanup_attempts integer,
-  p_failed_at timestamptz,
   p_error text
 ) returns jsonb
 language plpgsql
@@ -200,12 +334,12 @@ security invoker set search_path = ''
 as $$
 declare
   v_row public.message_notification_receipts%rowtype;
+  v_completed_at timestamptz := clock_timestamp();
 begin
   if p_id is null or p_cleanup_token is null
     or p_cleanup_owner is null or p_cleanup_owner <> btrim(p_cleanup_owner)
     or length(p_cleanup_owner) not between 1 and 200
     or p_expected_cleanup_attempts is null or p_expected_cleanup_attempts < 1
-    or p_failed_at is null or not isfinite(p_failed_at)
     or p_error is null or p_error not in (
       'missing_coordinates','bot_identity_mismatch','cant_delete_message',
       'rate_limited','cleanup_unconfirmed','slack_api_error'
@@ -222,7 +356,7 @@ begin
     and cleanup_owner = p_cleanup_owner
     and cleanup_token = p_cleanup_token
     and cleanup_attempts = p_expected_cleanup_attempts
-    and cleanup_expires_at > p_failed_at
+    and cleanup_expires_at > v_completed_at
   returning * into v_row;
 
   if not found then
@@ -232,11 +366,14 @@ begin
     'applied', true,
     'row', jsonb_build_object(
       'id', v_row.id,
+      'notification_state', v_row.notification_state,
       'cleanup_state', v_row.cleanup_state,
       'cleanup_attempts', v_row.cleanup_attempts,
       'cleanup_owner', v_row.cleanup_owner,
       'cleanup_token', v_row.cleanup_token,
       'cleanup_expires_at', v_row.cleanup_expires_at,
+      'cleanup_attempted_at', v_row.cleanup_attempted_at,
+      'cleaned_at', v_row.cleaned_at,
       'cleanup_error', v_row.cleanup_error,
       'cleanup_already_absent', v_row.cleanup_already_absent
     )
@@ -246,14 +383,22 @@ $$;
 
 revoke execute on function public.claim_notice_cleanup_batch_v2(timestamptz,text,integer,integer)
   from public, anon, authenticated;
-revoke execute on function public.mark_notice_cleanup_deleted_v2(uuid,text,uuid,integer,timestamptz,boolean)
+revoke execute on function public.mark_notice_cleanup_deleted_v2(uuid,text,uuid,integer,boolean)
   from public, anon, authenticated;
-revoke execute on function public.mark_notice_cleanup_failed_v2(uuid,text,uuid,integer,timestamptz,text)
+revoke execute on function public.mark_notice_cleanup_failed_v2(uuid,text,uuid,integer,text)
+  from public, anon, authenticated;
+revoke execute on function public.link_notice_cleanup_from_work_v2()
+  from public, anon, authenticated;
+revoke execute on function public.link_notice_cleanup_from_receipt_v2()
   from public, anon, authenticated;
 
 grant execute on function public.claim_notice_cleanup_batch_v2(timestamptz,text,integer,integer)
   to service_role;
-grant execute on function public.mark_notice_cleanup_deleted_v2(uuid,text,uuid,integer,timestamptz,boolean)
+grant execute on function public.mark_notice_cleanup_deleted_v2(uuid,text,uuid,integer,boolean)
   to service_role;
-grant execute on function public.mark_notice_cleanup_failed_v2(uuid,text,uuid,integer,timestamptz,text)
+grant execute on function public.mark_notice_cleanup_failed_v2(uuid,text,uuid,integer,text)
+  to service_role;
+grant execute on function public.link_notice_cleanup_from_work_v2()
+  to service_role;
+grant execute on function public.link_notice_cleanup_from_receipt_v2()
   to service_role;
