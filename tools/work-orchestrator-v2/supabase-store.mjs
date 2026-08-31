@@ -7,6 +7,27 @@ const DELIVERY_FAILURE_CODES = new Set(['post_rejected', 'delivery_unconfirmed']
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WORK_PRIORITIES = new Set(['p0', 'urgent', 'normal', 'low']);
 const AUTOMATION_STATES = new Set(['not_attempted', 'running', 'succeeded', 'failed', 'needs_human']);
+const AUTOMATION_RESOLUTION_KINDS = new Map([
+  ['auto_reply_readback', 'succeeded'],
+  ['operation_readback', 'succeeded'],
+  ['authoritative_failure', 'failed'],
+  ['owner_approval_required', 'needs_human'],
+  ['stale_evidence', 'needs_human'],
+  ['contradictory_evidence', 'needs_human'],
+  ['missing_authoritative_readback', 'needs_human']
+]);
+const AUTOMATION_EVIDENCE_STATUSES = new Set([
+  'readback_confirmed', 'completed', 'failed', 'succeeded'
+]);
+const AUTOMATION_NOTICE_TEXT = new Set([
+  'The automated reply was confirmed by authoritative readback.',
+  'The automated operation was confirmed by authoritative readback.',
+  'The automated operation failed according to authoritative readback.',
+  'Owner approval is required before this automation can be resolved.',
+  'Human review is required because the supplied evidence is stale.',
+  'Human review is required because the supplied evidence is contradictory.',
+  'Human review is required because authoritative resolution is unavailable.'
+]);
 const WORK_TYPES = new Set([
   'human_review', 'reply_needed', 'quote_send', 'tax_invoice', 'schedule_check',
   'reservation_review', 'price_review', 'payment_check', 'contract_document',
@@ -122,6 +143,72 @@ function isoTimestamp(value, { nullable = false } = {}) {
 function positiveVersion(value) {
   if (!Number.isSafeInteger(value) || value < 1) throw invalidInput();
   return value;
+}
+
+function normalizeAutomationEvidence(input) {
+  if (!isRecord(input)) throw invalidInput();
+  const allowedSections = new Set(['autoReply', 'operationReceipt', 'sheet']);
+  if (Object.keys(input).some((key) => !allowedSections.has(key))) throw invalidInput();
+  const evidence = {};
+  for (const [section, value] of Object.entries(input)) {
+    if (!isRecord(value) || !Object.keys(value).length
+      || Object.keys(value).some((key) => !['id', 'timestamp', 'status'].includes(key))) throw invalidInput();
+    const typed = {};
+    if (value.id !== undefined) {
+      const id = exactText(value.id, 100);
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) throw invalidInput();
+      typed.id = id;
+    }
+    if (value.timestamp !== undefined) typed.timestamp = isoTimestamp(value.timestamp);
+    if (value.status !== undefined) {
+      const status = exactText(value.status, 30);
+      if (!AUTOMATION_EVIDENCE_STATUSES.has(status)) throw invalidInput();
+      typed.status = status;
+    }
+    if (!Object.keys(typed).length) throw invalidInput();
+    evidence[section] = typed;
+  }
+  return evidence;
+}
+
+function normalizeAutomationResolution(input, expectedState = null) {
+  if (!exactKeys(input, ['state', 'resolutionKind', 'evidence', 'noticeText'])) throw invalidInput();
+  const state = exactText(input.state, 30);
+  const resolutionKind = exactText(input.resolutionKind, 60);
+  if (!AUTOMATION_STATES.has(state) || state === 'not_attempted' || state === 'running'
+    || AUTOMATION_RESOLUTION_KINDS.get(resolutionKind) !== state
+    || expectedState !== null && state !== expectedState
+    || typeof input.noticeText !== 'string' || !AUTOMATION_NOTICE_TEXT.has(input.noticeText)) throw invalidInput();
+  return {
+    state,
+    resolutionKind,
+    evidence: normalizeAutomationEvidence(input.evidence),
+    noticeText: input.noticeText
+  };
+}
+
+function automationWorkInput(input, expectedState = null) {
+  if (!exactKeys(input, ['id', 'expectedVersion', 'resolution'])) throw invalidInput();
+  return {
+    id: uuid(input.id),
+    expectedVersion: positiveVersion(input.expectedVersion),
+    resolution: normalizeAutomationResolution(input.resolution, expectedState)
+  };
+}
+
+function validNoticeUpdateRow(row, { pendingOnly = false } = {}) {
+  if (!isRecord(row) || typeof row.id !== 'string' || !UUID.test(row.id)
+    || typeof row.source_event_key !== 'string' || !row.source_event_key
+    || row.source_event_key.length > MAX_EVENT_KEY_LENGTH
+    || typeof row.slack_channel_id !== 'string' || !SLACK_CHANNEL_ID.test(row.slack_channel_id)
+    || typeof row.slack_message_ts !== 'string' || !SLACK_MESSAGE_TS.test(row.slack_message_ts)
+    || typeof row.updated_at !== 'string' || Number.isNaN(Date.parse(row.updated_at))
+    || !isRecord(row.payload)) throw responseInvalid();
+  const update = row.payload.automation_notice_update;
+  if (pendingOnly && (!isRecord(update) || update.status !== 'pending'
+    || !AUTOMATION_RESOLUTION_KINDS.has(update.resolution_kind)
+    || typeof update.notice_text !== 'string' || !AUTOMATION_NOTICE_TEXT.has(update.notice_text))) throw responseInvalid();
+  return row;
 }
 
 function normalizeWorkPayload(payload) {
@@ -988,6 +1075,63 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
     return { applied: Boolean(row), row };
   };
 
+  const transitionWorkAutomation = async (input, { resolve = false } = {}) => {
+    let normalized;
+    try {
+      normalized = automationWorkInput(input, resolve ? 'succeeded' : null);
+      if (!resolve && normalized.resolution.state === 'succeeded') throw invalidInput();
+    } catch {
+      throw invalidInput();
+    }
+    const resolvedAt = new Date().toISOString();
+    const patch = {
+      automation_state: normalized.resolution.state,
+      resolution_kind: normalized.resolution.resolutionKind,
+      resolution_evidence: normalized.resolution.evidence,
+      version: normalized.expectedVersion + 1,
+      ...(resolve ? {
+        state: 'resolved', snoozed_until: null, resolved_at: resolvedAt,
+        resolved_by: 'automation', pending_action: {}
+      } : {})
+    };
+    const query = new URLSearchParams({
+      id: `eq.${normalized.id}`,
+      version: `eq.${normalized.expectedVersion}`,
+      state: 'in.(open,in_progress,snoozed)',
+      select: '*'
+    });
+    const { data } = await request(`work_items_v2?${query}`, {
+      method: 'PATCH', body: safeJson(patch)
+    });
+    const row = Array.isArray(data) ? data[0] || null : null;
+    if (!row) return { applied: false, row: null };
+    responseWorkRow(row, { activeOnly: !resolve });
+    if (row.id !== normalized.id || row.version !== normalized.expectedVersion + 1
+      || row.automation_state !== normalized.resolution.state
+      || row.resolution_kind !== normalized.resolution.resolutionKind
+      || !sameJsonValue(row.resolution_evidence, normalized.resolution.evidence)
+      || resolve && (row.state !== 'resolved' || row.resolved_by !== 'automation')) throw responseInvalid();
+    return { applied: true, row };
+  };
+
+  const patchNoticeByObservedReceipt = async (row, patch) => {
+    validNoticeUpdateRow(row);
+    const query = new URLSearchParams({
+      id: `eq.${row.id}`,
+      source_event_key: `eq.${row.source_event_key}`,
+      notification_state: `eq.${row.notification_state}`,
+      updated_at: `eq.${row.updated_at}`,
+      slack_channel_id: `eq.${row.slack_channel_id}`,
+      slack_message_ts: `eq.${row.slack_message_ts}`,
+      select: '*'
+    });
+    const { data } = await request(`message_notification_receipts?${query}`, {
+      method: 'PATCH', body: safeJson(patch)
+    });
+    const updated = Array.isArray(data) ? data[0] || null : null;
+    return { applied: Boolean(updated), row: updated };
+  };
+
   return {
     claimNotificationReceipt: async (input) => {
       const { data } = await request('rpc/claim_message_notification_receipt', {
@@ -1120,6 +1264,91 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         action: body.p_action,
         requestedBy: body.p_requested_by
       });
+    },
+    resolveWorkItem: async (input = {}) => transitionWorkAutomation(input, { resolve: true }),
+    markAutomationState: async (input = {}) => transitionWorkAutomation(input),
+    requestImmediateNoticeUpdate: async (input = {}) => {
+      let sourceEventKey;
+      let cleanupAfter;
+      let resolution;
+      try {
+        if (!exactKeys(input, ['sourceEventKey', 'resolution', 'cleanupAfter'])) throw invalidInput();
+        sourceEventKey = notificationEventKey(input.sourceEventKey);
+        cleanupAfter = isoTimestamp(input.cleanupAfter);
+        resolution = normalizeAutomationResolution(input.resolution, 'succeeded');
+      } catch {
+        throw invalidInput();
+      }
+      const receiptQuery = new URLSearchParams({ select: '*', source_event_key: `eq.${sourceEventKey}`, limit: '1' });
+      const receiptData = (await request(`message_notification_receipts?${receiptQuery}`)).data?.[0] || null;
+      if (!receiptData) return { applied: false, row: null };
+      validNoticeUpdateRow(receiptData);
+      if (receiptData.source_event_key !== sourceEventKey || receiptData.notification_state !== 'delivered') {
+        return { applied: false, row: null };
+      }
+      const payload = {
+        ...receiptData.payload,
+        automation_notice_update: {
+          status: 'pending', resolution_kind: resolution.resolutionKind,
+          evidence: resolution.evidence, notice_text: resolution.noticeText
+        }
+      };
+      return patchNoticeByObservedReceipt(receiptData, {
+        notification_state: 'cleanup_pending', cleanup_after: cleanupAfter, payload
+      });
+    },
+    listImmediateNoticeUpdateRequests: async (input = {}) => {
+      if (!exactKeys(input, ['limit']) || !Number.isSafeInteger(input.limit)
+        || input.limit < 1 || input.limit > 25) throw invalidInput();
+      const query = new URLSearchParams({
+        select: 'id,source_event_key,notification_state,slack_channel_id,slack_message_ts,updated_at,payload',
+        notification_state: 'eq.cleanup_pending',
+        'payload->automation_notice_update->>status': 'eq.pending',
+        order: 'updated_at.asc', limit: String(input.limit)
+      });
+      const { data } = await request(`message_notification_receipts?${query}`);
+      if (!Array.isArray(data) || data.length > input.limit) throw responseInvalid();
+      return data.map((row) => validNoticeUpdateRow(row, { pendingOnly: true }));
+    },
+    markImmediateNoticeUpdated: async (input = {}) => {
+      let sourceEventKey;
+      let expectedUpdatedAt;
+      let channelId;
+      let messageTs;
+      let updatedAt;
+      try {
+        if (!exactKeys(input, [
+          'sourceEventKey', 'expectedUpdatedAt', 'channelId', 'messageTs', 'updatedAt'
+        ])) throw invalidInput();
+        sourceEventKey = notificationEventKey(input.sourceEventKey);
+        expectedUpdatedAt = isoTimestamp(input.expectedUpdatedAt);
+        channelId = exactText(input.channelId, 80);
+        messageTs = exactText(input.messageTs, 100);
+        updatedAt = isoTimestamp(input.updatedAt);
+        if (!SLACK_CHANNEL_ID.test(channelId) || !SLACK_MESSAGE_TS.test(messageTs)) throw invalidInput();
+      } catch {
+        throw invalidInput();
+      }
+      const query = new URLSearchParams({ select: '*', source_event_key: `eq.${sourceEventKey}`, limit: '1' });
+      const { data } = await request(`message_notification_receipts?${query}`);
+      const receipt = Array.isArray(data) ? data[0] || null : null;
+      if (!receipt || receipt.updated_at !== expectedUpdatedAt
+        || receipt.notification_state !== 'cleanup_pending'
+        || receipt.slack_channel_id !== channelId || receipt.slack_message_ts !== messageTs) {
+        return { applied: false, row: null };
+      }
+      validNoticeUpdateRow(receipt, { pendingOnly: true });
+      const payload = {
+        ...receipt.payload,
+        automation_notice_update: {
+          ...receipt.payload.automation_notice_update,
+          status: 'updated',
+          readback: { channel_id: channelId, message_ts: messageTs, updated_at: updatedAt }
+        }
+      };
+      const result = await patchNoticeByObservedReceipt(receipt, { payload });
+      if (result.applied) validNoticeUpdateRow(result.row);
+      return result;
     },
     listActionableWork: async (input = {}) => {
       let now;

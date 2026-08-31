@@ -479,6 +479,158 @@ test('requestWorkAction preserves exact id/version action CAS and exposes stale 
   });
 });
 
+const authoritativeResolution = {
+  state: 'succeeded',
+  resolutionKind: 'auto_reply_readback',
+  evidence: { autoReply: { id: 'kakao-7', status: 'readback_confirmed' } },
+  noticeText: 'The automated reply was confirmed by authoritative readback.'
+};
+
+test('authoritative automation resolution uses an active-state version CAS and stale writers are a no-op', async () => {
+  const requests = [];
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, body: JSON.parse(init.body) });
+      const body = JSON.parse(init.body);
+      return response({ data: requests.length === 1 ? [workRow({
+        state: 'resolved', version: 2, automation_state: 'succeeded',
+        resolution_kind: authoritativeResolution.resolutionKind,
+        resolution_evidence: authoritativeResolution.evidence,
+        resolved_at: body.resolved_at,
+        resolved_by: 'automation', pending_action: {}
+      })] : [] });
+    }
+  });
+
+  const applied = await store.resolveWorkItem({ id: WORK_ID, expectedVersion: 1, resolution: authoritativeResolution });
+  const stale = await store.resolveWorkItem({ id: WORK_ID, expectedVersion: 1, resolution: authoritativeResolution });
+
+  assert.equal(applied.applied, true);
+  assert.equal(applied.row.state, 'resolved');
+  assert.deepEqual(stale, { applied: false, row: null });
+  assert.match(requests[0].url, /work_items_v2\?/);
+  assert.match(requests[0].url, /id=eq\.11111111-1111-4111-8111-111111111111/);
+  assert.match(requests[0].url, /version=eq\.1/);
+  assert.match(requests[0].url, /state=in\.%28open%2Cin_progress%2Csnoozed%29/);
+  assert.deepEqual(requests[0].body.resolution_evidence, authoritativeResolution.evidence);
+});
+
+test('authoritative automation resolution keeps failed and unverified work open with finite typed evidence', async () => {
+  const requests = [];
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey,
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      requests.push({ url, body });
+      return response({ data: [workRow({
+        version: 2, automation_state: body.automation_state,
+        resolution_kind: body.resolution_kind,
+        resolution_evidence: body.resolution_evidence
+      })] });
+    }
+  });
+  const resolution = {
+    state: 'needs_human', resolutionKind: 'missing_authoritative_readback',
+    evidence: { operationReceipt: { id: 'operation-7', status: 'completed' } },
+    noticeText: 'Human review is required because authoritative resolution is unavailable.'
+  };
+
+  const result = await store.markAutomationState({ id: WORK_ID, expectedVersion: 1, resolution });
+
+  assert.equal(result.applied, true);
+  assert.equal(result.row.state, 'open');
+  assert.equal(result.row.automation_state, 'needs_human');
+  assert.equal(requests[0].body.state, undefined);
+  assert.equal(JSON.stringify(requests).includes('customer-private'), false);
+});
+
+test('authoritative automation resolution creates a durable exact-key notice update request with bounded TTL', async () => {
+  const existing = {
+    id: '99999999-9999-4999-8999-999999999999', source_event_key: 'event-exact-7',
+    notification_state: 'delivered', slack_channel_id: 'CINBOX', slack_message_ts: '123.45',
+    cleanup_after: null, updated_at: '2026-08-31T01:00:00.000Z', payload: { existing: 'preserved' }
+  };
+  const requests = [];
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey,
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url, method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null });
+      if (!init.body) return response({ data: [existing] });
+      const body = JSON.parse(init.body);
+      return response({ data: [{ ...existing, ...body, updated_at: '2026-08-31T01:00:01.000Z' }] });
+    }
+  });
+
+  const result = await store.requestImmediateNoticeUpdate({
+    sourceEventKey: 'event-exact-7', resolution: authoritativeResolution,
+    cleanupAfter: '2026-08-31T04:00:00.000Z'
+  });
+
+  assert.equal(result.applied, true);
+  assert.equal(result.row.notification_state, 'cleanup_pending');
+  assert.equal(requests[1].body.cleanup_after, '2026-08-31T04:00:00.000Z');
+  assert.deepEqual(requests[1].body.payload.existing, 'preserved');
+  assert.equal(requests[1].body.payload.automation_notice_update.status, 'pending');
+  assert.match(requests[1].url, /source_event_key=eq\.event-exact-7/);
+  assert.match(requests[1].url, /updated_at=eq\.2026-08-31T01%3A00%3A00\.000Z/);
+});
+
+test('authoritative automation resolution notice queue and readback stay fenced to exact coordinates', async () => {
+  const pending = {
+    id: '99999999-9999-4999-8999-999999999997', source_event_key: 'event-exact-8',
+    notification_state: 'cleanup_pending', slack_channel_id: 'CINBOX', slack_message_ts: '456.78',
+    updated_at: '2026-08-31T01:00:00.000Z',
+    payload: {
+      automation_notice_update: {
+        status: 'pending', resolution_kind: 'operation_readback',
+        notice_text: 'The automated operation was confirmed by authoritative readback.'
+      }
+    }
+  };
+  const requests = [];
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey,
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url, method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null });
+      if (requests.length <= 2) return response({ data: [pending] });
+      return response({ data: [{ ...pending, payload: requests[2].body.payload, updated_at: '2026-08-31T01:00:01.000Z' }] });
+    }
+  });
+
+  const queued = await store.listImmediateNoticeUpdateRequests({ limit: 5 });
+  const recorded = await store.markImmediateNoticeUpdated({
+    sourceEventKey: 'event-exact-8', expectedUpdatedAt: pending.updated_at,
+    channelId: 'CINBOX', messageTs: '456.78', updatedAt: '2026-08-31T01:00:01.000Z'
+  });
+
+  assert.equal(queued.length, 1);
+  assert.equal(recorded.applied, true);
+  assert.equal(requests[2].body.payload.automation_notice_update.status, 'updated');
+  assert.deepEqual(requests[2].body.payload.automation_notice_update.readback, {
+    channel_id: 'CINBOX', message_ts: '456.78', updated_at: '2026-08-31T01:00:01.000Z'
+  });
+  assert.match(requests[2].url, /slack_channel_id=eq\.CINBOX/);
+  assert.match(requests[2].url, /slack_message_ts=eq\.456\.78/);
+});
+
+test('authoritative automation resolution store rejects content-bearing evidence generically before fetch', async () => {
+  let calls = 0;
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey,
+    fetchImpl: async () => { calls += 1; return response(); }
+  });
+  await assert.rejects(
+    store.resolveWorkItem({
+      id: WORK_ID, expectedVersion: 1,
+      resolution: { ...authoritativeResolution, evidence: { rawCustomerBody: 'customer-private' } }
+    }),
+    /input is invalid/i
+  );
+  assert.equal(calls, 0);
+});
+
 test('listActionableWork selects a bounded deterministic digest surface including unresolved P0', async () => {
   const fetch = createFetch([response({ data: actionablePayload([workRow({
     priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z', payload: { requires_human_action: true }

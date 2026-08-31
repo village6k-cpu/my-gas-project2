@@ -1829,7 +1829,10 @@ function workOrchestratorV2FollowUpRow(overrides = {}) {
   };
 }
 
-function workOrchestratorV2FinalizeInput({ rows = [], autoReplyResult, config = {}, dependencies = {} } = {}) {
+function workOrchestratorV2FinalizeInput({
+  rows = [], autoReplyResult, decision = {}, sheetResult = null, postActionResult = null,
+  operationReceipt = null, workItem = null, config = {}, dependencies = {}
+} = {}) {
   return {
     config: {
       followUpRowsEnabled: false,
@@ -1838,15 +1841,20 @@ function workOrchestratorV2FinalizeInput({ rows = [], autoReplyResult, config = 
     },
     job: {
       jobId: '00000000-0000-4000-8000-000000000031',
+      eventHash: 'event-authoritative-31',
       roomKey: 'chat:work-orchestrator-v2',
-      receivedAt: '2026-08-29T03:00:00.000Z'
+      receivedAt: '2026-08-29T03:00:00.000Z',
+      ...(workItem ? { workItem } : {})
     },
     applied: {
       prepared: {
         status: 'ai_prepared',
         snapshot: { schema: 'kakao-room-snapshot/v1' },
-        decision: { should_write_to_sheet: false },
-        availabilityAwareRows: rows
+        decision: { should_write_to_sheet: false, ...decision },
+        availabilityAwareRows: rows,
+        sheetResult,
+        postActionResult,
+        operationReceipt
       },
       autoReplyResult: autoReplyResult || { attempted: false, sent: false, reason: 'not_attempted' }
     },
@@ -1970,7 +1978,10 @@ test('Work Orchestrator v2 work item verified automatic reply writes zero v2 row
       follow_up_key: 'room:reply:verified',
       type: 'reply_needed'
     })],
-    autoReplyResult: { attempted: true, sent: true, readbackConfirmed: true, reason: 'sent_via_devtools_verified' },
+    autoReplyResult: {
+      attempted: true, sent: true, readbackConfirmed: true,
+      transportMessageId: 'kakao-1', reason: 'sent_via_devtools_verified'
+    },
     dependencies: {
       workOrchestratorStore: {
         upsertWorkItem: async () => {
@@ -1991,6 +2002,109 @@ test('Work Orchestrator v2 work item verified automatic reply writes zero v2 row
   });
 });
 
+test('authoritative automation resolution resolves a referenced work CAS, requests exact-key TTL update, and creates no human item', async () => {
+  const calls = [];
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    workItem: { id: '11111111-1111-4111-8111-111111111111', version: 4 },
+    autoReplyResult: {
+      attempted: true, sent: true, readbackConfirmed: true,
+      transportMessageId: 'kakao-31', readbackAt: '2026-08-31T01:00:00.000Z'
+    },
+    config: { workOrchestratorV2AutoNoticeTtlMinutes: 180 },
+    dependencies: {
+      now: () => new Date('2026-08-31T01:00:00.000Z'),
+      workOrchestratorStore: {
+        upsertWorkItem: async () => assert.fail('verified success must create no human item'),
+        resolveWorkItem: async (input) => {
+          calls.push(['resolve', input]);
+          return { applied: true, row: { id: input.id, state: 'resolved', version: 5 } };
+        },
+        requestImmediateNoticeUpdate: async (input) => {
+          calls.push(['notice', input]);
+          return { applied: true, row: { source_event_key: input.sourceEventKey, notification_state: 'cleanup_pending' } };
+        }
+      }
+    }
+  }));
+
+  assert.equal(result.automationResolutionResult.state, 'succeeded');
+  assert.equal(result.automationResolutionResult.work.status, 'resolved');
+  assert.equal(result.automationResolutionResult.noticeUpdate.status, 'requested');
+  assert.equal(calls[0][1].expectedVersion, 4);
+  assert.equal(calls[1][1].sourceEventKey, 'event-authoritative-31');
+  assert.equal(calls[1][1].cleanupAfter, '2026-08-31T04:00:00.000Z');
+  assert.equal(result.workOrchestratorResult.inserted, 0);
+});
+
+test('authoritative automation resolution leaves unverified work open and records needs_human without notice update', async () => {
+  const calls = [];
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    autoReplyResult: { attempted: true, sent: true, readbackConfirmed: false },
+    dependencies: {
+      workOrchestratorStore: {
+        upsertWorkItem: async (candidate) => ({
+          applied: true, created: true,
+          row: { id: '11111111-1111-4111-8111-111111111111', version: 1, work_key: candidate.work_key }
+        }),
+        markAutomationState: async (input) => {
+          calls.push(input);
+          return { applied: true, row: { id: input.id, state: 'open', version: 2, automation_state: 'needs_human' } };
+        },
+        requestImmediateNoticeUpdate: async () => assert.fail('unverified output must not update notice')
+      }
+    }
+  }));
+
+  assert.equal(result.automationResolutionResult.state, 'needs_human');
+  assert.equal(result.automationResolutionResult.work.status, 'open');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].resolution.resolutionKind, 'missing_authoritative_readback');
+});
+
+test('authoritative automation resolution keeps owner approval open despite authoritative preliminary execution', async () => {
+  const states = [];
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    decision: { requires_owner_approval: true },
+    sheetResult: { success: true },
+    operationReceipt: { state: 'completed', authoritativeReadback: true, operationId: 'operation-31' },
+    dependencies: {
+      workOrchestratorStore: {
+        upsertWorkItem: async (candidate) => ({ applied: true, created: true, row: { id: '11111111-1111-4111-8111-111111111111', version: 1, work_key: candidate.work_key } }),
+        markAutomationState: async (input) => {
+          states.push(input.resolution.state);
+          return { applied: true, row: { id: input.id, state: 'open', version: 2 } };
+        }
+      }
+    }
+  }));
+  assert.equal(result.automationResolutionResult.resolutionKind, 'owner_approval_required');
+  assert.deepEqual(states, ['needs_human']);
+});
+
+test('authoritative automation resolution notice update failure retries independently and never corrupts resolved work', async () => {
+  const privateError = 'customer-private secret-token';
+  let resolved = false;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    workItem: { id: '11111111-1111-4111-8111-111111111111', version: 9 },
+    autoReplyResult: { sent: true, readbackConfirmed: true, transportMessageId: 'kakao-32' },
+    dependencies: {
+      now: () => new Date('2026-08-31T01:00:00.000Z'),
+      workOrchestratorStore: {
+        resolveWorkItem: async () => { resolved = true; return { applied: true, row: { state: 'resolved' } }; },
+        requestImmediateNoticeUpdate: async () => { throw new Error(privateError); },
+        upsertWorkItem: async () => assert.fail('success must not upsert')
+      }
+    }
+  }));
+  assert.equal(resolved, true);
+  assert.equal(result.automationResolutionResult.work.status, 'resolved');
+  assert.equal(result.automationResolutionResult.noticeUpdate.status, 'error');
+  assert.equal(JSON.stringify(result.automationResolutionResult).includes(privateError), false);
+});
+
 test('Work Orchestrator v2 work item approval candidate inserts one exact stable key', async () => {
   const candidates = [];
   const storedRow = { id: 'work-item-1', work_key: 'trade:260829-001:reservation-approval', version: 1 };
@@ -2001,7 +2115,10 @@ test('Work Orchestrator v2 work item approval candidate inserts one exact stable
         upsertWorkItem: async (candidate) => {
           candidates.push(candidate);
           return { applied: true, created: true, row: storedRow };
-        }
+        },
+        markAutomationState: async ({ id, expectedVersion }) => ({
+          applied: true, row: { ...storedRow, id, version: expectedVersion + 1, automation_state: 'needs_human' }
+        })
       }
     }
   }));
@@ -2013,7 +2130,7 @@ test('Work Orchestrator v2 work item approval candidate inserts one exact stable
     skipped: false,
     inserted: 1,
     merged: 0,
-    rows: [storedRow],
+    rows: [{ ...storedRow, version: 2, automation_state: 'needs_human' }],
     error: null
   });
 });
@@ -2029,7 +2146,10 @@ test('Work Orchestrator v2 work item duplicate processing submits the same key a
         created,
         row: { id: 'work-item-stable', work_key: candidate.work_key, version: created ? 1 : 2 }
       };
-    }
+    },
+    markAutomationState: async ({ id, expectedVersion }) => ({
+      applied: true, row: { id, version: expectedVersion + 1, state: 'open', automation_state: 'needs_human' }
+    })
   };
   const input = workOrchestratorV2FinalizeInput({
     rows: [workOrchestratorV2FollowUpRow()],
@@ -2133,14 +2253,17 @@ test('Work Orchestrator v2 work item never passes v2 rows to legacy Slack delive
         return { skipped: false, results: [] };
       },
       workOrchestratorStore: {
-        upsertWorkItem: async () => ({ applied: true, created: true, row: v2StoredRow })
+        upsertWorkItem: async () => ({ applied: true, created: true, row: { ...v2StoredRow, version: 1 } }),
+        markAutomationState: async ({ id, expectedVersion }) => ({
+          applied: true, row: { ...v2StoredRow, id, version: expectedVersion + 1, automation_state: 'needs_human' }
+        })
       }
     }
   }));
 
   assert.deepEqual(deliveredRows, [legacyStoredRow]);
   assert.notEqual(deliveredRows[0], v2StoredRow);
-  assert.deepEqual(result.workOrchestratorResult.rows, [v2StoredRow]);
+  assert.deepEqual(result.workOrchestratorResult.rows, [{ ...v2StoredRow, version: 2, automation_state: 'needs_human' }]);
 });
 
 test('Work Orchestrator v2 work item errors never return or log secrets and raw customer content', async (t) => {

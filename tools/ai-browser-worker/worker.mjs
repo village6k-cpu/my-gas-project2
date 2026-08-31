@@ -21,6 +21,8 @@ import {
 import { validateStaffConfirmedMutation } from './staff-confirmed-mutation.mjs';
 import { buildHumanWorkCandidates } from '../work-orchestrator-v2/work-items.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
+import { deriveAutomationResolution } from '../work-orchestrator-v2/automation-resolution.mjs';
+import { canonicalSourceEventKey } from '../work-orchestrator-v2/contracts.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -4527,6 +4529,10 @@ export function requireConfig() {
     followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items',
     followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
     workOrchestratorV2WorkItemsEnabled: process.env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED === '1',
+    workOrchestratorV2AutoNoticeTtlMinutes: (() => {
+      const value = Number(process.env.WORK_ORCHESTRATOR_V2_AUTO_NOTICE_TTL_MINUTES || 180);
+      return Number.isFinite(value) ? Math.min(1440, Math.max(30, value)) : 180;
+    })(),
     autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
     autoSendLogPath: process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
     // 응대 교정 원장 — 야간 채굴기(mine-kakao-corrections.mjs)가 사장 수동응대 사례를 적재하고
@@ -10438,7 +10444,15 @@ function emptyWorkOrchestratorResult(skipped) {
   return { skipped, inserted: 0, merged: 0, rows: [], error: null };
 }
 
-async function upsertWorkOrchestratorV2Items({ config, job, prepared, autoReplyResult, dependencies }) {
+function workOrchestratorV2Store({ config, dependencies }) {
+  return dependencies.workOrchestratorStore || createWorkOrchestratorStore({
+    supabaseUrl: config.supabaseUrl,
+    serviceRoleKey: config.serviceRoleKey,
+    fetchImpl: config.fetchImpl || fetch
+  });
+}
+
+async function upsertWorkOrchestratorV2Items({ config, job, prepared, autoReplyResult, dependencies, store = null }) {
   if (config.workOrchestratorV2WorkItemsEnabled !== true) return emptyWorkOrchestratorResult(true);
   const result = emptyWorkOrchestratorResult(false);
   let candidates;
@@ -10455,20 +10469,16 @@ async function upsertWorkOrchestratorV2Items({ config, job, prepared, autoReplyR
     return { ...result, error: 'work_orchestrator_v2_validation_failed' };
   }
 
-  let store;
+  let activeStore = store;
   try {
-    store = dependencies.workOrchestratorStore || createWorkOrchestratorStore({
-      supabaseUrl: config.supabaseUrl,
-      serviceRoleKey: config.serviceRoleKey,
-      fetchImpl: config.fetchImpl || fetch
-    });
+    activeStore ||= workOrchestratorV2Store({ config, dependencies });
   } catch {
     return { ...result, error: 'work_orchestrator_v2_store_failed' };
   }
 
   for (const candidate of candidates) {
     try {
-      const stored = await store.upsertWorkItem(candidate);
+      const stored = await activeStore.upsertWorkItem(candidate);
       if (!stored || typeof stored.applied !== 'boolean' || typeof stored.created !== 'boolean'
         || (stored.created && !stored.applied) || !stored.row || typeof stored.row !== 'object') {
         throw new Error('invalid v2 store response');
@@ -10482,6 +10492,96 @@ async function upsertWorkOrchestratorV2Items({ config, job, prepared, autoReplyR
     }
   }
   return result;
+}
+
+function automationWorkReference(job = {}) {
+  const workItem = job.workItem;
+  if (!workItem || typeof workItem !== 'object' || Array.isArray(workItem)) return null;
+  if (typeof workItem.id !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workItem.id)
+    || !Number.isSafeInteger(workItem.version) || workItem.version < 1) return null;
+  return { id: workItem.id, version: workItem.version };
+}
+
+function automationResultEnvelope(resolution) {
+  return {
+    ...resolution,
+    work: { status: 'not_applicable' },
+    noticeUpdate: { status: 'not_requested' }
+  };
+}
+
+async function applyAutomationResolution({ config, job, prepared, autoReplyResult, dependencies }) {
+  const resolution = deriveAutomationResolution({
+    decision: prepared.decision,
+    sheetResult: prepared.sheetResult,
+    postActionResult: prepared.postActionResult,
+    autoReplyResult,
+    operationReceipt: prepared.operationReceipt
+  });
+  const result = automationResultEnvelope(resolution);
+  if (config.workOrchestratorV2WorkItemsEnabled !== true) return { result, store: null };
+
+  let store;
+  try {
+    store = workOrchestratorV2Store({ config, dependencies });
+  } catch {
+    result.work = { status: 'error', code: 'work_orchestrator_v2_store_failed' };
+    result.noticeUpdate = { status: 'error', code: 'notice_update_request_failed' };
+    return { result, store: null };
+  }
+
+  if (resolution.state === 'succeeded') {
+    const workReference = automationWorkReference(job);
+    if (workReference) {
+      try {
+        const resolved = await store.resolveWorkItem({
+          id: workReference.id, expectedVersion: workReference.version, resolution
+        });
+        result.work = resolved?.applied
+          ? { status: 'resolved' }
+          : { status: 'conflict', code: 'stale_work_version' };
+      } catch {
+        result.work = { status: 'error', code: 'work_resolution_failed' };
+      }
+    }
+
+    try {
+      const sourceEventKey = canonicalSourceEventKey(job.sourceEventKey || job.eventHash || job.jobId || job.id);
+      const clock = typeof dependencies.now === 'function' ? dependencies.now() : new Date();
+      const now = clock instanceof Date ? new Date(clock) : new Date(clock);
+      if (Number.isNaN(now.getTime())) throw new Error('invalid clock');
+      const configuredTtl = Number(config.workOrchestratorV2AutoNoticeTtlMinutes ?? 180);
+      const ttlMinutes = Number.isFinite(configuredTtl)
+        ? Math.min(1440, Math.max(30, configuredTtl))
+        : 180;
+      const cleanupAfter = new Date(now.getTime() + ttlMinutes * 60_000).toISOString();
+      const requested = await store.requestImmediateNoticeUpdate({ sourceEventKey, resolution, cleanupAfter });
+      result.noticeUpdate = requested?.applied
+        ? { status: 'requested', sourceEventKey, cleanupAfter }
+        : { status: 'conflict', code: 'notice_update_request_conflict' };
+    } catch {
+      result.noticeUpdate = { status: 'error', code: 'notice_update_request_failed' };
+    }
+  }
+  return { result, store };
+}
+
+async function persistHumanAutomationState({ workOrchestratorResult, resolution, store }) {
+  if (!store || resolution.state === 'succeeded' || workOrchestratorResult.error) return workOrchestratorResult;
+  const rows = [];
+  for (const row of workOrchestratorResult.rows) {
+    try {
+      const marked = await store.markAutomationState({
+        id: row.id, expectedVersion: row.version, resolution
+      });
+      if (!marked?.applied || !marked.row) throw new Error('automation state conflict');
+      rows.push(marked.row);
+    } catch {
+      return { ...workOrchestratorResult, rows, error: 'work_orchestrator_v2_store_failed' };
+    }
+  }
+  return { ...workOrchestratorResult, rows };
 }
 
 export async function finalizePreparedKakaoDecision({ config, job, applied, dependencies = {} } = {}) {
@@ -10527,18 +10627,35 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
   const slackDeliveryResult = config.followUpRowsEnabled === false
     ? { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] }
     : await deliverLegacyRows(config, followUpResult.rows || []);
-  const workOrchestratorResult = await upsertWorkOrchestratorV2Items({
-    config,
-    job,
-    prepared,
-    autoReplyResult,
-    dependencies
+  const automationApplied = await applyAutomationResolution({
+    config, job, prepared, autoReplyResult, dependencies
   });
+  let workOrchestratorResult;
+  if (automationApplied.result.state === 'succeeded') {
+    workOrchestratorResult = emptyWorkOrchestratorResult(config.workOrchestratorV2WorkItemsEnabled !== true);
+  } else {
+    workOrchestratorResult = await upsertWorkOrchestratorV2Items({
+      config, job, prepared, autoReplyResult, dependencies, store: automationApplied.store
+    });
+    workOrchestratorResult = await persistHumanAutomationState({
+      workOrchestratorResult,
+      resolution: automationApplied.result,
+      store: automationApplied.store
+    });
+    if (workOrchestratorResult.rows.length && !workOrchestratorResult.error) {
+      automationApplied.result.work = { status: 'open' };
+    } else if (workOrchestratorResult.error) {
+      automationApplied.result.work = {
+        status: 'error', code: 'work_orchestrator_v2_store_failed'
+      };
+    }
+  }
   return {
     ...prepared,
     status: applied.superseded ? 'superseded_by_newer_room_event' : 'ai_completed',
     followUpResult,
     workOrchestratorResult,
+    automationResolutionResult: automationApplied.result,
     inquiryResult: null,
     manualTaskResult: null,
     slackDeliveryResult,

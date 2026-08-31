@@ -951,6 +951,89 @@ export function createWorkOrchestratorActionPoller({
   return { enabled, localConfigReady: enabled, state: localState, poll };
 }
 
+const IMMEDIATE_NOTICE_RESOLUTION_TEXT = Object.freeze({
+  auto_reply_readback: '자동 답변이 실제 전송 확인까지 완료되었습니다.',
+  operation_readback: '자동 처리가 실제 결과 확인까지 완료되었습니다.'
+});
+
+function immediateNoticeUpdateRow(row) {
+  const update = row?.payload?.automation_notice_update;
+  if (!workActionRecord(row) || typeof row.source_event_key !== 'string'
+    || !row.source_event_key || row.source_event_key.length > 500
+    || typeof row.slack_channel_id !== 'string' || !/^[A-Z0-9][A-Z0-9_-]{0,79}$/.test(row.slack_channel_id)
+    || typeof row.slack_message_ts !== 'string' || !/^[0-9]{1,20}\.[0-9]{1,20}$/.test(row.slack_message_ts)
+    || typeof row.updated_at !== 'string' || Number.isNaN(Date.parse(row.updated_at))
+    || !workActionRecord(update) || update.status !== 'pending'
+    || !Object.hasOwn(IMMEDIATE_NOTICE_RESOLUTION_TEXT, update.resolution_kind)) {
+    throw new Error('Immediate notice update request is invalid');
+  }
+  return { row, update };
+}
+
+export function createImmediateNoticeUpdatePoller({
+  config = {}, store = null, slack = null, now = () => new Date()
+} = {}) {
+  const enabled = config.immediateEnabled === true && config.workItemsEnabled === true
+    && typeof store?.listImmediateNoticeUpdateRequests === 'function'
+    && typeof store?.markImmediateNoticeUpdated === 'function'
+    && typeof slack?.updateMessage === 'function';
+  let running = false;
+
+  const poll = async (reason = 'interval') => {
+    const trigger = safeWorkActionTrigger(reason);
+    const result = {
+      status: enabled ? 'ok' : 'disabled', trigger, scanned: 0, updated: 0, failed: 0, conflicts: 0
+    };
+    if (!enabled) return result;
+    if (running) return { ...result, status: 'running' };
+    running = true;
+    try {
+      let rows;
+      try {
+        rows = await store.listImmediateNoticeUpdateRequests({ limit: 10 });
+        if (!Array.isArray(rows) || rows.length > 10) throw new Error('invalid');
+      } catch {
+        return { ...result, status: 'error' };
+      }
+      result.scanned = rows.length;
+      for (const candidate of rows) {
+        try {
+          const { row, update } = immediateNoticeUpdateRow(candidate);
+          const text = `✅ 자동 처리 완료 · ${IMMEDIATE_NOTICE_RESOLUTION_TEXT[update.resolution_kind]}`;
+          const delivery = await slack.updateMessage({
+            channel: row.slack_channel_id,
+            ts: row.slack_message_ts,
+            text,
+            blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }]
+          });
+          if (delivery?.channel !== row.slack_channel_id || delivery?.ts !== row.slack_message_ts) {
+            throw new Error('update readback mismatch');
+          }
+          const supplied = typeof now === 'function' ? now() : now;
+          const updatedAt = new Date(supplied);
+          if (Number.isNaN(updatedAt.getTime())) throw new Error('clock unavailable');
+          const recorded = await store.markImmediateNoticeUpdated({
+            sourceEventKey: row.source_event_key,
+            expectedUpdatedAt: row.updated_at,
+            channelId: delivery.channel,
+            messageTs: delivery.ts,
+            updatedAt: updatedAt.toISOString()
+          });
+          if (recorded?.applied) result.updated += 1;
+          else result.conflicts += 1;
+        } catch {
+          result.failed += 1;
+        }
+      }
+      return result;
+    } finally {
+      running = false;
+    }
+  };
+
+  return { enabled, poll };
+}
+
 export async function runSlackActionPollPair({
   reason = 'manual',
   legacy = null,
@@ -1626,6 +1709,11 @@ const workOrchestratorActionPoller = createWorkOrchestratorActionPoller({
   state: workOrchestratorShadowRuntime.state
 });
 CONFIG.workOrchestratorActionLocalConfigReady = workOrchestratorActionPoller.localConfigReady;
+const workOrchestratorImmediateNoticeUpdatePoller = createImmediateNoticeUpdatePoller({
+  config: CONFIG.workOrchestrator,
+  store: workOrchestratorStore,
+  slack: workOrchestratorSlackClient
+});
 
 const state = {
   startedAt: new Date().toISOString(),
@@ -5515,6 +5603,13 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     if (CONFIG.slackActionPollEnabled || workOrchestratorActionPoller.enabled) {
       setTimeout(() => runSlackActionPoll('startup'), 7000).unref?.();
       setInterval(() => runSlackActionPoll('interval'), CONFIG.slackActionPollIntervalMs).unref?.();
+    }
+    if (workOrchestratorImmediateNoticeUpdatePoller.enabled) {
+      setTimeout(() => workOrchestratorImmediateNoticeUpdatePoller.poll('startup'), 8000).unref?.();
+      setInterval(
+        () => workOrchestratorImmediateNoticeUpdatePoller.poll('interval'),
+        CONFIG.slackActionPollIntervalMs
+      ).unref?.();
     }
     if (CONFIG.p0SlackEscalationEnabled) {
       setTimeout(() => runP0SlackEscalationSweep('startup'), 9000).unref?.();

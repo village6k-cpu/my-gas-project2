@@ -38,6 +38,7 @@ const {
   createWorkOrchestratorDigestRuntime,
   createWorkOrchestratorImmediateRuntime,
   createWorkOrchestratorActionPoller,
+  createImmediateNoticeUpdatePoller,
   createWorkOrchestratorShadowRuntime,
   configForHermesTransport,
   classifyInitialScanIngress,
@@ -66,6 +67,88 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+test('authoritative automation resolution bridge updates exact coordinates and records exact readback', async () => {
+  const updates = [];
+  const readbacks = [];
+  const receipt = {
+    id: '99999999-9999-4999-8999-999999999999',
+    source_event_key: 'event-authoritative-bridge-1',
+    slack_channel_id: 'CINBOX', slack_message_ts: '123.45',
+    updated_at: '2026-08-31T01:00:00.000Z',
+    payload: {
+      automation_notice_update: {
+        status: 'pending', resolution_kind: 'auto_reply_readback',
+        notice_text: 'The automated reply was confirmed by authoritative readback.'
+      }
+    }
+  };
+  const runtime = createImmediateNoticeUpdatePoller({
+    config: { immediateEnabled: true, workItemsEnabled: true },
+    store: {
+      listImmediateNoticeUpdateRequests: async () => [receipt],
+      markImmediateNoticeUpdated: async (input) => {
+        readbacks.push(input);
+        return { applied: true, row: { ...receipt, updated_at: input.updatedAt } };
+      }
+    },
+    slack: {
+      updateMessage: async (input) => {
+        updates.push(input);
+        return { ok: true, channel: input.channel, ts: input.ts, message: { text: input.text } };
+      }
+    },
+    now: () => new Date('2026-08-31T01:00:01.000Z')
+  });
+
+  const result = await runtime.poll('manual');
+
+  assert.deepEqual(result, { status: 'ok', trigger: 'manual', scanned: 1, updated: 1, failed: 0, conflicts: 0 });
+  assert.equal(updates[0].channel, 'CINBOX');
+  assert.equal(updates[0].ts, '123.45');
+  assert.equal(readbacks[0].sourceEventKey, 'event-authoritative-bridge-1');
+  assert.equal(readbacks[0].channelId, 'CINBOX');
+  assert.equal(readbacks[0].messageTs, '123.45');
+});
+
+test('authoritative automation resolution bridge leaves failed update pending for bounded retry without touching work', async () => {
+  let attempts = 0;
+  let readbacks = 0;
+  const receipt = {
+    id: '99999999-9999-4999-8999-999999999998',
+    source_event_key: 'event-authoritative-bridge-2',
+    slack_channel_id: 'CINBOX', slack_message_ts: '999.1',
+    updated_at: '2026-08-31T01:00:00.000Z',
+    payload: {
+      automation_notice_update: {
+        status: 'pending', resolution_kind: 'operation_readback',
+        notice_text: 'The automated operation was confirmed by authoritative readback.'
+      }
+    }
+  };
+  const runtime = createImmediateNoticeUpdatePoller({
+    config: { immediateEnabled: true, workItemsEnabled: true },
+    store: {
+      listImmediateNoticeUpdateRequests: async () => [receipt],
+      markImmediateNoticeUpdated: async () => { readbacks += 1; return { applied: true, row: receipt }; }
+    },
+    slack: {
+      updateMessage: async (input) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('customer-private transport failure');
+        return { ok: true, channel: input.channel, ts: input.ts, message: {} };
+      }
+    }
+  });
+
+  const failed = await runtime.poll('interval');
+  const retried = await runtime.poll('interval');
+
+  assert.equal(failed.failed, 1);
+  assert.equal(readbacks, 1);
+  assert.equal(retried.updated, 1);
+  assert.equal(JSON.stringify(failed).includes('customer-private'), false);
+});
 
 function shadowEventRequest(event) {
   const req = Readable.from([JSON.stringify(event)]);
@@ -2360,6 +2443,9 @@ test('phase scheduler propagates a bridge deadline into an active Hermes decisio
 });
 
 test('phase scheduler enforces the configured end-to-end worker timeout', async () => {
+  // The production timeout is intentionally unref'ed; keep this isolated test's
+  // event loop alive long enough to observe that timer without relying on other files.
+  const keepAlive = setTimeout(() => {}, 100);
   const scheduler = createKakaoPhaseScheduler({
     workerTimeoutMs: 20,
     capture: async (job) => ({ job }),
@@ -2377,10 +2463,14 @@ test('phase scheduler enforces the configured end-to-end worker timeout', async 
     manualSend: async (payload) => payload
   });
 
-  await assert.rejects(
-    scheduler.run({ roomKey: 'timed-room' }),
-    /worker timed out after 20ms/
-  );
+  try {
+    await assert.rejects(
+      scheduler.run({ roomKey: 'timed-room' }),
+      /worker timed out after 20ms/
+    );
+  } finally {
+    clearTimeout(keepAlive);
+  }
 });
 
 test('worker result audit keeps phase timings and AI attempt counts without customer payload', () => {
