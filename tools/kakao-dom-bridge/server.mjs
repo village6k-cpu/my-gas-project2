@@ -320,7 +320,9 @@ export function buildWorkOrchestratorHealthState(value = {}) {
               omittedCount: p0Count(p0Readback.omittedCount),
               ready: p0Readback.ready === true,
               errors: Array.isArray(p0Readback.errors)
-                ? p0Readback.errors.filter((error) => ['p0_eligible_overflow', 'list_failed', 'invalid_list'].includes(error)).slice(0, 3)
+                ? p0Readback.errors.filter((error) => [
+                    'p0_eligible_overflow', 'list_failed', 'invalid_list', 'invalid_delivery'
+                  ].includes(error)).slice(0, 3)
                 : []
             }
           : null
@@ -2447,7 +2449,8 @@ export async function runP0EscalationPair({
 }
 
 export function createWorkOrchestratorP0Runtime({
-  config = {}, store = null, slack = null, now = () => new Date(), mentionUserIds = []
+  config = {}, store = null, slack = null, now = () => new Date(), mentionUserIds = [],
+  reconciliationOwner = crypto.randomUUID()
 } = {}) {
   const readbackEnabled = config.workItemsEnabled === true && config.p0ReadbackEnabled === true;
   const cutoverEnabled = readbackEnabled && config.p0CutoverEnabled === true;
@@ -2456,11 +2459,14 @@ export function createWorkOrchestratorP0Runtime({
   const listReady = store && typeof store.listDueP0Work === 'function';
   const deliveryReady = listReady
     && typeof store.claimP0Delivery === 'function'
+    && typeof store.claimP0Reconciliation === 'function'
     && typeof store.settleP0Delivery === 'function'
     && typeof store.readP0Delivery === 'function'
     && slack && typeof slack.postMessage === 'function'
     && typeof slack.findMessageByClientId === 'function';
-  const localConfigReady = !enabled || Boolean(listReady && (!cutoverEnabled || channel && deliveryReady));
+  const owner = String(reconciliationOwner || '').trim();
+  const localConfigReady = !enabled || Boolean(listReady && (!cutoverEnabled
+    || channel && deliveryReady && WORK_ACTION_UUID.test(owner)));
   if (!localConfigReady) throw new Error('Work Orchestrator P0 local configuration is missing');
 
   const settleKnownCoordinates = async ({ row, delivery, expectedStatus, posted, recordedAt }) => {
@@ -2473,7 +2479,11 @@ export function createWorkOrchestratorP0Runtime({
       status: 'delivered',
       recordedAt,
       channelId: posted.channel || channel,
-      messageTs: posted.ts
+      messageTs: posted.ts,
+      ...(expectedStatus === 'reconciling' ? {
+        reconcileOwner: delivery.reconcileOwner,
+        reconcileToken: delivery.reconcileToken
+      } : {})
     };
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -2531,12 +2541,37 @@ export function createWorkOrchestratorP0Runtime({
     result.selectedCount = listed.selectedCount;
     result.omittedCount = listed.omittedCount;
     result.omissions = listed.omittedCount;
+    const decisions = [];
+    for (const row of listed.rows) {
+      let decision;
+      try {
+        decision = v2P0ReminderDecision(row, { now: cutoff });
+      } catch {
+        decision = { due: false, reason: 'invalid_delivery' };
+      }
+      let processable = decision.due === true || decision.reconcile === true;
+      if (processable && decision.due === true) {
+        try {
+          buildV2P0DeliveryClaim(row, { now: cutoff, claimTtlMs: 120_000 });
+        } catch {
+          processable = false;
+        }
+      }
+      if (processable && decision.reconcile === true
+        && (!WORK_ACTION_UUID.test(String(row?.id || ''))
+          || !Number.isSafeInteger(row?.version) || row.version < 1)) processable = false;
+      if (decision.reason === 'invalid_delivery' || !processable) {
+        if (!result.errors.includes('invalid_delivery')) result.errors.push('invalid_delivery');
+      }
+      decisions.push(decision);
+    }
     if (!cutoverEnabled) {
-      result.ready = listed.omittedCount === 0;
-      if (!result.ready) {
+      result.ready = listed.omittedCount === 0 && result.errors.length === 0;
+      if (listed.omittedCount > 0) {
         result.status = 'not_ready';
         result.errors.push('p0_eligible_overflow');
       }
+      if (result.errors.length > 0) result.status = 'not_ready';
       return {
         status: result.status,
         mode: result.mode,
@@ -2548,52 +2583,95 @@ export function createWorkOrchestratorP0Runtime({
         errors: result.errors
       };
     }
-    result.ready = listed.omittedCount === 0;
+    result.ready = listed.omittedCount === 0 && result.errors.length === 0;
+    if (!result.ready) {
+      if (listed.omittedCount > 0) result.errors.push('p0_eligible_overflow');
+      result.status = 'error';
+      return result;
+    }
 
-    for (const row of listed.rows) {
-      let decision;
-      try {
-        decision = v2P0ReminderDecision(row, { now: cutoff });
-      } catch {
-        result.errors.push('invalid_delivery');
-        continue;
-      }
-      if (decision.reason === 'invalid_delivery') {
-        result.errors.push('invalid_delivery');
-        continue;
-      }
+    for (const [index, row] of listed.rows.entries()) {
+      const decision = decisions[index];
       const existingDelivery = row?.payload?.p0_delivery;
       if (decision.reconcile === true) {
-        result.reconciled += 1;
-        let found;
+        let reconciliation;
         try {
-          const oldest = Math.max(1, Date.parse(existingDelivery.claimed_at) / 1000 - 60);
-          const latest = Math.max(oldest + 1, Date.parse(cutoff) / 1000 + 60);
-          found = await slack.findMessageByClientId({
-            channel, clientMsgId: existingDelivery.client_message_id, oldest, latest
+          reconciliation = await store.claimP0Reconciliation({
+            id: row.id,
+            expectedVersion: row.version,
+            expectedStatus: existingDelivery.status,
+            expectedGeneration: existingDelivery.generation,
+            clientMessageId: existingDelivery.client_message_id,
+            reconcileOwner: owner,
+            leaseSeconds: 120,
+            now: cutoff
           });
         } catch {
+          result.errors.push('claim_failed');
+          continue;
+        }
+        if (reconciliation?.claimed !== true || !reconciliation.row) {
+          result.skipped += 1;
+          continue;
+        }
+        result.reconciled += 1;
+        const reconciliationRow = reconciliation.row;
+        const leasedDelivery = reconciliationRow?.payload?.p0_delivery;
+        const settleReconciliationFailure = async (status) => {
+          try {
+            const recorded = await store.settleP0Delivery({
+              id: reconciliationRow.id,
+              expectedVersion: reconciliationRow.version,
+              expectedStatus: 'reconciling',
+              expectedGeneration: leasedDelivery.generation,
+              clientMessageId: leasedDelivery.client_message_id,
+              status,
+              recordedAt: cutoff,
+              channelId: null,
+              messageTs: null,
+              reconcileOwner: leasedDelivery.reconcile_owner,
+              reconcileToken: leasedDelivery.reconcile_token
+            });
+            if (recorded?.applied !== true) result.errors.push('record_conflict');
+          } catch {
+            result.errors.push('record_failed');
+          }
+        };
+        let found;
+        try {
+          const oldest = Math.max(1, Date.parse(leasedDelivery.claimed_at) / 1000 - 60);
+          const latest = Math.max(oldest + 1, Date.parse(cutoff) / 1000 + 60);
+          found = await slack.findMessageByClientId({
+            channel, clientMsgId: leasedDelivery.client_message_id, oldest, latest
+          });
+        } catch {
+          await settleReconciliationFailure('reconcile_pending');
           result.errors.push('reconcile_failed');
           continue;
         }
         let posted = found;
         if (!posted) {
           try {
-            posted = await slack.postMessage(v2P0SlackMessage(row, {
-              clientMessageId: existingDelivery.client_message_id
+            posted = await slack.postMessage(v2P0SlackMessage(reconciliationRow, {
+              clientMessageId: leasedDelivery.client_message_id,
+              attempt: leasedDelivery.attempt
             }, channel, mentionUserIds));
-          } catch {
+          } catch (error) {
+            await settleReconciliationFailure(error?.ambiguous === true
+              ? 'reconcile_pending' : 'retry_pending');
             result.errors.push('post_failed');
             continue;
           }
         }
         const settled = await settleKnownCoordinates({
-          row,
+          row: reconciliationRow,
           delivery: {
-            generation: existingDelivery.generation,
-            clientMessageId: existingDelivery.client_message_id
+            generation: leasedDelivery.generation,
+            clientMessageId: leasedDelivery.client_message_id,
+            reconcileOwner: leasedDelivery.reconcile_owner,
+            reconcileToken: leasedDelivery.reconcile_token
           },
-          expectedStatus: existingDelivery.status,
+          expectedStatus: 'reconciling',
           posted,
           recordedAt: cutoff
         });

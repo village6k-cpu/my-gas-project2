@@ -12,6 +12,8 @@ const [noticeCleanupMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_notice_cleanup\.sql$/.test(name));
 const [p0DeliveryMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_p0_delivery\.sql$/.test(name));
+const [p0ReconciliationMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_p0_reconciliation\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -35,6 +37,13 @@ async function createP0DeliveryDatabase() {
   const db = await createFoundationDatabase();
   assert.ok(p0DeliveryMigrationName, 'the additive P0 delivery migration must exist');
   await db.exec(readFileSync(join(migrationsDirectory, p0DeliveryMigrationName), 'utf8'));
+  return db;
+}
+
+async function createP0ReconciliationDatabase() {
+  const db = await createP0DeliveryDatabase();
+  assert.ok(p0ReconciliationMigrationName, 'the additive P0 reconciliation migration must exist');
+  await db.exec(readFileSync(join(migrationsDirectory, p0ReconciliationMigrationName), 'utf8'));
   return db;
 }
 
@@ -1382,6 +1391,144 @@ test('v2 P0 review round 1 reports authoritative selected and omitted counts aft
     assert.equal(privileges.length, 4);
     assert.ok(privileges.every((row) => row.anon_execute === false
       && row.authenticated_execute === false && row.service_role_execute === true));
+  } finally {
+    await db.close();
+  }
+});
+
+test('v2 P0 review round 2 reconciliation lease has one winner, rotates on expiry, and fences stale settlement', async () => {
+  const db = await createP0ReconciliationDatabase();
+  const id = '11111111-1111-4111-8111-111111111111';
+  const clientId = '77777777-7777-5777-8777-777777777777';
+  const ownerA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const ownerB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const now = '2026-09-02T06:10:00.000Z';
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload
+      ) values (
+        $1, 'reconcile', 'room:reconcile', 'reconcile', '', 'human_review', 'p0', 'open',
+        $2::timestamptz, $2::timestamptz - interval '1 hour', $2::timestamptz,
+        jsonb_build_object('requires_human_action', true, 'p0_delivery', jsonb_build_object(
+          'status', 'reconcile_pending', 'generation', 1, 'attempt', 1,
+          'client_message_id', $3::text,
+          'claimed_at', '2026-09-02T05:59:00.000Z',
+          'claim_expires_at', '2026-09-02T06:01:00.000Z',
+          'last_attempt_at', '2026-09-02T06:00:00.000Z',
+          'next_at', '2026-09-02T06:10:00.000Z'
+        ))
+      )
+    `, [id, now, clientId]);
+    const claimSql = `select public.claim_p0_reconciliation_v2(
+      $1::uuid, 1, $2::text, 1, $3::uuid, $4::uuid, 120, $5::timestamptz
+    ) as result`;
+    const first = (await db.query(claimSql, [id, 'reconcile_pending', clientId, ownerA, now])).rows[0].result;
+    const competing = (await db.query(claimSql, [id, 'reconcile_pending', clientId, ownerB, now])).rows[0].result;
+    assert.equal(first.claimed, true);
+    assert.equal(competing.claimed, false);
+    assert.equal(first.row.payload.p0_delivery.status, 'reconciling');
+    assert.equal(first.row.payload.p0_delivery.generation, 1);
+    assert.equal(first.row.payload.p0_delivery.client_message_id, clientId);
+    assert.equal(first.row.payload.p0_delivery.reconcile_owner, ownerA);
+    assert.match(first.row.payload.p0_delivery.reconcile_token, /^[0-9a-f-]{36}$/);
+
+    const expiredAt = '2026-09-02T06:12:00.001Z';
+    const reclaimed = (await db.query(claimSql, [id, 'reconciling', clientId, ownerB, expiredAt])).rows[0].result;
+    assert.equal(reclaimed.claimed, true);
+    assert.equal(reclaimed.row.payload.p0_delivery.reconcile_owner, ownerB);
+    assert.notEqual(reclaimed.row.payload.p0_delivery.reconcile_token, first.row.payload.p0_delivery.reconcile_token);
+
+    const settleSql = `select public.settle_p0_delivery_v2(
+      $1::uuid, 1, 'reconciling', 1, $2::uuid, $3::text,
+      $4::timestamptz, $5::text, $6::text, $7::uuid, $8::uuid
+    ) as result`;
+    const stale = (await db.query(settleSql, [
+      id, clientId, 'delivered', expiredAt, 'CP0', '100.1', ownerA,
+      first.row.payload.p0_delivery.reconcile_token
+    ])).rows[0].result;
+    assert.equal(stale.applied, false);
+
+    const retryAt = '2026-09-02T06:12:01.000Z';
+    const rejected = (await db.query(settleSql, [
+      id, clientId, 'retry_pending', retryAt, null, null, ownerB,
+      reclaimed.row.payload.p0_delivery.reconcile_token
+    ])).rows[0].result;
+    assert.equal(rejected.applied, true);
+    assert.equal(rejected.row.payload.p0_delivery.status, 'retry_pending');
+    assert.equal(rejected.row.payload.p0_delivery.generation, 1);
+    assert.equal(rejected.row.payload.p0_delivery.client_message_id, clientId);
+    assert.equal(rejected.row.payload.p0_delivery.next_at, '2026-09-02T06:22:01.000Z');
+    assert.equal(Object.hasOwn(rejected.row.payload.p0_delivery, 'reconcile_token'), false);
+
+    const before = (await db.query(
+      `select public.list_due_p0_work_v2('2026-09-02T06:22:00.999Z', 50) as result`
+    )).rows[0].result;
+    const due = (await db.query(
+      `select public.list_due_p0_work_v2('2026-09-02T06:22:01.000Z', 50) as result`
+    )).rows[0].result;
+    assert.equal(before.eligible_count, 0);
+    assert.equal(due.eligible_count, 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test('v2 P0 review round 2 reconciliation RPC remains service-role only', async () => {
+  const db = await createP0ReconciliationDatabase();
+  try {
+    const privileges = (await db.query(`
+      select
+        has_function_privilege('anon', p.oid, 'execute') as anon_execute,
+        has_function_privilege('authenticated', p.oid, 'execute') as authenticated_execute,
+        has_function_privilege('service_role', p.oid, 'execute') as service_role_execute
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public' and p.proname = 'claim_p0_reconciliation_v2'
+    `)).rows;
+    assert.deepEqual(privileges, [{
+      anon_execute: false, authenticated_execute: false, service_role_execute: true
+    }]);
+  } finally {
+    await db.close();
+  }
+});
+
+test('v2 P0 review round 2 self-review rejects malformed claims and terminal settlements', async () => {
+  const db = await createP0ReconciliationDatabase();
+  const clientId = '77777777-7777-5777-8777-777777777777';
+  const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const malformedId = '11111111-1111-4111-8111-111111111112';
+  const terminalId = '11111111-1111-4111-8111-111111111113';
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload
+      ) values
+      ($1, 'malformed-reconcile', 'room:malformed', 'malformed', '', 'human_review', 'p0', 'open',
+       '2026-09-02T06:00:00.000Z', '2026-09-02T05:00:00.000Z', '2026-09-02T06:00:00.000Z',
+       jsonb_build_object('requires_human_action', true, 'p0_delivery', jsonb_build_object(
+         'status', 'reconcile_pending', 'generation', 1, 'attempt', 1, 'client_message_id', $3::text,
+         'claimed_at', '2026-09-02T05:50:00.000Z', 'claim_expires_at', '2026-09-02T05:52:00.000Z',
+         'last_attempt_at', '2026-09-02T05:51:00.000Z', 'next_at', '2026-09-02T06:00:00.000Z',
+         'unexpected', 'field'))),
+      ($2, 'terminal-settle', 'room:terminal', 'terminal', '', 'human_review', 'p0', 'resolved',
+       '2026-09-02T06:00:00.000Z', '2026-09-02T05:00:00.000Z', '2026-09-02T06:00:00.000Z',
+       jsonb_build_object('requires_human_action', true, 'p0_delivery', jsonb_build_object(
+         'status', 'claimed', 'generation', 1, 'attempt', 1, 'client_message_id', $3::text,
+         'claimed_at', '2026-09-02T05:58:00.000Z', 'claim_expires_at', '2026-09-02T06:02:00.000Z')))
+    `, [malformedId, terminalId, clientId]);
+    const malformed = (await db.query(`select public.claim_p0_reconciliation_v2(
+      $1::uuid, 1, 'reconcile_pending', 1, $2::uuid, $3::uuid, 120,
+      '2026-09-02T06:00:00.000Z'::timestamptz
+    ) as result`, [malformedId, clientId, owner])).rows[0].result;
+    const terminal = (await db.query(`select public.settle_p0_delivery_v2(
+      $1::uuid, 1, 'claimed', 1, $2::uuid, 'delivered',
+      '2026-09-02T06:00:01.000Z'::timestamptz, 'CP0', '100.1', null::uuid, null::uuid
+    ) as result`, [terminalId, clientId])).rows[0].result;
+    assert.equal(malformed.claimed, false);
+    assert.equal(terminal.applied, false);
   } finally {
     await db.close();
   }

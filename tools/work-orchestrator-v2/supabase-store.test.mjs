@@ -772,8 +772,107 @@ test('v2 P0 review round 1 store uses authoritative list and atomic delivery RPC
     p_status: 'delivered',
     p_recorded_at: '2026-09-01T06:00:01.000Z',
     p_channel_id: 'CP0',
-    p_message_ts: '100.1'
+    p_message_ts: '100.1',
+    p_reconcile_owner: null,
+    p_reconcile_token: null
   });
+});
+
+test('v2 P0 review round 2 store claims reconciliation and settles with the exact rotated lease', async () => {
+  const clientId = '77777777-7777-5777-8777-777777777777';
+  const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const token = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const reconciling = workRow({
+    priority: 'p0',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconciling', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T06:00:00.000Z',
+      reconcile_owner: owner, reconcile_token: token,
+      reconcile_claimed_at: '2026-09-02T06:00:00.000Z', reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+    } }
+  });
+  const retryPending = workRow({
+    ...reconciling,
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'retry_pending', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T06:00:01.000Z', next_at: '2026-09-02T06:10:01.000Z'
+    } }
+  });
+  const fetch = createFetch([
+    response({ data: { claimed: true, row: reconciling } }),
+    response({ data: { applied: true, row: retryPending } })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const claimed = await store.claimP0Reconciliation({
+    id: WORK_ID, expectedVersion: 1, expectedStatus: 'reconcile_pending', expectedGeneration: 1,
+    clientMessageId: clientId, reconcileOwner: owner, leaseSeconds: 120,
+    now: '2026-09-02T06:00:00.000Z'
+  });
+  assert.equal(claimed.claimed, true);
+  await store.settleP0Delivery({
+    id: WORK_ID, expectedVersion: 1, expectedStatus: 'reconciling', expectedGeneration: 1,
+    clientMessageId: clientId, status: 'retry_pending', recordedAt: '2026-09-02T06:00:01.000Z',
+    channelId: null, messageTs: null, reconcileOwner: owner, reconcileToken: token
+  });
+
+  assert.deepEqual(fetch.requests.map((request) => request.url), [
+    'https://supabase.example/rest/v1/rpc/claim_p0_reconciliation_v2',
+    'https://supabase.example/rest/v1/rpc/settle_p0_delivery_v2'
+  ]);
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_id: WORK_ID, p_expected_version: 1, p_expected_status: 'reconcile_pending',
+    p_expected_generation: 1, p_client_message_id: clientId,
+    p_reconcile_owner: owner, p_lease_seconds: 120, p_now: '2026-09-02T06:00:00.000Z'
+  });
+  assert.deepEqual(JSON.parse(fetch.requests[1].init.body), {
+    p_id: WORK_ID, p_expected_version: 1, p_expected_status: 'reconciling',
+    p_expected_generation: 1, p_client_message_id: clientId, p_status: 'retry_pending',
+    p_recorded_at: '2026-09-02T06:00:01.000Z', p_channel_id: null, p_message_ts: null,
+    p_reconcile_owner: owner, p_reconcile_token: token
+  });
+});
+
+test('v2 P0 review round 2 store rejects unknown, extra, or incomplete delivery states generically', async () => {
+  const clientId = '77777777-7777-5777-8777-777777777777';
+  const base = {
+    generation: 1, attempt: 1, client_message_id: clientId,
+    claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z'
+  };
+  const invalidRows = [
+    workRow({ priority: 'p0', payload: { requires_human_action: true, p0_delivery: {
+      ...base, status: 'unknown'
+    } } }),
+    workRow({ priority: 'p0', payload: { requires_human_action: true, p0_delivery: {
+      ...base, status: 'delivered', last_attempt_at: '2026-09-02T06:00:00.000Z',
+      delivered_at: '2026-09-02T06:00:00.000Z', next_at: '2026-09-02T06:20:00.000Z',
+      readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-09-02T06:00:00.000Z' },
+      unexpected: 'field'
+    } } }),
+    workRow({ priority: 'p0', payload: { requires_human_action: true, p0_delivery: {
+      ...base, status: 'reconciling', last_attempt_at: '2026-09-02T05:51:00.000Z',
+      next_at: '2026-09-02T06:00:00.000Z',
+      reconcile_owner: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      reconcile_claimed_at: '2026-09-02T06:00:00.000Z', reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+    } } })
+  ];
+  const fetch = createFetch(invalidRows.map((row) => response({ data: {
+    eligible_count: 1, selected_count: 1, omitted_count: 0, rows: [row]
+  } })));
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+  for (const row of invalidRows) {
+    await assert.rejects(
+      store.listDueP0Work({ now: '2026-09-02T06:00:00.000Z', limit: 50 }),
+      /response invalid/i,
+      `must reject ${row.payload.p0_delivery.status}`
+    );
+  }
 });
 
 test('listActionableWork selects a bounded deterministic digest surface including unresolved P0', async () => {

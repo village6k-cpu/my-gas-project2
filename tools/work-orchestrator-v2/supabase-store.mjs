@@ -980,7 +980,61 @@ function p0WorkResponseRow(row) {
   }
   responseTimestamp(row.last_digest_at, { nullable: true });
   responseTimestamp(row.next_reminder_at, { nullable: true });
+  if (Object.hasOwn(row.payload, 'p0_delivery')) validateP0DeliveryResponse(row.payload.p0_delivery);
   return row;
+}
+
+function p0ResponseTimestamp(value) {
+  const timestamp = responseTimestamp(value);
+  if (!P0_ACKNOWLEDGEMENT_TIMESTAMP.test(timestamp)
+    || new Date(timestamp).toISOString() !== timestamp) throw responseInvalid();
+  return timestamp;
+}
+
+function validateP0DeliveryResponse(delivery) {
+  if (!isRecord(delivery)) throw responseInvalid();
+  const common = ['attempt', 'client_message_id', 'generation', 'status'];
+  const keysByStatus = {
+    claimed: [...common, 'claimed_at', 'claim_expires_at'],
+    reconcile_pending: [...common, 'claimed_at', 'claim_expires_at', 'last_attempt_at', 'next_at'],
+    reconciling: [
+      ...common, 'claimed_at', 'claim_expires_at', 'last_attempt_at', 'next_at',
+      'reconcile_owner', 'reconcile_token', 'reconcile_claimed_at', 'reconcile_expires_at'
+    ],
+    retry_pending: [...common, 'claimed_at', 'claim_expires_at', 'last_attempt_at', 'next_at'],
+    delivered: [
+      ...common, 'claimed_at', 'claim_expires_at', 'last_attempt_at', 'next_at',
+      'delivered_at', 'readback'
+    ]
+  };
+  const expected = keysByStatus[delivery.status];
+  if (!expected || !exactKeys(delivery, expected)
+    || !Number.isSafeInteger(delivery.generation) || delivery.generation < 1
+    || delivery.attempt !== delivery.generation
+    || typeof delivery.client_message_id !== 'string'
+    || !P0_CLIENT_MESSAGE_ID.test(delivery.client_message_id)) throw responseInvalid();
+  p0ResponseTimestamp(delivery.claimed_at);
+  p0ResponseTimestamp(delivery.claim_expires_at);
+  if (delivery.status !== 'claimed') {
+    p0ResponseTimestamp(delivery.last_attempt_at);
+    p0ResponseTimestamp(delivery.next_at);
+  }
+  if (delivery.status === 'reconciling') {
+    if (responseUuid(delivery.reconcile_owner) === null
+      || responseUuid(delivery.reconcile_token) === null) throw responseInvalid();
+    p0ResponseTimestamp(delivery.reconcile_claimed_at);
+    p0ResponseTimestamp(delivery.reconcile_expires_at);
+  }
+  if (delivery.status === 'delivered') {
+    p0ResponseTimestamp(delivery.delivered_at);
+    if (!exactKeys(delivery.readback, ['channel_id', 'confirmed_at', 'message_ts'])
+      || typeof delivery.readback.channel_id !== 'string'
+      || !SLACK_CHANNEL_ID.test(delivery.readback.channel_id)
+      || typeof delivery.readback.message_ts !== 'string'
+      || !SLACK_MESSAGE_TS.test(delivery.readback.message_ts)) throw responseInvalid();
+    p0ResponseTimestamp(delivery.readback.confirmed_at);
+  }
+  return delivery;
 }
 
 function p0ListResponse(data, limit) {
@@ -1004,7 +1058,9 @@ function p0BaseInput(input, { claim = false, settle = false } = {}) {
   const expected = claim
     ? ['attempt','claimExpiresAt','claimedAt','clientMessageId','expectedGeneration','expectedVersion','generation','id']
     : settle
-      ? ['channelId','clientMessageId','expectedGeneration','expectedStatus','expectedVersion','id','messageTs','recordedAt','status']
+      ? input?.expectedStatus === 'reconciling'
+        ? ['channelId','clientMessageId','expectedGeneration','expectedStatus','expectedVersion','id','messageTs','reconcileOwner','reconcileToken','recordedAt','status']
+        : ['channelId','clientMessageId','expectedGeneration','expectedStatus','expectedVersion','id','messageTs','recordedAt','status']
       : ['clientMessageId','expectedGeneration','expectedVersion','id'];
   if (!exactKeys(input, expected)) throw invalidInput();
   const result = {
@@ -1028,8 +1084,15 @@ function p0BaseInput(input, { claim = false, settle = false } = {}) {
     result.expectedStatus = exactText(input.expectedStatus, 30);
     result.status = exactText(input.status, 30);
     result.recordedAt = isoTimestamp(input.recordedAt);
-    if (!['claimed', 'reconcile_pending'].includes(result.expectedStatus)
+    if (!['claimed', 'reconciling'].includes(result.expectedStatus)
       || !['delivered', 'reconcile_pending', 'retry_pending'].includes(result.status)) throw invalidInput();
+    if (result.expectedStatus === 'reconciling') {
+      result.reconcileOwner = uuid(input.reconcileOwner);
+      result.reconcileToken = uuid(input.reconcileToken);
+    } else {
+      result.reconcileOwner = null;
+      result.reconcileToken = null;
+    }
     if (result.status === 'delivered') {
       result.channelId = exactText(input.channelId, 80);
       result.messageTs = exactText(input.messageTs, 100);
@@ -1041,6 +1104,29 @@ function p0BaseInput(input, { claim = false, settle = false } = {}) {
     }
   }
   return result;
+}
+
+function p0ReconciliationInput(input) {
+  if (!isRecord(input) || !exactKeys(input, [
+    'clientMessageId', 'expectedGeneration', 'expectedStatus', 'expectedVersion', 'id',
+    'leaseSeconds', 'now', 'reconcileOwner'
+  ])) throw invalidInput();
+  const normalized = {
+    id: uuid(input.id),
+    expectedVersion: positiveVersion(input.expectedVersion),
+    expectedStatus: exactText(input.expectedStatus, 30),
+    expectedGeneration: Number(input.expectedGeneration),
+    clientMessageId: exactText(input.clientMessageId, 36),
+    reconcileOwner: uuid(input.reconcileOwner),
+    leaseSeconds: Number(input.leaseSeconds),
+    now: isoTimestamp(input.now)
+  };
+  if (!['claimed', 'reconcile_pending', 'reconciling'].includes(normalized.expectedStatus)
+    || !Number.isSafeInteger(normalized.expectedGeneration) || normalized.expectedGeneration < 1
+    || !P0_CLIENT_MESSAGE_ID.test(normalized.clientMessageId)
+    || !Number.isSafeInteger(normalized.leaseSeconds)
+    || normalized.leaseSeconds < 1 || normalized.leaseSeconds > 900) throw invalidInput();
+  return normalized;
 }
 
 function p0MutationResponse(data, input, { status = null } = {}) {
@@ -1599,6 +1685,43 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       });
       return p0MutationResponse(data, normalized);
     },
+    claimP0Reconciliation: async (input = {}) => {
+      let normalized;
+      try {
+        normalized = p0ReconciliationInput(input);
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/claim_p0_reconciliation_v2', {
+        method: 'POST', body: safeJson({
+          p_id: normalized.id,
+          p_expected_version: normalized.expectedVersion,
+          p_expected_status: normalized.expectedStatus,
+          p_expected_generation: normalized.expectedGeneration,
+          p_client_message_id: normalized.clientMessageId,
+          p_reconcile_owner: normalized.reconcileOwner,
+          p_lease_seconds: normalized.leaseSeconds,
+          p_now: normalized.now
+        })
+      });
+      if (!exactKeys(data, ['claimed', 'row']) || typeof data.claimed !== 'boolean') throw responseInvalid();
+      if (!data.claimed) {
+        if (data.row !== null) throw responseInvalid();
+        return data;
+      }
+      const row = p0WorkResponseRow(data.row);
+      const delivery = row.payload.p0_delivery;
+      if (row.id !== normalized.id || row.version !== normalized.expectedVersion
+        || delivery.status !== 'reconciling'
+        || delivery.generation !== normalized.expectedGeneration
+        || delivery.client_message_id !== normalized.clientMessageId
+        || delivery.reconcile_owner !== normalized.reconcileOwner
+        || Date.parse(delivery.reconcile_claimed_at) !== Date.parse(normalized.now)
+        || Date.parse(delivery.reconcile_expires_at) !== Date.parse(normalized.now) + normalized.leaseSeconds * 1000) {
+        throw responseInvalid();
+      }
+      return data;
+    },
     settleP0Delivery: async (input = {}) => {
       let normalized;
       try {
@@ -1616,7 +1739,9 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
           p_status: normalized.status,
           p_recorded_at: normalized.recordedAt,
           p_channel_id: normalized.channelId,
-          p_message_ts: normalized.messageTs
+          p_message_ts: normalized.messageTs,
+          p_reconcile_owner: normalized.reconcileOwner,
+          p_reconcile_token: normalized.reconcileToken
         })
       });
       return p0MutationResponse(data, normalized, { status: normalized.status });

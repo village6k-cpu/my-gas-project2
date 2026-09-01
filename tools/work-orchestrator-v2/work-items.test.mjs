@@ -772,6 +772,51 @@ test('v2 P0 reminder uses 10m exponential retries, a 1h cap, and a three-attempt
   }
 });
 
+test('v2 P0 review round 2 reconciliation decisions honor durable retry and lease expiry', () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const baseDelivery = {
+    generation: 1,
+    attempt: 1,
+    client_message_id: clientId,
+    claimed_at: '2026-08-29T05:50:00.000Z',
+    claim_expires_at: '2026-08-29T05:52:00.000Z',
+    last_attempt_at: '2026-08-29T05:51:00.000Z',
+    next_at: '2026-08-29T06:10:00.000Z'
+  };
+  const pending = activeItem({
+    priority: 'p0',
+    payload: { requires_human_action: true, p0_delivery: { ...baseDelivery, status: 'reconcile_pending' } }
+  });
+  assert.deepEqual(
+    workItems.v2P0ReminderDecision(pending, { now: '2026-08-29T06:09:59.999Z' }),
+    { due: false, reason: 'interval', dueAt: '2026-08-29T06:10:00.000Z', cleanupEligible: false }
+  );
+  assert.equal(
+    workItems.v2P0ReminderDecision(pending, { now: '2026-08-29T06:10:00.000Z' }).reconcile,
+    true
+  );
+
+  const reconciling = activeItem({
+    priority: 'p0',
+    payload: { requires_human_action: true, p0_delivery: {
+      ...baseDelivery,
+      status: 'reconciling',
+      reconcile_owner: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      reconcile_token: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      reconcile_claimed_at: '2026-08-29T06:10:00.000Z',
+      reconcile_expires_at: '2026-08-29T06:12:00.000Z'
+    } }
+  });
+  assert.deepEqual(
+    workItems.v2P0ReminderDecision(reconciling, { now: '2026-08-29T06:11:59.999Z' }),
+    { due: false, reason: 'reconciling', cleanupEligible: false }
+  );
+  const expired = workItems.v2P0ReminderDecision(reconciling, { now: '2026-08-29T06:12:00.000Z' });
+  assert.equal(expired.reconcile, true);
+  assert.equal(expired.generation, 1);
+  assert.equal(expired.clientMessageId, clientId);
+});
+
 test('v2 P0 canonical acknowledgement stops separate alerts but leaves the unresolved item active', async (t) => {
   for (const [name, acknowledgement, reason] of [
     ['effective acknowledgement', '2026-08-29T06:00:00.000Z', 'acknowledged'],

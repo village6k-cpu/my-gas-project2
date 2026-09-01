@@ -48,8 +48,9 @@ const PAYLOAD_STRING_LIMITS = Object.freeze({
 });
 const LIFECYCLE_PAYLOAD_STRING_LIMITS = Object.freeze({ p0_acknowledged_at: 40 });
 const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
-const P0_DELIVERY_STATES = new Set(['claimed', 'reconcile_pending', 'retry_pending', 'delivered']);
+const P0_DELIVERY_STATES = new Set(['claimed', 'reconcile_pending', 'reconciling', 'retry_pending', 'delivered']);
 const P0_CLIENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const P0_RECONCILIATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -407,17 +408,46 @@ function canonicalP0Delivery(value) {
     || value.attempt !== value.generation
     || typeof value.client_message_id !== 'string'
     || !P0_CLIENT_MESSAGE_ID.test(value.client_message_id)) return null;
+  const allowedByStatus = {
+    claimed: ['status', 'generation', 'attempt', 'client_message_id', 'claimed_at', 'claim_expires_at'],
+    reconcile_pending: [
+      'status', 'generation', 'attempt', 'client_message_id', 'claimed_at', 'claim_expires_at',
+      'last_attempt_at', 'next_at'
+    ],
+    reconciling: [
+      'status', 'generation', 'attempt', 'client_message_id', 'claimed_at', 'claim_expires_at',
+      'last_attempt_at', 'next_at', 'reconcile_owner', 'reconcile_token',
+      'reconcile_claimed_at', 'reconcile_expires_at'
+    ],
+    retry_pending: [
+      'status', 'generation', 'attempt', 'client_message_id', 'claimed_at', 'claim_expires_at',
+      'last_attempt_at', 'next_at'
+    ],
+    delivered: [
+      'status', 'generation', 'attempt', 'client_message_id', 'claimed_at', 'claim_expires_at',
+      'last_attempt_at', 'delivered_at', 'next_at', 'readback'
+    ]
+  };
+  if (Object.keys(value).some((key) => !allowedByStatus[value.status].includes(key))) return null;
   const result = {
     status: value.status,
     generation: value.generation,
     attempt: value.attempt,
     client_message_id: value.client_message_id
   };
-  for (const key of ['claimed_at', 'claim_expires_at', 'last_attempt_at', 'delivered_at', 'next_at']) {
+  for (const key of [
+    'claimed_at', 'claim_expires_at', 'last_attempt_at', 'delivered_at', 'next_at',
+    'reconcile_claimed_at', 'reconcile_expires_at'
+  ]) {
     if (value[key] === undefined || value[key] === null) continue;
     const canonical = canonicalP0Acknowledgement(value[key]);
     if (!canonical) return null;
     result[key] = canonical.toISOString();
+  }
+  for (const key of ['reconcile_owner', 'reconcile_token']) {
+    if (value[key] === undefined || value[key] === null) continue;
+    if (typeof value[key] !== 'string' || !P0_RECONCILIATION_ID.test(value[key])) return null;
+    result[key] = value[key];
   }
   if (value.readback !== undefined) {
     if (!isRecord(value.readback)
@@ -432,7 +462,11 @@ function canonicalP0Delivery(value) {
   }
   if (value.status === 'claimed' && (!result.claimed_at || !result.claim_expires_at)) return null;
   if (value.status === 'reconcile_pending'
-    && (!result.claimed_at || !result.claim_expires_at || !result.last_attempt_at)) return null;
+    && (!result.claimed_at || !result.claim_expires_at || !result.last_attempt_at || !result.next_at)) return null;
+  if (value.status === 'reconciling'
+    && (!result.claimed_at || !result.claim_expires_at || !result.last_attempt_at || !result.next_at
+      || !result.reconcile_owner || !result.reconcile_token
+      || !result.reconcile_claimed_at || !result.reconcile_expires_at)) return null;
   if (value.status === 'retry_pending' && (!result.last_attempt_at || !result.next_at)) return null;
   if (value.status === 'delivered' && (!result.delivered_at || !result.next_at || !result.readback)) return null;
   return result;
@@ -485,10 +519,24 @@ export function v2P0ReminderDecision(item, {
   if (rawDelivery !== undefined && !delivery) {
     return { due: false, reason: 'invalid_delivery', cleanupEligible: false };
   }
-  if (delivery?.status === 'claimed' || delivery?.status === 'reconcile_pending') {
-    const expiresAtMs = Date.parse(delivery.claim_expires_at);
-    if (delivery.status === 'claimed' && expiresAtMs > nowMs) {
-      return { due: false, reason: 'claimed', cleanupEligible: false };
+  if (delivery?.status === 'claimed' || delivery?.status === 'reconcile_pending'
+    || delivery?.status === 'reconciling') {
+    const dueAtMs = delivery.status === 'claimed'
+      ? Date.parse(delivery.claim_expires_at)
+      : delivery.status === 'reconcile_pending'
+        ? Date.parse(delivery.next_at)
+        : Date.parse(delivery.reconcile_expires_at);
+    if (dueAtMs > nowMs) {
+      if (delivery.status === 'reconcile_pending') {
+        return {
+          due: false, reason: 'interval', dueAt: delivery.next_at, cleanupEligible: false
+        };
+      }
+      return {
+        due: false,
+        reason: delivery.status === 'reconciling' ? 'reconciling' : 'claimed',
+        cleanupEligible: false
+      };
     }
     return {
       due: false,

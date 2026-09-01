@@ -2488,7 +2488,12 @@ test('v2 P0 review round 1 dry readback is authoritative and never claims, searc
     store: {
       async listDueP0Work(input) {
         calls.push(['list', input]);
-        return { rows: Array.from({ length: 50 }, () => ({})), eligibleCount: 61, selectedCount: 50, omittedCount: 11 };
+        return { rows: Array.from({ length: 50 }, () => ({
+          id: '11111111-1111-4111-8111-111111111111', version: 7,
+          priority: 'p0', state: 'open', first_opened_at: '2026-09-01T05:00:00.000Z',
+          title: 'Immediate review', summary: 'Review required',
+          payload: { requires_human_action: true }
+        })), eligibleCount: 61, selectedCount: 50, omittedCount: 11 };
       },
       async claimP0Delivery() { calls.push(['claim']); },
       async settleP0Delivery() { calls.push(['settle']); },
@@ -2533,6 +2538,7 @@ test('v2 P0 review round 1 known Slack coordinates survive lost settlement respo
           claim_expires_at: input.claimExpiresAt
         } } } };
       },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
       async settleP0Delivery(input) {
         settlements.push(input);
         throw new Error('response lost after commit');
@@ -2600,6 +2606,247 @@ test('v2 P0 review round 1 exposes finite content-free cutover readiness health'
   assert.doesNotMatch(JSON.stringify(health), /must-not-leak/);
 });
 
+test('v2 P0 review round 2 dry readback validates every selected delivery before readiness', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'unknown', generation: 1, attempt: 1,
+      client_message_id: '11111111-2222-5333-8444-555555555555'
+    } }
+  };
+  const calls = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: false,
+      digestChannelId: 'CP0'
+    },
+    store: {
+      async listDueP0Work() {
+        return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 };
+      },
+      async claimP0Delivery() { calls.push('claim'); },
+      async claimP0Reconciliation() { calls.push('reconcile_claim'); },
+      async settleP0Delivery() { calls.push('settle'); },
+      async readP0Delivery() { calls.push('read'); }
+    },
+    slack: {
+      async postMessage() { calls.push('post'); },
+      async findMessageByClientId() { calls.push('search'); }
+    },
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  assert.deepEqual(await runtime.sweep('dry'), {
+    status: 'not_ready', mode: 'readback', eligibleCount: 1, selectedCount: 1,
+    omittedCount: 0, scanned: 1, ready: false, errors: ['invalid_delivery']
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('v2 P0 review round 2 self-review rejects unprocessable dry rows with one finite error', async () => {
+  const base = {
+    version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required'
+  };
+  const rows = [{
+    ...base,
+    id: '11111111-1111-4111-8111-111111111111',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'delivered', generation: 1, attempt: 1,
+      client_message_id: '11111111-2222-5333-8444-555555555555',
+      delivered_at: '2026-09-02T05:10:00.000Z', next_at: '2026-09-02T05:30:00.000Z',
+      readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-09-02T05:10:00.000Z' },
+      unexpected: 'field'
+    } }
+  }, {
+    ...base,
+    id: 'not-a-work-id',
+    payload: { requires_human_action: true }
+  }];
+  const calls = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: false, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows, eligibleCount: 2, selectedCount: 2, omittedCount: 0 }; },
+      async claimP0Delivery() { calls.push('claim'); },
+      async claimP0Reconciliation() { calls.push('reconcile_claim'); },
+      async settleP0Delivery() { calls.push('settle'); },
+      async readP0Delivery() { calls.push('read'); }
+    },
+    slack: {
+      async postMessage() { calls.push('post'); },
+      async findMessageByClientId() { calls.push('search'); }
+    },
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  assert.deepEqual(await runtime.sweep('dry'), {
+    status: 'not_ready', mode: 'readback', eligibleCount: 2, selectedCount: 2,
+    omittedCount: 0, scanned: 2, ready: false, errors: ['invalid_delivery']
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('v2 P0 review round 2 two runtimes reclaim one expired lease and post exactly once', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const expired = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconciling', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T05:52:00.000Z',
+      reconcile_owner: '99999999-9999-4999-8999-999999999999',
+      reconcile_token: '88888888-8888-4888-8888-888888888888',
+      reconcile_claimed_at: '2026-09-02T05:55:00.000Z', reconcile_expires_at: '2026-09-02T05:57:00.000Z'
+    } }
+  };
+  let winner = null;
+  let posts = 0;
+  let searches = 0;
+  const settlements = [];
+  const store = {
+    async listDueP0Work() {
+      return { rows: [expired], eligibleCount: 1, selectedCount: 1, omittedCount: 0 };
+    },
+    async claimP0Delivery() { throw new Error('must retain the same generation'); },
+    async claimP0Reconciliation(input) {
+      if (winner !== null) return { claimed: false, row: null };
+      winner = input.reconcileOwner;
+      return { claimed: true, row: { ...expired, payload: { ...expired.payload, p0_delivery: {
+        ...expired.payload.p0_delivery,
+        reconcile_owner: input.reconcileOwner,
+        reconcile_token: '77777777-7777-4777-8777-777777777777',
+        reconcile_claimed_at: input.now,
+        reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+      } } } };
+    },
+    async settleP0Delivery(input) { settlements.push(input); return { applied: true, row: expired }; },
+    async readP0Delivery() { throw new Error('read must not run'); }
+  };
+  const slack = {
+    async findMessageByClientId() { searches += 1; return null; },
+    async postMessage() { posts += 1; return { channel: 'CP0', ts: '100.1' }; }
+  };
+  const makeRuntime = (reconciliationOwner) => createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    store, slack, reconciliationOwner,
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  const results = await Promise.all([
+    makeRuntime('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa').sweep('test'),
+    makeRuntime('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb').sweep('test')
+  ]);
+  assert.equal(posts, 1);
+  assert.equal(searches, 1);
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0].expectedStatus, 'reconciling');
+  assert.equal(settlements[0].reconcileOwner, winner);
+  assert.equal(settlements[0].reconcileToken, '77777777-7777-4777-8777-777777777777');
+  assert.equal(results.reduce((sum, result) => sum + result.delivered, 0), 1);
+});
+
+test('v2 P0 review round 2 definite reconciliation rejection becomes durable same-generation retry', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const pending = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T06:00:00.000Z'
+    } }
+  };
+  const records = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    reconciliationOwner: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    store: {
+      async listDueP0Work() { return { rows: [pending], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { throw new Error('must not claim a new generation'); },
+      async claimP0Reconciliation(input) {
+        return { claimed: true, row: { ...pending, payload: { ...pending.payload, p0_delivery: {
+          ...pending.payload.p0_delivery, status: 'reconciling',
+          reconcile_owner: input.reconcileOwner,
+          reconcile_token: '77777777-7777-4777-8777-777777777777',
+          reconcile_claimed_at: input.now, reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+        } } } };
+      },
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: pending }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async findMessageByClientId() { return null; },
+      async postMessage() { throw Object.assign(new Error('private rejection'), { ambiguous: false }); }
+    },
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.deepEqual(result.errors, ['post_failed']);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].expectedStatus, 'reconciling');
+  assert.equal(records[0].status, 'retry_pending');
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.equal(records[0].clientMessageId, clientId);
+  assert.equal(records[0].reconcileToken, '77777777-7777-4777-8777-777777777777');
+});
+
+test('v2 P0 review round 2 ambiguous reconciliation releases to a delayed same-ID reconcile path', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const pending = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T06:00:00.000Z'
+    } }
+  };
+  const records = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    reconciliationOwner: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    store: {
+      async listDueP0Work() { return { rows: [pending], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { throw new Error('must not claim a new generation'); },
+      async claimP0Reconciliation(input) {
+        return { claimed: true, row: { ...pending, payload: { ...pending.payload, p0_delivery: {
+          ...pending.payload.p0_delivery, status: 'reconciling',
+          reconcile_owner: input.reconcileOwner,
+          reconcile_token: '77777777-7777-4777-8777-777777777777',
+          reconcile_claimed_at: input.now, reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+        } } } };
+      },
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: pending }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async findMessageByClientId() { return null; },
+      async postMessage() { throw Object.assign(new Error('private ambiguity'), { ambiguous: true }); }
+    },
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.deepEqual(result.errors, ['post_failed']);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, 'reconcile_pending');
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.equal(records[0].clientMessageId, clientId);
+});
+
 test('v2 P0 stale claim CAS never reaches Slack', async () => {
   let posts = 0;
   const row = {
@@ -2612,6 +2859,7 @@ test('v2 P0 stale claim CAS never reaches Slack', async () => {
     store: {
       async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
       async claimP0Delivery() { return { applied: false, row: null }; },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
       async settleP0Delivery() { throw new Error('settle must not run'); },
       async readP0Delivery() { throw new Error('read must not run'); }
     },
@@ -2649,6 +2897,15 @@ test('v2 P0 ambiguous retry reconciles the same generation and deterministic cli
     store: {
       async listDueP0Work() { return { rows: [claimed], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
       async claimP0Delivery() { throw new Error('same generation must reconcile before claiming'); },
+      async claimP0Reconciliation(input) {
+        return { claimed: true, row: { ...claimed, payload: { ...claimed.payload, p0_delivery: {
+          ...claimed.payload.p0_delivery, status: 'reconciling',
+          reconcile_owner: input.reconcileOwner,
+          reconcile_token: '77777777-7777-4777-8777-777777777777',
+          reconcile_claimed_at: input.now,
+          reconcile_expires_at: '2026-08-29T06:11:01.000Z'
+        } } } };
+      },
       async settleP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; },
       async readP0Delivery() { throw new Error('read must not run'); }
     },
@@ -2659,7 +2916,7 @@ test('v2 P0 ambiguous retry reconciles the same generation and deterministic cli
         return { channel: 'CP0', ts: '100.1', client_msg_id: clientId };
       }
     },
-    now: () => new Date('2026-08-29T06:00:00.000Z')
+    now: () => new Date('2026-08-29T06:09:01.000Z')
   });
 
   const result = await runtime.sweep('test');
@@ -2718,6 +2975,7 @@ test('v2 P0 ambiguous Slack result durably records reconciliation before any lat
           claim_expires_at: input.claimExpiresAt
         } } } };
       },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
       async settleP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; },
       async readP0Delivery() { throw new Error('read must not run'); }
     },
@@ -2756,6 +3014,7 @@ test('v2 P0 definite Slack rejection records a same-generation retry without lea
           claim_expires_at: input.claimExpiresAt
         } } } };
       },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
       async settleP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; },
       async readP0Delivery() { throw new Error('read must not run'); }
     },
@@ -2792,6 +3051,7 @@ test('v2 P0 alert carries a current versioned acknowledgement action', async () 
           claim_expires_at: input.claimExpiresAt
         } } } };
       },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
       async settleP0Delivery() { return { applied: true, row }; },
       async readP0Delivery() { throw new Error('read must not run'); }
     },
