@@ -1741,6 +1741,55 @@ test('notice cleanup bounds ownership mutations and skips unrelated active or am
   }
 });
 
+test('notice cleanup completes a bounded b-then-a receipt batch under the shared multi-key lock contract', async () => {
+  const db = await createNoticeCleanupDatabase();
+  const receiptB = '37500000-0000-4000-8000-000000000001';
+  const receiptA = '37500000-0000-4000-8000-000000000002';
+  const workId = '37600000-0000-4000-8000-000000000001';
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, source_event_keys, room_key, title, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, version, payload
+      ) values ($1, 'work:lock-order', array['event-lock-a', 'event-lock-b'],
+        'room:lock-order', 'Lock order', 'human_review', 'normal', 'open',
+        '2026-08-31T05:00:00Z', '2026-08-31T05:00:00Z', '2026-08-31T05:00:00Z', 1, '{}')
+    `, [workId]);
+    await db.query(`
+      insert into public.message_notification_receipts (
+        id, source, source_event_key, room_key, received_at, notification_state,
+        client_message_id, slack_channel_id, slack_message_ts, delivered_at,
+        payload, created_at, updated_at
+      ) values
+        ($1, 'kakao', 'event-lock-b', 'room:lock-order', '2026-08-31T05:00:00Z', 'delivered',
+          gen_random_uuid(), 'CNOTICE', '395.1', '2026-08-31T05:00:01Z', '{}',
+          '2026-08-31T05:00:00Z', '2026-08-31T05:00:00Z'),
+        ($2, 'kakao', 'event-lock-a', 'room:lock-order', '2026-08-31T05:00:00Z', 'delivered',
+          gen_random_uuid(), 'CNOTICE', '395.2', '2026-08-31T05:00:01Z', '{}',
+          '2026-08-31T05:00:00Z', '2026-08-31T05:01:00Z')
+    `, [receiptB, receiptA]);
+    await db.query(`
+      insert into public.digest_runs (
+        window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, slack_channel_id, slack_message_ts, delivered_at
+      ) values ('2026-08-31T03:00:00Z', '2026-08-31T06:00:00Z', '2026-08-31T06:00:00Z',
+        'delivered', 'slack:CNOTICE', $1::jsonb, '2026-08-31T06:00:00Z',
+        'CNOTICE', '495.1', '2026-08-31T06:00:00Z')
+    `, [JSON.stringify([
+      { id: workId, version: 1, inclusionReason: 'actionable', priority: 'normal' }
+    ])]);
+    const claimed = (await db.query(`
+      select public.claim_notice_cleanup_batch_v2(
+        '2026-08-31T06:00:01Z', 'bridge:lock-order', 120, 25
+      ) as result
+    `)).rows[0].result;
+    assert.deepEqual(claimed.map((row) => row.id), [receiptB, receiptA],
+      'opposite receipt order still completes after the implementation pre-acquires lexical source locks');
+  } finally {
+    await db.close();
+  }
+});
+
 test('notice cleanup terminal CAS uses database execution time at and after lease expiry', async () => {
   const db = await createNoticeCleanupDatabase();
   const receiptId = '33000000-0000-4000-8000-000000000001';

@@ -167,6 +167,8 @@ declare
   v_match_count integer;
   v_work_id uuid;
   v_work_version integer;
+  v_candidate_ids uuid[];
+  v_source_key text;
 begin
   if p_now is null or not isfinite(p_now)
     or p_cleanup_owner is null or p_cleanup_owner <> btrim(p_cleanup_owner)
@@ -176,8 +178,14 @@ begin
     raise exception 'invalid notice cleanup input';
   end if;
 
-  for v_row in
-    select receipt.*
+  select coalesce(array_agg(candidate.id order by
+      candidate.sort_priority, candidate.updated_at, candidate.id), array[]::uuid[])
+  into v_candidate_ids
+  from (
+    select receipt.id,
+      case when receipt.urgency = 'p0' and receipt.cleanup_state = 'blocked_p0' then 1 else 0 end
+        as sort_priority,
+      receipt.updated_at
     from public.message_notification_receipts as receipt
     where receipt.notification_state in ('delivered','cleanup_pending')
       and receipt.cleanup_state in ('idle','pending','failed','blocked_p0')
@@ -245,11 +253,26 @@ begin
       receipt.id
     for update of receipt skip locked
     limit p_limit
+  ) as candidate;
+
+  for v_source_key in
+    select distinct receipt.source_event_key
+    from public.message_notification_receipts as receipt
+    where receipt.id = any(v_candidate_ids)
+    order by receipt.source_event_key
   loop
     perform pg_advisory_xact_lock(hashtextextended(
-      'notice-cleanup-source:' || v_row.source_event_key,
+      'notice-cleanup-source:' || v_source_key,
       91420260901
     ));
+  end loop;
+
+  for v_row in
+    select receipt.*
+    from public.message_notification_receipts as receipt
+    where receipt.id = any(v_candidate_ids)
+    order by array_position(v_candidate_ids, receipt.id)
+  loop
     v_acknowledged := false;
     v_digest_eligible := v_row.notification_state = 'cleanup_pending';
     v_match_count := 0;

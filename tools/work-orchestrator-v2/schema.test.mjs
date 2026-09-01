@@ -295,3 +295,23 @@ test('work source removal and deletion take the same cleanup ownership lock', ()
     /create trigger capture_notice_cleanup_work_sources_v2\s+after insert or delete or update of source_event_keys, version/i,
     'DELETE ownership changes invoke the same advisory-lock trigger');
 });
+
+test('bounded cleanup candidates acquire every source lock lexically before receipt processing', () => {
+  const sql = readFileSync(join(migrationsDirectory, noticeCleanupMigrationFiles[0]), 'utf8');
+  const claim = sql.match(/create function public\.claim_notice_cleanup_batch_v2\([\s\S]*?\$\$;/i)?.[0];
+  assert.ok(claim, 'claim function exists');
+  const boundedRows = claim.search(
+    /array_agg\(candidate\.id[\s\S]*?into\s+v_candidate_ids[\s\S]*?for update of receipt skip locked\s+limit p_limit/i
+  );
+  const orderedLocks = claim.search(
+    /for v_source_key in[\s\S]*?select distinct receipt\.source_event_key[\s\S]*?id = any\(v_candidate_ids\)[\s\S]*?order by receipt\.source_event_key/i
+  );
+  const receiptProcessing = claim.search(
+    /for v_row in[\s\S]*?id = any\(v_candidate_ids\)[\s\S]*?array_position\(v_candidate_ids, receipt\.id\)/i
+  );
+  assert.ok(boundedRows >= 0, 'receipt rows are bounded and locked into one candidate set');
+  assert.ok(orderedLocks > boundedRows, 'all distinct source locks are acquired after bounded row locks');
+  assert.ok(receiptProcessing > orderedLocks, 'receipt mutation starts only after every source lock is held');
+  assert.match(claim.slice(orderedLocks, receiptProcessing),
+    /pg_advisory_xact_lock\(hashtextextended\(\s*'notice-cleanup-source:'\s*\|\|\s*v_source_key,\s*91420260901/i);
+});
