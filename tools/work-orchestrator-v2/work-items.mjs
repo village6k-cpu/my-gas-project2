@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export const WORK_ACTIONS = Object.freeze([
   'progress',
   'snooze',
@@ -46,6 +48,8 @@ const PAYLOAD_STRING_LIMITS = Object.freeze({
 });
 const LIFECYCLE_PAYLOAD_STRING_LIMITS = Object.freeze({ p0_acknowledged_at: 40 });
 const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
+const P0_DELIVERY_STATES = new Set(['claimed', 'reconcile_pending', 'retry_pending', 'delivered']);
+const P0_CLIENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -183,6 +187,10 @@ function safePayload(row, { includeLifecycle = false } = {}) {
     if (value === null || value === undefined || value === '') continue;
     const bounded = boundedText(value, limit);
     if (bounded) result[key] = bounded;
+  }
+  if (includeLifecycle && source.p0_delivery !== undefined) {
+    const delivery = canonicalP0Delivery(source.p0_delivery);
+    if (delivery) result.p0_delivery = delivery;
   }
   return result;
 }
@@ -390,6 +398,150 @@ function p0Acknowledged(item, cutoff) {
   return date !== null
     && !Number.isNaN(cutoffDate.getTime())
     && date.getTime() <= cutoffDate.getTime();
+}
+
+function canonicalP0Delivery(value) {
+  if (!isRecord(value) || !P0_DELIVERY_STATES.has(value.status)
+    || !Number.isSafeInteger(value.generation) || value.generation < 1
+    || !Number.isSafeInteger(value.attempt) || value.attempt < 1
+    || value.attempt !== value.generation
+    || typeof value.client_message_id !== 'string'
+    || !P0_CLIENT_MESSAGE_ID.test(value.client_message_id)) return null;
+  const result = {
+    status: value.status,
+    generation: value.generation,
+    attempt: value.attempt,
+    client_message_id: value.client_message_id
+  };
+  for (const key of ['claimed_at', 'claim_expires_at', 'last_attempt_at', 'delivered_at', 'next_at']) {
+    if (value[key] === undefined || value[key] === null) continue;
+    const canonical = canonicalP0Acknowledgement(value[key]);
+    if (!canonical) return null;
+    result[key] = canonical.toISOString();
+  }
+  if (value.readback !== undefined) {
+    if (!isRecord(value.readback)
+      || typeof value.readback.channel_id !== 'string' || !/^[A-Z0-9][A-Z0-9_-]{0,79}$/.test(value.readback.channel_id)
+      || typeof value.readback.message_ts !== 'string' || !/^[0-9]{1,20}\.[0-9]{1,20}$/.test(value.readback.message_ts)
+      || !canonicalP0Acknowledgement(value.readback.confirmed_at)) return null;
+    result.readback = {
+      channel_id: value.readback.channel_id,
+      message_ts: value.readback.message_ts,
+      confirmed_at: value.readback.confirmed_at
+    };
+  }
+  if (value.status === 'claimed' && (!result.claimed_at || !result.claim_expires_at)) return null;
+  if (value.status === 'reconcile_pending'
+    && (!result.claimed_at || !result.claim_expires_at || !result.last_attempt_at)) return null;
+  if (value.status === 'retry_pending' && (!result.last_attempt_at || !result.next_at)) return null;
+  if (value.status === 'delivered' && (!result.delivered_at || !result.next_at || !result.readback)) return null;
+  return result;
+}
+
+function p0BackoffMs(attempts, initialMs, capMs) {
+  return Math.min(initialMs * 2 ** Math.max(0, attempts), capMs);
+}
+
+function deterministicV2P0ClientMessageId(itemId, generation) {
+  const chars = createHash('sha256')
+    .update(`village-work-orchestrator-v2-p0:${itemId}:${generation}`)
+    .digest('hex')
+    .slice(0, 32)
+    .split('');
+  chars[12] = '5';
+  chars[16] = ['8', '9', 'a', 'b'][Number.parseInt(chars[16], 16) % 4];
+  const hex = chars.join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function v2P0ReminderDecision(item, {
+  now,
+  initialMs = 600_000,
+  maxIntervalMs = 3_600_000,
+  maxAttempts = 3
+} = {}) {
+  if (!isRecord(item) || item.priority !== 'p0') {
+    return { due: false, reason: 'not_p0', cleanupEligible: false };
+  }
+  const cutoff = isoDate(now, 'P0 reminder clock');
+  const acknowledged = p0Acknowledged(item, cutoff);
+  if (TERMINAL_STATES.has(item.state)) {
+    return { due: false, reason: 'terminal', cleanupEligible: acknowledged };
+  }
+  if (!ACTIVE_STATES.has(item.state)) return { due: false, reason: 'invalid_state', cleanupEligible: false };
+  if (acknowledged) return { due: false, reason: 'acknowledged', cleanupEligible: true };
+  const initial = Number(initialMs);
+  const cap = Number(maxIntervalMs);
+  const limit = Number(maxAttempts);
+  if (!Number.isSafeInteger(initial) || initial < 1
+    || !Number.isSafeInteger(cap) || cap < initial
+    || !Number.isSafeInteger(limit) || limit < 0) {
+    throw new Error('invalid P0 reminder policy');
+  }
+  if (limit === 0) return { due: false, reason: 'disabled', cleanupEligible: false };
+  const nowMs = Date.parse(cutoff);
+  const rawDelivery = isRecord(item.payload) ? item.payload.p0_delivery : undefined;
+  const delivery = rawDelivery === undefined ? null : canonicalP0Delivery(rawDelivery);
+  if (rawDelivery !== undefined && !delivery) {
+    return { due: false, reason: 'invalid_delivery', cleanupEligible: false };
+  }
+  if (delivery?.status === 'claimed' || delivery?.status === 'reconcile_pending') {
+    const expiresAtMs = Date.parse(delivery.claim_expires_at);
+    if (delivery.status === 'claimed' && expiresAtMs > nowMs) {
+      return { due: false, reason: 'claimed', cleanupEligible: false };
+    }
+    return {
+      due: false,
+      reason: 'reconcile',
+      reconcile: true,
+      generation: delivery.generation,
+      attempt: delivery.attempt,
+      clientMessageId: delivery.client_message_id,
+      cleanupEligible: false
+    };
+  }
+  const attempts = delivery?.attempt ?? 0;
+  if (attempts >= limit) return { due: false, reason: 'max_attempts', cleanupEligible: false };
+  const reference = delivery?.delivered_at || delivery?.last_attempt_at || item.first_opened_at;
+  const referenceIso = isoDate(reference, 'P0 reminder reference');
+  const dueAtMs = delivery?.status === 'retry_pending'
+    ? Date.parse(delivery.next_at)
+    : Date.parse(referenceIso) + p0BackoffMs(attempts, initial, cap);
+  const dueAt = new Date(dueAtMs).toISOString();
+  if (nowMs < dueAtMs) return { due: false, reason: 'interval', dueAt, cleanupEligible: false };
+  return {
+    due: true,
+    reason: 'due',
+    attempt: attempts + 1,
+    generation: (delivery?.generation ?? 0) + 1,
+    dueAt,
+    cleanupEligible: false
+  };
+}
+
+export function buildV2P0DeliveryClaim(item, options = {}) {
+  if (!isRecord(item) || typeof item.id !== 'string' || !UUID.test(item.id)
+    || !Number.isSafeInteger(item.version) || item.version < 1) {
+    throw new Error('invalid P0 work item');
+  }
+  const decision = v2P0ReminderDecision(item, options);
+  if (!decision.due) throw new Error(`P0 reminder is not due: ${decision.reason}`);
+  const claimedAt = isoDate(options.now, 'P0 claim clock');
+  const claimTtlMs = Number(options.claimTtlMs ?? 120_000);
+  if (!Number.isSafeInteger(claimTtlMs) || claimTtlMs < 1 || claimTtlMs > 900_000) {
+    throw new Error('invalid P0 claim policy');
+  }
+  const current = isRecord(item.payload) ? canonicalP0Delivery(item.payload.p0_delivery) : null;
+  const generation = decision.generation;
+  return {
+    expectedVersion: item.version,
+    expectedGeneration: current?.generation ?? 0,
+    generation,
+    attempt: decision.attempt,
+    clientMessageId: deterministicV2P0ClientMessageId(item.id, generation),
+    claimedAt,
+    claimExpiresAt: new Date(Date.parse(claimedAt) + claimTtlMs).toISOString()
+  };
 }
 
 export function applyWorkAction(item, action, now = new Date()) {

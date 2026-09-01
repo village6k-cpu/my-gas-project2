@@ -32,6 +32,11 @@ import {
 import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-notifications.mjs';
 import { digestScheduleWindow, runDigestCycle } from '../work-orchestrator-v2/digest-runner.mjs';
 import { processPendingWorkAction } from '../work-orchestrator-v2/work-actions.mjs';
+import {
+  buildV2P0DeliveryClaim,
+  encodeWorkActionValue,
+  v2P0ReminderDecision
+} from '../work-orchestrator-v2/work-items.mjs';
 import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shadow-receipts.mjs';
 import { createSlackClient } from '../work-orchestrator-v2/slack-client.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
@@ -1671,7 +1676,9 @@ const workOrchestratorShadowRuntime = createWorkOrchestratorShadowRuntime({
   store: workOrchestratorStore
 });
 let workOrchestratorSlackClient = null;
-if ((CONFIG.workOrchestrator.immediateEnabled || CONFIG.workOrchestrator.digestEnabled)
+if ((CONFIG.workOrchestrator.immediateEnabled
+    || CONFIG.workOrchestrator.workItemsEnabled
+    || CONFIG.workOrchestrator.digestEnabled)
   && CONFIG.slackBotToken.trim()) {
   try {
     workOrchestratorSlackClient = createSlackClient({ token: CONFIG.slackBotToken });
@@ -1729,6 +1736,28 @@ const workOrchestratorImmediateNoticeUpdatePoller = createImmediateNoticeUpdateP
   config: CONFIG.workOrchestrator,
   store: workOrchestratorStore,
   slack: workOrchestratorSlackClient
+});
+let workOrchestratorP0Store = null;
+if (workOrchestratorCredentialsPresent) {
+  try {
+    workOrchestratorP0Store = createV2P0Store({
+      supabaseUrl: CONFIG.supabaseUrl,
+      serviceRoleKey: CONFIG.supabaseServiceRoleKey
+    });
+  } catch {
+    workOrchestratorP0Store = null;
+  }
+}
+const workOrchestratorP0Runtime = createWorkOrchestratorP0Runtime({
+  config: {
+    ...CONFIG.workOrchestrator,
+    digestChannelId: CONFIG.workOrchestrator.digestChannelId || CONFIG.workOrchestrator.inboxChannelId
+  },
+  store: workOrchestratorP0Store,
+  slack: workOrchestratorSlackClient,
+  mentionUserIds: String(process.env.SLACK_CARD_MENTION_USER_IDS || '')
+    .split(/[\s,]+/)
+    .filter(Boolean)
 });
 
 const state = {
@@ -2315,6 +2344,409 @@ export function buildP0SlackEscalationMessage(row = {}, claim = {}, { mentionUse
     unfurl_links: false,
     unfurl_media: false
   };
+}
+
+function finiteV2P0Error(value) {
+  return [
+    'list_failed', 'invalid_list', 'claim_failed', 'claim_conflict', 'post_failed',
+    'reconcile_failed', 'record_failed', 'record_conflict', 'invalid_delivery'
+  ].includes(value) ? value : 'p0_failed';
+}
+
+function v2P0SlackMessage(row, claim, channel, mentionUserIds = []) {
+  const mentions = [...new Set((Array.isArray(mentionUserIds) ? mentionUserIds : [])
+    .map((value) => String(value || '').trim())
+    .filter((value) => /^[UW][A-Z0-9]{1,79}$/.test(value)))]
+    .map((value) => `<@${value}>`)
+    .join(' ');
+  const title = String(row?.title || 'Immediate review required').trim().slice(0, 300);
+  const summary = String(row?.summary || '').trim().slice(0, 1000);
+  const text = `${mentions ? `${mentions} ` : ''}<!channel> 🚨 P0 unacknowledged · ${title}${summary ? ` · ${summary}` : ''}`;
+  const actionValue = encodeWorkActionValue({
+    id: row.id,
+    version: row.version,
+    action: { type: 'ack_p0' }
+  });
+  return {
+    channel,
+    text,
+    clientMsgId: claim.clientMessageId,
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text } },
+      {
+        type: 'actions',
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'P0 확인', emoji: true },
+          action_id: 'village_work_v2_ack_p0',
+          value: actionValue
+        }]
+      }
+    ]
+  };
+}
+
+export async function runP0EscalationPair({ v2Enabled = false, legacy = null, v2 = null } = {}) {
+  if (v2Enabled) return typeof v2 === 'function' ? v2() : null;
+  return typeof legacy === 'function' ? legacy() : null;
+}
+
+const V2_P0_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const V2_P0_CLIENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function v2P0Iso(value) {
+  if (typeof value !== 'string' || !/^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/.test(value)) {
+    throw new Error('invalid v2 P0 input');
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value) throw new Error('invalid v2 P0 input');
+  return value;
+}
+
+function v2P0Row(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)
+    || typeof row.id !== 'string' || !V2_P0_UUID.test(row.id)
+    || !Number.isSafeInteger(row.version) || row.version < 1
+    || row.priority !== 'p0' || !['open', 'in_progress', 'snoozed'].includes(row.state)
+    || typeof row.first_opened_at !== 'string' || Number.isNaN(Date.parse(row.first_opened_at))
+    || typeof row.title !== 'string' || row.title.length > 300
+    || typeof row.summary !== 'string' || row.summary.length > 2000
+    || !row.payload || typeof row.payload !== 'object' || Array.isArray(row.payload)) {
+    throw new Error('invalid v2 P0 response');
+  }
+  return row;
+}
+
+function v2P0MutationInput(input, { record = false } = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || typeof input.id !== 'string' || !V2_P0_UUID.test(input.id)
+    || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1
+    || !Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 0
+    || typeof input.clientMessageId !== 'string' || !V2_P0_CLIENT_ID.test(input.clientMessageId)
+    || !input.payload || typeof input.payload !== 'object' || Array.isArray(input.payload)) {
+    throw new Error('invalid v2 P0 input');
+  }
+  if (record) {
+    if (!['delivered', 'reconcile_pending', 'retry_pending'].includes(input.status)) {
+      throw new Error('invalid v2 P0 input');
+    }
+    v2P0Iso(input.recordedAt);
+    if (input.status === 'delivered'
+      && (typeof input.channelId !== 'string' || !/^[A-Z0-9][A-Z0-9_-]{0,79}$/.test(input.channelId)
+        || typeof input.messageTs !== 'string' || !/^[0-9]{1,20}\.[0-9]{1,20}$/.test(input.messageTs))) {
+      throw new Error('invalid v2 P0 input');
+    }
+  } else {
+    if (!Number.isSafeInteger(input.generation) || input.generation !== input.expectedGeneration + 1
+      || !Number.isSafeInteger(input.attempt) || input.attempt !== input.generation) {
+      throw new Error('invalid v2 P0 input');
+    }
+    v2P0Iso(input.claimedAt);
+    v2P0Iso(input.claimExpiresAt);
+  }
+  return input;
+}
+
+export function createV2P0Store({ supabaseUrl, serviceRoleKey, fetchImpl = fetch } = {}) {
+  const baseUrl = String(supabaseUrl || '').replace(/\/+$/, '');
+  const key = String(serviceRoleKey || '').trim();
+  if (!/^https:\/\//.test(baseUrl) || !key || typeof fetchImpl !== 'function') {
+    throw new Error('Work Orchestrator P0 store configuration is invalid');
+  }
+  const endpoint = `${baseUrl}/rest/v1/work_items_v2`;
+  const request = async (query, { method = 'GET', body = null, count = false } = {}) => {
+    let response;
+    try {
+      response = await fetchImpl(`${endpoint}?${query}`, {
+        method,
+        headers: {
+          apikey: key,
+          authorization: `Bearer ${key}`,
+          'content-type': 'application/json',
+          prefer: count ? 'count=exact' : 'return=representation'
+        },
+        ...(body ? { body: JSON.stringify(body) } : {})
+      });
+    } catch {
+      throw new Error('Work Orchestrator P0 store request failed');
+    }
+    if (!response?.ok) throw new Error('Work Orchestrator P0 store request failed');
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error('Work Orchestrator P0 store response is invalid');
+    }
+    return { data, response };
+  };
+
+  return {
+    async listP0Work({ now, limit } = {}) {
+      v2P0Iso(now);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('invalid v2 P0 input');
+      const query = new URLSearchParams({
+        select: 'id,version,priority,state,first_opened_at,title,summary,payload',
+        priority: 'eq.p0',
+        state: 'in.(open,in_progress,snoozed)',
+        order: 'first_opened_at.asc,id.asc',
+        limit: String(limit)
+      });
+      const { data, response } = await request(query.toString(), { count: true });
+      if (!Array.isArray(data) || data.length > limit) throw new Error('Work Orchestrator P0 store response is invalid');
+      const rows = data.map(v2P0Row);
+      const contentRange = response.headers?.get?.('content-range') || '';
+      const totalMatch = contentRange.match(/\/(\d+)$/);
+      if (!totalMatch) throw new Error('Work Orchestrator P0 store response is invalid');
+      const total = Number(totalMatch[1]);
+      if (!Number.isSafeInteger(total) || total < rows.length) throw new Error('Work Orchestrator P0 store response is invalid');
+      return { rows, omitted: total - rows.length };
+    },
+
+    async claimP0Delivery(input = {}) {
+      const normalized = v2P0MutationInput(input);
+      const delivery = {
+        status: 'claimed', generation: normalized.generation, attempt: normalized.attempt,
+        client_message_id: normalized.clientMessageId,
+        claimed_at: normalized.claimedAt, claim_expires_at: normalized.claimExpiresAt
+      };
+      const query = new URLSearchParams({
+        id: `eq.${normalized.id}`,
+        version: `eq.${normalized.expectedVersion}`,
+        priority: 'eq.p0',
+        state: 'in.(open,in_progress,snoozed)',
+        'payload->p0_delivery->>generation': normalized.expectedGeneration === 0
+          ? 'is.null'
+          : `eq.${normalized.expectedGeneration}`,
+        select: 'id,version,priority,state,first_opened_at,title,summary,payload'
+      });
+      const { data } = await request(query.toString(), {
+        method: 'PATCH',
+        body: { payload: { ...normalized.payload, p0_delivery: delivery } }
+      });
+      if (!Array.isArray(data) || data.length > 1) throw new Error('Work Orchestrator P0 store response is invalid');
+      if (!data.length) return { applied: false, row: null };
+      const row = v2P0Row(data[0]);
+      if (row.id !== normalized.id || row.version !== normalized.expectedVersion
+        || row.payload?.p0_delivery?.generation !== normalized.generation
+        || row.payload?.p0_delivery?.client_message_id !== normalized.clientMessageId) {
+        throw new Error('Work Orchestrator P0 store response is invalid');
+      }
+      return { applied: true, row };
+    },
+
+    async recordP0Delivery(input = {}) {
+      const normalized = v2P0MutationInput(input, { record: true });
+      const previous = normalized.payload.p0_delivery;
+      if (!previous || previous.generation !== normalized.expectedGeneration
+        || previous.client_message_id !== normalized.clientMessageId
+        || previous.attempt !== normalized.expectedGeneration) {
+        throw new Error('invalid v2 P0 input');
+      }
+      const base = {
+        ...previous,
+        status: normalized.status,
+        last_attempt_at: normalized.recordedAt
+      };
+      const delivery = normalized.status === 'delivered'
+        ? {
+            ...base,
+            delivered_at: normalized.recordedAt,
+            next_at: new Date(Date.parse(normalized.recordedAt) + p0SlackEscalationBackoffMs(previous.attempt)).toISOString(),
+            readback: {
+              channel_id: normalized.channelId,
+              message_ts: normalized.messageTs,
+              confirmed_at: normalized.recordedAt
+            }
+          }
+        : {
+            ...base,
+            next_at: new Date(Date.parse(normalized.recordedAt) + p0SlackEscalationBackoffMs(Math.max(0, previous.attempt - 1))).toISOString()
+          };
+      const query = new URLSearchParams({
+        id: `eq.${normalized.id}`,
+        version: `eq.${normalized.expectedVersion}`,
+        priority: 'eq.p0',
+        state: 'in.(open,in_progress,snoozed)',
+        'payload->p0_delivery->>generation': `eq.${normalized.expectedGeneration}`,
+        'payload->p0_delivery->>client_message_id': `eq.${normalized.clientMessageId}`,
+        select: 'id,version,priority,state,first_opened_at,title,summary,payload'
+      });
+      const { data } = await request(query.toString(), {
+        method: 'PATCH',
+        body: { payload: { ...normalized.payload, p0_delivery: delivery } }
+      });
+      if (!Array.isArray(data) || data.length > 1) throw new Error('Work Orchestrator P0 store response is invalid');
+      if (!data.length) return { applied: false, row: null };
+      const row = v2P0Row(data[0]);
+      if (row.id !== normalized.id || row.version !== normalized.expectedVersion
+        || row.payload?.p0_delivery?.status !== normalized.status
+        || row.payload?.p0_delivery?.generation !== normalized.expectedGeneration
+        || row.payload?.p0_delivery?.client_message_id !== normalized.clientMessageId) {
+        throw new Error('Work Orchestrator P0 store response is invalid');
+      }
+      return { applied: true, row };
+    }
+  };
+}
+
+export function createWorkOrchestratorP0Runtime({
+  config = {}, store = null, slack = null, now = () => new Date(), mentionUserIds = []
+} = {}) {
+  const enabled = config.workItemsEnabled === true;
+  const channel = String(config.digestChannelId || '').trim();
+  const localConfigReady = !enabled || Boolean(
+    channel
+    && store && typeof store.listP0Work === 'function'
+    && typeof store.claimP0Delivery === 'function'
+    && typeof store.recordP0Delivery === 'function'
+    && slack && typeof slack.postMessage === 'function'
+    && typeof slack.findMessageByClientId === 'function'
+  );
+  if (!localConfigReady) throw new Error('Work Orchestrator P0 local configuration is missing');
+
+  const sweep = async () => {
+    if (!enabled) return { status: 'disabled' };
+    const result = {
+      status: 'ok', scanned: 0, claimed: 0, delivered: 0, reconciled: 0,
+      skipped: 0, errors: [], omissions: 0
+    };
+    const cutoff = now().toISOString();
+    let listed;
+    try {
+      listed = await store.listP0Work({ now: cutoff, limit: 50 });
+    } catch {
+      return { ...result, status: 'error', errors: ['list_failed'] };
+    }
+    if (!listed || !Array.isArray(listed.rows)
+      || !Number.isSafeInteger(listed.omitted) || listed.omitted < 0 || listed.rows.length > 50) {
+      return { ...result, status: 'error', errors: ['invalid_list'] };
+    }
+    result.scanned = listed.rows.length;
+    result.omissions = listed.omitted;
+
+    for (const row of listed.rows) {
+      let decision;
+      try {
+        decision = v2P0ReminderDecision(row, { now: cutoff });
+      } catch {
+        result.errors.push('invalid_delivery');
+        continue;
+      }
+      if (decision.reason === 'invalid_delivery') {
+        result.errors.push('invalid_delivery');
+        continue;
+      }
+      const existingDelivery = row?.payload?.p0_delivery;
+      if (decision.reconcile === true) {
+        result.reconciled += 1;
+        let found;
+        try {
+          const oldest = Math.max(1, Date.parse(existingDelivery.claimed_at) / 1000 - 60);
+          const latest = Math.max(oldest + 1, Date.parse(cutoff) / 1000 + 60);
+          found = await slack.findMessageByClientId({
+            channel, clientMsgId: existingDelivery.client_message_id, oldest, latest
+          });
+        } catch {
+          result.errors.push('reconcile_failed');
+          continue;
+        }
+        let posted = found;
+        if (!posted) {
+          try {
+            posted = await slack.postMessage(v2P0SlackMessage(row, {
+              clientMessageId: existingDelivery.client_message_id
+            }, channel, mentionUserIds));
+          } catch {
+            result.errors.push('post_failed');
+            continue;
+          }
+        }
+        try {
+          const recorded = await store.recordP0Delivery({
+            id: row.id,
+            expectedVersion: row.version,
+            expectedGeneration: existingDelivery.generation,
+            clientMessageId: existingDelivery.client_message_id,
+            status: 'delivered',
+            channelId: posted.channel || channel,
+            messageTs: posted.ts,
+            recordedAt: cutoff,
+            payload: row.payload
+          });
+          if (recorded?.applied !== true) {
+            result.skipped += 1;
+            result.errors.push('record_conflict');
+            continue;
+          }
+          result.delivered += 1;
+        } catch {
+          result.errors.push('record_failed');
+        }
+        continue;
+      }
+      if (!decision.due) {
+        result.skipped += 1;
+        continue;
+      }
+      let claim;
+      try {
+        claim = buildV2P0DeliveryClaim(row, { now: cutoff, claimTtlMs: 120_000 });
+        const claimed = await store.claimP0Delivery({ id: row.id, payload: row.payload, ...claim });
+        if (claimed?.applied !== true || !claimed.row) {
+          result.skipped += 1;
+          continue;
+        }
+        result.claimed += 1;
+        const posted = await slack.postMessage(v2P0SlackMessage(row, claim, channel, mentionUserIds));
+        const recorded = await store.recordP0Delivery({
+          id: row.id,
+          expectedVersion: claimed.row.version,
+          expectedGeneration: claim.generation,
+          clientMessageId: claim.clientMessageId,
+          status: 'delivered',
+          channelId: posted.channel || channel,
+          messageTs: posted.ts,
+          recordedAt: cutoff,
+          payload: claimed.row.payload
+        });
+        if (recorded?.applied !== true) {
+          result.errors.push('record_conflict');
+          continue;
+        }
+        result.delivered += 1;
+      } catch (error) {
+        const code = claim ? 'post_failed' : 'claim_failed';
+        if (claim) {
+          try {
+            const recorded = await store.recordP0Delivery({
+              id: row.id,
+              expectedVersion: row.version,
+              expectedGeneration: claim.generation,
+              clientMessageId: claim.clientMessageId,
+              status: error?.ambiguous === true ? 'reconcile_pending' : 'retry_pending',
+              recordedAt: cutoff,
+              payload: {
+                ...row.payload,
+                p0_delivery: {
+                  status: 'claimed', generation: claim.generation, attempt: claim.attempt,
+                  client_message_id: claim.clientMessageId,
+                  claimed_at: claim.claimedAt, claim_expires_at: claim.claimExpiresAt
+                }
+              }
+            });
+            if (recorded?.applied !== true) result.errors.push('record_conflict');
+          } catch {
+            result.errors.push('record_failed');
+          }
+        }
+        result.errors.push(finiteV2P0Error(code));
+      }
+    }
+    if (result.errors.length || result.omissions > 0) result.status = 'error';
+    return result;
+  };
+
+  return { enabled, localConfigReady, sweep };
 }
 
 export function buildCorsHeaders() {
@@ -4048,7 +4480,7 @@ async function deliverDueP0SlackEscalation(row, nowMs = Date.now()) {
   }
 }
 
-async function runP0SlackEscalationSweep(reason = 'interval') {
+async function runLegacyP0SlackEscalationSweep(reason = 'interval') {
   if (!CONFIG.p0SlackEscalationEnabled || !supabaseConfigured() || !CONFIG.slackBotToken) {
     return { skipped: true, reason: 'disabled_or_unconfigured' };
   }
@@ -4076,6 +4508,24 @@ async function runP0SlackEscalationSweep(reason = 'interval') {
     state.p0SlackEscalationRunning = false;
   }
   return result;
+}
+
+async function runP0SlackEscalationSweep(reason = 'interval') {
+  return runP0EscalationPair({
+    v2Enabled: workOrchestratorP0Runtime.enabled,
+    legacy: () => runLegacyP0SlackEscalationSweep(reason),
+    v2: async () => {
+      if (state.p0SlackEscalationRunning) return { skipped: true, reason: 'already_running' };
+      state.p0SlackEscalationRunning = true;
+      try {
+        const result = await workOrchestratorP0Runtime.sweep(reason);
+        state.lastP0SlackEscalation = result;
+        return result;
+      } finally {
+        state.p0SlackEscalationRunning = false;
+      }
+    }
+  });
 }
 
 async function patchFollowUpCaseRowByStateVersion(row, expectedStateVersion, payloadPatch = {}, extraPatch = {}) {
@@ -5627,7 +6077,7 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
         CONFIG.slackActionPollIntervalMs
       ).unref?.();
     }
-    if (CONFIG.p0SlackEscalationEnabled) {
+    if (CONFIG.p0SlackEscalationEnabled || workOrchestratorP0Runtime.enabled) {
       setTimeout(() => runP0SlackEscalationSweep('startup'), 9000).unref?.();
       setInterval(() => runP0SlackEscalationSweep('interval'), CONFIG.p0SlackEscalationIntervalMs).unref?.();
     }

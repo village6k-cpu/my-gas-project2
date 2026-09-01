@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import * as workItems from './work-items.mjs';
 
 import {
   WORK_ACTIONS,
@@ -707,6 +708,116 @@ test('unacknowledged P0 work cannot be hidden by snooze or dismissal', () => {
     () => applyWorkAction(item, { type: 'dismiss', expectedVersion: 4, requestedBy: 'UOWNER' }, NOW),
     /acknowledge P0/i
   );
+});
+
+test('v2 P0 reminder uses 10m exponential retries, a 1h cap, and a three-attempt limit', async (t) => {
+  const base = activeItem({
+    priority: 'p0',
+    first_opened_at: '2026-08-29T06:00:00.000Z',
+    payload: { requires_human_action: true }
+  });
+  const cases = [
+    ['before initial interval', base, '2026-08-29T06:09:59.999Z', 3, { due: false, reason: 'interval' }],
+    ['first attempt', base, '2026-08-29T06:10:00.000Z', 3, { due: true, attempt: 1 }],
+    ['second attempt before 20m', activeItem({
+      priority: 'p0', payload: { requires_human_action: true, p0_delivery: {
+        status: 'delivered', generation: 1, attempt: 1,
+        client_message_id: '11111111-2222-5333-8444-555555555555',
+        delivered_at: '2026-08-29T06:10:00.000Z', next_at: '2026-08-29T06:30:00.000Z',
+        readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-08-29T06:10:00.000Z' }
+      } } }), '2026-08-29T06:29:59.999Z', 3, { due: false, reason: 'interval' }],
+    ['second attempt at 20m', activeItem({
+      priority: 'p0', payload: { requires_human_action: true, p0_delivery: {
+        status: 'delivered', generation: 1, attempt: 1,
+        client_message_id: '11111111-2222-5333-8444-555555555555',
+        delivered_at: '2026-08-29T06:10:00.000Z', next_at: '2026-08-29T06:30:00.000Z',
+        readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-08-29T06:10:00.000Z' }
+      } } }), '2026-08-29T06:30:00.000Z', 3, { due: true, attempt: 2 }],
+    ['definite failure before retry time', activeItem({
+      priority: 'p0', payload: { requires_human_action: true, p0_delivery: {
+        status: 'retry_pending', generation: 1, attempt: 1,
+        client_message_id: '11111111-2222-5333-8444-555555555555',
+        last_attempt_at: '2026-08-29T06:10:00.000Z', next_at: '2026-08-29T06:20:00.000Z'
+      } } }), '2026-08-29T06:19:59.999Z', 3, { due: false, reason: 'interval' }],
+    ['definite failure retries at its durable time', activeItem({
+      priority: 'p0', payload: { requires_human_action: true, p0_delivery: {
+        status: 'retry_pending', generation: 1, attempt: 1,
+        client_message_id: '11111111-2222-5333-8444-555555555555',
+        last_attempt_at: '2026-08-29T06:10:00.000Z', next_at: '2026-08-29T06:20:00.000Z'
+      } } }), '2026-08-29T06:20:00.000Z', 3, { due: true, attempt: 2 }],
+    ['one-hour cap', activeItem({
+      priority: 'p0', payload: { requires_human_action: true, p0_delivery: {
+        status: 'delivered', generation: 6, attempt: 6,
+        client_message_id: '11111111-2222-5333-8444-555555555555',
+        delivered_at: '2026-08-29T06:10:00.000Z', next_at: '2026-08-29T07:10:00.000Z',
+        readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-08-29T06:10:00.000Z' }
+      } } }), '2026-08-29T07:10:00.000Z', 10, { due: true, attempt: 7 }],
+    ['attempt limit', activeItem({
+      priority: 'p0', payload: { requires_human_action: true, p0_delivery: {
+        status: 'delivered', generation: 3, attempt: 3,
+        client_message_id: '11111111-2222-5333-8444-555555555555',
+        delivered_at: '2026-08-29T06:10:00.000Z', next_at: '2026-08-29T06:50:00.000Z',
+        readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-08-29T06:10:00.000Z' }
+      } } }), '2026-08-29T09:00:00.000Z', 3, { due: false, reason: 'max_attempts' }]
+  ];
+
+  for (const [name, item, now, maxAttempts, expected] of cases) {
+    await t.test(name, () => {
+      const decision = workItems.v2P0ReminderDecision(item, { now, maxAttempts });
+      assert.equal(decision.due, expected.due);
+      if (expected.reason) assert.equal(decision.reason, expected.reason);
+      if (expected.attempt) assert.equal(decision.attempt, expected.attempt);
+      if (name === 'one-hour cap') assert.equal(decision.dueAt, '2026-08-29T07:10:00.000Z');
+    });
+  }
+});
+
+test('v2 P0 canonical acknowledgement stops separate alerts but leaves the unresolved item active', async (t) => {
+  for (const [name, acknowledgement, reason] of [
+    ['effective acknowledgement', '2026-08-29T06:00:00.000Z', 'acknowledged'],
+    ['future acknowledgement', '2026-08-29T06:00:00.001Z', 'due'],
+    ['malformed acknowledgement', 'not-a-time', 'due']
+  ]) {
+    await t.test(name, () => {
+      const item = activeItem({
+        priority: 'p0',
+        first_opened_at: '2026-08-29T05:00:00.000Z',
+        payload: { requires_human_action: true, p0_acknowledged_at: acknowledgement }
+      });
+      const decision = workItems.v2P0ReminderDecision(item, { now: NOW });
+      assert.equal(decision.reason, reason);
+      assert.equal(item.state, 'open');
+    });
+  }
+});
+
+test('v2 P0 terminal work stops all alerts and acknowledgement gates cleanup', () => {
+  const unacknowledged = activeItem({ priority: 'p0', first_opened_at: '2026-08-29T05:00:00.000Z' });
+  assert.equal(workItems.v2P0ReminderDecision(unacknowledged, { now: NOW }).cleanupEligible, false);
+  assert.deepEqual(
+    workItems.v2P0ReminderDecision(activeItem({ ...unacknowledged, state: 'resolved' }), { now: NOW }),
+    { due: false, reason: 'terminal', cleanupEligible: false }
+  );
+  assert.equal(workItems.v2P0ReminderDecision(activeItem({
+    priority: 'p0', payload: { requires_human_action: true, p0_acknowledged_at: NOW.toISOString() }
+  }), { now: NOW }).cleanupEligible, true);
+});
+
+test('v2 P0 claim is deterministic for one generation and carries exact version-generation CAS', () => {
+  const item = activeItem({
+    priority: 'p0', version: 17, first_opened_at: '2026-08-29T05:00:00.000Z',
+    payload: { requires_human_action: true }
+  });
+  const first = workItems.buildV2P0DeliveryClaim(item, { now: NOW, claimTtlMs: 120_000 });
+  const retry = workItems.buildV2P0DeliveryClaim(item, { now: NOW, claimTtlMs: 120_000 });
+
+  assert.deepEqual(first, retry);
+  assert.equal(first.expectedVersion, 17);
+  assert.equal(first.expectedGeneration, 0);
+  assert.equal(first.generation, 1);
+  assert.equal(first.attempt, 1);
+  assert.match(first.clientMessageId, /^[0-9a-f-]{36}$/);
+  assert.equal(first.claimExpiresAt, '2026-08-29T06:02:00.000Z');
 });
 
 test('request_resolve records a pending request and local operation without resolving', () => {

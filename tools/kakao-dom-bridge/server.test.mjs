@@ -21,8 +21,11 @@ const {
   compactQueueAuditRecord,
   buildP0SlackEscalationClaim,
   buildP0SlackEscalationMessage,
+  createWorkOrchestratorP0Runtime,
+  createV2P0Store,
   p0SlackEscalationBackoffMs,
   p0SlackEscalationDue,
+  runP0EscalationPair,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
   createGatewayRegisteredReservationChangeExecutor,
@@ -2425,6 +2428,282 @@ test('P0 escalation without an initial Slack card falls back to a standalone cha
   assert.equal(message.channel, 'CFOLLOWUP');
   assert.equal(message.thread_ts, undefined);
   assert.equal(message.reply_broadcast, false);
+});
+
+test('v2 P0 stale claim CAS never reaches Slack', async () => {
+  let posts = 0;
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listP0Work() { return { rows: [row], omitted: 0 }; },
+      async claimP0Delivery() { return { applied: false, row: null }; },
+      async recordP0Delivery() { throw new Error('record must not run'); }
+    },
+    slack: {
+      async postMessage() { posts += 1; throw new Error('must not post'); },
+      async findMessageByClientId() { throw new Error('must not search'); }
+    },
+    now: () => new Date('2026-08-29T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.deepEqual(result, {
+    status: 'ok', scanned: 1, claimed: 0, delivered: 0, reconciled: 0,
+    skipped: 1, errors: [], omissions: 0
+  });
+  assert.equal(posts, 0);
+});
+
+test('v2 P0 ambiguous retry reconciles the same generation and deterministic client id without blind repost', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const claimed = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-08-29T05:59:00.000Z', claim_expires_at: '2026-08-29T05:59:30.000Z',
+      last_attempt_at: '2026-08-29T05:59:01.000Z', next_at: '2026-08-29T06:09:01.000Z'
+    } }
+  };
+  let posts = 0;
+  const searches = [];
+  const records = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listP0Work() { return { rows: [claimed], omitted: 0 }; },
+      async claimP0Delivery() { throw new Error('same generation must reconcile before claiming'); },
+      async recordP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; }
+    },
+    slack: {
+      async postMessage() { posts += 1; throw new Error('must not repost'); },
+      async findMessageByClientId(input) {
+        searches.push(input);
+        return { channel: 'CP0', ts: '100.1', client_msg_id: clientId };
+      }
+    },
+    now: () => new Date('2026-08-29T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.equal(result.reconciled, 1);
+  assert.equal(result.delivered, 1);
+  assert.equal(posts, 0);
+  assert.equal(searches[0].clientMsgId, clientId);
+  assert.equal(records[0].expectedVersion, 8);
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.equal(records[0].clientMessageId, clientId);
+  assert.equal(records[0].status, 'delivered');
+});
+
+test('v2 P0 flag OFF preserves exact legacy sweep parity', async () => {
+  const legacyResult = { scanned: 4, delivered: 1, marker: 'legacy-exact' };
+  let v2Calls = 0;
+  const result = await runP0EscalationPair({
+    v2Enabled: false,
+    legacy: async () => legacyResult,
+    v2: async () => { v2Calls += 1; }
+  });
+  assert.equal(result, legacyResult);
+  assert.equal(v2Calls, 0);
+});
+
+test('v2 P0 cutover lets one source event reach only the v2 escalation path', async () => {
+  const calls = [];
+  const result = await runP0EscalationPair({
+    v2Enabled: true,
+    legacy: async () => calls.push('legacy'),
+    v2: async () => { calls.push('v2'); return { status: 'ok', scanned: 1 }; }
+  });
+  assert.deepEqual(calls, ['v2']);
+  assert.deepEqual(result, { status: 'ok', scanned: 1 });
+});
+
+test('v2 P0 store claims and records with exact work version and delivery generation CAS', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  const requests = [];
+  const responses = [
+    new Response(JSON.stringify([row]), { status: 200, headers: { 'content-range': '0-0/1' } }),
+    new Response(JSON.stringify([{ ...row, payload: {
+      ...row.payload,
+      p0_delivery: {
+        status: 'claimed', generation: 1, attempt: 1,
+        client_message_id: '11111111-2222-5333-8444-555555555555',
+        claimed_at: '2026-08-29T06:00:00.000Z', claim_expires_at: '2026-08-29T06:02:00.000Z'
+      }
+    } }]), { status: 200 }),
+    new Response(JSON.stringify([{ ...row, payload: {
+      ...row.payload,
+      p0_delivery: {
+        status: 'delivered', generation: 1, attempt: 1,
+        client_message_id: '11111111-2222-5333-8444-555555555555',
+        claimed_at: '2026-08-29T06:00:00.000Z', claim_expires_at: '2026-08-29T06:02:00.000Z',
+        delivered_at: '2026-08-29T06:00:01.000Z', next_at: '2026-08-29T06:20:01.000Z',
+        readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-08-29T06:00:01.000Z' }
+      }
+    } }]), { status: 200 })
+  ];
+  const store = createV2P0Store({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-role-test',
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url, init, body: init.body ? JSON.parse(init.body) : null });
+      return responses.shift();
+    }
+  });
+
+  const listed = await store.listP0Work({ now: '2026-08-29T06:00:00.000Z', limit: 50 });
+  const claimed = await store.claimP0Delivery({
+    id: row.id, expectedVersion: 7, expectedGeneration: 0, generation: 1, attempt: 1,
+    clientMessageId: '11111111-2222-5333-8444-555555555555',
+    claimedAt: '2026-08-29T06:00:00.000Z', claimExpiresAt: '2026-08-29T06:02:00.000Z',
+    payload: row.payload
+  });
+  const recorded = await store.recordP0Delivery({
+    id: row.id, expectedVersion: 7, expectedGeneration: 1,
+    clientMessageId: '11111111-2222-5333-8444-555555555555', status: 'delivered',
+    channelId: 'CP0', messageTs: '100.1', recordedAt: '2026-08-29T06:00:01.000Z',
+    payload: claimed.row.payload
+  });
+
+  assert.deepEqual(listed, { rows: [row], omitted: 0 });
+  assert.equal(claimed.applied, true);
+  assert.equal(recorded.applied, true);
+  assert.match(requests[0].url, /work_items_v2\?/);
+  assert.match(requests[0].url, /priority=eq\.p0/);
+  assert.equal(requests[0].init.headers.prefer, 'count=exact');
+  assert.match(requests[1].url, /id=eq\.11111111-1111-4111-8111-111111111111/);
+  assert.match(requests[1].url, /version=eq\.7/);
+  assert.match(requests[1].url, /payload-%3Ep0_delivery-%3E%3Egeneration=is\.null/);
+  assert.equal(Object.hasOwn(requests[1].body, 'version'), false);
+  assert.equal(requests[1].body.payload.p0_delivery.generation, 1);
+  assert.match(requests[2].url, /version=eq\.7/);
+  assert.match(requests[2].url, /payload-%3Ep0_delivery-%3E%3Egeneration=eq\.1/);
+  assert.match(requests[2].url, /payload-%3Ep0_delivery-%3E%3Eclient_message_id=eq\.11111111-2222-5333-8444-555555555555/);
+  assert.equal(Object.hasOwn(requests[2].body, 'version'), false);
+  assert.equal(requests[2].body.payload.p0_delivery.status, 'delivered');
+  assert.equal(requests[2].body.payload.p0_delivery.next_at, '2026-08-29T06:20:01.000Z');
+});
+
+test('v2 P0 ambiguous Slack result durably records reconciliation before any later retry', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  const records = [];
+  let claimedClientId = '';
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listP0Work() { return { rows: [row], omitted: 0 }; },
+      async claimP0Delivery(input) {
+        claimedClientId = input.clientMessageId;
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async recordP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; }
+    },
+    slack: {
+      async postMessage() { throw Object.assign(new Error('private transport failure'), { ambiguous: true }); },
+      async findMessageByClientId() { throw new Error('reconciliation occurs on the next sweep'); }
+    },
+    now: () => new Date('2026-08-29T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.deepEqual(result.errors, ['post_failed']);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, 'reconcile_pending');
+  assert.equal(records[0].expectedVersion, 7);
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.equal(records[0].clientMessageId, claimedClientId);
+  assert.doesNotMatch(JSON.stringify(result), /private transport failure/);
+});
+
+test('v2 P0 definite Slack rejection records a same-generation retry without leaking content', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  const records = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listP0Work() { return { rows: [row], omitted: 0 }; },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async recordP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; }
+    },
+    slack: {
+      async postMessage() { throw Object.assign(new Error('private rejected content'), { ambiguous: false }); },
+      async findMessageByClientId() { throw new Error('must not search a definite rejection'); }
+    },
+    now: () => new Date('2026-08-29T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.deepEqual(result.errors, ['post_failed']);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, 'retry_pending');
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.doesNotMatch(JSON.stringify(result), /private rejected content/);
+});
+
+test('v2 P0 alert carries a current versioned acknowledgement action', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  let postedInput = null;
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listP0Work() { return { rows: [row], omitted: 0 }; },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async recordP0Delivery() { return { applied: true, row }; }
+    },
+    slack: {
+      async postMessage(input) { postedInput = input; return { channel: 'CP0', ts: '100.1' }; },
+      async findMessageByClientId() { throw new Error('must not search'); }
+    },
+    now: () => new Date('2026-08-29T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  const action = postedInput.blocks[1].elements[0];
+  const decoded = JSON.parse(Buffer.from(action.value, 'base64url').toString('utf8'));
+  assert.equal(result.delivered, 1);
+  assert.equal(action.action_id, 'village_work_v2_ack_p0');
+  assert.deepEqual(decoded, {
+    id: row.id,
+    version: 7,
+    action: { type: 'ack_p0' }
+  });
 });
 
 function deferred() {
