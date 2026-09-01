@@ -1215,18 +1215,18 @@ test('notice cleanup migration is service-role only with invoker and empty-searc
       join pg_namespace n on n.oid = p.pronamespace
       where n.nspname = 'public'
         and p.proname in (
+          'capture_notice_cleanup_work_sources_v2',
           'claim_notice_cleanup_batch_v2',
           'link_notice_cleanup_from_receipt_v2',
-          'link_notice_cleanup_from_work_v2',
           'mark_notice_cleanup_deleted_v2',
           'mark_notice_cleanup_failed_v2'
         )
       order by p.proname
     `);
     assert.deepEqual(rows.map((row) => row.proname), [
+      'capture_notice_cleanup_work_sources_v2',
       'claim_notice_cleanup_batch_v2',
       'link_notice_cleanup_from_receipt_v2',
-      'link_notice_cleanup_from_work_v2',
       'mark_notice_cleanup_deleted_v2',
       'mark_notice_cleanup_failed_v2'
     ]);
@@ -1235,6 +1235,18 @@ test('notice cleanup migration is service-role only with invoker and empty-searc
     assert.ok(rows.every((row) => row.anon_execute === false));
     assert.ok(rows.every((row) => row.authenticated_execute === false));
     assert.ok(rows.every((row) => row.service_role_execute === true));
+    const tablePrivileges = (await db.query(`
+      select has_table_privilege('anon', 'public.notice_cleanup_work_sources_v2', 'select') as anon_select,
+        has_table_privilege('authenticated', 'public.notice_cleanup_work_sources_v2', 'select') as authenticated_select,
+        has_table_privilege('service_role', 'public.notice_cleanup_work_sources_v2', 'select') as service_role_select,
+        has_table_privilege('service_role', 'public.notice_cleanup_work_sources_v2', 'insert') as service_role_insert
+    `)).rows[0];
+    assert.deepEqual(tablePrivileges, {
+      anon_select: false,
+      authenticated_select: false,
+      service_role_select: true,
+      service_role_insert: true
+    });
   } finally {
     await db.close();
   }
@@ -1260,22 +1272,22 @@ test('notice cleanup atomically gates digest, TTL, and P0 eligibility with recla
       insert into public.message_notification_receipts (
         id, source, source_event_key, room_key, received_at, urgency,
         notification_state, client_message_id, slack_channel_id, slack_message_ts,
-        delivered_at, cleanup_after, payload
+        delivered_at, cleanup_after, payload, created_at
       ) values
         ($1, 'kakao', 'event-ordinary', 'room:1', '2026-08-31T05:00:00Z', 'normal',
-          'delivered', gen_random_uuid(), 'CNOTICE', '101.1', '2026-08-31T05:00:01Z', null, '{}'),
+          'delivered', gen_random_uuid(), 'CNOTICE', '101.1', '2026-08-31T05:00:01Z', null, '{}', '2026-08-31T05:00:00Z'),
         ($2, 'kakao', 'event-no-digest', 'room:2', '2026-08-31T05:00:00Z', 'normal',
-          'delivered', gen_random_uuid(), 'CNOTICE', '102.1', '2026-08-31T05:00:01Z', null, '{}'),
+          'delivered', gen_random_uuid(), 'CNOTICE', '102.1', '2026-08-31T05:00:01Z', null, '{}', '2026-08-31T05:00:00Z'),
         ($3, 'kakao', 'event-auto-due', 'room:3', '2026-08-31T05:00:00Z', 'normal',
           'cleanup_pending', gen_random_uuid(), 'CNOTICE', '103.1', '2026-08-31T05:00:01Z',
-          '2026-08-31T05:59:59Z', '{"automation_notice_update":{"status":"updated"}}'),
+          '2026-08-31T05:59:59Z', '{"automation_notice_update":{"status":"updated"}}', '2026-08-31T05:00:00Z'),
         ($4, 'kakao', 'event-auto-future', 'room:4', '2026-08-31T05:00:00Z', 'normal',
           'cleanup_pending', gen_random_uuid(), 'CNOTICE', '104.1', '2026-08-31T05:00:01Z',
-          '2026-08-31T07:00:00Z', '{"automation_notice_update":{"status":"updated"}}'),
+          '2026-08-31T07:00:00Z', '{"automation_notice_update":{"status":"updated"}}', '2026-08-31T05:00:00Z'),
         ($5, 'kakao', 'event-p0', 'room:5', '2026-08-31T05:00:00Z', 'p0',
-          'delivered', gen_random_uuid(), 'CNOTICE', '105.1', '2026-08-31T05:00:01Z', null, '{}'),
+          'delivered', gen_random_uuid(), 'CNOTICE', '105.1', '2026-08-31T05:00:01Z', null, '{}', '2026-08-31T05:00:00Z'),
         ($6, 'kakao', 'event-missing-coordinate', 'room:6', '2026-08-31T05:00:00Z', 'normal',
-          'delivered', gen_random_uuid(), null, null, '2026-08-31T05:00:01Z', null, '{}')
+          'delivered', gen_random_uuid(), null, null, '2026-08-31T05:00:01Z', null, '{}', '2026-08-31T05:00:00Z')
     `, [ids.ordinary, ids.missingDigest, ids.autoDue, ids.autoFuture, ids.p0, ids.missingCoordinate]);
 
     await db.query(`
@@ -1402,7 +1414,7 @@ test('notice cleanup atomically gates digest, TTL, and P0 eligibility with recla
   }
 });
 
-test('notice cleanup fences each receipt to the exact work version represented by a delivered digest', async () => {
+test('notice cleanup uses a minimum work version plus the receipt creation temporal fence', async () => {
   const db = await createNoticeCleanupDatabase();
   const oldReceiptId = '31000000-0000-4000-8000-000000000001';
   const newReceiptId = '31000000-0000-4000-8000-000000000002';
@@ -1428,9 +1440,11 @@ test('notice cleanup fences each receipt to the exact work version represented b
     await db.query(`
       insert into public.message_notification_receipts (
         id, source, source_event_key, room_key, received_at, notification_state,
-        client_message_id, slack_channel_id, slack_message_ts, delivered_at
+        client_message_id, slack_channel_id, slack_message_ts, delivered_at,
+        created_at
       ) values ($1, 'kakao', 'event-link-old', 'room:stable-cleanup-link',
-        '2026-08-31T05:00:00Z', 'delivered', gen_random_uuid(), 'CNOTICE', '301.1', '2026-08-31T05:00:01Z')
+        '2026-08-31T05:00:00Z', 'delivered', gen_random_uuid(), 'CNOTICE', '301.1',
+        '2026-08-31T05:00:01Z', '2026-08-31T05:00:00Z')
     `, [oldReceiptId]);
     const firstWork = await db.query(
       `select public.upsert_work_item_v2($1::jsonb) as result`,
@@ -1438,6 +1452,12 @@ test('notice cleanup fences each receipt to the exact work version represented b
     );
     assert.equal(firstWork.rows[0].result.row.version, 1);
     const workId = firstWork.rows[0].result.row.id;
+    const mergedWork = await db.query(
+      `select public.upsert_work_item_v2($1::jsonb) as result`,
+      [JSON.stringify(candidate('event-link-new', '2026-08-31T05:30:00.000Z'))]
+    );
+    assert.equal(mergedWork.rows[0].result.row.id, workId);
+    assert.equal(mergedWork.rows[0].result.row.version, 2);
     await db.query(`
       insert into public.digest_runs (
         window_started_at, window_ended_at, scheduled_at, state, destination_key,
@@ -1447,36 +1467,32 @@ test('notice cleanup fences each receipt to the exact work version represented b
         'delivered', 'slack:CNOTICE', $1::jsonb, '2026-08-31T06:00:00Z',
         'CNOTICE', '390.1', '2026-08-31T06:00:00Z'
       )
-    `, [JSON.stringify([{ id: workId, version: 1, inclusionReason: 'actionable', priority: 'normal' }])]);
+    `, [JSON.stringify([{ id: workId, version: 2, inclusionReason: 'actionable', priority: 'normal' }])]);
 
     const oldClaim = (await db.query(`
       select public.claim_notice_cleanup_batch_v2(
         '2026-08-31T06:00:01.000Z', 'bridge:old-link', 900, 25
       ) as result
     `)).rows[0].result;
-    assert.deepEqual(oldClaim.map((row) => row.id), [oldReceiptId]);
+    assert.deepEqual(oldClaim.map((row) => row.id), [oldReceiptId],
+      'a v2 digest represents an older receipt linked to minimum work version v1');
 
     await db.query(`
       insert into public.message_notification_receipts (
         id, source, source_event_key, room_key, received_at, notification_state,
-        client_message_id, slack_channel_id, slack_message_ts, delivered_at
+        client_message_id, slack_channel_id, slack_message_ts, delivered_at, created_at
       ) values ($1, 'kakao', 'event-link-new', 'room:stable-cleanup-link',
-        '2026-08-31T06:01:00Z', 'delivered', gen_random_uuid(), 'CNOTICE', '302.1', '2026-08-31T06:01:01Z')
+        '2026-08-31T06:01:00Z', 'delivered', gen_random_uuid(), 'CNOTICE', '302.1',
+        '2026-08-31T06:01:01Z', '2026-08-31T06:01:00Z')
     `, [newReceiptId]);
-    const mergedWork = await db.query(
-      `select public.upsert_work_item_v2($1::jsonb) as result`,
-      [JSON.stringify(candidate('event-link-new', '2026-08-31T06:01:00.000Z'))]
-    );
-    assert.equal(mergedWork.rows[0].result.row.id, workId);
-    assert.equal(mergedWork.rows[0].result.row.version, 2);
 
-    const beforeV2Digest = (await db.query(`
+    const afterPastSameVersionDigest = (await db.query(`
       select public.claim_notice_cleanup_batch_v2(
         '2026-08-31T06:01:02.000Z', 'bridge:new-link', 120, 25
       ) as result
     `)).rows[0].result;
-    assert.equal(beforeV2Digest.some((row) => row.id === newReceiptId), false,
-      'a newly merged event is not represented by the older work-version snapshot');
+    assert.equal(afterPastSameVersionDigest.some((row) => row.id === newReceiptId), false,
+      'a digest delivered before a later receipt cannot authorize that receipt at the same version');
 
     await db.query(`
       insert into public.digest_runs (
@@ -1487,10 +1503,28 @@ test('notice cleanup fences each receipt to the exact work version represented b
         'delivered', 'slack:CNOTICE', $1::jsonb, '2026-08-31T06:02:00Z',
         'CNOTICE', '391.1', '2026-08-31T06:02:00Z'
       )
+    `, [JSON.stringify([{ id: workId, version: 1, inclusionReason: 'actionable', priority: 'normal' }])]);
+    const afterLaterV1Digest = (await db.query(`
+      select public.claim_notice_cleanup_batch_v2(
+        '2026-08-31T06:02:01.000Z', 'bridge:new-link', 120, 25
+      ) as result
+    `)).rows[0].result;
+    assert.equal(afterLaterV1Digest.some((row) => row.id === newReceiptId), false,
+      'a new receipt linked at minimum v2 cannot be authorized by a later v1 digest');
+
+    await db.query(`
+      insert into public.digest_runs (
+        window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, slack_channel_id, slack_message_ts, delivered_at
+      ) values (
+        '2026-08-31T06:00:00Z', '2026-08-31T09:00:00Z', '2026-08-31T09:00:01Z',
+        'delivered', 'slack:CNOTICE', $1::jsonb, '2026-08-31T06:03:00Z',
+        'CNOTICE', '392.1', '2026-08-31T06:03:00Z'
+      )
     `, [JSON.stringify([{ id: workId, version: 2, inclusionReason: 'actionable', priority: 'normal' }])]);
     const afterV2Digest = (await db.query(`
       select public.claim_notice_cleanup_batch_v2(
-        '2026-08-31T06:02:01.000Z', 'bridge:new-link', 120, 25
+        '2026-08-31T06:03:01.000Z', 'bridge:new-link', 120, 25
       ) as result
     `)).rows[0].result;
     assert.equal(afterV2Digest.some((row) => row.id === newReceiptId), true);
@@ -1504,6 +1538,104 @@ test('notice cleanup fences each receipt to the exact work version represented b
       { id: oldReceiptId, cleanup_work_id: workId, cleanup_work_version: 1 },
       { id: newReceiptId, cleanup_work_id: workId, cleanup_work_version: 2 }
     ]);
+  } finally {
+    await db.close();
+  }
+});
+
+test('notice cleanup claim reconciles exact zero-one-many source ownership on every attempt', async () => {
+  const db = await createNoticeCleanupDatabase();
+  const receiptBeforeWork = '32000000-0000-4000-8000-000000000001';
+  const workBeforeReceipt = '32000000-0000-4000-8000-000000000002';
+  const ambiguousReceipt = '32000000-0000-4000-8000-000000000003';
+  const zeroOwnerReceipt = '32000000-0000-4000-8000-000000000004';
+  const firstWork = '32100000-0000-4000-8000-000000000001';
+  const secondWork = '32100000-0000-4000-8000-000000000002';
+  const ambiguousFirstWork = '32100000-0000-4000-8000-000000000003';
+  const ambiguousSecondWork = '32100000-0000-4000-8000-000000000004';
+  const insertWork = async (id, workKey, sourceEventKey) => db.query(`
+    insert into public.work_items_v2 (
+      id, work_key, source_event_keys, room_key, title, work_type, priority, state,
+      actionable_at, first_opened_at, last_activity_at, version, payload
+    ) values ($1, $2, array[$3], 'room:reconcile', 'Reconcile', 'human_review', 'normal',
+      'open', '2026-08-31T05:00:00Z', '2026-08-31T05:00:00Z',
+      '2026-08-31T05:00:00Z', 1, '{}')
+  `, [id, workKey, sourceEventKey]);
+  const insertReceipt = async (id, sourceEventKey, createdAt, messageTs) => db.query(`
+    insert into public.message_notification_receipts (
+      id, source, source_event_key, room_key, received_at, notification_state,
+      client_message_id, slack_channel_id, slack_message_ts, delivered_at, created_at
+    ) values ($1, 'kakao', $2, 'room:reconcile', $3::timestamptz, 'delivered',
+      gen_random_uuid(), 'CNOTICE', $4, $3::timestamptz, $3::timestamptz)
+  `, [id, sourceEventKey, createdAt, messageTs]);
+  const insertDigest = async (workId, deliveredAt, messageTs) => db.query(`
+    insert into public.digest_runs (
+      window_started_at, window_ended_at, scheduled_at, state, destination_key,
+      item_snapshot, manifest_prepared_at, slack_channel_id, slack_message_ts, delivered_at
+    ) values ('2026-08-31T03:00:00Z', '2026-08-31T06:00:00Z', $2::timestamptz,
+      'delivered', 'slack:CNOTICE', $1::jsonb, $2::timestamptz, 'CNOTICE', $3, $2::timestamptz)
+  `, [JSON.stringify([{ id: workId, version: 1, inclusionReason: 'actionable', priority: 'normal' }]), deliveredAt, messageTs]);
+  const claim = async (owner, now) => (await db.query(`
+    select public.claim_notice_cleanup_batch_v2($1::timestamptz, $2, 900, 25) as result
+  `, [now, owner])).rows[0].result;
+
+  try {
+    await insertReceipt(zeroOwnerReceipt, 'event-zero-owner', '2026-08-31T04:59:00Z', '320.0');
+    await db.query(`update public.message_notification_receipts set urgency = 'p0' where id = $1::uuid`, [zeroOwnerReceipt]);
+    await insertReceipt(receiptBeforeWork, 'event-receipt-before-work', '2026-08-31T05:00:00Z', '320.1');
+    await insertWork(firstWork, 'work:receipt-before', 'event-receipt-before-work');
+    let link = (await db.query(`
+      select cleanup_work_id, cleanup_work_version
+      from public.message_notification_receipts where id = $1::uuid
+    `, [receiptBeforeWork])).rows[0];
+    assert.deepEqual(link, { cleanup_work_id: null, cleanup_work_version: null },
+      'receipt-before-work does not depend on a work-side trigger wakeup');
+    await insertDigest(firstWork, '2026-08-31T06:00:00Z', '420.1');
+    const receiptFirstClaim = await claim('bridge:receipt-first', '2026-08-31T06:00:01Z');
+    assert.equal(receiptFirstClaim.some((row) => row.id === receiptBeforeWork), true);
+    assert.equal(receiptFirstClaim.some((row) => row.id === zeroOwnerReceipt), false,
+      'a zero-owner P0 receipt is not claimed through the blocked-P0 path');
+    link = (await db.query(`
+      select cleanup_work_id, cleanup_work_version
+      from public.message_notification_receipts where id = $1::uuid
+    `, [receiptBeforeWork])).rows[0];
+    assert.deepEqual(link, { cleanup_work_id: firstWork, cleanup_work_version: 1 });
+
+    await insertWork(secondWork, 'work:work-before', 'event-work-before-receipt');
+    await insertReceipt(workBeforeReceipt, 'event-work-before-receipt', '2026-08-31T05:01:00Z', '320.2');
+    await db.query(`
+      update public.message_notification_receipts
+      set cleanup_work_id = null, cleanup_work_version = null
+      where id = $1::uuid
+    `, [workBeforeReceipt]);
+    await db.query(`delete from public.notice_cleanup_work_sources_v2 where work_id = $1::uuid`, [secondWork]);
+    await insertDigest(secondWork, '2026-08-31T06:00:02Z', '420.2');
+    const missedWakeClaim = await claim('bridge:missed-wake', '2026-08-31T06:00:03Z');
+    assert.equal(missedWakeClaim.some((row) => row.id === workBeforeReceipt), true,
+      'claim-time reconciliation repairs a committed exact-one link after a missed eager wakeup');
+
+    await insertWork(ambiguousFirstWork, 'work:ambiguous-first', 'event-later-ambiguous');
+    await insertReceipt(ambiguousReceipt, 'event-later-ambiguous', '2026-08-31T05:02:00Z', '320.3');
+    await insertDigest(ambiguousFirstWork, '2026-08-31T06:00:04Z', '420.3');
+    await insertWork(ambiguousSecondWork, 'work:ambiguous-second', 'event-later-ambiguous');
+    const ambiguousClaim = await claim('bridge:ambiguous', '2026-08-31T06:00:05Z');
+    assert.equal(ambiguousClaim.some((row) => row.id === ambiguousReceipt), false,
+      'a later second exact source owner invalidates even an already linked receipt');
+    link = (await db.query(`
+      select cleanup_work_id, cleanup_work_version
+      from public.message_notification_receipts where id = $1::uuid
+    `, [ambiguousReceipt])).rows[0];
+    assert.deepEqual(link, { cleanup_work_id: null, cleanup_work_version: null });
+
+    await db.query(`delete from public.work_items_v2 where id = $1::uuid`, [ambiguousSecondWork]);
+    const restoredClaim = await claim('bridge:restored', '2026-08-31T06:00:06Z');
+    assert.equal(restoredClaim.some((row) => row.id === ambiguousReceipt), true,
+      'a later exact-one committed owner can safely restore the bounded link');
+    link = (await db.query(`
+      select cleanup_work_id, cleanup_work_version
+      from public.message_notification_receipts where id = $1::uuid
+    `, [ambiguousReceipt])).rows[0];
+    assert.deepEqual(link, { cleanup_work_id: ambiguousFirstWork, cleanup_work_version: 1 });
   } finally {
     await db.close();
   }
@@ -1632,15 +1764,26 @@ test('notice cleanup normalizes poison coordinates without blocking valid siblin
 test('notice cleanup reclaims only complete legacy null-lease pending rows after migration', async () => {
   const db = await createFoundationDatabase();
   const legacyReceipt = '35000000-0000-4000-8000-000000000001';
-  const partialReceipt = '35000000-0000-4000-8000-000000000002';
+  const partialReceipts = [
+    '35000000-0000-4000-8000-000000000002',
+    '35000000-0000-4000-8000-000000000003',
+    '35000000-0000-4000-8000-000000000004',
+    '35000000-0000-4000-8000-000000000005',
+    '35000000-0000-4000-8000-000000000006',
+    '35000000-0000-4000-8000-000000000007',
+    '35000000-0000-4000-8000-000000000008',
+    '35000000-0000-4000-8000-000000000009'
+  ];
   const workId = '36000000-0000-4000-8000-000000000001';
   try {
     await db.query(`
       insert into public.message_notification_receipts (
         id, source, source_event_key, room_key, received_at, notification_state,
-        client_message_id, slack_channel_id, slack_message_ts, delivered_at, cleanup_state
+        client_message_id, slack_channel_id, slack_message_ts, delivered_at, cleanup_state,
+        created_at
       ) values ($1, 'kakao', 'event-legacy-pending', 'room:legacy', '2026-08-31T05:00:00Z',
-        'delivered', gen_random_uuid(), 'CNOTICE', '350.1', '2026-08-31T05:00:01Z', 'pending')
+        'delivered', gen_random_uuid(), 'CNOTICE', '350.1', '2026-08-31T05:00:01Z', 'pending',
+        '2026-08-31T05:00:00Z')
     `, [legacyReceipt]);
     await db.query(`
       insert into public.work_items_v2 (
@@ -1658,16 +1801,26 @@ test('notice cleanup reclaims only complete legacy null-lease pending rows after
     `, [JSON.stringify([{ id: workId, version: 1, inclusionReason: 'actionable', priority: 'normal' }])]);
 
     await db.exec(readFileSync(join(migrationsDirectory, noticeCleanupMigrationName), 'utf8'));
-    await db.query(`
-      insert into public.message_notification_receipts (
-        id, source, source_event_key, room_key, received_at, notification_state,
-        client_message_id, slack_channel_id, slack_message_ts, delivered_at, cleanup_after,
-        cleanup_state, cleanup_owner, payload
-      ) values ($1, 'kakao', 'event-partial-pending', 'room:legacy', clock_timestamp() - interval '1 hour',
-        'cleanup_pending', gen_random_uuid(), 'CNOTICE', '350.2', clock_timestamp() - interval '59 minutes',
-        clock_timestamp() - interval '1 minute', 'pending', 'partial-owner',
-        '{"automation_notice_update":{"status":"updated"}}')
-    `, [partialReceipt]);
+    for (const [index, id] of partialReceipts.entries()) {
+      await db.query(`
+        insert into public.message_notification_receipts (
+          id, source, source_event_key, room_key, received_at, notification_state,
+          client_message_id, slack_channel_id, slack_message_ts, delivered_at, cleanup_after,
+          cleanup_state, payload
+        ) values ($1, 'kakao', $2, 'room:legacy', '2026-08-31T05:00:00Z',
+          'cleanup_pending', gen_random_uuid(), 'CNOTICE', $3, '2026-08-31T05:00:01Z',
+          '2026-08-31T05:59:59Z', 'pending',
+          '{"automation_notice_update":{"status":"updated"}}')
+      `, [id, `event-partial-pending-${index}`, `35${index + 1}.2`]);
+    }
+    await db.query(`update public.message_notification_receipts set cleanup_owner = 'partial-owner' where id = $1::uuid`, [partialReceipts[0]]);
+    await db.query(`update public.message_notification_receipts set cleanup_token = gen_random_uuid() where id = $1::uuid`, [partialReceipts[1]]);
+    await db.query(`update public.message_notification_receipts set cleanup_expires_at = '2026-08-31T05:00:00Z' where id = $1::uuid`, [partialReceipts[2]]);
+    await db.query(`update public.message_notification_receipts set cleanup_attempts = 1 where id = $1::uuid`, [partialReceipts[3]]);
+    await db.query(`update public.message_notification_receipts set cleanup_attempted_at = '2026-08-31T05:00:00Z' where id = $1::uuid`, [partialReceipts[4]]);
+    await db.query(`update public.message_notification_receipts set cleaned_at = '2026-08-31T05:00:00Z' where id = $1::uuid`, [partialReceipts[5]]);
+    await db.query(`update public.message_notification_receipts set cleanup_error = 'cleanup_unconfirmed' where id = $1::uuid`, [partialReceipts[6]]);
+    await db.query(`update public.message_notification_receipts set cleanup_already_absent = true where id = $1::uuid`, [partialReceipts[7]]);
     const claimed = (await db.query(`
       select public.claim_notice_cleanup_batch_v2(
         '2026-08-31T06:00:01.000Z', 'bridge:legacy', 120, 25
@@ -1676,8 +1829,8 @@ test('notice cleanup reclaims only complete legacy null-lease pending rows after
     assert.deepEqual(claimed.map((row) => row.id), [legacyReceipt]);
     assert.equal(claimed[0].cleanup_owner, 'bridge:legacy');
     assert.ok(claimed[0].cleanup_token);
-    assert.equal(claimed.some((row) => row.id === partialReceipt), false,
-      'partially populated pending lease metadata fails closed');
+    assert.deepEqual(claimed.filter((row) => partialReceipts.includes(row.id)), [],
+      'every partially populated pending generation or terminal shape fails closed');
   } finally {
     await db.close();
   }

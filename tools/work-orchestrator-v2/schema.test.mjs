@@ -195,9 +195,9 @@ test('additive notice cleanup migration defines a private atomic lease and termi
   assert.equal(noticeCleanupMigrationFiles.length, 1, 'exactly one additive notice-cleanup migration must exist');
   const sql = readFileSync(join(migrationsDirectory, noticeCleanupMigrationFiles[0]), 'utf8');
   const functions = [
+    'capture_notice_cleanup_work_sources_v2',
     'claim_notice_cleanup_batch_v2',
     'link_notice_cleanup_from_receipt_v2',
-    'link_notice_cleanup_from_work_v2',
     'mark_notice_cleanup_deleted_v2',
     'mark_notice_cleanup_failed_v2'
   ];
@@ -210,18 +210,25 @@ test('additive notice cleanup migration defines a private atomic lease and termi
   assert.match(sql, /cleanup_attempted_at timestamptz/i);
   assert.match(sql, /cleaned_at timestamptz/i);
   assert.match(sql, /cleanup_already_absent boolean/i);
+  assert.match(sql, /create table public\.notice_cleanup_work_sources_v2/i);
+  assert.match(sql, /minimum_work_version integer not null/i);
   assert.match(sql, /cleanup_work_id uuid/i);
   assert.match(sql, /cleanup_work_version integer/i);
   assert.match(sql, /p_limit[^;]*?between 1 and 25/i);
   assert.match(sql, /for update skip locked/i);
   assert.match(sql, /cleanup_expires_at\s*<=\s*p_now/i);
-  assert.match(sql, /snapshot\.entry->>'id'\s*=\s*receipt\.cleanup_work_id::text[\s\S]*?snapshot\.entry->>'version'\)::integer\s*=\s*receipt\.cleanup_work_version/i);
+  assert.match(sql, /snapshot\.entry->>'id'\s*=\s*receipt\.cleanup_work_id::text[\s\S]*?snapshot\.entry->>'version'\)::integer\s*>=\s*receipt\.cleanup_work_version/i);
+  assert.match(sql, /digest\.delivered_at\s*>=\s*receipt\.created_at/i,
+    'a digest delivered before the receipt cannot authorize cleanup of that later receipt');
+  assert.match(sql, /count\(\*\)[\s\S]*?source_event_key\s*=\s*any\(work\.source_event_keys\)/i,
+    'claim-time reconciliation rechecks exact source-event ownership');
+  assert.doesNotMatch(sql, /create trigger link_notice_cleanup_from_work_v2/i,
+    'claim-time reconciliation replaces the lossy work-side wakeup trigger');
   assert.match(sql, /public\.is_effective_p0_ack_v2\(/i, 'cleanup reuses canonical P0 acknowledgement semantics');
   assert.match(sql, /public\.digest_runs[\s\S]*?jsonb_array_elements[\s\S]*?state in \('delivered','replaced'\)/i);
   assert.match(sql, /public\.work_items_v2[\s\S]*?source_event_keys/i);
   assert.match(sql, /notification_state\s*=\s*'cleanup_pending'[\s\S]*?cleanup_after\s*<=\s*p_now/i);
   assert.match(sql, /cleanup_expires_at\s*>\s*v_completed_at/i);
-  assert.match(sql, /v_completed_at[^;]*?clock_timestamp\(\)/i);
   assert.doesNotMatch(sql, /p_(?:deleted|failed)_at timestamptz/i,
     'terminal time is owned by the database and cannot be supplied by a caller');
 
@@ -236,4 +243,19 @@ test('additive notice cleanup migration defines a private atomic lease and termi
   }
   assert.doesNotMatch(sql, /create policy/i);
   assert.doesNotMatch(sql, /conversations\.(?:history|replies)|search\.messages|admin\./i);
+});
+
+test('notice cleanup terminal functions lock the exact generation before reading DB time', () => {
+  const sql = readFileSync(join(migrationsDirectory, noticeCleanupMigrationFiles[0]), 'utf8');
+  for (const terminalName of ['mark_notice_cleanup_deleted_v2', 'mark_notice_cleanup_failed_v2']) {
+    const match = sql.match(new RegExp(
+      `create function public\\.${terminalName}\\([\\s\\S]*?\\$\\$;`,
+      'i'
+    ));
+    assert.ok(match, `${terminalName} exists`);
+    const lockIndex = match[0].search(/select[\s\S]*?into\s+v_row[\s\S]*?for update/i);
+    const clockIndex = match[0].search(/v_completed_at\s*:=\s*clock_timestamp\(\)/i);
+    assert.ok(lockIndex >= 0 && clockIndex > lockIndex,
+      `${terminalName} captures terminal time only after acquiring the row lock`);
+  }
 });
