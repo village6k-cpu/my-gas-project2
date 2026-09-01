@@ -69,6 +69,15 @@ function readBooleanEnvironment(value, defaultValue = false) {
   return ['1', 'true'].includes(String(value).trim().toLowerCase());
 }
 
+export function resolveWorkOrchestratorP0Config(env = {}) {
+  const readbackEnabled = readBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED, false);
+  const cutoverEnabled = readBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED, false);
+  if (cutoverEnabled && !readbackEnabled) {
+    throw new Error('Work Orchestrator v2 P0 cutover requires readback');
+  }
+  return { readbackEnabled, cutoverEnabled };
+}
+
 export function resolveHermesTransport(value) {
   const normalized = String(value ?? '').trim() || 'cli';
   if (!['cli', 'gateway', 'gateway_no_send'].includes(normalized)) {
@@ -107,7 +116,12 @@ export function configForHermesTransport(config = {}, transport = 'cli') {
     : config;
 }
 
-const WORK_ORCHESTRATOR_CONFIG = loadWorkOrchestratorConfig(process.env);
+const P0_WORK_ORCHESTRATOR_CONFIG = resolveWorkOrchestratorP0Config(process.env);
+const WORK_ORCHESTRATOR_CONFIG = {
+  ...loadWorkOrchestratorConfig(process.env),
+  p0ReadbackEnabled: P0_WORK_ORCHESTRATOR_CONFIG.readbackEnabled,
+  p0CutoverEnabled: P0_WORK_ORCHESTRATOR_CONFIG.cutoverEnabled
+};
 
 const CONFIG = {
   port: Number(process.env.PORT || 8787),
@@ -202,6 +216,8 @@ export function buildHealthConfig(config = {}) {
       shadowWrites: Boolean(config.workOrchestrator.shadowWrites),
       immediateEnabled: Boolean(config.workOrchestrator.immediateEnabled),
       workItemsEnabled: Boolean(config.workOrchestrator.workItemsEnabled),
+      p0ReadbackEnabled: Boolean(config.workOrchestrator.p0ReadbackEnabled),
+      p0CutoverEnabled: Boolean(config.workOrchestrator.p0CutoverEnabled),
       digestEnabled: Boolean(config.workOrchestrator.digestEnabled),
       cleanupEnabled: Boolean(config.workOrchestrator.cleanupEnabled),
       storeConfigured: Boolean(config.workOrchestratorStoreConfigured),
@@ -209,6 +225,9 @@ export function buildHealthConfig(config = {}) {
       shadowReady: Boolean(config.workOrchestratorShadowReady),
       // This proves local values and clients were constructed only. Durable-store and Slack connectivity require separate readback.
       immediateLocalConfigReady: Boolean(config.workOrchestratorImmediateLocalConfigReady),
+      ...(Object.hasOwn(config, 'workOrchestratorP0LocalConfigReady')
+        ? { p0LocalConfigReady: Boolean(config.workOrchestratorP0LocalConfigReady) }
+        : {}),
       ...(Object.hasOwn(config, 'workOrchestratorDigestLocalConfigReady')
         ? { digestLocalConfigReady: Boolean(config.workOrchestratorDigestLocalConfigReady) }
         : {}),
@@ -281,11 +300,37 @@ export function buildWorkOrchestratorHealthState(value = {}) {
   const healthWithActions = hasWorkActionState
     ? { ...health, workActionPollRunning: value.workActionPollRunning === true, lastWorkActionPoll: safeAction }
     : health;
+  const p0Readback = value.lastP0Readback;
+  const p0Count = (input) => Number.isSafeInteger(input) && input >= 0 && input <= Number.MAX_SAFE_INTEGER
+    ? input
+    : 0;
+  const healthWithP0 = Object.hasOwn(value, 'lastP0Readback')
+    ? {
+        ...healthWithActions,
+        lastP0Readback: p0Readback && typeof p0Readback === 'object' && !Array.isArray(p0Readback)
+          ? {
+              status: ['ok', 'not_ready', 'error', 'disabled'].includes(p0Readback.status)
+                ? p0Readback.status
+                : 'error',
+              mode: ['readback', 'cutover', 'disabled'].includes(p0Readback.mode)
+                ? p0Readback.mode
+                : 'disabled',
+              eligibleCount: p0Count(p0Readback.eligibleCount),
+              selectedCount: p0Count(p0Readback.selectedCount),
+              omittedCount: p0Count(p0Readback.omittedCount),
+              ready: p0Readback.ready === true,
+              errors: Array.isArray(p0Readback.errors)
+                ? p0Readback.errors.filter((error) => ['p0_eligible_overflow', 'list_failed', 'invalid_list'].includes(error)).slice(0, 3)
+                : []
+            }
+          : null
+      }
+    : healthWithActions;
   const hasDigestState = [
     'digestRunning', 'lastDigestRun', 'lastDigestSuccessAt', 'lastDigestFailureAt',
     'nextScheduledAt', 'digestFailureCount', 'omittedEligibleCount'
   ].some((key) => Object.hasOwn(value, key));
-  if (!hasDigestState) return healthWithActions;
+  if (!hasDigestState) return healthWithP0;
 
   const count = (input, maximum) => {
     const numeric = input;
@@ -319,7 +364,7 @@ export function buildWorkOrchestratorHealthState(value = {}) {
     return result;
   };
   return {
-    ...healthWithActions,
+    ...healthWithP0,
     digestRunning: value.digestRunning === true,
     lastDigestRun: safeLastRun(value.lastDigestRun),
     lastDigestSuccessAt: safeShadowTimestamp(value.lastDigestSuccessAt) || null,
@@ -1737,28 +1782,18 @@ const workOrchestratorImmediateNoticeUpdatePoller = createImmediateNoticeUpdateP
   store: workOrchestratorStore,
   slack: workOrchestratorSlackClient
 });
-let workOrchestratorP0Store = null;
-if (workOrchestratorCredentialsPresent) {
-  try {
-    workOrchestratorP0Store = createV2P0Store({
-      supabaseUrl: CONFIG.supabaseUrl,
-      serviceRoleKey: CONFIG.supabaseServiceRoleKey
-    });
-  } catch {
-    workOrchestratorP0Store = null;
-  }
-}
 const workOrchestratorP0Runtime = createWorkOrchestratorP0Runtime({
   config: {
     ...CONFIG.workOrchestrator,
     digestChannelId: CONFIG.workOrchestrator.digestChannelId || CONFIG.workOrchestrator.inboxChannelId
   },
-  store: workOrchestratorP0Store,
+  store: workOrchestratorStore,
   slack: workOrchestratorSlackClient,
   mentionUserIds: String(process.env.SLACK_CARD_MENTION_USER_IDS || '')
     .split(/[\s,]+/)
     .filter(Boolean)
 });
+CONFIG.workOrchestratorP0LocalConfigReady = workOrchestratorP0Runtime.localConfigReady;
 
 const state = {
   startedAt: new Date().toISOString(),
@@ -1788,7 +1823,10 @@ const state = {
   activeWorkerJobIds: new Set(),
   seenGroupingTexts: new Set(),
   lastContentScriptStartedAtMs: 0,
-  workOrchestrator: workOrchestratorShadowRuntime.state
+  workOrchestrator: {
+    ...workOrchestratorShadowRuntime.state,
+    lastP0Readback: null
+  }
 };
 
 const gatewayTransportSelected = ['gateway', 'gateway_no_send'].includes(CONFIG.hermesTransport);
@@ -2386,243 +2424,131 @@ function v2P0SlackMessage(row, claim, channel, mentionUserIds = []) {
   };
 }
 
-export async function runP0EscalationPair({ v2Enabled = false, legacy = null, v2 = null } = {}) {
-  if (v2Enabled) return typeof v2 === 'function' ? v2() : null;
+export async function runP0EscalationPair({
+  readbackEnabled = false,
+  cutoverEnabled = false,
+  legacy = null,
+  v2Readback = null,
+  v2 = null
+} = {}) {
+  const cutover = cutoverEnabled === true;
+  if (cutover) return typeof v2 === 'function' ? v2() : null;
+  if (readbackEnabled) {
+    let readback = null;
+    try {
+      readback = typeof v2Readback === 'function' ? await v2Readback() : null;
+    } catch {
+      readback = { status: 'error', errors: ['readback_failed'] };
+    }
+    const legacyResult = typeof legacy === 'function' ? await legacy() : null;
+    return { legacy: legacyResult, readback, sender: 'legacy' };
+  }
   return typeof legacy === 'function' ? legacy() : null;
-}
-
-const V2_P0_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const V2_P0_CLIENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
-function v2P0Iso(value) {
-  if (typeof value !== 'string' || !/^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/.test(value)) {
-    throw new Error('invalid v2 P0 input');
-  }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value) throw new Error('invalid v2 P0 input');
-  return value;
-}
-
-function v2P0Row(row) {
-  if (!row || typeof row !== 'object' || Array.isArray(row)
-    || typeof row.id !== 'string' || !V2_P0_UUID.test(row.id)
-    || !Number.isSafeInteger(row.version) || row.version < 1
-    || row.priority !== 'p0' || !['open', 'in_progress', 'snoozed'].includes(row.state)
-    || typeof row.first_opened_at !== 'string' || Number.isNaN(Date.parse(row.first_opened_at))
-    || typeof row.title !== 'string' || row.title.length > 300
-    || typeof row.summary !== 'string' || row.summary.length > 2000
-    || !row.payload || typeof row.payload !== 'object' || Array.isArray(row.payload)) {
-    throw new Error('invalid v2 P0 response');
-  }
-  return row;
-}
-
-function v2P0MutationInput(input, { record = false } = {}) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)
-    || typeof input.id !== 'string' || !V2_P0_UUID.test(input.id)
-    || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1
-    || !Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 0
-    || typeof input.clientMessageId !== 'string' || !V2_P0_CLIENT_ID.test(input.clientMessageId)
-    || !input.payload || typeof input.payload !== 'object' || Array.isArray(input.payload)) {
-    throw new Error('invalid v2 P0 input');
-  }
-  if (record) {
-    if (!['delivered', 'reconcile_pending', 'retry_pending'].includes(input.status)) {
-      throw new Error('invalid v2 P0 input');
-    }
-    v2P0Iso(input.recordedAt);
-    if (input.status === 'delivered'
-      && (typeof input.channelId !== 'string' || !/^[A-Z0-9][A-Z0-9_-]{0,79}$/.test(input.channelId)
-        || typeof input.messageTs !== 'string' || !/^[0-9]{1,20}\.[0-9]{1,20}$/.test(input.messageTs))) {
-      throw new Error('invalid v2 P0 input');
-    }
-  } else {
-    if (!Number.isSafeInteger(input.generation) || input.generation !== input.expectedGeneration + 1
-      || !Number.isSafeInteger(input.attempt) || input.attempt !== input.generation) {
-      throw new Error('invalid v2 P0 input');
-    }
-    v2P0Iso(input.claimedAt);
-    v2P0Iso(input.claimExpiresAt);
-  }
-  return input;
-}
-
-export function createV2P0Store({ supabaseUrl, serviceRoleKey, fetchImpl = fetch } = {}) {
-  const baseUrl = String(supabaseUrl || '').replace(/\/+$/, '');
-  const key = String(serviceRoleKey || '').trim();
-  if (!/^https:\/\//.test(baseUrl) || !key || typeof fetchImpl !== 'function') {
-    throw new Error('Work Orchestrator P0 store configuration is invalid');
-  }
-  const endpoint = `${baseUrl}/rest/v1/work_items_v2`;
-  const request = async (query, { method = 'GET', body = null, count = false } = {}) => {
-    let response;
-    try {
-      response = await fetchImpl(`${endpoint}?${query}`, {
-        method,
-        headers: {
-          apikey: key,
-          authorization: `Bearer ${key}`,
-          'content-type': 'application/json',
-          prefer: count ? 'count=exact' : 'return=representation'
-        },
-        ...(body ? { body: JSON.stringify(body) } : {})
-      });
-    } catch {
-      throw new Error('Work Orchestrator P0 store request failed');
-    }
-    if (!response?.ok) throw new Error('Work Orchestrator P0 store request failed');
-    let data;
-    try {
-      data = await response.json();
-    } catch {
-      throw new Error('Work Orchestrator P0 store response is invalid');
-    }
-    return { data, response };
-  };
-
-  return {
-    async listP0Work({ now, limit } = {}) {
-      v2P0Iso(now);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('invalid v2 P0 input');
-      const query = new URLSearchParams({
-        select: 'id,version,priority,state,first_opened_at,title,summary,payload',
-        priority: 'eq.p0',
-        state: 'in.(open,in_progress,snoozed)',
-        order: 'first_opened_at.asc,id.asc',
-        limit: String(limit)
-      });
-      const { data, response } = await request(query.toString(), { count: true });
-      if (!Array.isArray(data) || data.length > limit) throw new Error('Work Orchestrator P0 store response is invalid');
-      const rows = data.map(v2P0Row);
-      const contentRange = response.headers?.get?.('content-range') || '';
-      const totalMatch = contentRange.match(/\/(\d+)$/);
-      if (!totalMatch) throw new Error('Work Orchestrator P0 store response is invalid');
-      const total = Number(totalMatch[1]);
-      if (!Number.isSafeInteger(total) || total < rows.length) throw new Error('Work Orchestrator P0 store response is invalid');
-      return { rows, omitted: total - rows.length };
-    },
-
-    async claimP0Delivery(input = {}) {
-      const normalized = v2P0MutationInput(input);
-      const delivery = {
-        status: 'claimed', generation: normalized.generation, attempt: normalized.attempt,
-        client_message_id: normalized.clientMessageId,
-        claimed_at: normalized.claimedAt, claim_expires_at: normalized.claimExpiresAt
-      };
-      const query = new URLSearchParams({
-        id: `eq.${normalized.id}`,
-        version: `eq.${normalized.expectedVersion}`,
-        priority: 'eq.p0',
-        state: 'in.(open,in_progress,snoozed)',
-        'payload->p0_delivery->>generation': normalized.expectedGeneration === 0
-          ? 'is.null'
-          : `eq.${normalized.expectedGeneration}`,
-        select: 'id,version,priority,state,first_opened_at,title,summary,payload'
-      });
-      const { data } = await request(query.toString(), {
-        method: 'PATCH',
-        body: { payload: { ...normalized.payload, p0_delivery: delivery } }
-      });
-      if (!Array.isArray(data) || data.length > 1) throw new Error('Work Orchestrator P0 store response is invalid');
-      if (!data.length) return { applied: false, row: null };
-      const row = v2P0Row(data[0]);
-      if (row.id !== normalized.id || row.version !== normalized.expectedVersion
-        || row.payload?.p0_delivery?.generation !== normalized.generation
-        || row.payload?.p0_delivery?.client_message_id !== normalized.clientMessageId) {
-        throw new Error('Work Orchestrator P0 store response is invalid');
-      }
-      return { applied: true, row };
-    },
-
-    async recordP0Delivery(input = {}) {
-      const normalized = v2P0MutationInput(input, { record: true });
-      const previous = normalized.payload.p0_delivery;
-      if (!previous || previous.generation !== normalized.expectedGeneration
-        || previous.client_message_id !== normalized.clientMessageId
-        || previous.attempt !== normalized.expectedGeneration) {
-        throw new Error('invalid v2 P0 input');
-      }
-      const base = {
-        ...previous,
-        status: normalized.status,
-        last_attempt_at: normalized.recordedAt
-      };
-      const delivery = normalized.status === 'delivered'
-        ? {
-            ...base,
-            delivered_at: normalized.recordedAt,
-            next_at: new Date(Date.parse(normalized.recordedAt) + p0SlackEscalationBackoffMs(previous.attempt)).toISOString(),
-            readback: {
-              channel_id: normalized.channelId,
-              message_ts: normalized.messageTs,
-              confirmed_at: normalized.recordedAt
-            }
-          }
-        : {
-            ...base,
-            next_at: new Date(Date.parse(normalized.recordedAt) + p0SlackEscalationBackoffMs(Math.max(0, previous.attempt - 1))).toISOString()
-          };
-      const query = new URLSearchParams({
-        id: `eq.${normalized.id}`,
-        version: `eq.${normalized.expectedVersion}`,
-        priority: 'eq.p0',
-        state: 'in.(open,in_progress,snoozed)',
-        'payload->p0_delivery->>generation': `eq.${normalized.expectedGeneration}`,
-        'payload->p0_delivery->>client_message_id': `eq.${normalized.clientMessageId}`,
-        select: 'id,version,priority,state,first_opened_at,title,summary,payload'
-      });
-      const { data } = await request(query.toString(), {
-        method: 'PATCH',
-        body: { payload: { ...normalized.payload, p0_delivery: delivery } }
-      });
-      if (!Array.isArray(data) || data.length > 1) throw new Error('Work Orchestrator P0 store response is invalid');
-      if (!data.length) return { applied: false, row: null };
-      const row = v2P0Row(data[0]);
-      if (row.id !== normalized.id || row.version !== normalized.expectedVersion
-        || row.payload?.p0_delivery?.status !== normalized.status
-        || row.payload?.p0_delivery?.generation !== normalized.expectedGeneration
-        || row.payload?.p0_delivery?.client_message_id !== normalized.clientMessageId) {
-        throw new Error('Work Orchestrator P0 store response is invalid');
-      }
-      return { applied: true, row };
-    }
-  };
 }
 
 export function createWorkOrchestratorP0Runtime({
   config = {}, store = null, slack = null, now = () => new Date(), mentionUserIds = []
 } = {}) {
-  const enabled = config.workItemsEnabled === true;
+  const readbackEnabled = config.workItemsEnabled === true && config.p0ReadbackEnabled === true;
+  const cutoverEnabled = readbackEnabled && config.p0CutoverEnabled === true;
+  const enabled = readbackEnabled;
   const channel = String(config.digestChannelId || '').trim();
-  const localConfigReady = !enabled || Boolean(
-    channel
-    && store && typeof store.listP0Work === 'function'
+  const listReady = store && typeof store.listDueP0Work === 'function';
+  const deliveryReady = listReady
     && typeof store.claimP0Delivery === 'function'
-    && typeof store.recordP0Delivery === 'function'
+    && typeof store.settleP0Delivery === 'function'
+    && typeof store.readP0Delivery === 'function'
     && slack && typeof slack.postMessage === 'function'
-    && typeof slack.findMessageByClientId === 'function'
-  );
+    && typeof slack.findMessageByClientId === 'function';
+  const localConfigReady = !enabled || Boolean(listReady && (!cutoverEnabled || channel && deliveryReady));
   if (!localConfigReady) throw new Error('Work Orchestrator P0 local configuration is missing');
 
+  const settleKnownCoordinates = async ({ row, delivery, expectedStatus, posted, recordedAt }) => {
+    const input = {
+      id: row.id,
+      expectedVersion: row.version,
+      expectedStatus,
+      expectedGeneration: delivery.generation,
+      clientMessageId: delivery.clientMessageId,
+      status: 'delivered',
+      recordedAt,
+      channelId: posted.channel || channel,
+      messageTs: posted.ts
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const settled = await store.settleP0Delivery(input);
+        if (settled?.applied === true) return true;
+      } catch {
+        // A lost response may mean the exact terminal CAS committed. Read it back before retrying.
+      }
+      let readback;
+      try {
+        readback = await store.readP0Delivery({
+          id: row.id,
+          expectedVersion: row.version,
+          expectedGeneration: delivery.generation,
+          clientMessageId: delivery.clientMessageId
+        });
+      } catch {
+        continue;
+      }
+      const current = readback?.row?.payload?.p0_delivery;
+      if (readback?.matched === true && current?.status === 'delivered'
+        && current.readback?.channel_id === input.channelId
+        && current.readback?.message_ts === input.messageTs) return true;
+      if (readback?.matched !== true || current?.status !== expectedStatus) return false;
+    }
+    return false;
+  };
+
   const sweep = async () => {
-    if (!enabled) return { status: 'disabled' };
+    if (!enabled) return { status: 'disabled', mode: 'disabled' };
     const result = {
       status: 'ok', scanned: 0, claimed: 0, delivered: 0, reconciled: 0,
-      skipped: 0, errors: [], omissions: 0
+      skipped: 0, errors: [], omissions: 0,
+      eligibleCount: 0, selectedCount: 0, omittedCount: 0,
+      mode: cutoverEnabled ? 'cutover' : 'readback', ready: false
     };
     const cutoff = now().toISOString();
     let listed;
     try {
-      listed = await store.listP0Work({ now: cutoff, limit: 50 });
+      listed = await store.listDueP0Work({ now: cutoff, limit: 50 });
     } catch {
-      return { ...result, status: 'error', errors: ['list_failed'] };
+      return { ...result, status: 'error', errors: ['list_failed'], ready: false };
     }
     if (!listed || !Array.isArray(listed.rows)
-      || !Number.isSafeInteger(listed.omitted) || listed.omitted < 0 || listed.rows.length > 50) {
-      return { ...result, status: 'error', errors: ['invalid_list'] };
+      || !Number.isSafeInteger(listed.eligibleCount) || listed.eligibleCount < 0
+      || !Number.isSafeInteger(listed.selectedCount) || listed.selectedCount < 0
+      || !Number.isSafeInteger(listed.omittedCount) || listed.omittedCount < 0
+      || listed.selectedCount !== listed.rows.length
+      || listed.omittedCount !== listed.eligibleCount - listed.selectedCount
+      || listed.rows.length > 50) {
+      return { ...result, status: 'error', errors: ['invalid_list'], ready: false };
     }
     result.scanned = listed.rows.length;
-    result.omissions = listed.omitted;
+    result.eligibleCount = listed.eligibleCount;
+    result.selectedCount = listed.selectedCount;
+    result.omittedCount = listed.omittedCount;
+    result.omissions = listed.omittedCount;
+    if (!cutoverEnabled) {
+      result.ready = listed.omittedCount === 0;
+      if (!result.ready) {
+        result.status = 'not_ready';
+        result.errors.push('p0_eligible_overflow');
+      }
+      return {
+        status: result.status,
+        mode: result.mode,
+        eligibleCount: result.eligibleCount,
+        selectedCount: result.selectedCount,
+        omittedCount: result.omittedCount,
+        scanned: result.scanned,
+        ready: result.ready,
+        errors: result.errors
+      };
+    }
+    result.ready = listed.omittedCount === 0;
 
     for (const row of listed.rows) {
       let decision;
@@ -2661,25 +2587,19 @@ export function createWorkOrchestratorP0Runtime({
             continue;
           }
         }
-        try {
-          const recorded = await store.recordP0Delivery({
-            id: row.id,
-            expectedVersion: row.version,
-            expectedGeneration: existingDelivery.generation,
-            clientMessageId: existingDelivery.client_message_id,
-            status: 'delivered',
-            channelId: posted.channel || channel,
-            messageTs: posted.ts,
-            recordedAt: cutoff,
-            payload: row.payload
-          });
-          if (recorded?.applied !== true) {
-            result.skipped += 1;
-            result.errors.push('record_conflict');
-            continue;
-          }
+        const settled = await settleKnownCoordinates({
+          row,
+          delivery: {
+            generation: existingDelivery.generation,
+            clientMessageId: existingDelivery.client_message_id
+          },
+          expectedStatus: existingDelivery.status,
+          posted,
+          recordedAt: cutoff
+        });
+        if (settled) {
           result.delivered += 1;
-        } catch {
+        } else {
           result.errors.push('record_failed');
         }
         continue;
@@ -2689,64 +2609,61 @@ export function createWorkOrchestratorP0Runtime({
         continue;
       }
       let claim;
+      let claimedRow;
       try {
         claim = buildV2P0DeliveryClaim(row, { now: cutoff, claimTtlMs: 120_000 });
-        const claimed = await store.claimP0Delivery({ id: row.id, payload: row.payload, ...claim });
+        const claimed = await store.claimP0Delivery({ id: row.id, ...claim });
         if (claimed?.applied !== true || !claimed.row) {
           result.skipped += 1;
           continue;
         }
+        claimedRow = claimed.row;
         result.claimed += 1;
-        const posted = await slack.postMessage(v2P0SlackMessage(row, claim, channel, mentionUserIds));
-        const recorded = await store.recordP0Delivery({
-          id: row.id,
-          expectedVersion: claimed.row.version,
-          expectedGeneration: claim.generation,
-          clientMessageId: claim.clientMessageId,
-          status: 'delivered',
-          channelId: posted.channel || channel,
-          messageTs: posted.ts,
-          recordedAt: cutoff,
-          payload: claimed.row.payload
-        });
-        if (recorded?.applied !== true) {
-          result.errors.push('record_conflict');
-          continue;
-        }
-        result.delivered += 1;
+      } catch {
+        result.errors.push('claim_failed');
+        continue;
+      }
+      let posted;
+      try {
+        posted = await slack.postMessage(v2P0SlackMessage(row, claim, channel, mentionUserIds));
       } catch (error) {
-        const code = claim ? 'post_failed' : 'claim_failed';
-        if (claim) {
-          try {
-            const recorded = await store.recordP0Delivery({
-              id: row.id,
-              expectedVersion: row.version,
-              expectedGeneration: claim.generation,
-              clientMessageId: claim.clientMessageId,
-              status: error?.ambiguous === true ? 'reconcile_pending' : 'retry_pending',
-              recordedAt: cutoff,
-              payload: {
-                ...row.payload,
-                p0_delivery: {
-                  status: 'claimed', generation: claim.generation, attempt: claim.attempt,
-                  client_message_id: claim.clientMessageId,
-                  claimed_at: claim.claimedAt, claim_expires_at: claim.claimExpiresAt
-                }
-              }
-            });
-            if (recorded?.applied !== true) result.errors.push('record_conflict');
-          } catch {
-            result.errors.push('record_failed');
-          }
+        try {
+          const recorded = await store.settleP0Delivery({
+            id: row.id,
+            expectedVersion: claimedRow.version,
+            expectedStatus: 'claimed',
+            expectedGeneration: claim.generation,
+            clientMessageId: claim.clientMessageId,
+            status: error?.ambiguous === true ? 'reconcile_pending' : 'retry_pending',
+            recordedAt: cutoff,
+            channelId: null,
+            messageTs: null
+          });
+          if (recorded?.applied !== true) result.errors.push('record_conflict');
+        } catch {
+          result.errors.push('record_failed');
         }
-        result.errors.push(finiteV2P0Error(code));
+        result.errors.push(finiteV2P0Error('post_failed'));
+        continue;
+      }
+      const settled = await settleKnownCoordinates({
+        row: claimedRow,
+        delivery: { generation: claim.generation, clientMessageId: claim.clientMessageId },
+        expectedStatus: 'claimed',
+        posted,
+        recordedAt: cutoff
+      });
+      if (settled) {
+        result.delivered += 1;
+      } else {
+        result.errors.push('record_failed');
       }
     }
     if (result.errors.length || result.omissions > 0) result.status = 'error';
     return result;
   };
 
-  return { enabled, localConfigReady, sweep };
+  return { enabled, readbackEnabled, cutoverEnabled, localConfigReady, sweep };
 }
 
 export function buildCorsHeaders() {
@@ -4512,14 +4429,21 @@ async function runLegacyP0SlackEscalationSweep(reason = 'interval') {
 
 async function runP0SlackEscalationSweep(reason = 'interval') {
   return runP0EscalationPair({
-    v2Enabled: workOrchestratorP0Runtime.enabled,
+    readbackEnabled: workOrchestratorP0Runtime.readbackEnabled,
+    cutoverEnabled: workOrchestratorP0Runtime.cutoverEnabled,
     legacy: () => runLegacyP0SlackEscalationSweep(reason),
+    v2Readback: async () => {
+      const result = await workOrchestratorP0Runtime.sweep(reason);
+      state.workOrchestrator.lastP0Readback = result;
+      return result;
+    },
     v2: async () => {
       if (state.p0SlackEscalationRunning) return { skipped: true, reason: 'already_running' };
       state.p0SlackEscalationRunning = true;
       try {
         const result = await workOrchestratorP0Runtime.sweep(reason);
         state.lastP0SlackEscalation = result;
+        state.workOrchestrator.lastP0Readback = result;
         return result;
       } finally {
         state.p0SlackEscalationRunning = false;

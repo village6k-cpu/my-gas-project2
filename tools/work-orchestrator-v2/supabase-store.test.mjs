@@ -707,6 +707,75 @@ test('authoritative automation resolution store rejects content-bearing evidence
   assert.equal(calls, 0);
 });
 
+test('v2 P0 review round 1 store uses authoritative list and atomic delivery RPCs', async () => {
+  const p0 = workRow({
+    priority: 'p0', state: 'open', first_opened_at: '2026-09-01T05:30:00.000Z',
+    payload: { requires_human_action: true }
+  });
+  const claimed = {
+    ...p0,
+    payload: { ...p0.payload, p0_delivery: {
+      status: 'claimed', generation: 1, attempt: 1,
+      client_message_id: '77777777-7777-5777-8777-777777777777',
+      claimed_at: '2026-09-01T06:00:00.000Z', claim_expires_at: '2026-09-01T06:02:00.000Z'
+    } }
+  };
+  const delivered = {
+    ...claimed,
+    payload: { ...claimed.payload, p0_delivery: {
+      ...claimed.payload.p0_delivery, status: 'delivered',
+      delivered_at: '2026-09-01T06:00:01.000Z', next_at: '2026-09-01T06:20:01.000Z',
+      last_attempt_at: '2026-09-01T06:00:01.000Z',
+      readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-09-01T06:00:01.000Z' }
+    } }
+  };
+  const fetch = createFetch([
+    response({ data: { eligible_count: 1, selected_count: 1, omitted_count: 0, rows: [p0] } }),
+    response({ data: { applied: true, row: claimed } }),
+    response({ data: { applied: true, row: delivered } }),
+    response({ data: { matched: true, row: delivered } })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  assert.deepEqual(await store.listDueP0Work({ now: '2026-09-01T06:00:00.000Z', limit: 50 }), {
+    eligibleCount: 1, selectedCount: 1, omittedCount: 0, rows: [p0]
+  });
+  await store.claimP0Delivery({
+    id: WORK_ID, expectedVersion: 1, expectedGeneration: 0, generation: 1, attempt: 1,
+    clientMessageId: '77777777-7777-5777-8777-777777777777',
+    claimedAt: '2026-09-01T06:00:00.000Z', claimExpiresAt: '2026-09-01T06:02:00.000Z'
+  });
+  await store.settleP0Delivery({
+    id: WORK_ID, expectedVersion: 1, expectedStatus: 'claimed', expectedGeneration: 1,
+    clientMessageId: '77777777-7777-5777-8777-777777777777', status: 'delivered',
+    recordedAt: '2026-09-01T06:00:01.000Z', channelId: 'CP0', messageTs: '100.1'
+  });
+  await store.readP0Delivery({
+    id: WORK_ID, expectedVersion: 1, expectedGeneration: 1,
+    clientMessageId: '77777777-7777-5777-8777-777777777777'
+  });
+
+  assert.deepEqual(fetch.requests.map((request) => request.url), [
+    'https://supabase.example/rest/v1/rpc/list_due_p0_work_v2',
+    'https://supabase.example/rest/v1/rpc/claim_p0_delivery_v2',
+    'https://supabase.example/rest/v1/rpc/settle_p0_delivery_v2',
+    'https://supabase.example/rest/v1/rpc/read_p0_delivery_v2'
+  ]);
+  assert.deepEqual(JSON.parse(fetch.requests[2].init.body), {
+    p_id: WORK_ID,
+    p_expected_version: 1,
+    p_expected_status: 'claimed',
+    p_expected_generation: 1,
+    p_client_message_id: '77777777-7777-5777-8777-777777777777',
+    p_status: 'delivered',
+    p_recorded_at: '2026-09-01T06:00:01.000Z',
+    p_channel_id: 'CP0',
+    p_message_ts: '100.1'
+  });
+});
+
 test('listActionableWork selects a bounded deterministic digest surface including unresolved P0', async () => {
   const fetch = createFetch([response({ data: actionablePayload([workRow({
     priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z', payload: { requires_human_action: true }

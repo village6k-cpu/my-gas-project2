@@ -10,6 +10,8 @@ const [migrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_foundation\.sql$/.test(name));
 const [noticeCleanupMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_notice_cleanup\.sql$/.test(name));
+const [p0DeliveryMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_p0_delivery\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -26,6 +28,13 @@ async function createFoundationDatabase() {
 async function createNoticeCleanupDatabase() {
   const db = await createFoundationDatabase();
   await db.exec(readFileSync(join(migrationsDirectory, noticeCleanupMigrationName), 'utf8'));
+  return db;
+}
+
+async function createP0DeliveryDatabase() {
+  const db = await createFoundationDatabase();
+  assert.ok(p0DeliveryMigrationName, 'the additive P0 delivery migration must exist');
+  await db.exec(readFileSync(join(migrationsDirectory, p0DeliveryMigrationName), 'utf8'));
   return db;
 }
 
@@ -1247,6 +1256,132 @@ test('notice cleanup migration is service-role only with invoker and empty-searc
       service_role_select: true,
       service_role_insert: true
     });
+  } finally {
+    await db.close();
+  }
+});
+
+test('v2 P0 review round 1 lists eligibility before limiting and settles exact delivery CAS without clobbering payload', async () => {
+  const db = await createP0DeliveryDatabase();
+  const now = '2026-09-01T06:00:00.000Z';
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload
+      )
+      select
+        'acked:' || n, 'room:' || n, 'acknowledged', '', 'human_review', 'p0', 'open',
+        $1::timestamptz - interval '2 days', $1::timestamptz - interval '2 days',
+        $1::timestamptz - interval '2 days',
+        jsonb_build_object(
+          'requires_human_action', true,
+          'p0_acknowledged_at', to_char($1::timestamptz at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        )
+      from generate_series(1, 51) as n
+    `, [now]);
+    const { rows: inserted } = await db.query(`
+      insert into public.work_items_v2 (
+        work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload
+      ) values (
+        'eligible', 'room:eligible', 'eligible', '', 'human_review', 'p0', 'open',
+        $1::timestamptz, $1::timestamptz - interval '20 minutes',
+        $1::timestamptz - interval '20 minutes', '{"requires_human_action":true}'::jsonb
+      ) returning id, version
+    `, [now]);
+    const { rows: listedRows } = await db.query(`
+      select public.list_due_p0_work_v2($1::timestamptz, 50) as result
+    `, [now]);
+    const listed = listedRows[0].result;
+    assert.equal(listed.eligible_count, 1);
+    assert.equal(listed.selected_count, 1);
+    assert.equal(listed.omitted_count, 0);
+    assert.deepEqual(listed.rows.map((row) => row.id), [inserted[0].id]);
+
+    await db.query(`
+      update public.work_items_v2
+      set payload = jsonb_set(payload, '{concurrent_marker}', '"preserved"'::jsonb, true)
+      where id = $1
+    `, [inserted[0].id]);
+    const clientId = '77777777-7777-5777-8777-777777777777';
+    const { rows: claimedRows } = await db.query(`
+      select public.claim_p0_delivery_v2(
+        $1::uuid, $2::integer, 0, 1, 1, $3::uuid,
+        $4::timestamptz, $4::timestamptz + interval '2 minutes'
+      ) as result
+    `, [inserted[0].id, inserted[0].version, clientId, now]);
+    assert.equal(claimedRows[0].result.applied, true);
+    assert.equal(claimedRows[0].result.row.payload.concurrent_marker, 'preserved');
+
+    await db.query(`
+      update public.work_items_v2
+      set payload = jsonb_set(payload, '{other_writer}', 'true'::jsonb, true)
+      where id = $1
+    `, [inserted[0].id]);
+    const { rows: settledRows } = await db.query(`
+      select public.settle_p0_delivery_v2(
+        $1::uuid, $2::integer, 'claimed', 1, $3::uuid, 'delivered',
+        $4::timestamptz, 'CP0', '100.1'
+      ) as result
+    `, [inserted[0].id, inserted[0].version, clientId, now]);
+    assert.equal(settledRows[0].result.applied, true);
+    assert.equal(settledRows[0].result.row.payload.other_writer, true);
+
+    const { rows: staleRows } = await db.query(`
+      select public.settle_p0_delivery_v2(
+        $1::uuid, $2::integer, 'claimed', 1, $3::uuid, 'retry_pending',
+        $4::timestamptz, null, null
+      ) as result
+    `, [inserted[0].id, inserted[0].version, clientId, now]);
+    assert.equal(staleRows[0].result.applied, false);
+    const { rows: readback } = await db.query(
+      `select payload from public.work_items_v2 where id = $1`, [inserted[0].id]
+    );
+    assert.equal(readback[0].payload.p0_delivery.status, 'delivered');
+    assert.equal(readback[0].payload.p0_delivery.readback.message_ts, '100.1');
+  } finally {
+    await db.close();
+  }
+});
+
+test('v2 P0 review round 1 reports authoritative selected and omitted counts after due filtering', async () => {
+  const db = await createP0DeliveryDatabase();
+  const now = '2026-09-01T06:00:00.000Z';
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload
+      )
+      select
+        'due:' || n, 'room:' || n, 'due', '', 'human_review', 'p0', 'open',
+        $1::timestamptz, $1::timestamptz - (n || ' minutes')::interval,
+        $1::timestamptz - (n || ' minutes')::interval, '{"requires_human_action":true}'::jsonb
+      from generate_series(20, 79) as n
+    `, [now]);
+    const { rows } = await db.query(
+      `select public.list_due_p0_work_v2($1::timestamptz, 50) as result`, [now]
+    );
+    assert.equal(rows[0].result.eligible_count, 60);
+    assert.equal(rows[0].result.selected_count, 50);
+    assert.equal(rows[0].result.omitted_count, 10);
+    assert.equal(rows[0].result.rows.length, 50);
+    const { rows: privileges } = await db.query(`
+      select p.proname,
+        has_function_privilege('anon', p.oid, 'execute') as anon_execute,
+        has_function_privilege('authenticated', p.oid, 'execute') as authenticated_execute,
+        has_function_privilege('service_role', p.oid, 'execute') as service_role_execute
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public' and p.proname in (
+        'list_due_p0_work_v2', 'claim_p0_delivery_v2',
+        'settle_p0_delivery_v2', 'read_p0_delivery_v2'
+      ) order by p.proname
+    `);
+    assert.equal(privileges.length, 4);
+    assert.ok(privileges.every((row) => row.anon_execute === false
+      && row.authenticated_execute === false && row.service_role_execute === true));
   } finally {
     await db.close();
   }

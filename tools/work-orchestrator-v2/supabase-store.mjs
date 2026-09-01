@@ -48,6 +48,7 @@ const WORK_PAYLOAD_TEXT_LIMITS = Object.freeze({
 });
 const WORK_ACTIONS = new Set(['progress', 'snooze', 'ack_p0', 'request_resolve', 'dismiss']);
 const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
+const P0_CLIENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST_INCLUSION_REASONS = new Set(['p0', 'overdue', 'urgent', 'carry_over', 'actionable', 'daily_reminder']);
 const DIGEST_FAILURE_CODES = new Set([
   'digest_build_failed', 'digest_delivery_failed', 'delivery_unconfirmed',
@@ -970,6 +971,93 @@ function actionableResponse(data, now, limit) {
   return rows;
 }
 
+function p0WorkResponseRow(row) {
+  if (!exactKeys(row, ACTIONABLE_WORK_SELECT.split(','))) throw responseInvalid();
+  responseWorkRow(row, { activeOnly: true });
+  if (row.priority !== 'p0') throw responseInvalid();
+  for (const counter of ['digest_inclusion_count', 'consecutive_unhandled_digests']) {
+    if (!Number.isSafeInteger(row[counter]) || row[counter] < 0) throw responseInvalid();
+  }
+  responseTimestamp(row.last_digest_at, { nullable: true });
+  responseTimestamp(row.next_reminder_at, { nullable: true });
+  return row;
+}
+
+function p0ListResponse(data, limit) {
+  if (!exactKeys(data, ['eligible_count', 'selected_count', 'omitted_count', 'rows'])
+    || !Number.isSafeInteger(data.eligible_count) || data.eligible_count < 0
+    || !Number.isSafeInteger(data.selected_count) || data.selected_count < 0
+    || !Number.isSafeInteger(data.omitted_count) || data.omitted_count < 0
+    || data.selected_count !== Math.min(data.eligible_count, limit)
+    || data.omitted_count !== data.eligible_count - data.selected_count
+    || !Array.isArray(data.rows) || data.rows.length !== data.selected_count) throw responseInvalid();
+  return {
+    eligibleCount: data.eligible_count,
+    selectedCount: data.selected_count,
+    omittedCount: data.omitted_count,
+    rows: data.rows.map(p0WorkResponseRow)
+  };
+}
+
+function p0BaseInput(input, { claim = false, settle = false } = {}) {
+  if (!isRecord(input)) throw invalidInput();
+  const expected = claim
+    ? ['attempt','claimExpiresAt','claimedAt','clientMessageId','expectedGeneration','expectedVersion','generation','id']
+    : settle
+      ? ['channelId','clientMessageId','expectedGeneration','expectedStatus','expectedVersion','id','messageTs','recordedAt','status']
+      : ['clientMessageId','expectedGeneration','expectedVersion','id'];
+  if (!exactKeys(input, expected)) throw invalidInput();
+  const result = {
+    id: uuid(input.id),
+    expectedVersion: positiveVersion(input.expectedVersion),
+    expectedGeneration: Number(input.expectedGeneration),
+    clientMessageId: exactText(input.clientMessageId, 36)
+  };
+  if (!Number.isSafeInteger(result.expectedGeneration) || result.expectedGeneration < (claim ? 0 : 1)
+    || !P0_CLIENT_MESSAGE_ID.test(result.clientMessageId)) throw invalidInput();
+  if (claim) {
+    result.generation = Number(input.generation);
+    result.attempt = Number(input.attempt);
+    result.claimedAt = isoTimestamp(input.claimedAt);
+    result.claimExpiresAt = isoTimestamp(input.claimExpiresAt);
+    if (!Number.isSafeInteger(result.generation) || result.generation !== result.expectedGeneration + 1
+      || result.attempt !== result.generation
+      || Date.parse(result.claimExpiresAt) <= Date.parse(result.claimedAt)) throw invalidInput();
+  }
+  if (settle) {
+    result.expectedStatus = exactText(input.expectedStatus, 30);
+    result.status = exactText(input.status, 30);
+    result.recordedAt = isoTimestamp(input.recordedAt);
+    if (!['claimed', 'reconcile_pending'].includes(result.expectedStatus)
+      || !['delivered', 'reconcile_pending', 'retry_pending'].includes(result.status)) throw invalidInput();
+    if (result.status === 'delivered') {
+      result.channelId = exactText(input.channelId, 80);
+      result.messageTs = exactText(input.messageTs, 100);
+      if (!SLACK_CHANNEL_ID.test(result.channelId) || !SLACK_MESSAGE_TS.test(result.messageTs)) throw invalidInput();
+    } else if (input.channelId !== null || input.messageTs !== null) throw invalidInput();
+    else {
+      result.channelId = null;
+      result.messageTs = null;
+    }
+  }
+  return result;
+}
+
+function p0MutationResponse(data, input, { status = null } = {}) {
+  if (!exactKeys(data, ['applied', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
+  if (!data.applied) {
+    if (data.row !== null) throw responseInvalid();
+    return data;
+  }
+  const row = p0WorkResponseRow(data.row);
+  const delivery = row.payload.p0_delivery;
+  if (!isRecord(delivery) || row.id !== input.id || row.version !== input.expectedVersion
+    || delivery.generation !== (status === null ? input.generation : input.expectedGeneration)
+    || delivery.client_message_id !== input.clientMessageId
+    || status !== null && delivery.status !== status) throw responseInvalid();
+  return data;
+}
+
 function requiredText(value, maxLength) {
   if (typeof value !== 'string') throw invalidInput();
   const normalized = value.trim();
@@ -1473,6 +1561,92 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         readbackAt: updatedAt, contentHash
       });
       return result;
+    },
+    listDueP0Work: async (input = {}) => {
+      let now;
+      let limit;
+      try {
+        if (!exactKeys(input, ['limit', 'now'])
+          || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50) throw invalidInput();
+        now = isoTimestamp(input.now);
+        limit = input.limit;
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/list_due_p0_work_v2', {
+        method: 'POST', body: safeJson({ p_now: now, p_limit: limit })
+      });
+      return p0ListResponse(data, limit);
+    },
+    claimP0Delivery: async (input = {}) => {
+      let normalized;
+      try {
+        normalized = p0BaseInput(input, { claim: true });
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/claim_p0_delivery_v2', {
+        method: 'POST', body: safeJson({
+          p_id: normalized.id,
+          p_expected_version: normalized.expectedVersion,
+          p_expected_generation: normalized.expectedGeneration,
+          p_generation: normalized.generation,
+          p_attempt: normalized.attempt,
+          p_client_message_id: normalized.clientMessageId,
+          p_claimed_at: normalized.claimedAt,
+          p_claim_expires_at: normalized.claimExpiresAt
+        })
+      });
+      return p0MutationResponse(data, normalized);
+    },
+    settleP0Delivery: async (input = {}) => {
+      let normalized;
+      try {
+        normalized = p0BaseInput(input, { settle: true });
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/settle_p0_delivery_v2', {
+        method: 'POST', body: safeJson({
+          p_id: normalized.id,
+          p_expected_version: normalized.expectedVersion,
+          p_expected_status: normalized.expectedStatus,
+          p_expected_generation: normalized.expectedGeneration,
+          p_client_message_id: normalized.clientMessageId,
+          p_status: normalized.status,
+          p_recorded_at: normalized.recordedAt,
+          p_channel_id: normalized.channelId,
+          p_message_ts: normalized.messageTs
+        })
+      });
+      return p0MutationResponse(data, normalized, { status: normalized.status });
+    },
+    readP0Delivery: async (input = {}) => {
+      let normalized;
+      try {
+        normalized = p0BaseInput(input);
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/read_p0_delivery_v2', {
+        method: 'POST', body: safeJson({
+          p_id: normalized.id,
+          p_expected_version: normalized.expectedVersion,
+          p_expected_generation: normalized.expectedGeneration,
+          p_client_message_id: normalized.clientMessageId
+        })
+      });
+      if (!exactKeys(data, ['matched', 'row']) || typeof data.matched !== 'boolean') throw responseInvalid();
+      if (!data.matched) {
+        if (data.row !== null) throw responseInvalid();
+        return data;
+      }
+      const row = p0WorkResponseRow(data.row);
+      const delivery = row.payload.p0_delivery;
+      if (row.id !== normalized.id || row.version !== normalized.expectedVersion
+        || !isRecord(delivery) || delivery.generation !== normalized.expectedGeneration
+        || delivery.client_message_id !== normalized.clientMessageId) throw responseInvalid();
+      return data;
     },
     listActionableWork: async (input = {}) => {
       let now;

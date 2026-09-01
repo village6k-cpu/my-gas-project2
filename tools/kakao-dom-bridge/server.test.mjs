@@ -22,9 +22,9 @@ const {
   buildP0SlackEscalationClaim,
   buildP0SlackEscalationMessage,
   createWorkOrchestratorP0Runtime,
-  createV2P0Store,
   p0SlackEscalationBackoffMs,
   p0SlackEscalationDue,
+  resolveWorkOrchestratorP0Config,
   runP0EscalationPair,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
@@ -2430,6 +2430,176 @@ test('P0 escalation without an initial Slack card falls back to a standalone cha
   assert.equal(message.reply_broadcast, false);
 });
 
+test('v2 P0 review round 1 cutover controls are distinct, default OFF, and readback precedes cutover', async () => {
+  assert.deepEqual(resolveWorkOrchestratorP0Config({}), {
+    readbackEnabled: false, cutoverEnabled: false
+  });
+  assert.deepEqual(resolveWorkOrchestratorP0Config({
+    WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1'
+  }), { readbackEnabled: true, cutoverEnabled: false });
+  assert.throws(() => resolveWorkOrchestratorP0Config({
+    WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1'
+  }), /readback/i);
+
+  const calls = [];
+  const legacyResult = { marker: 'legacy' };
+  const dryResult = { status: 'ok', eligibleCount: 0, selectedCount: 0, omittedCount: 0 };
+  const staged = await runP0EscalationPair({
+    readbackEnabled: true,
+    cutoverEnabled: false,
+    legacy: async () => { calls.push('legacy'); return legacyResult; },
+    v2Readback: async () => { calls.push('readback'); return dryResult; },
+    v2: async () => { calls.push('v2'); }
+  });
+  assert.deepEqual(calls, ['readback', 'legacy']);
+  assert.deepEqual(staged, { legacy: legacyResult, readback: dryResult, sender: 'legacy' });
+
+  calls.length = 0;
+  const failedReadback = await runP0EscalationPair({
+    readbackEnabled: true,
+    legacy: async () => { calls.push('legacy'); return legacyResult; },
+    v2Readback: async () => { calls.push('readback'); throw new Error('private readback failure'); }
+  });
+  assert.deepEqual(calls, ['readback', 'legacy']);
+  assert.deepEqual(failedReadback, {
+    legacy: legacyResult,
+    readback: { status: 'error', errors: ['readback_failed'] },
+    sender: 'legacy'
+  });
+
+  calls.length = 0;
+  await runP0EscalationPair({
+    readbackEnabled: true,
+    cutoverEnabled: true,
+    legacy: async () => calls.push('legacy'),
+    v2Readback: async () => calls.push('readback'),
+    v2: async () => { calls.push('v2'); return { status: 'ok' }; }
+  });
+  assert.deepEqual(calls, ['v2']);
+});
+
+test('v2 P0 review round 1 dry readback is authoritative and never claims, searches, or sends', async () => {
+  const calls = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: false,
+      digestChannelId: 'CP0'
+    },
+    store: {
+      async listDueP0Work(input) {
+        calls.push(['list', input]);
+        return { rows: Array.from({ length: 50 }, () => ({})), eligibleCount: 61, selectedCount: 50, omittedCount: 11 };
+      },
+      async claimP0Delivery() { calls.push(['claim']); },
+      async settleP0Delivery() { calls.push(['settle']); },
+      async readP0Delivery() { calls.push(['read']); }
+    },
+    slack: {
+      async postMessage() { calls.push(['post']); },
+      async findMessageByClientId() { calls.push(['search']); }
+    },
+    now: () => new Date('2026-09-01T06:00:00.000Z')
+  });
+
+  assert.deepEqual(await runtime.sweep('dry'), {
+    status: 'not_ready', mode: 'readback', eligibleCount: 61, selectedCount: 50,
+    omittedCount: 11, scanned: 50, ready: false, errors: ['p0_eligible_overflow']
+  });
+  assert.deepEqual(calls, [['list', { now: '2026-09-01T06:00:00.000Z', limit: 50 }]]);
+});
+
+test('v2 P0 review round 1 known Slack coordinates survive lost settlement response without repost or retry state', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-01T05:30:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  let posts = 0;
+  const settlements = [];
+  const reads = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    store: {
+      async listDueP0Work() {
+        return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 };
+      },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async settleP0Delivery(input) {
+        settlements.push(input);
+        throw new Error('response lost after commit');
+      },
+      async readP0Delivery(input) {
+        reads.push(input);
+        return { matched: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'delivered', generation: 1, attempt: 1,
+          client_message_id: input.clientMessageId,
+          claimed_at: '2026-09-01T06:00:00.000Z', claim_expires_at: '2026-09-01T06:02:00.000Z',
+          last_attempt_at: '2026-09-01T06:00:00.000Z', delivered_at: '2026-09-01T06:00:00.000Z',
+          next_at: '2026-09-01T06:20:00.000Z',
+          readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-09-01T06:00:00.000Z' }
+        } } } };
+      }
+    },
+    slack: {
+      async postMessage() { posts += 1; return { channel: 'CP0', ts: '100.1' }; },
+      async findMessageByClientId() { throw new Error('new claim posts directly'); }
+    },
+    now: () => new Date('2026-09-01T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.equal(result.delivered, 1);
+  assert.deepEqual(result.errors, []);
+  assert.equal(posts, 1);
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0].expectedStatus, 'claimed');
+  assert.equal(settlements[0].status, 'delivered');
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].clientMessageId, settlements[0].clientMessageId);
+  assert.doesNotMatch(JSON.stringify(settlements), /retry_pending|post_failed/);
+});
+
+test('v2 P0 review round 1 exposes finite content-free cutover readiness health', () => {
+  const config = buildHealthConfig({
+    workOrchestrator: {
+      shadowWrites: false, immediateEnabled: true, workItemsEnabled: true,
+      digestEnabled: true, cleanupEnabled: true,
+      p0ReadbackEnabled: true, p0CutoverEnabled: false
+    },
+    workOrchestratorStoreConfigured: true,
+    workOrchestratorShadowReady: true,
+    workOrchestratorImmediateLocalConfigReady: true,
+    workOrchestratorP0LocalConfigReady: true
+  });
+  assert.deepEqual({
+    readbackEnabled: config.workOrchestrator.p0ReadbackEnabled,
+    cutoverEnabled: config.workOrchestrator.p0CutoverEnabled,
+    localConfigReady: config.workOrchestrator.p0LocalConfigReady
+  }, { readbackEnabled: true, cutoverEnabled: false, localConfigReady: true });
+  const health = buildWorkOrchestratorHealthState({
+    lastP0Readback: {
+      status: 'not_ready', mode: 'readback', eligibleCount: 61,
+      selectedCount: 50, omittedCount: 11, ready: false,
+      errors: ['p0_eligible_overflow'], privatePayload: 'must-not-leak'
+    }
+  });
+  assert.deepEqual(health.lastP0Readback, {
+    status: 'not_ready', mode: 'readback', eligibleCount: 61,
+    selectedCount: 50, omittedCount: 11, ready: false,
+    errors: ['p0_eligible_overflow']
+  });
+  assert.doesNotMatch(JSON.stringify(health), /must-not-leak/);
+});
+
 test('v2 P0 stale claim CAS never reaches Slack', async () => {
   let posts = 0;
   const row = {
@@ -2438,11 +2608,12 @@ test('v2 P0 stale claim CAS never reaches Slack', async () => {
     payload: { requires_human_action: true }
   };
   const runtime = createWorkOrchestratorP0Runtime({
-    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
     store: {
-      async listP0Work() { return { rows: [row], omitted: 0 }; },
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
       async claimP0Delivery() { return { applied: false, row: null }; },
-      async recordP0Delivery() { throw new Error('record must not run'); }
+      async settleP0Delivery() { throw new Error('settle must not run'); },
+      async readP0Delivery() { throw new Error('read must not run'); }
     },
     slack: {
       async postMessage() { posts += 1; throw new Error('must not post'); },
@@ -2452,10 +2623,10 @@ test('v2 P0 stale claim CAS never reaches Slack', async () => {
   });
 
   const result = await runtime.sweep('test');
-  assert.deepEqual(result, {
-    status: 'ok', scanned: 1, claimed: 0, delivered: 0, reconciled: 0,
-    skipped: 1, errors: [], omissions: 0
-  });
+  assert.equal(result.status, 'ok');
+  assert.equal(result.scanned, 1);
+  assert.equal(result.skipped, 1);
+  assert.deepEqual(result.errors, []);
   assert.equal(posts, 0);
 });
 
@@ -2474,11 +2645,12 @@ test('v2 P0 ambiguous retry reconciles the same generation and deterministic cli
   const searches = [];
   const records = [];
   const runtime = createWorkOrchestratorP0Runtime({
-    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
     store: {
-      async listP0Work() { return { rows: [claimed], omitted: 0 }; },
+      async listDueP0Work() { return { rows: [claimed], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
       async claimP0Delivery() { throw new Error('same generation must reconcile before claiming'); },
-      async recordP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; }
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
     },
     slack: {
       async postMessage() { posts += 1; throw new Error('must not repost'); },
@@ -2505,7 +2677,8 @@ test('v2 P0 flag OFF preserves exact legacy sweep parity', async () => {
   const legacyResult = { scanned: 4, delivered: 1, marker: 'legacy-exact' };
   let v2Calls = 0;
   const result = await runP0EscalationPair({
-    v2Enabled: false,
+    readbackEnabled: false,
+    cutoverEnabled: false,
     legacy: async () => legacyResult,
     v2: async () => { v2Calls += 1; }
   });
@@ -2516,81 +2689,13 @@ test('v2 P0 flag OFF preserves exact legacy sweep parity', async () => {
 test('v2 P0 cutover lets one source event reach only the v2 escalation path', async () => {
   const calls = [];
   const result = await runP0EscalationPair({
-    v2Enabled: true,
+    readbackEnabled: true,
+    cutoverEnabled: true,
     legacy: async () => calls.push('legacy'),
     v2: async () => { calls.push('v2'); return { status: 'ok', scanned: 1 }; }
   });
   assert.deepEqual(calls, ['v2']);
   assert.deepEqual(result, { status: 'ok', scanned: 1 });
-});
-
-test('v2 P0 store claims and records with exact work version and delivery generation CAS', async () => {
-  const row = {
-    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
-    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
-    payload: { requires_human_action: true }
-  };
-  const requests = [];
-  const responses = [
-    new Response(JSON.stringify([row]), { status: 200, headers: { 'content-range': '0-0/1' } }),
-    new Response(JSON.stringify([{ ...row, payload: {
-      ...row.payload,
-      p0_delivery: {
-        status: 'claimed', generation: 1, attempt: 1,
-        client_message_id: '11111111-2222-5333-8444-555555555555',
-        claimed_at: '2026-08-29T06:00:00.000Z', claim_expires_at: '2026-08-29T06:02:00.000Z'
-      }
-    } }]), { status: 200 }),
-    new Response(JSON.stringify([{ ...row, payload: {
-      ...row.payload,
-      p0_delivery: {
-        status: 'delivered', generation: 1, attempt: 1,
-        client_message_id: '11111111-2222-5333-8444-555555555555',
-        claimed_at: '2026-08-29T06:00:00.000Z', claim_expires_at: '2026-08-29T06:02:00.000Z',
-        delivered_at: '2026-08-29T06:00:01.000Z', next_at: '2026-08-29T06:20:01.000Z',
-        readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-08-29T06:00:01.000Z' }
-      }
-    } }]), { status: 200 })
-  ];
-  const store = createV2P0Store({
-    supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-role-test',
-    fetchImpl: async (url, init = {}) => {
-      requests.push({ url, init, body: init.body ? JSON.parse(init.body) : null });
-      return responses.shift();
-    }
-  });
-
-  const listed = await store.listP0Work({ now: '2026-08-29T06:00:00.000Z', limit: 50 });
-  const claimed = await store.claimP0Delivery({
-    id: row.id, expectedVersion: 7, expectedGeneration: 0, generation: 1, attempt: 1,
-    clientMessageId: '11111111-2222-5333-8444-555555555555',
-    claimedAt: '2026-08-29T06:00:00.000Z', claimExpiresAt: '2026-08-29T06:02:00.000Z',
-    payload: row.payload
-  });
-  const recorded = await store.recordP0Delivery({
-    id: row.id, expectedVersion: 7, expectedGeneration: 1,
-    clientMessageId: '11111111-2222-5333-8444-555555555555', status: 'delivered',
-    channelId: 'CP0', messageTs: '100.1', recordedAt: '2026-08-29T06:00:01.000Z',
-    payload: claimed.row.payload
-  });
-
-  assert.deepEqual(listed, { rows: [row], omitted: 0 });
-  assert.equal(claimed.applied, true);
-  assert.equal(recorded.applied, true);
-  assert.match(requests[0].url, /work_items_v2\?/);
-  assert.match(requests[0].url, /priority=eq\.p0/);
-  assert.equal(requests[0].init.headers.prefer, 'count=exact');
-  assert.match(requests[1].url, /id=eq\.11111111-1111-4111-8111-111111111111/);
-  assert.match(requests[1].url, /version=eq\.7/);
-  assert.match(requests[1].url, /payload-%3Ep0_delivery-%3E%3Egeneration=is\.null/);
-  assert.equal(Object.hasOwn(requests[1].body, 'version'), false);
-  assert.equal(requests[1].body.payload.p0_delivery.generation, 1);
-  assert.match(requests[2].url, /version=eq\.7/);
-  assert.match(requests[2].url, /payload-%3Ep0_delivery-%3E%3Egeneration=eq\.1/);
-  assert.match(requests[2].url, /payload-%3Ep0_delivery-%3E%3Eclient_message_id=eq\.11111111-2222-5333-8444-555555555555/);
-  assert.equal(Object.hasOwn(requests[2].body, 'version'), false);
-  assert.equal(requests[2].body.payload.p0_delivery.status, 'delivered');
-  assert.equal(requests[2].body.payload.p0_delivery.next_at, '2026-08-29T06:20:01.000Z');
 });
 
 test('v2 P0 ambiguous Slack result durably records reconciliation before any later retry', async () => {
@@ -2602,9 +2707,9 @@ test('v2 P0 ambiguous Slack result durably records reconciliation before any lat
   const records = [];
   let claimedClientId = '';
   const runtime = createWorkOrchestratorP0Runtime({
-    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
     store: {
-      async listP0Work() { return { rows: [row], omitted: 0 }; },
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
       async claimP0Delivery(input) {
         claimedClientId = input.clientMessageId;
         return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
@@ -2613,7 +2718,8 @@ test('v2 P0 ambiguous Slack result durably records reconciliation before any lat
           claim_expires_at: input.claimExpiresAt
         } } } };
       },
-      async recordP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; }
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
     },
     slack: {
       async postMessage() { throw Object.assign(new Error('private transport failure'), { ambiguous: true }); },
@@ -2640,9 +2746,9 @@ test('v2 P0 definite Slack rejection records a same-generation retry without lea
   };
   const records = [];
   const runtime = createWorkOrchestratorP0Runtime({
-    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
     store: {
-      async listP0Work() { return { rows: [row], omitted: 0 }; },
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
       async claimP0Delivery(input) {
         return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
           status: 'claimed', generation: input.generation, attempt: input.attempt,
@@ -2650,7 +2756,8 @@ test('v2 P0 definite Slack rejection records a same-generation retry without lea
           claim_expires_at: input.claimExpiresAt
         } } } };
       },
-      async recordP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; }
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
     },
     slack: {
       async postMessage() { throw Object.assign(new Error('private rejected content'), { ambiguous: false }); },
@@ -2675,9 +2782,9 @@ test('v2 P0 alert carries a current versioned acknowledgement action', async () 
   };
   let postedInput = null;
   const runtime = createWorkOrchestratorP0Runtime({
-    config: { workItemsEnabled: true, digestChannelId: 'CP0' },
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
     store: {
-      async listP0Work() { return { rows: [row], omitted: 0 }; },
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
       async claimP0Delivery(input) {
         return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
           status: 'claimed', generation: input.generation, attempt: input.attempt,
@@ -2685,7 +2792,8 @@ test('v2 P0 alert carries a current versioned acknowledgement action', async () 
           claim_expires_at: input.claimExpiresAt
         } } } };
       },
-      async recordP0Delivery() { return { applied: true, row }; }
+      async settleP0Delivery() { return { applied: true, row }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
     },
     slack: {
       async postMessage(input) { postedInput = input; return { channel: 'CP0', ts: '100.1' }; },
@@ -3769,6 +3877,8 @@ test('Work Orchestrator shadow health exposes only flags, readiness, counters, t
       shadowWrites: true,
       immediateEnabled: false,
       workItemsEnabled: false,
+      p0ReadbackEnabled: false,
+      p0CutoverEnabled: false,
       digestEnabled: false,
       cleanupEnabled: false
     },
@@ -3790,6 +3900,8 @@ test('Work Orchestrator shadow health exposes only flags, readiness, counters, t
       shadowWrites: true,
       immediateEnabled: false,
       workItemsEnabled: false,
+      p0ReadbackEnabled: false,
+      p0CutoverEnabled: false,
       digestEnabled: false,
       cleanupEnabled: false,
       storeConfigured: false,
