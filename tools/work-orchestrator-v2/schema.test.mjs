@@ -315,3 +315,12 @@ test('bounded cleanup candidates acquire every source lock lexically before rece
   assert.match(claim.slice(orderedLocks, receiptProcessing),
     /pg_advisory_xact_lock\(hashtextextended\(\s*'notice-cleanup-source:'\s*\|\|\s*v_source_key,\s*91420260901/i);
 });
+
+test('cleanup claim never mutates work membership while holding source ownership locks', () => {
+  const sql = readFileSync(join(migrationsDirectory, noticeCleanupMigrationFiles[0]), 'utf8');
+  const claim = sql.match(/create function public\.claim_notice_cleanup_batch_v2\([\s\S]*?\$\$;/i)?.[0];
+  assert.ok(claim, 'claim function exists');
+  assert.doesNotMatch(claim,
+    /(?:insert\s+into|update|delete\s+from)\s+public\.notice_cleanup_work_sources_v2/i,
+    'only the migration backfill and work trigger maintain membership rows');
+});

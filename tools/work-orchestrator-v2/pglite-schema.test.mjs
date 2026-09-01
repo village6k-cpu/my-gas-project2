@@ -1568,13 +1568,15 @@ test('notice cleanup claim reconciles exact zero-one-many source ownership on ev
     ) values ($1, 'kakao', $2, 'room:reconcile', $3::timestamptz, 'delivered',
       gen_random_uuid(), 'CNOTICE', $4, $3::timestamptz, $3::timestamptz)
   `, [id, sourceEventKey, createdAt, messageTs]);
-  const insertDigest = async (workId, deliveredAt, messageTs) => db.query(`
+  const insertDigest = async (workId, workVersion, deliveredAt, messageTs) => db.query(`
     insert into public.digest_runs (
       window_started_at, window_ended_at, scheduled_at, state, destination_key,
       item_snapshot, manifest_prepared_at, slack_channel_id, slack_message_ts, delivered_at
     ) values ('2026-08-31T03:00:00Z', '2026-08-31T06:00:00Z', $2::timestamptz,
       'delivered', 'slack:CNOTICE', $1::jsonb, $2::timestamptz, 'CNOTICE', $3, $2::timestamptz)
-  `, [JSON.stringify([{ id: workId, version: 1, inclusionReason: 'actionable', priority: 'normal' }]), deliveredAt, messageTs]);
+  `, [JSON.stringify([{
+    id: workId, version: workVersion, inclusionReason: 'actionable', priority: 'normal'
+  }]), deliveredAt, messageTs]);
   const claim = async (owner, now) => (await db.query(`
     select public.claim_notice_cleanup_batch_v2($1::timestamptz, $2, 900, 25) as result
   `, [now, owner])).rows[0].result;
@@ -1590,7 +1592,7 @@ test('notice cleanup claim reconciles exact zero-one-many source ownership on ev
     `, [receiptBeforeWork])).rows[0];
     assert.deepEqual(link, { cleanup_work_id: null, cleanup_work_version: null },
       'receipt-before-work does not depend on a work-side trigger wakeup');
-    await insertDigest(firstWork, '2026-08-31T06:00:00Z', '420.1');
+    await insertDigest(firstWork, 1, '2026-08-31T06:00:00Z', '420.1');
     const receiptFirstClaim = await claim('bridge:receipt-first', '2026-08-31T06:00:01Z');
     assert.equal(receiptFirstClaim.some((row) => row.id === receiptBeforeWork), true);
     assert.equal(receiptFirstClaim.some((row) => row.id === zeroOwnerReceipt), false,
@@ -1608,17 +1610,34 @@ test('notice cleanup claim reconciles exact zero-one-many source ownership on ev
       set cleanup_work_id = null, cleanup_work_version = null
       where id = $1::uuid
     `, [workBeforeReceipt]);
+    await db.query(`update public.work_items_v2 set version = 2 where id = $1::uuid`, [secondWork]);
     await db.query(`delete from public.notice_cleanup_work_sources_v2 where work_id = $1::uuid`, [secondWork]);
-    await insertDigest(secondWork, '2026-08-31T06:00:02Z', '420.2');
-    const missedWakeClaim = await claim('bridge:missed-wake', '2026-08-31T06:00:03Z');
+    await insertDigest(secondWork, 1, '2026-08-31T06:00:02Z', '420.2');
+    const beforeCurrentDigest = await claim('bridge:missed-wake-old-digest', '2026-08-31T06:00:03Z');
+    assert.equal(beforeCurrentDigest.some((row) => row.id === workBeforeReceipt), false,
+      'missing membership conservatively waits for a digest at the current work version');
+    await insertDigest(secondWork, 2, '2026-08-31T06:00:04Z', '420.21');
+    const missedWakeClaim = await claim('bridge:missed-wake-current-digest', '2026-08-31T06:00:05Z');
     assert.equal(missedWakeClaim.some((row) => row.id === workBeforeReceipt), true,
-      'claim-time reconciliation repairs a committed exact-one link after a missed eager wakeup');
+      'claim-time reconciliation links a committed exact-one owner after its current-version digest');
+    const missedMembership = (await db.query(`
+      select count(*)::integer as count
+      from public.notice_cleanup_work_sources_v2
+      where work_id = $1::uuid and source_event_key = 'event-work-before-receipt'
+    `, [secondWork])).rows[0].count;
+    assert.equal(missedMembership, 0,
+      'claim reconciliation does not repair membership while holding the source advisory lock');
+    link = (await db.query(`
+      select cleanup_work_id, cleanup_work_version
+      from public.message_notification_receipts where id = $1::uuid
+    `, [workBeforeReceipt])).rows[0];
+    assert.deepEqual(link, { cleanup_work_id: secondWork, cleanup_work_version: 2 });
 
     await insertWork(ambiguousFirstWork, 'work:ambiguous-first', 'event-later-ambiguous');
     await insertReceipt(ambiguousReceipt, 'event-later-ambiguous', '2026-08-31T05:02:00Z', '320.3');
-    await insertDigest(ambiguousFirstWork, '2026-08-31T06:00:04Z', '420.3');
+    await insertDigest(ambiguousFirstWork, 1, '2026-08-31T06:00:06Z', '420.3');
     await insertWork(ambiguousSecondWork, 'work:ambiguous-second', 'event-later-ambiguous');
-    const ambiguousClaim = await claim('bridge:ambiguous', '2026-08-31T06:00:05Z');
+    const ambiguousClaim = await claim('bridge:ambiguous', '2026-08-31T06:00:07Z');
     assert.equal(ambiguousClaim.some((row) => row.id === ambiguousReceipt), false,
       'a later second exact source owner invalidates even an already linked receipt');
     link = (await db.query(`
@@ -1629,7 +1648,7 @@ test('notice cleanup claim reconciles exact zero-one-many source ownership on ev
       'a bounded claim may leave a stale link stored but never trusts it without the exact recount');
 
     await db.query(`delete from public.work_items_v2 where id = $1::uuid`, [ambiguousSecondWork]);
-    const restoredClaim = await claim('bridge:restored', '2026-08-31T06:00:06Z');
+    const restoredClaim = await claim('bridge:restored', '2026-08-31T06:00:08Z');
     assert.equal(restoredClaim.some((row) => row.id === ambiguousReceipt), true,
       'a later exact-one committed owner can safely restore the bounded link');
     link = (await db.query(`

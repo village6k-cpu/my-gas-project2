@@ -295,15 +295,12 @@ begin
         continue;
       end if;
 
-      insert into public.notice_cleanup_work_sources_v2 (
-        work_id, source_event_key, minimum_work_version
-      ) values (v_work_id, v_row.source_event_key, v_work_version)
-      on conflict (work_id, source_event_key) do nothing;
-      select membership.minimum_work_version
-      into v_work_version
-      from public.notice_cleanup_work_sources_v2 as membership
-      where membership.work_id = v_work_id
-        and membership.source_event_key = v_row.source_event_key;
+      v_work_version := coalesce((
+        select membership.minimum_work_version
+        from public.notice_cleanup_work_sources_v2 as membership
+        where membership.work_id = v_work_id
+          and membership.source_event_key = v_row.source_event_key
+      ), v_work_version);
 
       update public.message_notification_receipts
       set cleanup_work_id = v_work_id, cleanup_work_version = v_work_version
