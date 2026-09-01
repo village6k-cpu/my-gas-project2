@@ -875,6 +875,127 @@ test('v2 P0 review round 2 store rejects unknown, extra, or incomplete delivery 
   }
 });
 
+test('v2 P0 review round 3 store rejects valid delivery facts that do not match the exact request', async () => {
+  const clientId = '77777777-7777-5777-8777-777777777777';
+  const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const token = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const claimedAt = '2026-09-02T06:00:00.000Z';
+  const claimExpiresAt = '2026-09-02T06:02:00.000Z';
+  const recordedAt = '2026-09-02T06:00:01.000Z';
+  const claimed = {
+    status: 'claimed', generation: 1, attempt: 1, client_message_id: clientId,
+    claimed_at: claimedAt, claim_expires_at: claimExpiresAt
+  };
+  const delivered = {
+    ...claimed, status: 'delivered', last_attempt_at: recordedAt,
+    delivered_at: recordedAt, next_at: '2026-09-02T06:20:01.000Z',
+    readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: recordedAt }
+  };
+  const reconciliationInput = {
+    id: WORK_ID, expectedVersion: 1, expectedStatus: 'reconcile_pending', expectedGeneration: 1,
+    clientMessageId: clientId, reconcileOwner: owner, leaseSeconds: 120, now: claimedAt
+  };
+  const claimInput = {
+    id: WORK_ID, expectedVersion: 1, expectedGeneration: 0, generation: 1, attempt: 1,
+    clientMessageId: clientId, claimedAt, claimExpiresAt
+  };
+  const deliveredInput = {
+    id: WORK_ID, expectedVersion: 1, expectedStatus: 'claimed', expectedGeneration: 1,
+    clientMessageId: clientId, status: 'delivered', recordedAt,
+    channelId: 'CP0', messageTs: '100.1'
+  };
+  const retryInput = {
+    ...deliveredInput, status: 'retry_pending', channelId: null, messageTs: null
+  };
+  const cases = [{
+    name: 'initial claim wrong state', method: 'claimP0Delivery', input: claimInput,
+    data: { applied: true, row: workRow({ priority: 'p0', payload: {
+      requires_human_action: true, p0_delivery: delivered
+    } }) }
+  }, {
+    name: 'initial claim wrong claimed time', method: 'claimP0Delivery', input: claimInput,
+    data: { applied: true, row: workRow({ priority: 'p0', payload: {
+      requires_human_action: true, p0_delivery: {
+        ...claimed, claimed_at: '2026-09-02T06:00:00.001Z'
+      }
+    } }) }
+  }, {
+    name: 'initial claim wrong lease expiry', method: 'claimP0Delivery', input: claimInput,
+    data: { applied: true, row: workRow({ priority: 'p0', payload: {
+      requires_human_action: true, p0_delivery: {
+        ...claimed, claim_expires_at: '2026-09-02T06:02:00.001Z'
+      }
+    } }) }
+  }, {
+    name: 'reconciliation claim wrong attempt', method: 'claimP0Reconciliation', input: reconciliationInput,
+    data: { claimed: true, row: workRow({ priority: 'p0', payload: {
+      requires_human_action: true, p0_delivery: {
+        status: 'reconciling', generation: 2, attempt: 2, client_message_id: clientId,
+        claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+        last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: claimedAt,
+        reconcile_owner: owner, reconcile_token: token,
+        reconcile_claimed_at: claimedAt, reconcile_expires_at: claimExpiresAt
+      }
+    } }) }
+  }, {
+    name: 'settlement wrong coordinates', method: 'settleP0Delivery', input: deliveredInput,
+    data: { applied: true, row: workRow({ priority: 'p0', payload: {
+      requires_human_action: true, p0_delivery: {
+        ...delivered,
+        readback: { channel_id: 'COTHER', message_ts: '200.2', confirmed_at: recordedAt }
+      }
+    } }) }
+  }, {
+    name: 'settlement wrong recorded times', method: 'settleP0Delivery', input: deliveredInput,
+    data: { applied: true, row: workRow({ priority: 'p0', payload: {
+      requires_human_action: true, p0_delivery: {
+        ...delivered, last_attempt_at: '2026-09-02T06:00:01.001Z',
+        delivered_at: '2026-09-02T06:00:01.001Z',
+        readback: { ...delivered.readback, confirmed_at: '2026-09-02T06:00:01.001Z' }
+      }
+    } }) }
+  }, {
+    name: 'settlement wrong next time', method: 'settleP0Delivery', input: deliveredInput,
+    data: { applied: true, row: workRow({ priority: 'p0', payload: {
+      requires_human_action: true, p0_delivery: {
+        ...delivered, next_at: '2026-09-02T06:20:01.001Z'
+      }
+    } }) }
+  }, {
+    name: 'retry settlement wrong next time', method: 'settleP0Delivery', input: retryInput,
+    data: { applied: true, row: workRow({ priority: 'p0', payload: {
+      requires_human_action: true, p0_delivery: {
+        ...claimed, status: 'retry_pending', last_attempt_at: recordedAt,
+        next_at: '2026-09-02T06:10:01.001Z'
+      }
+    } }) }
+  }];
+  const outcomes = [];
+  for (const invalidCase of cases) {
+    const fetch = createFetch([response({ data: invalidCase.data })]);
+    const store = createWorkOrchestratorStore({
+      supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+    });
+    try {
+      await store[invalidCase.method](invalidCase.input);
+      outcomes.push(`${invalidCase.name}:accepted`);
+    } catch (error) {
+      assert.match(error.message, /response invalid/i);
+      outcomes.push(`${invalidCase.name}:rejected`);
+    }
+  }
+  assert.deepEqual(outcomes, [
+    'initial claim wrong state:rejected',
+    'initial claim wrong claimed time:rejected',
+    'initial claim wrong lease expiry:rejected',
+    'reconciliation claim wrong attempt:rejected',
+    'settlement wrong coordinates:rejected',
+    'settlement wrong recorded times:rejected',
+    'settlement wrong next time:rejected',
+    'retry settlement wrong next time:rejected'
+  ]);
+});
+
 test('listActionableWork selects a bounded deterministic digest surface including unresolved P0', async () => {
   const fetch = createFetch([response({ data: actionablePayload([workRow({
     priority: 'p0', actionable_at: '2099-01-01T00:00:00.000Z', payload: { requires_human_action: true }

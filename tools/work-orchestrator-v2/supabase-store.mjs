@@ -1129,18 +1129,53 @@ function p0ReconciliationInput(input) {
   return normalized;
 }
 
-function p0MutationResponse(data, input, { status = null } = {}) {
+function p0AppliedResponseRow(data) {
   if (!exactKeys(data, ['applied', 'row']) || typeof data.applied !== 'boolean') throw responseInvalid();
   if (!data.applied) {
     if (data.row !== null) throw responseInvalid();
-    return data;
+    return null;
   }
-  const row = p0WorkResponseRow(data.row);
+  return p0WorkResponseRow(data.row);
+}
+
+function p0ClaimResponse(data, input) {
+  const row = p0AppliedResponseRow(data);
+  if (row === null) return data;
   const delivery = row.payload.p0_delivery;
   if (!isRecord(delivery) || row.id !== input.id || row.version !== input.expectedVersion
-    || delivery.generation !== (status === null ? input.generation : input.expectedGeneration)
+    || delivery.status !== 'claimed'
+    || delivery.generation !== input.generation || delivery.attempt !== input.attempt
     || delivery.client_message_id !== input.clientMessageId
-    || status !== null && delivery.status !== status) throw responseInvalid();
+    || delivery.claimed_at !== input.claimedAt
+    || delivery.claim_expires_at !== input.claimExpiresAt) throw responseInvalid();
+  return data;
+}
+
+function p0ExpectedNextAt(input) {
+  const exponent = input.status === 'delivered'
+    ? input.expectedGeneration
+    : Math.max(0, input.expectedGeneration - 1);
+  const seconds = Math.min(3_600, 600 * 2 ** exponent);
+  return new Date(Date.parse(input.recordedAt) + seconds * 1000).toISOString();
+}
+
+function p0SettlementResponse(data, input) {
+  const row = p0AppliedResponseRow(data);
+  if (row === null) return data;
+  const delivery = row.payload.p0_delivery;
+  if (!isRecord(delivery) || row.id !== input.id || row.version !== input.expectedVersion
+    || delivery.status !== input.status
+    || delivery.generation !== input.expectedGeneration
+    || delivery.attempt !== input.expectedGeneration
+    || delivery.client_message_id !== input.clientMessageId
+    || delivery.last_attempt_at !== input.recordedAt
+    || delivery.next_at !== p0ExpectedNextAt(input)) throw responseInvalid();
+  if (input.status === 'delivered') {
+    if (delivery.delivered_at !== input.recordedAt
+      || delivery.readback.channel_id !== input.channelId
+      || delivery.readback.message_ts !== input.messageTs
+      || delivery.readback.confirmed_at !== input.recordedAt) throw responseInvalid();
+  }
   return data;
 }
 
@@ -1683,7 +1718,7 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
           p_claim_expires_at: normalized.claimExpiresAt
         })
       });
-      return p0MutationResponse(data, normalized);
+      return p0ClaimResponse(data, normalized);
     },
     claimP0Reconciliation: async (input = {}) => {
       let normalized;
@@ -1744,7 +1779,7 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
           p_reconcile_token: normalized.reconcileToken
         })
       });
-      return p0MutationResponse(data, normalized, { status: normalized.status });
+      return p0SettlementResponse(data, normalized);
     },
     readP0Delivery: async (input = {}) => {
       let normalized;

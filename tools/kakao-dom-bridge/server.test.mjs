@@ -2847,6 +2847,175 @@ test('v2 P0 review round 2 ambiguous reconciliation releases to a delayed same-I
   assert.equal(records[0].clientMessageId, clientId);
 });
 
+test('v2 P0 review round 3 settlement reads a fresh clock after Slack post', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  const settlements = [];
+  const clock = [
+    '2026-09-02T06:00:00.000Z',
+    '2026-09-02T06:00:05.000Z'
+  ];
+  let clockIndex = 0;
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery(input) { settlements.push(input); return { applied: true, row }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async postMessage() { return { channel: 'CP0', ts: '100.1' }; },
+      async findMessageByClientId() { throw new Error('history must not run'); }
+    },
+    now: () => new Date(clock[Math.min(clockIndex++, clock.length - 1)])
+  });
+
+  const result = await runtime.sweep('test');
+  assert.equal(result.delivered, 1);
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0].recordedAt, '2026-09-02T06:00:05.000Z');
+  assert.equal(clockIndex, 2);
+});
+
+test('v2 P0 review round 3 a lease expiring during Slack work makes fresh settlement stale', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const token = '77777777-7777-4777-8777-777777777777';
+  const leaseExpiresAt = '2026-09-02T06:02:00.000Z';
+  const pending = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T06:00:00.000Z'
+    } }
+  };
+  const reconciling = { ...pending, payload: { ...pending.payload, p0_delivery: {
+    ...pending.payload.p0_delivery, status: 'reconciling', reconcile_owner: owner,
+    reconcile_token: token, reconcile_claimed_at: '2026-09-02T06:00:00.000Z',
+    reconcile_expires_at: leaseExpiresAt
+  } } };
+  const settlements = [];
+  const clock = [
+    '2026-09-02T06:00:00.000Z',
+    '2026-09-02T06:03:00.000Z',
+    '2026-09-02T06:03:00.001Z'
+  ];
+  let clockIndex = 0;
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    reconciliationOwner: owner,
+    store: {
+      async listDueP0Work() { return { rows: [pending], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { throw new Error('new generation must not run'); },
+      async claimP0Reconciliation() { return { claimed: true, row: reconciling }; },
+      async settleP0Delivery(input) {
+        settlements.push(input);
+        return Date.parse(input.recordedAt) > Date.parse(leaseExpiresAt)
+          ? { applied: false, row: null }
+          : { applied: true, row: reconciling };
+      },
+      async readP0Delivery() { return { matched: true, row: reconciling }; }
+    },
+    slack: {
+      async findMessageByClientId() { return null; },
+      async postMessage() { return { channel: 'CP0', ts: '100.1' }; }
+    },
+    now: () => new Date(clock[Math.min(clockIndex++, clock.length - 1)])
+  });
+
+  const result = await runtime.sweep('test');
+  assert.equal(result.delivered, 0);
+  assert.deepEqual(result.errors, ['record_failed']);
+  assert.equal(settlements.length, 2);
+  assert.deepEqual(settlements.map((input) => input.recordedAt), [
+    '2026-09-02T06:03:00.000Z',
+    '2026-09-02T06:03:00.001Z'
+  ]);
+});
+
+test('v2 P0 review round 3 record paths read fresh clocks after Slack rejection', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const token = '77777777-7777-4777-8777-777777777777';
+  const base = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required'
+  };
+  const initialRow = { ...base, payload: { requires_human_action: true } };
+  const pending = { ...base, payload: { requires_human_action: true, p0_delivery: {
+    status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+    claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+    last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T06:00:00.000Z'
+  } } };
+  const reconciling = { ...pending, payload: { ...pending.payload, p0_delivery: {
+    ...pending.payload.p0_delivery, status: 'reconciling', reconcile_owner: owner,
+    reconcile_token: token, reconcile_claimed_at: '2026-09-02T06:00:00.000Z',
+    reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+  } } };
+  const recordedAt = [];
+  const makeClock = () => {
+    const values = ['2026-09-02T06:00:00.000Z', '2026-09-02T06:00:05.000Z'];
+    let index = 0;
+    return () => new Date(values[Math.min(index++, values.length - 1)]);
+  };
+  const initialRuntime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows: [initialRow], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...initialRow, payload: { ...initialRow.payload, p0_delivery: {
+          status: 'claimed', generation: 1, attempt: 1, client_message_id: input.clientMessageId,
+          claimed_at: input.claimedAt, claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery(input) { recordedAt.push(input.recordedAt); return { applied: true, row: initialRow }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async postMessage() { throw Object.assign(new Error('private rejection'), { ambiguous: false }); },
+      async findMessageByClientId() { throw new Error('history must not run'); }
+    },
+    now: makeClock()
+  });
+  const reconciliationRuntime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    reconciliationOwner: owner,
+    store: {
+      async listDueP0Work() { return { rows: [pending], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { throw new Error('new generation must not run'); },
+      async claimP0Reconciliation() { return { claimed: true, row: reconciling }; },
+      async settleP0Delivery(input) { recordedAt.push(input.recordedAt); return { applied: true, row: pending }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async findMessageByClientId() { return null; },
+      async postMessage() { throw Object.assign(new Error('private rejection'), { ambiguous: false }); }
+    },
+    now: makeClock()
+  });
+
+  await initialRuntime.sweep('test');
+  await reconciliationRuntime.sweep('test');
+  assert.deepEqual(recordedAt, [
+    '2026-09-02T06:00:05.000Z',
+    '2026-09-02T06:00:05.000Z'
+  ]);
+});
+
 test('v2 P0 stale claim CAS never reaches Slack', async () => {
   let posts = 0;
   const row = {

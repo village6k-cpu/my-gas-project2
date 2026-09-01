@@ -2469,29 +2469,31 @@ export function createWorkOrchestratorP0Runtime({
     || channel && deliveryReady && WORK_ACTION_UUID.test(owner)));
   if (!localConfigReady) throw new Error('Work Orchestrator P0 local configuration is missing');
 
-  const settleKnownCoordinates = async ({ row, delivery, expectedStatus, posted, recordedAt }) => {
-    const input = {
-      id: row.id,
-      expectedVersion: row.version,
-      expectedStatus,
-      expectedGeneration: delivery.generation,
-      clientMessageId: delivery.clientMessageId,
-      status: 'delivered',
-      recordedAt,
-      channelId: posted.channel || channel,
-      messageTs: posted.ts,
-      ...(expectedStatus === 'reconciling' ? {
-        reconcileOwner: delivery.reconcileOwner,
-        reconcileToken: delivery.reconcileToken
-      } : {})
-    };
+  const settleKnownCoordinates = async ({ row, delivery, expectedStatus, posted }) => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      let input;
       try {
+        input = {
+          id: row.id,
+          expectedVersion: row.version,
+          expectedStatus,
+          expectedGeneration: delivery.generation,
+          clientMessageId: delivery.clientMessageId,
+          status: 'delivered',
+          recordedAt: now().toISOString(),
+          channelId: posted.channel || channel,
+          messageTs: posted.ts,
+          ...(expectedStatus === 'reconciling' ? {
+            reconcileOwner: delivery.reconcileOwner,
+            reconcileToken: delivery.reconcileToken
+          } : {})
+        };
         const settled = await store.settleP0Delivery(input);
         if (settled?.applied === true) return true;
       } catch {
         // A lost response may mean the exact terminal CAS committed. Read it back before retrying.
       }
+      if (!input) continue;
       let readback;
       try {
         readback = await store.readP0Delivery({
@@ -2626,7 +2628,7 @@ export function createWorkOrchestratorP0Runtime({
               expectedGeneration: leasedDelivery.generation,
               clientMessageId: leasedDelivery.client_message_id,
               status,
-              recordedAt: cutoff,
+              recordedAt: now().toISOString(),
               channelId: null,
               messageTs: null,
               reconcileOwner: leasedDelivery.reconcile_owner,
@@ -2672,8 +2674,7 @@ export function createWorkOrchestratorP0Runtime({
             reconcileToken: leasedDelivery.reconcile_token
           },
           expectedStatus: 'reconciling',
-          posted,
-          recordedAt: cutoff
+          posted
         });
         if (settled) {
           result.delivered += 1;
@@ -2713,7 +2714,7 @@ export function createWorkOrchestratorP0Runtime({
             expectedGeneration: claim.generation,
             clientMessageId: claim.clientMessageId,
             status: error?.ambiguous === true ? 'reconcile_pending' : 'retry_pending',
-            recordedAt: cutoff,
+            recordedAt: now().toISOString(),
             channelId: null,
             messageTs: null
           });
@@ -2728,8 +2729,7 @@ export function createWorkOrchestratorP0Runtime({
         row: claimedRow,
         delivery: { generation: claim.generation, clientMessageId: claim.clientMessageId },
         expectedStatus: 'claimed',
-        posted,
-        recordedAt: cutoff
+        posted
       });
       if (settled) {
         result.delivered += 1;
