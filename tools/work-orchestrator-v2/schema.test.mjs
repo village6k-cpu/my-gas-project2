@@ -215,9 +215,10 @@ test('additive notice cleanup migration defines a private atomic lease and termi
   assert.match(sql, /cleanup_work_id uuid/i);
   assert.match(sql, /cleanup_work_version integer/i);
   assert.match(sql, /p_limit[^;]*?between 1 and 25/i);
-  assert.match(sql, /for update skip locked/i);
+  assert.match(sql, /for update(?: of receipt)? skip locked/i);
   assert.match(sql, /cleanup_expires_at\s*<=\s*p_now/i);
-  assert.match(sql, /snapshot\.entry->>'id'\s*=\s*receipt\.cleanup_work_id::text[\s\S]*?snapshot\.entry->>'version'\)::integer\s*>=\s*receipt\.cleanup_work_version/i);
+  assert.match(sql, /snapshot\.entry->>'id'\s*=\s*v_work_id::text[\s\S]*?snapshot\.entry->>'version'\)::integer\s*>=\s*v_work_version/i,
+    'final digest eligibility uses the authoritative under-lock ownership recount');
   assert.match(sql, /digest\.delivered_at\s*>=\s*receipt\.created_at/i,
     'a digest delivered before the receipt cannot authorize cleanup of that later receipt');
   assert.match(sql, /count\(\*\)[\s\S]*?source_event_key\s*=\s*any\(work\.source_event_keys\)/i,
@@ -258,4 +259,39 @@ test('notice cleanup terminal functions lock the exact generation before reading
     assert.ok(lockIndex >= 0 && clockIndex > lockIndex,
       `${terminalName} captures terminal time only after acquiring the row lock`);
   }
+});
+
+test('notice cleanup serializes exact source ownership only after a bounded receipt claim', () => {
+  const sql = readFileSync(join(migrationsDirectory, noticeCleanupMigrationFiles[0]), 'utf8');
+  const claim = sql.match(/create function public\.claim_notice_cleanup_batch_v2\([\s\S]*?\$\$;/i)?.[0];
+  const capture = sql.match(/create function public\.capture_notice_cleanup_work_sources_v2\([\s\S]*?\$\$;/i)?.[0];
+  assert.ok(claim && capture, 'claim and membership capture functions exist');
+  const boundedLock = claim.search(/for update of receipt skip locked\s+limit p_limit/i);
+  assert.ok(boundedLock >= 0, 'the claim locks at most p_limit receipt rows before mutation');
+  const firstGlobalMutation = claim.search(
+    /insert into public\.notice_cleanup_work_sources_v2[\s\S]*?from public\.work_items_v2|update public\.message_notification_receipts as receipt[\s\S]*?from ownership/i
+  );
+  assert.ok(firstGlobalMutation < 0 || firstGlobalMutation > boundedLock,
+    'no global membership backfill or receipt reconciliation runs before the bounded lock');
+  for (const body of [claim, capture]) {
+    assert.match(body, /pg_advisory_xact_lock\(hashtextextended\(\s*'notice-cleanup-source:'\s*\|\|/i,
+      'claim and membership capture share the exact source-key advisory namespace');
+    assert.match(body, /91420260901/i, 'claim and membership capture share the exact advisory seed');
+  }
+  assert.match(capture, /order by source_key/i,
+    'multi-key work membership locks are acquired deterministically');
+  assert.match(sql, /after insert or delete or update of source_event_keys, version/i,
+    'work ownership removal and deletion use the same serialized trigger');
+});
+
+test('work source removal and deletion take the same cleanup ownership lock', () => {
+  const sql = readFileSync(join(migrationsDirectory, noticeCleanupMigrationFiles[0]), 'utf8');
+  const capture = sql.match(/create function public\.capture_notice_cleanup_work_sources_v2\([\s\S]*?\$\$;/i)?.[0];
+  assert.ok(capture, 'membership capture function exists');
+  assert.match(capture,
+    /unnest\(old\.source_event_keys\)[\s\S]*?not \(source_key = any\(new\.source_event_keys\)\)/i,
+    'UPDATE removal keys participate in the deterministic advisory-lock set');
+  assert.match(sql,
+    /create trigger capture_notice_cleanup_work_sources_v2\s+after insert or delete or update of source_event_keys, version/i,
+    'DELETE ownership changes invoke the same advisory-lock trigger');
 });

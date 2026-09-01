@@ -1625,7 +1625,8 @@ test('notice cleanup claim reconciles exact zero-one-many source ownership on ev
       select cleanup_work_id, cleanup_work_version
       from public.message_notification_receipts where id = $1::uuid
     `, [ambiguousReceipt])).rows[0];
-    assert.deepEqual(link, { cleanup_work_id: null, cleanup_work_version: null });
+    assert.deepEqual(link, { cleanup_work_id: ambiguousFirstWork, cleanup_work_version: 1 },
+      'a bounded claim may leave a stale link stored but never trusts it without the exact recount');
 
     await db.query(`delete from public.work_items_v2 where id = $1::uuid`, [ambiguousSecondWork]);
     const restoredClaim = await claim('bridge:restored', '2026-08-31T06:00:06Z');
@@ -1636,6 +1637,105 @@ test('notice cleanup claim reconciles exact zero-one-many source ownership on ev
       from public.message_notification_receipts where id = $1::uuid
     `, [ambiguousReceipt])).rows[0];
     assert.deepEqual(link, { cleanup_work_id: ambiguousFirstWork, cleanup_work_version: 1 });
+  } finally {
+    await db.close();
+  }
+});
+
+test('notice cleanup bounds ownership mutations and skips unrelated active or ambiguous history', async () => {
+  const db = await createNoticeCleanupDatabase();
+  const ambiguousReceiptIds = Array.from({ length: 30 }, (_, index) =>
+    `37000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`);
+  const historyWorkIds = Array.from({ length: 30 }, (_, index) =>
+    `37100000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`);
+  const activeLeaseIds = Array.from({ length: 30 }, (_, index) =>
+    `37400000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`);
+  const validIds = [
+    '37200000-0000-4000-8000-000000000001',
+    '37200000-0000-4000-8000-000000000002'
+  ];
+  try {
+    for (const [index, receiptId] of ambiguousReceiptIds.entries()) {
+      const firstWorkId = `37300000-0000-4000-8000-${String(index * 2 + 1).padStart(12, '0')}`;
+      const secondWorkId = `37300000-0000-4000-8000-${String(index * 2 + 2).padStart(12, '0')}`;
+      const sourceKey = `event-bounded-ambiguous-${index}`;
+      await db.query(`
+        insert into public.work_items_v2 (
+          id, work_key, source_event_keys, room_key, title, work_type, priority, state,
+          actionable_at, first_opened_at, last_activity_at, version, payload
+        ) values ($1, $2, array[$3], 'room:bounded', 'Bounded', 'human_review', 'p0',
+          'open', now(), now(), now(), 1, '{}')
+      `, [firstWorkId, `work:bounded:first:${index}`, sourceKey]);
+      await db.query(`
+        insert into public.message_notification_receipts (
+          id, source, source_event_key, room_key, received_at, urgency, notification_state,
+          client_message_id, slack_channel_id, slack_message_ts, delivered_at, created_at
+        ) values ($1, 'kakao', $2, 'room:bounded', '2026-08-31T05:00:00Z', 'p0', 'delivered',
+          gen_random_uuid(), 'CNOTICE', $3, '2026-08-31T05:00:01Z', '2026-08-31T05:00:00Z')
+      `, [receiptId, sourceKey, `37${index}.1`]);
+      await db.query(`
+        insert into public.work_items_v2 (
+          id, work_key, source_event_keys, room_key, title, work_type, priority, state,
+          actionable_at, first_opened_at, last_activity_at, version, payload
+        ) values ($1, $2, array[$3], 'room:bounded', 'Ambiguous', 'human_review', 'p0',
+          'open', now(), now(), now(), 1, '{}')
+      `, [secondWorkId, `work:bounded:second:${index}`, sourceKey]);
+    }
+    for (const [index, workId] of historyWorkIds.entries()) {
+      await db.query(`
+        insert into public.work_items_v2 (
+          id, work_key, source_event_keys, room_key, title, work_type, priority, state,
+          actionable_at, first_opened_at, last_activity_at, version, payload
+        ) values ($1, $2, array[$3], 'room:history', 'History', 'human_review', 'normal',
+          'resolved', now(), now(), now(), 1, '{}')
+      `, [workId, `work:history:${index}`, `event-history-${index}`]);
+    }
+    await db.query(`delete from public.notice_cleanup_work_sources_v2 where work_id = any($1::uuid[])`, [historyWorkIds]);
+    for (const [index, id] of activeLeaseIds.entries()) {
+      await db.query(`
+        insert into public.message_notification_receipts (
+          id, source, source_event_key, room_key, received_at, notification_state,
+          client_message_id, slack_channel_id, slack_message_ts, delivered_at, cleanup_after,
+          cleanup_state, cleanup_attempts, cleanup_owner, cleanup_token, cleanup_expires_at,
+          cleanup_attempted_at, payload
+        ) values ($1, 'kakao', $2, 'room:active', '2026-08-31T05:00:00Z', 'cleanup_pending',
+          gen_random_uuid(), 'CNOTICE', $3, '2026-08-31T05:00:01Z', '2026-08-31T05:59:59Z',
+          'pending', 1, 'bridge:active', gen_random_uuid(), '2026-08-31T07:00:00Z',
+          '2026-08-31T05:00:00Z', '{"automation_notice_update":{"status":"updated"}}')
+      `, [id, `event-active-${index}`, `390.${index + 1}`]);
+    }
+    for (const [index, id] of validIds.entries()) {
+      await db.query(`
+        insert into public.message_notification_receipts (
+          id, source, source_event_key, room_key, received_at, notification_state,
+          client_message_id, slack_channel_id, slack_message_ts, delivered_at, cleanup_after, payload
+        ) values ($1, 'kakao', $2, 'room:valid', '2026-08-31T05:00:00Z', 'cleanup_pending',
+          gen_random_uuid(), 'CNOTICE', $3, '2026-08-31T05:00:01Z', '2026-08-31T05:59:59Z',
+          '{"automation_notice_update":{"status":"updated"}}')
+      `, [id, `event-valid-${index}`, `380.${index + 1}`]);
+    }
+
+    const claimed = (await db.query(`
+      select public.claim_notice_cleanup_batch_v2('2026-08-31T06:00:00Z', 'bridge:bounded', 120, 25) as result
+    `)).rows[0].result;
+    assert.deepEqual(claimed.map((row) => row.id).sort(), validIds);
+    const invalidated = (await db.query(`
+      select count(*)::integer as count from public.message_notification_receipts
+      where id = any($1::uuid[]) and cleanup_work_id is null
+    `, [ambiguousReceiptIds])).rows[0].count;
+    assert.ok(invalidated <= 25, 'one bounded sweep cannot mutate more than its receipt claim limit');
+    const repairedHistory = (await db.query(`
+      select count(*)::integer as count from public.notice_cleanup_work_sources_v2
+      where work_id = any($1::uuid[])
+    `, [historyWorkIds])).rows[0].count;
+    assert.ok(repairedHistory <= 25, 'one bounded sweep cannot backfill unrelated history globally');
+    const activeOwners = (await db.query(`
+      select count(*)::integer as count from public.message_notification_receipts
+      where id = any($1::uuid[]) and cleanup_owner = 'bridge:active'
+        and cleanup_expires_at = '2026-08-31T07:00:00Z'
+    `, [activeLeaseIds])).rows[0].count;
+    assert.equal(activeOwners, activeLeaseIds.length,
+      'unrelated active leases do not block or get mutated by the bounded scheduler');
   } finally {
     await db.close();
   }

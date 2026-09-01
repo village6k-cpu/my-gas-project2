@@ -44,29 +44,51 @@ returns trigger
 language plpgsql
 security invoker set search_path = ''
 as $$
+declare
+  v_source_key text;
+  v_source_keys text[];
 begin
   if tg_op = 'INSERT' then
-    insert into public.notice_cleanup_work_sources_v2 (
-      work_id, source_event_key, minimum_work_version
-    )
-    select new.id, source_key, new.version
-    from unnest(new.source_event_keys) as source_key
-    on conflict (work_id, source_event_key) do nothing;
+    v_source_keys := new.source_event_keys;
+  elsif tg_op = 'DELETE' then
+    v_source_keys := old.source_event_keys;
   else
-    insert into public.notice_cleanup_work_sources_v2 (
-      work_id, source_event_key, minimum_work_version
-    )
-    select new.id, source_key, new.version
-    from unnest(new.source_event_keys) as source_key
-    where not (source_key = any(old.source_event_keys))
-    on conflict (work_id, source_event_key) do nothing;
+    select coalesce(array_agg(source_key order by source_key), '{}'::text[])
+    into v_source_keys
+    from (
+      select source_key from unnest(new.source_event_keys) as source_key
+      where not (source_key = any(old.source_event_keys))
+      union
+      select source_key from unnest(old.source_event_keys) as source_key
+      where not (source_key = any(new.source_event_keys))
+    ) as changed_keys;
+  end if;
+  for v_source_key in
+    select source_key
+    from unnest(v_source_keys) as source_key
+    order by source_key
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(
+      'notice-cleanup-source:' || v_source_key,
+      91420260901
+    ));
+    if tg_op <> 'DELETE' and v_source_key = any(new.source_event_keys) then
+      insert into public.notice_cleanup_work_sources_v2 (
+        work_id, source_event_key, minimum_work_version
+      )
+      values (new.id, v_source_key, new.version)
+      on conflict (work_id, source_event_key) do nothing;
+    end if;
+  end loop;
+  if tg_op = 'DELETE' then
+    return old;
   end if;
   return new;
 end;
 $$;
 
 create trigger capture_notice_cleanup_work_sources_v2
-after insert or update of source_event_keys, version on public.work_items_v2
+after insert or delete or update of source_event_keys, version on public.work_items_v2
 for each row execute function public.capture_notice_cleanup_work_sources_v2();
 
 with unique_links as (
@@ -141,6 +163,10 @@ declare
   v_claimed public.message_notification_receipts%rowtype;
   v_result jsonb := '[]'::jsonb;
   v_acknowledged boolean;
+  v_digest_eligible boolean;
+  v_match_count integer;
+  v_work_id uuid;
+  v_work_version integer;
 begin
   if p_now is null or not isfinite(p_now)
     or p_cleanup_owner is null or p_cleanup_owner <> btrim(p_cleanup_owner)
@@ -149,48 +175,6 @@ begin
     or p_limit is null or p_limit not between 1 and 25 then
     raise exception 'invalid notice cleanup input';
   end if;
-
-  -- Repair a missed membership capture conservatively at the current work
-  -- version. Normal writes preserve the true minimum version in the trigger.
-  insert into public.notice_cleanup_work_sources_v2 (
-    work_id, source_event_key, minimum_work_version
-  )
-  select work.id, source_key, work.version
-  from public.work_items_v2 as work
-  cross join lateral unnest(work.source_event_keys) as source_key
-  on conflict (work_id, source_event_key) do nothing;
-
-  -- Reconcile against authoritative current ownership on every attempt.
-  -- Zero or multiple owners clear even a previously established link.
-  with ownership as (
-    select receipt.id,
-      matches.match_count, matches.work_id, matches.work_version
-    from public.message_notification_receipts as receipt
-    cross join lateral (
-      select count(*)::integer as match_count,
-        (array_agg(work.id order by work.id))[1] as work_id,
-        (array_agg(coalesce(membership.minimum_work_version, work.version)
-          order by work.id))[1] as work_version
-      from public.work_items_v2 as work
-      left join public.notice_cleanup_work_sources_v2 as membership
-        on membership.work_id = work.id
-        and membership.source_event_key = receipt.source_event_key
-      where receipt.source_event_key = any(work.source_event_keys)
-    ) as matches
-    where receipt.notification_state = 'delivered'
-      and receipt.cleanup_state in ('idle','pending','failed','blocked_p0')
-  )
-  update public.message_notification_receipts as receipt
-  set cleanup_work_id = case when ownership.match_count = 1 then ownership.work_id else null end,
-      cleanup_work_version = case when ownership.match_count = 1 then ownership.work_version else null end
-  from ownership
-  where receipt.id = ownership.id
-    and (
-      receipt.cleanup_work_id is distinct from
-        case when ownership.match_count = 1 then ownership.work_id else null end
-      or receipt.cleanup_work_version is distinct from
-        case when ownership.match_count = 1 then ownership.work_version else null end
-    );
 
   for v_row in
     select receipt.*
@@ -226,34 +210,32 @@ begin
         )
         or (
           receipt.notification_state = 'delivered'
-          and receipt.cleanup_work_id is not null
-          and receipt.cleanup_work_version is not null
-          and exists (
-            select 1
-            from public.digest_runs as digest
-            cross join lateral jsonb_array_elements(digest.item_snapshot) as snapshot(entry)
-            where digest.state in ('delivered','replaced')
-              and digest.delivered_at is not null
-              and digest.delivered_at >= receipt.created_at
-              and snapshot.entry->>'id' = receipt.cleanup_work_id::text
-              and case
-                when snapshot.entry->>'version' ~ '^[1-9][0-9]*$'
-                  then (snapshot.entry->>'version')::integer >= receipt.cleanup_work_version
-                else false
-              end
-          )
-        )
-        or (
-          receipt.urgency = 'p0'
-          and receipt.cleanup_work_id is not null
-          and receipt.cleanup_work_version is not null
-          and not exists (
-            select 1
-            from public.work_items_v2 as acknowledged_work
-            where acknowledged_work.id = receipt.cleanup_work_id
-              and receipt.source_event_key = any(acknowledged_work.source_event_keys)
-              and acknowledged_work.priority = 'p0'
-              and public.is_effective_p0_ack_v2(acknowledged_work.payload, p_now)
+          and (
+            select count(*)
+            from public.work_items_v2 as candidate_work
+            where receipt.source_event_key = any(candidate_work.source_event_keys)
+          ) = 1
+          and (
+            receipt.urgency = 'p0'
+            or exists (
+              select 1
+              from public.work_items_v2 as candidate_work
+              left join public.notice_cleanup_work_sources_v2 as membership
+                on membership.work_id = candidate_work.id
+                and membership.source_event_key = receipt.source_event_key
+              join public.digest_runs as digest on digest.state in ('delivered','replaced')
+                and digest.delivered_at is not null
+                and digest.delivered_at >= receipt.created_at
+              cross join lateral jsonb_array_elements(digest.item_snapshot) as snapshot(entry)
+              where receipt.source_event_key = any(candidate_work.source_event_keys)
+                and snapshot.entry->>'id' = candidate_work.id::text
+                and case
+                  when snapshot.entry->>'version' ~ '^[1-9][0-9]*$'
+                    then (snapshot.entry->>'version')::integer
+                      >= coalesce(membership.minimum_work_version, candidate_work.version)
+                  else false
+                end
+            )
           )
         )
       )
@@ -261,17 +243,76 @@ begin
       case when receipt.urgency = 'p0' and receipt.cleanup_state = 'blocked_p0' then 1 else 0 end,
       receipt.updated_at,
       receipt.id
-    for update skip locked
+    for update of receipt skip locked
     limit p_limit
   loop
-    select exists (
-      select 1
+    perform pg_advisory_xact_lock(hashtextextended(
+      'notice-cleanup-source:' || v_row.source_event_key,
+      91420260901
+    ));
+    v_acknowledged := false;
+    v_digest_eligible := v_row.notification_state = 'cleanup_pending';
+    v_match_count := 0;
+    v_work_id := null;
+    v_work_version := null;
+
+    if v_row.notification_state = 'delivered' or v_row.urgency = 'p0' then
+      select count(*)::integer,
+        (array_agg(work.id order by work.id))[1],
+        (array_agg(work.version order by work.id))[1]
+      into v_match_count, v_work_id, v_work_version
       from public.work_items_v2 as work
-      where work.id = v_row.cleanup_work_id
-        and v_row.source_event_key = any(work.source_event_keys)
-        and work.priority = 'p0'
-        and public.is_effective_p0_ack_v2(work.payload, p_now)
-    ) into v_acknowledged;
+      where v_row.source_event_key = any(work.source_event_keys);
+
+      if v_match_count <> 1 then
+        update public.message_notification_receipts
+        set cleanup_work_id = null, cleanup_work_version = null
+        where id = v_row.id
+          and (cleanup_work_id is not null or cleanup_work_version is not null);
+        continue;
+      end if;
+
+      insert into public.notice_cleanup_work_sources_v2 (
+        work_id, source_event_key, minimum_work_version
+      ) values (v_work_id, v_row.source_event_key, v_work_version)
+      on conflict (work_id, source_event_key) do nothing;
+      select membership.minimum_work_version
+      into v_work_version
+      from public.notice_cleanup_work_sources_v2 as membership
+      where membership.work_id = v_work_id
+        and membership.source_event_key = v_row.source_event_key;
+
+      update public.message_notification_receipts
+      set cleanup_work_id = v_work_id, cleanup_work_version = v_work_version
+      where id = v_row.id
+        and (
+          cleanup_work_id is distinct from v_work_id
+          or cleanup_work_version is distinct from v_work_version
+        );
+
+      select exists (
+        select 1
+        from public.work_items_v2 as work
+        where work.id = v_work_id
+          and v_row.source_event_key = any(work.source_event_keys)
+          and work.priority = 'p0'
+          and public.is_effective_p0_ack_v2(work.payload, p_now)
+      ) into v_acknowledged;
+      select exists (
+        select 1
+        from public.digest_runs as digest
+        cross join lateral jsonb_array_elements(digest.item_snapshot) as snapshot(entry)
+        where digest.state in ('delivered','replaced')
+          and digest.delivered_at is not null
+          and digest.delivered_at >= v_row.created_at
+          and snapshot.entry->>'id' = v_work_id::text
+          and case
+            when snapshot.entry->>'version' ~ '^[1-9][0-9]*$'
+              then (snapshot.entry->>'version')::integer >= v_work_version
+            else false
+          end
+      ) into v_digest_eligible;
+    end if;
 
     if v_row.urgency = 'p0' and not v_acknowledged then
       update public.message_notification_receipts
@@ -281,7 +322,7 @@ begin
           cleanup_already_absent = false, cleanup_generation_initialized = true
       where id = v_row.id
       returning * into v_claimed;
-    else
+    elsif v_digest_eligible then
       update public.message_notification_receipts
       set cleanup_state = 'pending', cleanup_attempts = cleanup_attempts + 1,
           cleanup_owner = p_cleanup_owner, cleanup_token = gen_random_uuid(),
@@ -313,6 +354,8 @@ begin
           )
         )
       returning * into v_claimed;
+    else
+      continue;
     end if;
 
     if found then
