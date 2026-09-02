@@ -188,6 +188,96 @@ test('claimNotificationReceipt sends the normalized receipt to the reviewed RPC 
   assert.equal(claimed.created, true);
 });
 
+function healthAggregate(overrides = {}) {
+  return {
+    measured_at: '2026-09-02T12:00:00.000Z',
+    notifications: {
+      undelivered_count: 1, pending_count: 1, delivering_count: 0, failed_count: 0,
+      oldest_undelivered_at: '2026-09-02T11:59:00.000Z', oldest_undelivered_age_seconds: 60
+    },
+    automation: {
+      not_attempted_count: 1, running_count: 0, succeeded_count: 0,
+      failed_count: 0, needs_human_count: 0
+    },
+    work: {
+      actionable_count: 1, snoozed_count: 0, overdue_count: 0, p0_count: 0,
+      unacknowledged_p0_count: 0, unacknowledged_p0_missing_alert_count: 0
+    },
+    digests: {
+      building_count: 0, delivering_count: 0, delivered_count: 0, failed_count: 0,
+      diverged_count: 0, replaced_count: 0, retired_count: 0,
+      last_success_at: null, last_failure_at: null,
+      latest_delivered_eligible_omitted_count: 0
+    },
+    cleanup: {
+      notice: {
+        idle_count: 0, pending_count: 0, failed_count: 0, blocked_p0_count: 0,
+        deleted_count: 0, backlog_count: 0, oldest_backlog_age_seconds: null
+      },
+      digest: {
+        idle_count: 0, deleting_count: 0, failed_count: 0, deleted_count: 0,
+        already_absent_count: 0, backlog_count: 0, oldest_backlog_age_seconds: null
+      }
+    },
+    actions: { stale_conflict_count: 0 },
+    leases: {
+      digest: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      p0: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      notice_cleanup: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      digest_cleanup: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null }
+    },
+    ...overrides
+  };
+}
+
+test('readHealthAggregate calls one explicit-clock RPC and accepts only the exact content-free shape', async () => {
+  const aggregate = healthAggregate();
+  const fetch = createFetch([response({ data: aggregate })]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const result = await store.readHealthAggregate({ now: '2026-09-02T12:00:00.000Z' });
+
+  assert.deepEqual(result, aggregate);
+  assert.equal(fetch.requests.length, 1);
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/read_work_orchestrator_health_v2');
+  assert.equal(fetch.requests[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_now: '2026-09-02T12:00:00.000Z'
+  });
+});
+
+test('readHealthAggregate rejects invalid clock and malformed, extra, fractional, or content-bearing response fields', async () => {
+  const invalidFetch = createFetch([]);
+  const invalidStore = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: invalidFetch.fetchImpl
+  });
+  await assert.rejects(
+    invalidStore.readHealthAggregate({ now: '2026-09-02T12:00:00Z', extra: true }),
+    /input is invalid/
+  );
+  assert.equal(invalidFetch.requests.length, 0);
+
+  const malformed = [
+    { ...healthAggregate(), source_event_key: 'private-source' },
+    { ...healthAggregate(), notifications: { ...healthAggregate().notifications, undelivered_count: -1 } },
+    { ...healthAggregate(), actions: { stale_conflict_count: 0.5 } },
+    { ...healthAggregate(), measured_at: '2026-09-02T12:00:01.000Z' },
+    { ...healthAggregate(), cleanup: { ...healthAggregate().cleanup, notice: { ...healthAggregate().cleanup.notice, payload: 'private' } } }
+  ];
+  for (const data of malformed) {
+    const fetch = createFetch([response({ data })]);
+    const store = createWorkOrchestratorStore({
+      supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+    });
+    await assert.rejects(
+      store.readHealthAggregate({ now: '2026-09-02T12:00:00.000Z' }),
+      /response invalid/
+    );
+  }
+});
+
 test('getNotificationByEventKey URL-encodes an event-key filter', async () => {
   const fetch = createFetch([response({ data: [{ id: 'receipt-1' }] })]);
   const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example/', serviceRoleKey, fetchImpl: fetch.fetchImpl });

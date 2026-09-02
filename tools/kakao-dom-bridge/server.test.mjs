@@ -14,6 +14,8 @@ const {
   buildCorsHeaders,
   buildHealthConfig,
   buildWorkOrchestratorHealthState,
+  attachWorkOrchestratorInvariantHealth,
+  readBridgeWorkOrchestratorHealth,
   buildGatewayHealthReadback,
   assertGatewayFailureNotificationDelivered,
   buildWorkerResultAudit,
@@ -2572,6 +2574,65 @@ test('v2 P0 review round 1 known Slack coordinates survive lost settlement respo
   assert.equal(reads.length, 1);
   assert.equal(reads[0].clientMessageId, settlements[0].clientMessageId);
   assert.doesNotMatch(JSON.stringify(settlements), /retry_pending|post_failed/);
+});
+
+test('bridge exposes invariant health as a separate top-level subsystem without changing bridge ok', async () => {
+  const now = '2026-09-02T12:00:00.000Z';
+  const aggregate = {
+    measured_at: now,
+    notifications: {
+      undelivered_count: 1, pending_count: 1, delivering_count: 0, failed_count: 0,
+      oldest_undelivered_at: '2026-09-02T11:54:59.000Z', oldest_undelivered_age_seconds: 301
+    },
+    automation: {
+      not_attempted_count: 0, running_count: 0, succeeded_count: 0,
+      failed_count: 0, needs_human_count: 0
+    },
+    work: {
+      actionable_count: 0, snoozed_count: 0, overdue_count: 0, p0_count: 0,
+      unacknowledged_p0_count: 0, unacknowledged_p0_missing_alert_count: 0
+    },
+    digests: {
+      building_count: 0, delivering_count: 0, delivered_count: 0, failed_count: 0,
+      diverged_count: 0, replaced_count: 0, retired_count: 0,
+      last_success_at: null, last_failure_at: null,
+      latest_delivered_eligible_omitted_count: 0
+    },
+    cleanup: {
+      notice: {
+        idle_count: 0, pending_count: 0, failed_count: 0, blocked_p0_count: 0,
+        deleted_count: 0, backlog_count: 0, oldest_backlog_age_seconds: null
+      },
+      digest: {
+        idle_count: 0, deleting_count: 0, failed_count: 0, deleted_count: 0,
+        already_absent_count: 0, backlog_count: 0, oldest_backlog_age_seconds: null
+      }
+    },
+    actions: { stale_conflict_count: 0 },
+    leases: {
+      digest: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      p0: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      notice_cleanup: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      digest_cleanup: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null }
+    }
+  };
+  const subsystem = await readBridgeWorkOrchestratorHealth({
+    store: { readHealthAggregate: async (input) => {
+      assert.deepEqual(input, { now });
+      return aggregate;
+    } },
+    now: () => now
+  });
+  const response = attachWorkOrchestratorInvariantHealth({
+    ok: true, gateway: { authenticated: true }, state: { privatePayload: 'not-inspected' }
+  }, subsystem);
+
+  assert.equal(response.ok, true, 'the bridge process remains independently healthy');
+  assert.equal(response.workOrchestrator.ok, false);
+  assert.deepEqual(response.workOrchestrator.reasons, ['immediate_delivery_sla_breached']);
+  assert.equal(response.gateway.authenticated, true);
+  assert.equal(response.state.privatePayload, 'not-inspected');
+  assert.doesNotMatch(JSON.stringify(response.workOrchestrator), /not-inspected/);
 });
 
 test('v2 P0 review round 1 exposes finite content-free cutover readiness health', () => {

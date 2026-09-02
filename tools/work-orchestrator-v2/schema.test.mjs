@@ -8,6 +8,8 @@ const migrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_foundation\.sql$/.test(name));
 const noticeCleanupMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_notice_cleanup\.sql$/.test(name));
+const healthAggregateMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_health_aggregate\.sql$/.test(name));
 
 test('foundation migration enforces the private service-role schema contract', () => {
   assert.equal(migrationFiles.length, 1, 'exactly one foundation migration must exist');
@@ -323,4 +325,36 @@ test('cleanup claim never mutates work membership while holding source ownership
   assert.doesNotMatch(claim,
     /(?:insert\s+into|update|delete\s+from)\s+public\.notice_cleanup_work_sources_v2/i,
     'only the migration backfill and work trigger maintain membership rows');
+});
+
+test('additive health migration exposes exactly one private read-only aggregate RPC', () => {
+  assert.equal(healthAggregateMigrationFiles.length, 1, 'exactly one additive health aggregate migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, healthAggregateMigrationFiles[0]), 'utf8');
+
+  assert.equal(
+    (sql.match(/create(?:\s+or\s+replace)?\s+function\s+public\./gi) || []).length,
+    1,
+    'the migration adds one aggregate RPC and no helper mutation surface'
+  );
+  assert.match(sql, /create function public\.read_work_orchestrator_health_v2\(\s*p_now timestamptz\s*\)/i);
+  assert.match(sql, /returns jsonb language plpgsql stable security invoker set search_path = ''/i);
+  assert.match(sql, /p_now is null[\s\S]*?not isfinite\(p_now\)[\s\S]*?22023/i);
+  assert.match(sql, /revoke execute on function public\.read_work_orchestrator_health_v2\(timestamptz\)\s+from public, anon, authenticated/i);
+  assert.match(sql, /grant execute on function public\.read_work_orchestrator_health_v2\(timestamptz\)\s+to service_role/i);
+  assert.doesNotMatch(sql, /security definer|create policy|grant execute[^;]+to (?:public|anon|authenticated)/i);
+  assert.doesNotMatch(sql, /\b(insert|update|delete|merge|truncate)\b/i, 'health aggregation remains read-only');
+
+  for (const bucket of [
+    'notifications', 'automation', 'work', 'digests', 'cleanup', 'actions', 'leases',
+    'notice_cleanup', 'digest_cleanup'
+  ]) assert.match(sql, new RegExp(`'${bucket}'`, 'i'));
+  for (const table of [
+    'message_notification_receipts', 'work_items_v2', 'digest_runs', 'digest_message_parts'
+  ]) assert.match(sql, new RegExp(`public\\.${table}`, 'i'));
+  assert.match(sql, /lease_expires_at\s*>\s*p_now/i);
+  assert.match(sql, /lease_expires_at\s*<=\s*p_now/i);
+  assert.match(sql, /reconcile_expires_at/i);
+  assert.match(sql, /latest_delivered_eligible_omitted_count/i);
+  assert.match(sql, /unacknowledged_p0_missing_alert_count/i);
+  assert.match(sql, /stale_conflict_count/i);
 });

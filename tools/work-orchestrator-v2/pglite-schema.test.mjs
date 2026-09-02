@@ -14,6 +14,8 @@ const [p0DeliveryMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_p0_delivery\.sql$/.test(name));
 const [p0ReconciliationMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_p0_reconciliation\.sql$/.test(name));
+const [healthAggregateMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_health_aggregate\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -44,6 +46,20 @@ async function createP0ReconciliationDatabase() {
   const db = await createP0DeliveryDatabase();
   assert.ok(p0ReconciliationMigrationName, 'the additive P0 reconciliation migration must exist');
   await db.exec(readFileSync(join(migrationsDirectory, p0ReconciliationMigrationName), 'utf8'));
+  return db;
+}
+
+async function createHealthAggregateDatabase() {
+  const db = await createFoundationDatabase();
+  for (const migration of [
+    noticeCleanupMigrationName,
+    p0DeliveryMigrationName,
+    p0ReconciliationMigrationName,
+    healthAggregateMigrationName
+  ]) {
+    assert.ok(migration, 'every additive migration through health aggregate must exist');
+    await db.exec(readFileSync(join(migrationsDirectory, migration), 'utf8'));
+  }
   return db;
 }
 
@@ -1214,6 +1230,199 @@ test('foundation migration executes and exposes only service-role access in Post
       listedIds: p0ListRows.slice(2).map((row) => row.id),
       mergeStates: ['open', 'snoozed']
     }, 'SQL uses each operation cutoff for list and upsert wake eligibility');
+  } finally {
+    await db.close();
+  }
+});
+
+test('health aggregate RPC executes with an explicit clock and is executable only by service_role', async () => {
+  const db = await createHealthAggregateDatabase();
+  try {
+    const privileges = await db.query(`
+      select
+        has_function_privilege('anon', 'public.read_work_orchestrator_health_v2(timestamptz)', 'execute') as anon_execute,
+        has_function_privilege('authenticated', 'public.read_work_orchestrator_health_v2(timestamptz)', 'execute') as authenticated_execute,
+        has_function_privilege('service_role', 'public.read_work_orchestrator_health_v2(timestamptz)', 'execute') as service_execute
+    `);
+    assert.deepEqual(privileges.rows[0], {
+      anon_execute: false, authenticated_execute: false, service_execute: true
+    });
+    const result = await db.query(`
+      select public.read_work_orchestrator_health_v2('2026-09-02T12:00:00.000Z'::timestamptz) as health
+    `);
+    assert.equal(result.rows[0].health.measured_at, '2026-09-02T12:00:00.000Z');
+    assert.deepEqual(result.rows[0].health.notifications, {
+      undelivered_count: 0, pending_count: 0, delivering_count: 0, failed_count: 0,
+      oldest_undelivered_at: null, oldest_undelivered_age_seconds: null
+    });
+    assert.deepEqual(result.rows[0].health.work, {
+      actionable_count: 0, snoozed_count: 0, overdue_count: 0, p0_count: 0,
+      unacknowledged_p0_count: 0, unacknowledged_p0_missing_alert_count: 0
+    });
+    assert.deepEqual(result.rows[0].health.leases, {
+      digest: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      p0: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      notice_cleanup: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      digest_cleanup: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null }
+    });
+    await assert.rejects(
+      db.query('select public.read_work_orchestrator_health_v2(null::timestamptz)'),
+      /invalid work orchestrator health clock/i
+    );
+    await assert.rejects(
+      db.query("select public.read_work_orchestrator_health_v2('infinity'::timestamptz)"),
+      /invalid work orchestrator health clock/i
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test('health aggregate counts durable receipts, work, omissions, conflicts, cleanup, and leases without content', async () => {
+  const db = await createHealthAggregateDatabase();
+  try {
+    await db.exec(`
+      insert into public.message_notification_receipts (
+        id, source, source_event_key, room_key, received_at, created_at, notification_state,
+        client_message_id, payload
+      ) values (
+        'a1000000-0000-4000-8000-000000000001', 'internal', 'private-event-one',
+        'private-room-one', '2026-09-02T10:00:00Z', '2026-09-02T11:50:00Z', 'pending',
+        'a1000000-0000-5000-8000-000000000001', '{"private":"customer content"}'::jsonb
+      );
+      insert into public.message_notification_receipts (
+        id, source, source_event_key, room_key, received_at, notification_state,
+        client_message_id, delivered_at, cleanup_after, cleanup_state,
+        cleanup_attempts, cleanup_owner, cleanup_token, cleanup_expires_at,
+        cleanup_attempted_at, slack_channel_id, slack_message_ts
+      ) values (
+        'a1000000-0000-4000-8000-000000000002', 'internal', 'private-event-two',
+        'private-room-two', '2026-09-02T11:40:00Z', 'cleanup_pending',
+        'a1000000-0000-5000-8000-000000000002', '2026-09-02T11:41:00Z',
+        '2026-09-02T11:45:00Z', 'pending', 1, 'bridge:notice',
+        'a1000000-0000-4000-8000-000000000003', '2026-09-02T11:59:00Z',
+        '2026-09-02T11:55:00Z', 'CNOTICE', '100.1'
+      );
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, work_type, priority, state, actionable_at,
+        first_opened_at, last_activity_at, automation_state, pending_action, version, payload
+      ) values
+      ('b1000000-0000-4000-8000-000000000001', 'private-work-one', 'private-room',
+        'Private title', 'human_review', 'normal', 'open', '2026-09-01T10:00:00Z',
+        '2026-09-01T10:00:00Z', '2026-09-02T11:00:00Z', 'needs_human',
+        '{"status":"pending","expected_version":1}'::jsonb, 3, '{"requires_human_action":true}'::jsonb),
+      ('b1000000-0000-4000-8000-000000000002', 'private-p0-missing', 'private-room',
+        'Private P0', 'human_review', 'p0', 'open', '2026-09-02T10:00:00Z',
+        '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z', 'not_attempted',
+        '{}'::jsonb, 1, '{"requires_human_action":true}'::jsonb),
+      ('b1000000-0000-4000-8000-000000000003', 'private-p0-claimed', 'private-room',
+        'Private P0 claimed', 'human_review', 'p0', 'open', '2026-09-02T10:00:00Z',
+        '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z', 'not_attempted', '{}'::jsonb, 1,
+        '{"requires_human_action":true,"p0_delivery":{"status":"claimed","generation":1,"attempt":1,"client_message_id":"b1000000-0000-5000-8000-000000000003","claimed_at":"2026-09-02T11:59:00.000Z","claim_expires_at":"2026-09-02T12:01:00.000Z"}}'::jsonb);
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, delivered_at
+      ) values (
+        'c1000000-0000-4000-8000-000000000001', '2026-09-02T09:00:00Z',
+        '2026-09-02T11:50:00Z', '2026-09-02T11:50:00Z', 'delivered', 'slack:private',
+        '[]'::jsonb, '2026-09-02T11:50:00Z', '2026-09-02T11:50:00Z'
+      );
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        lease_owner, lease_token, lease_expires_at, error, updated_at
+      ) values
+      ('c1000000-0000-4000-8000-000000000002', '2026-09-02T11:00:00Z',
+        '2026-09-02T11:30:00Z', '2026-09-02T11:30:00Z', 'failed', 'slack:failed',
+        'bridge:failed', 'c1000000-0000-4000-8000-000000000003',
+        '2026-09-02T11:59:00Z', 'digest_delivery_failed', '2026-09-02T11:55:00Z'),
+      ('c1000000-0000-4000-8000-000000000004', '2026-09-02T11:30:00Z',
+        '2026-09-02T12:00:00Z', '2026-09-02T12:00:00Z', 'building', 'slack:active',
+        'bridge:active', 'c1000000-0000-4000-8000-000000000005',
+        '2026-09-02T12:01:00Z', null, '2026-09-02T11:59:00Z');
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, delivered_at
+      ) values
+      ('c1000000-0000-4000-8000-000000000006', '2026-09-02T11:00:00Z',
+        '2026-09-02T11:40:00Z', '2026-09-02T11:40:00Z', 'delivered', 'slack:cleanup-valid',
+        '[]'::jsonb, '2026-09-02T11:40:00Z', '2026-09-02T11:40:00Z'),
+      ('c1000000-0000-4000-8000-000000000009', '2026-09-02T11:00:00Z',
+        '2026-09-02T11:30:00Z', '2026-09-02T11:30:00Z', 'delivered', 'slack:cleanup-decoy',
+        '[]'::jsonb, '2026-09-02T11:30:00Z', '2026-09-02T11:30:00Z');
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, delivered_at, previous_digest_id
+      ) values
+      ('c1000000-0000-4000-8000-000000000007', '2026-09-02T11:40:00Z',
+        '2026-09-02T11:58:00Z', '2026-09-02T11:58:00Z', 'delivered', 'slack:cleanup-valid',
+        '[]'::jsonb, '2026-09-02T11:58:00Z', '2026-09-02T11:58:00Z',
+        'c1000000-0000-4000-8000-000000000006'),
+      ('c1000000-0000-4000-8000-000000000010', '2026-09-02T11:30:00Z',
+        '2026-09-02T11:59:00Z', '2026-09-02T11:59:00Z', 'delivered', 'slack:cleanup-decoy',
+        '[]'::jsonb, null, '2026-09-02T11:59:00Z',
+        'c1000000-0000-4000-8000-000000000009');
+      insert into public.digest_message_parts (
+        id, digest_run_id, part_kind, part_number, part_count, item_ids, payload_hash,
+        client_message_id, delivery_state, delivery_attempts, delivery_claimed_at,
+        slack_channel_id, slack_message_ts, delivered_at, cleanup_state,
+        cleanup_attempts, cleanup_owner, cleanup_token, cleanup_expires_at,
+        cleanup_attempted_at
+      ) values
+      ('d1000000-0000-4000-8000-000000000001',
+        'c1000000-0000-4000-8000-000000000006', 'ordinary', 1, 1,
+        array['b1000000-0000-4000-8000-000000000001'::uuid], repeat('a', 64),
+        'd1000000-0000-5000-8000-000000000001', 'delivered', 1,
+        '2026-09-02T11:40:00Z', 'CCLEAN', '200.1', '2026-09-02T11:40:01Z',
+        'deleting', 1, 'bridge:cleanup', 'd1000000-0000-4000-8000-000000000002',
+        '2026-09-02T11:59:00Z', '2026-09-02T11:58:00Z'),
+      ('d1000000-0000-4000-8000-000000000003',
+        'c1000000-0000-4000-8000-000000000009', 'ordinary', 1, 1,
+        array['b1000000-0000-4000-8000-000000000001'::uuid], repeat('b', 64),
+        'd1000000-0000-5000-8000-000000000003', 'delivered', 1,
+        '2026-09-02T11:30:00Z', 'CDECOY', '200.2', '2026-09-02T11:30:01Z',
+        'idle', 0, null, null, null, null);
+    `);
+
+    const result = await db.query(`
+      select public.read_work_orchestrator_health_v2('2026-09-02T12:00:00.000Z'::timestamptz) as health
+    `);
+    const health = result.rows[0].health;
+    assert.deepEqual(health.notifications, {
+      undelivered_count: 1, pending_count: 1, delivering_count: 0, failed_count: 0,
+      oldest_undelivered_at: '2026-09-02T11:50:00.000Z', oldest_undelivered_age_seconds: 600
+    });
+    assert.deepEqual(health.automation, {
+      not_attempted_count: 2, running_count: 0, succeeded_count: 0,
+      failed_count: 0, needs_human_count: 1
+    });
+    assert.deepEqual(health.work, {
+      actionable_count: 3, snoozed_count: 0, overdue_count: 1, p0_count: 2,
+      unacknowledged_p0_count: 2, unacknowledged_p0_missing_alert_count: 1
+    });
+    assert.equal(health.digests.latest_delivered_eligible_omitted_count, 3);
+    assert.equal(health.cleanup.notice.pending_count, 1);
+    assert.equal(health.cleanup.notice.backlog_count, 1);
+    assert.deepEqual(health.cleanup.digest, {
+      idle_count: 1, deleting_count: 1, failed_count: 0, deleted_count: 0,
+      already_absent_count: 0, backlog_count: 1, oldest_backlog_age_seconds: 120
+    });
+    assert.equal(health.actions.stale_conflict_count, 1);
+    assert.deepEqual(health.leases.digest, {
+      active_count: 1, expired_count: 1, oldest_expired_age_seconds: 60
+    });
+    assert.deepEqual(health.leases.p0, {
+      active_count: 1, expired_count: 0, oldest_expired_age_seconds: null
+    });
+    assert.deepEqual(health.leases.notice_cleanup, {
+      active_count: 0, expired_count: 1, oldest_expired_age_seconds: 60
+    });
+    assert.deepEqual(health.leases.digest_cleanup, {
+      active_count: 0, expired_count: 1, oldest_expired_age_seconds: 60
+    });
+    assert.doesNotMatch(
+      JSON.stringify(health),
+      /private|source_event|room|title|channel|message_ts|payload|owner|token|\"id\"/i
+    );
   } finally {
     await db.close();
   }

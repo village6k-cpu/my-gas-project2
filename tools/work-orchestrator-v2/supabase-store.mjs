@@ -1,4 +1,5 @@
 import { assertNotificationTransition } from './contracts.mjs';
+import { validateWorkOrchestratorHealthAggregate } from './observability.mjs';
 
 const REQUEST_ERROR_PREFIX = 'Work Orchestrator Supabase request failed';
 const MAX_EVENT_KEY_LENGTH = 500;
@@ -2207,6 +2208,25 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         id: body.p_id, state: 'failed', expectedCleanupAttempts: body.p_expected_cleanup_attempts,
         error: body.p_error
       });
+    },
+    readHealthAggregate: async (input = {}) => {
+      let now;
+      try {
+        if (!exactKeys(input, ['now'])) throw invalidInput();
+        now = isoTimestamp(input.now);
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/read_work_orchestrator_health_v2', {
+        method: 'POST', body: safeJson({ p_now: now })
+      });
+      try {
+        return validateWorkOrchestratorHealthAggregate(data, now);
+      } catch (cause) {
+        const error = responseInvalid();
+        error.code = cause?.code;
+        throw error;
+      }
     },
     counts: async () => {
       const count = async (table, filters) => {

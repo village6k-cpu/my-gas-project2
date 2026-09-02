@@ -40,6 +40,7 @@ import {
 import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shadow-receipts.mjs';
 import { createSlackClient } from '../work-orchestrator-v2/slack-client.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
+import { readWorkOrchestratorHealth } from '../work-orchestrator-v2/observability.mjs';
 
 export { buildGatewayHealthReadback } from './hermes-gateway-http.mjs';
 
@@ -237,6 +238,28 @@ export function buildHealthConfig(config = {}) {
     };
   }
   return health;
+}
+
+export async function readBridgeWorkOrchestratorHealth({
+  store = null,
+  now = () => new Date().toISOString()
+} = {}) {
+  let measuredAt;
+  try {
+    measuredAt = now();
+  } catch {
+    measuredAt = null;
+  }
+  return readWorkOrchestratorHealth({ store, now: measuredAt });
+}
+
+export function attachWorkOrchestratorInvariantHealth(bridgeHealth, workOrchestratorHealth) {
+  if (!bridgeHealth || typeof bridgeHealth !== 'object' || Array.isArray(bridgeHealth)
+    || !workOrchestratorHealth || typeof workOrchestratorHealth !== 'object'
+    || Array.isArray(workOrchestratorHealth)) {
+    throw new Error('Bridge health response is invalid');
+  }
+  return { ...bridgeHealth, workOrchestrator: workOrchestratorHealth };
 }
 
 function genericShadowError(value) {
@@ -5866,6 +5889,9 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/health') {
       await workOrchestratorImmediateRuntime.refreshBacklogHealth();
+      const workOrchestratorInvariantHealth = await readBridgeWorkOrchestratorHealth({
+        store: workOrchestratorStore
+      });
       const gatewayStatus = gatewayChannel ? await gatewayChannel.status() : {};
       const documentExecutionConfig = gatewayTransportEnabled
         ? resolveGatewayDocumentConfig(CONFIG, getKakaoWorkerRuntimeConfigForTransport())
@@ -5877,7 +5903,7 @@ const server = http.createServer(async (req, res) => {
         nowMs: Date.now(),
         consumerFreshnessMs: Math.max(60_000, CONFIG.hermesLeaseMs * 2)
       });
-      return json(res, 200, {
+      return json(res, 200, attachWorkOrchestratorInvariantHealth({
         ok: true,
         gateway: gatewayReadback,
         config: {
@@ -5950,7 +5976,7 @@ const server = http.createServer(async (req, res) => {
           phaseScheduler: kakaoPhaseScheduler?.status?.() || null,
           workOrchestrator: buildWorkOrchestratorHealthState(state.workOrchestrator)
         }
-      });
+      }, workOrchestratorInvariantHealth));
     }
 
     if (req.method === 'GET' && url.pathname === '/worker/freshness') {
