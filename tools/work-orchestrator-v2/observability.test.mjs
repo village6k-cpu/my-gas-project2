@@ -8,6 +8,7 @@ const NOW = '2026-09-02T12:00:00.000Z';
 function aggregate(overrides = {}) {
   const value = {
     measured_at: NOW,
+    invalid_evidence_count: 0,
     notifications: {
       undelivered_count: 3,
       pending_count: 1,
@@ -158,7 +159,8 @@ test('unknown or malformed aggregate evidence fails closed without reflecting co
     { ...aggregate(), payload: privateValue },
     { ...aggregate(), notifications: { ...aggregate().notifications, pending_count: -1 } },
     { ...aggregate(), leases: { ...aggregate().leases, p0: { active_count: 0.5, expired_count: 0, oldest_expired_age_seconds: null } } },
-    { ...aggregate(), measured_at: '2026-09-02T12:00:01.000Z' }
+    { ...aggregate(), measured_at: '2026-09-02T12:00:01.000Z' },
+    { ...aggregate(), invalid_evidence_count: 1 }
   ]) {
     const health = await readWorkOrchestratorHealth({
       store: { readHealthAggregate: async () => malformed }, now: NOW

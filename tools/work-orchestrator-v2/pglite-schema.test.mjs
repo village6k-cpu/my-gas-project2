@@ -1242,15 +1242,34 @@ test('health aggregate RPC executes with an explicit clock and is executable onl
       select
         has_function_privilege('anon', 'public.read_work_orchestrator_health_v2(timestamptz)', 'execute') as anon_execute,
         has_function_privilege('authenticated', 'public.read_work_orchestrator_health_v2(timestamptz)', 'execute') as authenticated_execute,
-        has_function_privilege('service_role', 'public.read_work_orchestrator_health_v2(timestamptz)', 'execute') as service_execute
+        has_function_privilege('service_role', 'public.read_work_orchestrator_health_v2(timestamptz)', 'execute') as service_execute,
+        has_function_privilege('anon', 'public.is_valid_pending_work_action_at_v2(jsonb,integer,timestamptz)', 'execute') as helper_anon_execute,
+        has_function_privilege('authenticated', 'public.is_valid_pending_work_action_at_v2(jsonb,integer,timestamptz)', 'execute') as helper_authenticated_execute,
+        has_function_privilege('service_role', 'public.is_valid_pending_work_action_at_v2(jsonb,integer,timestamptz)', 'execute') as helper_service_execute
     `);
     assert.deepEqual(privileges.rows[0], {
-      anon_execute: false, authenticated_execute: false, service_execute: true
+      anon_execute: false, authenticated_execute: false, service_execute: true,
+      helper_anon_execute: false, helper_authenticated_execute: false, helper_service_execute: true
     });
+    const invalidHelperClocks = await db.query(`
+      select
+        public.is_valid_pending_work_action_at_v2(
+          '{"type":"progress","action":{"type":"progress"},"status":"pending","requested_at":"2026-09-02T11:00:00.000Z","requested_by":"UOWNER","expected_version":1}'::jsonb,
+          2,
+          null::timestamptz
+        ) as null_clock,
+        public.is_valid_pending_work_action_at_v2(
+          '{"type":"progress","action":{"type":"progress"},"status":"pending","requested_at":"2026-09-02T11:00:00.000Z","requested_by":"UOWNER","expected_version":1}'::jsonb,
+          2,
+          'infinity'::timestamptz
+        ) as infinite_clock
+    `);
+    assert.deepEqual(invalidHelperClocks.rows[0], { null_clock: false, infinite_clock: false });
     const result = await db.query(`
       select public.read_work_orchestrator_health_v2('2026-09-02T12:00:00.000Z'::timestamptz) as health
     `);
     assert.equal(result.rows[0].health.measured_at, '2026-09-02T12:00:00.000Z');
+    assert.equal(result.rows[0].health.invalid_evidence_count, 0);
     assert.deepEqual(result.rows[0].health.notifications, {
       undelivered_count: 0, pending_count: 0, delivering_count: 0, failed_count: 0,
       oldest_undelivered_at: null, oldest_undelivered_age_seconds: null
@@ -1423,6 +1442,407 @@ test('health aggregate counts durable receipts, work, omissions, conflicts, clea
       JSON.stringify(health),
       /private|source_event|room|title|channel|message_ts|payload|owner|token|\"id\"/i
     );
+  } finally {
+    await db.close();
+  }
+});
+
+test('health aggregate reports every stored PostgreSQL infinity that its classifications, ages, or leases consume', async (t) => {
+  const db = await createHealthAggregateDatabase();
+  const callHealth = () => db.query(`
+    select public.read_work_orchestrator_health_v2(
+      '2026-09-02T12:00:00.000Z'::timestamptz
+    ) as health
+  `);
+  const dropFiniteConstraint = async (table, column) => {
+    const constraints = await db.query(`
+      select constraint_value.conname
+      from pg_constraint as constraint_value
+      join pg_class as table_value on table_value.oid = constraint_value.conrelid
+      join pg_namespace as namespace_value on namespace_value.oid = table_value.relnamespace
+      where namespace_value.nspname = 'public' and table_value.relname = $1::text
+        and pg_get_constraintdef(constraint_value.oid) ilike $2::text
+    `, [table, `%isfinite(${column})%`]);
+    assert.ok(constraints.rows.length > 0, `expected a finite ${table}.${column} constraint`);
+    for (const { conname } of constraints.rows) {
+      assert.match(conname, /^[a-z0-9_]+$/i);
+      await db.exec(`alter table public.${table} drop constraint "${conname}"`);
+    }
+  };
+  const insertDigestCleanupPart = async ({
+    deliveredAt = '2026-09-02T10:00:01Z', cleanupState = 'idle', cleanupAttempts = 0,
+    cleanupOwner = null, cleanupToken = null, cleanupExpiresAt = null, cleanupAttemptedAt = null
+  } = {}) => {
+    await db.exec(`
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, delivered_at
+      ) values (
+        'e4000000-0000-4000-8000-000000000001', '2026-09-02T09:00:00Z',
+        '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z', 'delivered',
+        'slack:infinite-part', '[]'::jsonb, '2026-09-02T10:00:00Z',
+        '2026-09-02T10:00:00Z'
+      );
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, delivered_at, previous_digest_id
+      ) values (
+        'e4000000-0000-4000-8000-000000000002', '2026-09-02T10:00:00Z',
+        '2026-09-02T11:00:00Z', '2026-09-02T11:00:00Z', 'delivered',
+        'slack:infinite-part', '[]'::jsonb, '2026-09-02T11:00:00Z',
+        '2026-09-02T11:00:00Z', 'e4000000-0000-4000-8000-000000000001'
+      );
+    `);
+    await db.query(`
+      insert into public.digest_message_parts (
+        id, digest_run_id, part_kind, part_number, part_count, item_ids, payload_hash,
+        client_message_id, delivery_state, delivery_attempts, delivery_claimed_at,
+        slack_channel_id, slack_message_ts, delivered_at, cleanup_state,
+        cleanup_attempts, cleanup_owner, cleanup_token, cleanup_expires_at, cleanup_attempted_at
+      ) values (
+        'e4000000-0000-4000-8000-000000000003',
+        'e4000000-0000-4000-8000-000000000001', 'ordinary', 1, 1,
+        array['e4000000-0000-4000-8000-000000000004'::uuid], repeat('e', 64),
+        'e4000000-0000-5000-8000-000000000005', 'delivered', 1,
+        '2026-09-02T10:00:00Z', 'CPART', '300.1', $1::timestamptz,
+        $2::text, $3::integer, $4::text, $5::uuid, $6::timestamptz, $7::timestamptz
+      )
+    `, [
+      deliveredAt, cleanupState, cleanupAttempts, cleanupOwner, cleanupToken,
+      cleanupExpiresAt, cleanupAttemptedAt
+    ]);
+  };
+  const cases = [
+    {
+      label: 'accepted receipt created_at',
+      setup: (value) => db.query(`
+        insert into public.message_notification_receipts (
+          source, source_event_key, room_key, received_at, notification_state,
+          client_message_id, created_at
+        ) values ('internal', 'infinite-receipt-created', 'room', '2026-09-02T11:00:00Z',
+          'pending', 'e1000000-0000-5000-8000-000000000001', $1::timestamptz)
+      `, [value])
+    },
+    {
+      label: 'notice cleanup_after',
+      setup: (value) => db.query(`
+        insert into public.message_notification_receipts (
+          source, source_event_key, room_key, received_at, notification_state,
+          client_message_id, delivered_at, cleanup_after, cleanup_state, payload, created_at, updated_at
+        ) values ('internal', 'infinite-notice-after', 'room', '2026-09-02T10:00:00Z',
+          'cleanup_pending', 'e1000000-0000-5000-8000-000000000002',
+          '2026-09-02T10:01:00Z', $1::timestamptz, 'idle',
+          '{"automation_notice_update":{"status":"updated"}}'::jsonb,
+          '2026-09-02T10:00:00Z', '2026-09-02T10:01:00Z')
+      `, [value])
+    },
+    {
+      label: 'notice cleanup_attempted_at',
+      setup: (value) => db.query(`
+        insert into public.message_notification_receipts (
+          source, source_event_key, room_key, received_at, notification_state,
+          client_message_id, cleanup_state, cleanup_attempted_at, created_at, updated_at
+        ) values ('internal', 'infinite-notice-attempted', 'room', '2026-09-02T10:00:00Z',
+          'delivered', 'e1000000-0000-5000-8000-000000000003', 'failed',
+          $1::timestamptz, '2026-09-02T10:00:00Z', '2026-09-02T10:01:00Z')
+      `, [value])
+    },
+    {
+      label: 'notice updated_at fallback',
+      setup: (value) => db.query(`
+        insert into public.message_notification_receipts (
+          source, source_event_key, room_key, received_at, notification_state,
+          client_message_id, cleanup_state, created_at, updated_at
+        ) values ('internal', 'infinite-notice-updated', 'room', '2026-09-02T10:00:00Z',
+          'delivered', 'e1000000-0000-5000-8000-000000000004', 'failed',
+          '2026-09-02T10:00:00Z', $1::timestamptz)
+      `, [value])
+    },
+    {
+      label: 'notice cleanup lease expiry',
+      setup: (value) => db.query(`
+        insert into public.message_notification_receipts (
+          source, source_event_key, room_key, received_at, notification_state,
+          client_message_id, cleanup_state, cleanup_expires_at, created_at, updated_at
+        ) values ('internal', 'infinite-notice-lease', 'room', '2026-09-02T10:00:00Z',
+          'delivered', 'e1000000-0000-5000-8000-000000000005', 'pending',
+          $1::timestamptz, '2026-09-02T10:00:00Z', '2026-09-02T10:01:00Z')
+      `, [value])
+    },
+    {
+      label: 'active work actionable_at',
+      setup: (value) => db.query(`
+        insert into public.work_items_v2 (
+          work_key, room_key, title, work_type, state, actionable_at,
+          first_opened_at, last_activity_at
+        ) values ('infinite-work-actionable', 'room', 'title', 'review', 'open',
+          $1::timestamptz, '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z')
+      `, [value])
+    },
+    {
+      label: 'active work first_opened_at',
+      setup: (value) => db.query(`
+        insert into public.work_items_v2 (
+          work_key, room_key, title, work_type, state, actionable_at,
+          first_opened_at, last_activity_at
+        ) values ('infinite-work-opened', 'room', 'title', 'review', 'open',
+          '2026-09-02T10:00:00Z', $1::timestamptz, '2026-09-02T10:00:00Z')
+      `, [value])
+    },
+    {
+      label: 'delivered digest scheduled_at',
+      setup: (value) => db.query(`
+        insert into public.digest_runs (
+          window_started_at, window_ended_at, scheduled_at, state, destination_key,
+          item_snapshot, manifest_prepared_at, delivered_at
+        ) values ('2026-09-02T10:00:00Z', '2026-09-02T11:00:00Z', $1::timestamptz,
+          'delivered', 'slack:infinite-scheduled', '[]'::jsonb,
+          '2026-09-02T11:00:00Z', '2026-09-02T11:00:00Z')
+      `, [value])
+    },
+    {
+      label: 'delivered digest delivered_at',
+      setup: async (value) => {
+        await dropFiniteConstraint('digest_runs', 'delivered_at');
+        await db.query(`
+          insert into public.digest_runs (
+            window_started_at, window_ended_at, scheduled_at, state, destination_key,
+            item_snapshot, manifest_prepared_at, delivered_at
+          ) values ('2026-09-02T10:00:00Z', '2026-09-02T11:00:00Z',
+            '2026-09-02T11:00:00Z', 'delivered', 'slack:infinite-delivered',
+            '[]'::jsonb, '2026-09-02T11:00:00Z', $1::timestamptz)
+        `, [value]);
+      }
+    },
+    {
+      label: 'cleanup successor manifest_prepared_at',
+      setup: async (value) => {
+        await db.exec(`
+          insert into public.digest_runs (
+            id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+            item_snapshot, manifest_prepared_at, delivered_at
+          ) values (
+            'e2000000-0000-4000-8000-000000000001', '2026-09-02T09:00:00Z',
+            '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z', 'delivered',
+            'slack:infinite-manifest', '[]'::jsonb,
+            '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z'
+          );
+        `);
+        await db.query(`
+          insert into public.digest_runs (
+            id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+            item_snapshot, manifest_prepared_at, delivered_at, previous_digest_id
+          ) values (
+            'e2000000-0000-4000-8000-000000000002', '2026-09-02T10:00:00Z',
+            '2026-09-02T11:00:00Z', '2026-09-02T11:00:00Z', 'delivered',
+            'slack:infinite-manifest', '[]'::jsonb, $1::timestamptz,
+            '2026-09-02T11:00:00Z', 'e2000000-0000-4000-8000-000000000001'
+          )
+        `, [value]);
+      }
+    },
+    {
+      label: 'cleanup predecessor manifest_prepared_at',
+      setup: async (value) => {
+        await db.query(`
+          insert into public.digest_runs (
+            id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+            item_snapshot, manifest_prepared_at, delivered_at
+          ) values (
+            'e3000000-0000-4000-8000-000000000001', '2026-09-02T09:00:00Z',
+            '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z', 'delivered',
+            'slack:infinite-prior-manifest', '[]'::jsonb, $1::timestamptz,
+            '2026-09-02T10:00:00Z'
+          )
+        `, [value]);
+        await db.exec(`
+          insert into public.digest_runs (
+            id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+            item_snapshot, manifest_prepared_at, delivered_at, previous_digest_id
+          ) values (
+            'e3000000-0000-4000-8000-000000000002', '2026-09-02T10:00:00Z',
+            '2026-09-02T11:00:00Z', '2026-09-02T11:00:00Z', 'delivered',
+            'slack:infinite-prior-manifest', '[]'::jsonb, '2026-09-02T11:00:00Z',
+            '2026-09-02T11:00:00Z', 'e3000000-0000-4000-8000-000000000001'
+          );
+        `);
+      }
+    },
+    {
+      label: 'diverged cleanup predecessor scheduled_at',
+      setup: async (value) => {
+        await db.query(`
+          insert into public.digest_runs (
+            id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+            item_snapshot, manifest_prepared_at, error
+          ) values (
+            'e3000000-0000-4000-8000-000000000003', '2026-09-02T09:00:00Z',
+            '2026-09-02T10:00:00Z', $1::timestamptz, 'diverged',
+            'slack:infinite-diverged-scheduled', '[]'::jsonb,
+            '2026-09-02T10:00:00Z', 'digest_generation_diverged'
+          )
+        `, [value]);
+        await db.exec(`
+          insert into public.digest_runs (
+            id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+            item_snapshot, manifest_prepared_at, delivered_at, previous_digest_id
+          ) values (
+            'e3000000-0000-4000-8000-000000000004', '2026-09-02T10:00:00Z',
+            '2026-09-02T11:00:00Z', '2026-09-02T11:00:00Z', 'delivered',
+            'slack:infinite-diverged-scheduled', '[]'::jsonb, '2026-09-02T11:00:00Z',
+            '2026-09-02T11:00:00Z', 'e3000000-0000-4000-8000-000000000003'
+          );
+        `);
+      }
+    },
+    {
+      label: 'diverged cleanup predecessor manifest_prepared_at',
+      setup: async (value) => {
+        await db.query(`
+          insert into public.digest_runs (
+            id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+            item_snapshot, manifest_prepared_at, error
+          ) values (
+            'e3000000-0000-4000-8000-000000000005', '2026-09-02T09:00:00Z',
+            '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z', 'diverged',
+            'slack:infinite-diverged-manifest', '[]'::jsonb, $1::timestamptz,
+            'digest_generation_diverged'
+          )
+        `, [value]);
+        await db.exec(`
+          insert into public.digest_runs (
+            id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+            item_snapshot, manifest_prepared_at, delivered_at, previous_digest_id
+          ) values (
+            'e3000000-0000-4000-8000-000000000006', '2026-09-02T10:00:00Z',
+            '2026-09-02T11:00:00Z', '2026-09-02T11:00:00Z', 'delivered',
+            'slack:infinite-diverged-manifest', '[]'::jsonb, '2026-09-02T11:00:00Z',
+            '2026-09-02T11:00:00Z', 'e3000000-0000-4000-8000-000000000005'
+          );
+        `);
+      }
+    },
+    {
+      label: 'digest cleanup part delivered_at',
+      setup: async (value) => {
+        await dropFiniteConstraint('digest_message_parts', 'delivered_at');
+        await insertDigestCleanupPart({ deliveredAt: value });
+      }
+    },
+    {
+      label: 'digest cleanup part cleanup_attempted_at',
+      setup: async (value) => {
+        await dropFiniteConstraint('digest_message_parts', 'cleanup_attempted_at');
+        await insertDigestCleanupPart({
+          cleanupState: 'deleting', cleanupAttempts: 1, cleanupOwner: 'bridge:test',
+          cleanupToken: 'e4000000-0000-4000-8000-000000000006',
+          cleanupExpiresAt: '2026-09-02T11:30:00Z', cleanupAttemptedAt: value
+        });
+      }
+    },
+    {
+      label: 'digest cleanup part cleanup_expires_at',
+      setup: async (value) => {
+        await dropFiniteConstraint('digest_message_parts', 'cleanup_expires_at');
+        await insertDigestCleanupPart({
+          cleanupState: 'deleting', cleanupAttempts: 1, cleanupOwner: 'bridge:test',
+          cleanupToken: 'e4000000-0000-4000-8000-000000000007',
+          cleanupExpiresAt: value, cleanupAttemptedAt: '2026-09-02T11:00:00Z'
+        });
+      }
+    },
+    {
+      label: 'failed digest updated_at',
+      setup: (value) => db.query(`
+        insert into public.digest_runs (
+          window_started_at, window_ended_at, scheduled_at, state, destination_key,
+          lease_owner, lease_token, lease_expires_at, updated_at
+        ) values ('2026-09-02T10:00:00Z', '2026-09-02T11:00:00Z',
+          '2026-09-02T11:00:00Z', 'failed', 'slack:infinite-updated',
+          'bridge:test', 'e2000000-0000-4000-8000-000000000003',
+          '2026-09-02T11:30:00Z', $1::timestamptz)
+      `, [value])
+    },
+    {
+      label: 'digest lease expiry',
+      setup: (value) => db.query(`
+        insert into public.digest_runs (
+          window_started_at, window_ended_at, scheduled_at, state, destination_key,
+          lease_owner, lease_token, lease_expires_at, updated_at
+        ) values ('2026-09-02T10:00:00Z', '2026-09-02T11:00:00Z',
+          '2026-09-02T11:00:00Z', 'failed', 'slack:infinite-lease',
+          'bridge:test', 'e2000000-0000-4000-8000-000000000004',
+          $1::timestamptz, '2026-09-02T11:00:00Z')
+      `, [value])
+    }
+  ];
+
+  try {
+    for (const { label, setup } of cases) {
+      for (const value of ['infinity', '-infinity']) {
+        await t.test(`${label}: ${value}`, async () => {
+          await db.exec('begin');
+          try {
+            await setup(value);
+            const result = await callHealth();
+            assert.equal(result.rows[0].health.invalid_evidence_count, 1);
+            assert.doesNotMatch(JSON.stringify(result.rows[0].health), /infinity/i);
+          } finally {
+            await db.exec('rollback');
+          }
+        });
+      }
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test('health stale action conflicts use the exact supplied-clock contract while valid resolve requests remain pending', async () => {
+  const db = await createHealthAggregateDatabase();
+  const insert = async (key, pendingAction, version = 2) => db.query(`
+    insert into public.work_items_v2 (
+      work_key, room_key, title, work_type, state, actionable_at,
+      first_opened_at, last_activity_at, pending_action, version
+    ) values ($1::text, 'room', 'title', 'review', 'open',
+      '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z', '2026-09-02T10:00:00Z',
+      $2::jsonb, $3::integer)
+  `, [key, JSON.stringify(pendingAction), version]);
+  const pending = (type, action = { type }, overrides = {}) => ({
+    type, action, status: 'pending', requested_at: '2026-09-02T11:00:00.000Z',
+    requested_by: 'UOWNER', expected_version: 1, ...overrides
+  });
+  const readCount = async () => (await db.query(`
+    select public.read_work_orchestrator_health_v2('2026-09-02T12:00:00.000Z'::timestamptz) as health
+  `)).rows[0].health.actions.stale_conflict_count;
+
+  try {
+    for (const [index, action] of [
+      ['progress', { type: 'progress' }],
+      ['snooze', { type: 'snooze', snoozedUntil: '2026-09-02T13:00:00.000Z' }],
+      ['ack_p0', { type: 'ack_p0' }],
+      ['dismiss', { type: 'dismiss' }],
+      ['request_resolve', { type: 'request_resolve' }]
+    ].entries()) await insert(`valid-action-${index}`, pending(action[0], action[1]));
+    assert.equal(await readCount(), 0, 'an exact request_resolve is intentionally awaiting authoritative resolution');
+
+    const malformed = [
+      pending('progress', { type: 'progress', extra: true }),
+      pending('snooze', { type: 'snooze', snoozedUntil: '2026-09-02T12:00:00.000Z' }),
+      pending('ack_p0', { type: 'ack_p0' }, { requested_at: '2026-09-02T12:00:00.001Z' }),
+      pending('dismiss', { type: 'dismiss' }, { requested_by: 'invalid-user' }),
+      pending('request_resolve', { type: 'request_resolve' }, { requested_by: undefined }),
+      { ...pending('request_resolve'), extra: true },
+      pending('request_resolve', { type: 'progress' }),
+      pending('request_resolve', { type: 'request_resolve', extra: true }),
+      pending('request_resolve', { type: 'request_resolve' }, { requested_at: 'infinity' }),
+      pending('request_resolve', { type: 'request_resolve' }, { requested_at: '2026-09-02T12:00:00.001Z' }),
+      pending('request_resolve', { type: 'request_resolve' }, { requested_by: 'invalid-user' }),
+      pending('request_resolve', { type: 'request_resolve' }, { expected_version: 2 })
+    ];
+    for (const [index, action] of malformed.entries()) await insert(`invalid-action-${index}`, action);
+
+    assert.equal(await readCount(), 12);
   } finally {
     await db.close();
   }

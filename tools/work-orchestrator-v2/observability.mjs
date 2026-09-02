@@ -69,10 +69,11 @@ export function validateWorkOrchestratorHealthAggregate(value, expectedNow) {
   const now = canonicalTimestamp(expectedNow);
   const nowMs = Date.parse(now);
   if (!exactKeys(value, [
-    'measured_at', 'notifications', 'automation', 'work', 'digests',
+    'measured_at', 'invalid_evidence_count', 'notifications', 'automation', 'work', 'digests',
     'cleanup', 'actions', 'leases'
   ])) throw invalidAggregate();
   if (canonicalTimestamp(value.measured_at) !== now) throw invalidAggregate();
+  if (count(value.invalid_evidence_count) > 0) throw invalidAggregate();
 
   const notifications = value.notifications;
   const notificationKeys = [

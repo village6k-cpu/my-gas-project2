@@ -2580,6 +2580,7 @@ test('bridge exposes invariant health as a separate top-level subsystem without 
   const now = '2026-09-02T12:00:00.000Z';
   const aggregate = {
     measured_at: now,
+    invalid_evidence_count: 0,
     notifications: {
       undelivered_count: 1, pending_count: 1, delivering_count: 0, failed_count: 0,
       oldest_undelivered_at: '2026-09-02T11:54:59.000Z', oldest_undelivered_age_seconds: 301

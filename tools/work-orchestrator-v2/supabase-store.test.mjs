@@ -191,6 +191,7 @@ test('claimNotificationReceipt sends the normalized receipt to the reviewed RPC 
 function healthAggregate(overrides = {}) {
   return {
     measured_at: '2026-09-02T12:00:00.000Z',
+    invalid_evidence_count: 0,
     notifications: {
       undelivered_count: 1, pending_count: 1, delivering_count: 0, failed_count: 0,
       oldest_undelivered_at: '2026-09-02T11:59:00.000Z', oldest_undelivered_age_seconds: 60
@@ -264,6 +265,7 @@ test('readHealthAggregate rejects invalid clock and malformed, extra, fractional
     { ...healthAggregate(), notifications: { ...healthAggregate().notifications, undelivered_count: -1 } },
     { ...healthAggregate(), actions: { stale_conflict_count: 0.5 } },
     { ...healthAggregate(), measured_at: '2026-09-02T12:00:01.000Z' },
+    { ...healthAggregate(), invalid_evidence_count: 1 },
     { ...healthAggregate(), cleanup: { ...healthAggregate().cleanup, notice: { ...healthAggregate().cleanup.notice, payload: 'private' } } }
   ];
   for (const data of malformed) {

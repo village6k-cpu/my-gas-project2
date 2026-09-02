@@ -1,14 +1,152 @@
 set lock_timeout = '5s';
 
+create function public.is_valid_pending_work_action_at_v2(
+  p_pending jsonb,
+  p_current_version integer,
+  p_now timestamptz
+) returns boolean language plpgsql stable security invoker set search_path = '' as $$
+declare
+  v_type text;
+  v_action jsonb;
+  v_expected_version integer;
+  v_requested_at timestamptz;
+  v_snoozed_until timestamptz;
+begin
+  if p_now is null or not isfinite(p_now)
+    or p_pending is null or jsonb_typeof(p_pending) <> 'object'
+    or not (p_pending ?& array['type','action','status','requested_at','requested_by','expected_version'])
+    or (p_pending - array['type','action','status','requested_at','requested_by','expected_version']::text[]) <> '{}'::jsonb
+    or jsonb_typeof(p_pending->'type') <> 'string'
+    or jsonb_typeof(p_pending->'action') <> 'object'
+    or jsonb_typeof(p_pending->'status') <> 'string' or p_pending->>'status' <> 'pending'
+    or jsonb_typeof(p_pending->'requested_at') <> 'string'
+    or length(p_pending->>'requested_at') > 40
+    or (p_pending->>'requested_at') !~ '^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    or jsonb_typeof(p_pending->'requested_by') <> 'string'
+    or (p_pending->>'requested_by') !~ '^[UW][A-Z0-9]{2,79}$'
+    or jsonb_typeof(p_pending->'expected_version') <> 'number'
+    or (p_pending->>'expected_version') !~ '^[1-9][0-9]*$' then
+    return false;
+  end if;
+  begin
+    v_expected_version := (p_pending->>'expected_version')::integer;
+    v_requested_at := (p_pending->>'requested_at')::timestamptz;
+  exception when others then
+    return false;
+  end;
+  if p_current_version is null or p_current_version <= 1
+    or v_expected_version <> p_current_version - 1
+    or not isfinite(v_requested_at) or v_requested_at > p_now then
+    return false;
+  end if;
+  v_type := p_pending->>'type';
+  v_action := p_pending->'action';
+  if v_type not in ('progress','snooze','ack_p0','request_resolve','dismiss')
+    or v_action->>'type' is distinct from v_type
+    or (v_type <> 'snooze' and (v_action - 'type') <> '{}'::jsonb)
+    or (v_type = 'snooze' and (
+      not (v_action ?& array['type','snoozedUntil'])
+      or (v_action - array['type','snoozedUntil']::text[]) <> '{}'::jsonb
+      or jsonb_typeof(v_action->'snoozedUntil') <> 'string'
+      or length(v_action->>'snoozedUntil') > 40
+      or (v_action->>'snoozedUntil') !~ '^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'
+    )) then
+    return false;
+  end if;
+  if v_type = 'snooze' then
+    begin
+      v_snoozed_until := (v_action->>'snoozedUntil')::timestamptz;
+    exception when others then
+      return false;
+    end;
+    if not isfinite(v_snoozed_until) or v_snoozed_until <= p_now then return false; end if;
+  end if;
+  return true;
+end;
+$$;
+
 create function public.read_work_orchestrator_health_v2(
   p_now timestamptz
 ) returns jsonb language plpgsql stable security invoker set search_path = '' as $$
 declare
   v_result jsonb;
+  v_invalid_evidence_count bigint;
 begin
   if p_now is null or not isfinite(p_now) then
     raise exception 'invalid work orchestrator health clock' using errcode = '22023';
   end if;
+
+  select count(*)::bigint into v_invalid_evidence_count
+  from (
+    select 1 from public.message_notification_receipts as receipt
+    where receipt.notification_state in ('pending','delivering','failed')
+      and not isfinite(receipt.created_at)
+    union all
+    select 1 from public.message_notification_receipts as receipt
+    where receipt.cleanup_state = 'idle'
+      and receipt.notification_state = 'cleanup_pending'
+      and receipt.cleanup_after is not null and not isfinite(receipt.cleanup_after)
+    union all
+    select 1 from public.message_notification_receipts as receipt
+    where receipt.cleanup_state in ('pending','failed')
+      and receipt.cleanup_attempted_at is not null
+      and not isfinite(receipt.cleanup_attempted_at)
+    union all
+    select 1 from public.message_notification_receipts as receipt
+    where receipt.cleanup_state in ('pending','failed')
+      and receipt.cleanup_attempted_at is null and receipt.cleanup_after is null
+      and not isfinite(receipt.updated_at)
+    union all
+    select 1 from public.message_notification_receipts as receipt
+    where receipt.cleanup_state in ('pending','failed')
+      and receipt.cleanup_attempted_at is null and receipt.cleanup_after is not null
+      and not isfinite(receipt.cleanup_after)
+    union all
+    select 1 from public.message_notification_receipts as receipt
+    where receipt.cleanup_state = 'pending' and receipt.cleanup_expires_at is not null
+      and not isfinite(receipt.cleanup_expires_at)
+    union all
+    select 1 from public.work_items_v2 as work
+    where work.state in ('open','in_progress','snoozed')
+      and not isfinite(work.actionable_at)
+    union all
+    select 1 from public.work_items_v2 as work
+    where work.state in ('open','in_progress','snoozed')
+      and not isfinite(work.first_opened_at)
+    union all
+    select 1 from public.digest_runs as digest
+    where digest.state in ('delivered','replaced') and digest.delivered_at is not null
+      and not isfinite(digest.delivered_at)
+    union all
+    select 1 from public.digest_runs as digest
+    where digest.state in ('delivered','replaced','diverged')
+      and not isfinite(digest.scheduled_at)
+    union all
+    select 1 from public.digest_runs as digest
+    where digest.state in ('delivered','replaced','diverged')
+      and digest.manifest_prepared_at is not null and not isfinite(digest.manifest_prepared_at)
+    union all
+    select 1 from public.digest_runs as digest
+    where digest.state in ('failed','diverged') and not isfinite(digest.updated_at)
+    union all
+    select 1 from public.digest_runs as digest
+    where digest.state in ('building','delivering','failed') and digest.lease_expires_at is not null
+      and not isfinite(digest.lease_expires_at)
+    union all
+    select 1 from public.digest_message_parts as part
+    where part.delivery_state = 'delivered'
+      and part.cleanup_state in ('idle','deleting','failed')
+      and part.delivered_at is not null and not isfinite(part.delivered_at)
+    union all
+    select 1 from public.digest_message_parts as part
+    where part.delivery_state = 'delivered'
+      and part.cleanup_state in ('idle','deleting','failed')
+      and part.cleanup_attempted_at is not null and not isfinite(part.cleanup_attempted_at)
+    union all
+    select 1 from public.digest_message_parts as part
+    where part.cleanup_state = 'deleting' and part.cleanup_expires_at is not null
+      and not isfinite(part.cleanup_expires_at)
+  ) as invalid_evidence;
 
   with recursive
   notification_metrics as (
@@ -17,7 +155,9 @@ begin
       count(*) filter (where notification_state = 'pending')::bigint as pending_count,
       count(*) filter (where notification_state = 'delivering')::bigint as delivering_count,
       count(*) filter (where notification_state = 'failed')::bigint as failed_count,
-      min(created_at) filter (where notification_state in ('pending','delivering','failed')) as oldest_at
+      min(created_at) filter (
+        where notification_state in ('pending','delivering','failed') and isfinite(created_at)
+      ) as oldest_at
     from public.message_notification_receipts
   ),
   automation_metrics as (
@@ -125,6 +265,7 @@ begin
     select delivered_at, item_snapshot
     from public.digest_runs
     where state in ('delivered','replaced') and delivered_at is not null
+      and isfinite(delivered_at) and isfinite(scheduled_at)
     order by delivered_at desc, scheduled_at desc, id desc
     limit 1
   ),
@@ -156,8 +297,11 @@ begin
       count(*) filter (where state = 'diverged')::bigint as diverged_count,
       count(*) filter (where state = 'replaced')::bigint as replaced_count,
       count(*) filter (where state = 'retired')::bigint as retired_count,
-      max(delivered_at) filter (where state in ('delivered','replaced')) as last_success_at,
-      max(updated_at) filter (where state in ('failed','diverged')) as last_failure_at
+      max(delivered_at) filter (
+        where state in ('delivered','replaced') and isfinite(delivered_at)
+      ) as last_success_at,
+      max(updated_at) filter (where state in ('failed','diverged') and isfinite(updated_at))
+        as last_failure_at
     from public.digest_runs
   ),
   notice_cleanup_base as (
@@ -181,7 +325,7 @@ begin
       count(*) filter (where cleanup_state = 'blocked_p0')::bigint as blocked_p0_count,
       count(*) filter (where cleanup_state = 'deleted')::bigint as deleted_count,
       count(*) filter (where in_backlog)::bigint as backlog_count,
-      min(backlog_at) filter (where in_backlog) as oldest_backlog_at
+      min(backlog_at) filter (where in_backlog and isfinite(backlog_at)) as oldest_backlog_at
     from notice_cleanup_base
   ),
   cleanup_chain(
@@ -258,7 +402,8 @@ begin
     from public.digest_message_parts
   ),
   digest_cleanup_backlog_metrics as (
-    select count(*)::bigint as backlog_count, min(backlog_at) as oldest_backlog_at
+    select count(*)::bigint as backlog_count,
+      min(backlog_at) filter (where isfinite(backlog_at)) as oldest_backlog_at
     from digest_cleanup_backlog
   ),
   action_metrics as (
@@ -267,17 +412,14 @@ begin
     where pending_action <> '{}'::jsonb
       and (
         state not in ('open','in_progress','snoozed')
-        or jsonb_typeof(pending_action) <> 'object'
-        or pending_action->>'status' is distinct from 'pending'
-        or jsonb_typeof(pending_action->'expected_version') <> 'number'
-        or (pending_action->>'expected_version') !~ '^[1-9][0-9]*$'
-        or (pending_action->>'expected_version')::numeric <> (version - 1)::numeric
+        or not public.is_valid_pending_work_action_at_v2(pending_action, version, p_now)
       )
   ),
   digest_leases as (
     select lease_expires_at
     from public.digest_runs
     where state in ('building','delivering','failed') and lease_expires_at is not null
+      and isfinite(lease_expires_at)
   ),
   p0_leases as (
     select case
@@ -294,11 +436,13 @@ begin
     select cleanup_expires_at as lease_expires_at
     from public.message_notification_receipts
     where cleanup_state = 'pending' and cleanup_expires_at is not null
+      and isfinite(cleanup_expires_at)
   ),
   digest_cleanup_leases as (
     select cleanup_expires_at as lease_expires_at
     from public.digest_message_parts
     where cleanup_state = 'deleting' and cleanup_expires_at is not null
+      and isfinite(cleanup_expires_at)
   ),
   digest_lease_metrics as (
     select count(*) filter (where lease_expires_at > p_now)::bigint as active_count,
@@ -326,6 +470,7 @@ begin
   )
   select jsonb_build_object(
     'measured_at', to_char(p_now at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    'invalid_evidence_count', v_invalid_evidence_count,
     'notifications', jsonb_build_object(
       'undelivered_count', notification_metrics.undelivered_count,
       'pending_count', notification_metrics.pending_count,
@@ -413,5 +558,9 @@ $$;
 
 revoke execute on function public.read_work_orchestrator_health_v2(timestamptz)
   from public, anon, authenticated;
+revoke execute on function public.is_valid_pending_work_action_at_v2(jsonb,integer,timestamptz)
+  from public, anon, authenticated;
 grant execute on function public.read_work_orchestrator_health_v2(timestamptz)
+  to service_role;
+grant execute on function public.is_valid_pending_work_action_at_v2(jsonb,integer,timestamptz)
   to service_role;

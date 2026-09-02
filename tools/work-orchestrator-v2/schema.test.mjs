@@ -333,14 +333,23 @@ test('additive health migration exposes exactly one private read-only aggregate 
 
   assert.equal(
     (sql.match(/create(?:\s+or\s+replace)?\s+function\s+public\./gi) || []).length,
-    1,
-    'the migration adds one aggregate RPC and no helper mutation surface'
+    2,
+    'the migration adds one aggregate RPC and one deterministic read-only action validator'
   );
+  assert.match(sql, /create function public\.is_valid_pending_work_action_at_v2\(\s*p_pending jsonb,\s*p_current_version integer,\s*p_now timestamptz\s*\)/i);
+  assert.match(sql, /returns boolean language plpgsql stable security invoker set search_path = ''/i);
+  const helperSql = sql.slice(
+    sql.search(/create function public\.is_valid_pending_work_action_at_v2/i),
+    sql.search(/create function public\.read_work_orchestrator_health_v2/i)
+  );
+  assert.doesNotMatch(helperSql, /\b(?:now|clock_timestamp)\s*\(/i, 'health action validation uses only p_now');
   assert.match(sql, /create function public\.read_work_orchestrator_health_v2\(\s*p_now timestamptz\s*\)/i);
   assert.match(sql, /returns jsonb language plpgsql stable security invoker set search_path = ''/i);
   assert.match(sql, /p_now is null[\s\S]*?not isfinite\(p_now\)[\s\S]*?22023/i);
   assert.match(sql, /revoke execute on function public\.read_work_orchestrator_health_v2\(timestamptz\)\s+from public, anon, authenticated/i);
   assert.match(sql, /grant execute on function public\.read_work_orchestrator_health_v2\(timestamptz\)\s+to service_role/i);
+  assert.match(sql, /revoke execute on function public\.is_valid_pending_work_action_at_v2\(jsonb,integer,timestamptz\)\s+from public, anon, authenticated/i);
+  assert.match(sql, /grant execute on function public\.is_valid_pending_work_action_at_v2\(jsonb,integer,timestamptz\)\s+to service_role/i);
   assert.doesNotMatch(sql, /security definer|create policy|grant execute[^;]+to (?:public|anon|authenticated)/i);
   assert.doesNotMatch(sql, /\b(insert|update|delete|merge|truncate)\b/i, 'health aggregation remains read-only');
 
@@ -357,4 +366,11 @@ test('additive health migration exposes exactly one private read-only aggregate 
   assert.match(sql, /latest_delivered_eligible_omitted_count/i);
   assert.match(sql, /unacknowledged_p0_missing_alert_count/i);
   assert.match(sql, /stale_conflict_count/i);
+  assert.match(sql, /not public\.is_valid_pending_work_action_at_v2\(pending_action, version, p_now\)/i);
+  assert.match(sql, /invalid_evidence_count/i);
+  for (const timestamp of [
+    'created_at', 'actionable_at', 'first_opened_at', 'delivered_at', 'cleanup_after',
+    'cleanup_attempted_at', 'updated_at', 'cleanup_expires_at', 'scheduled_at',
+    'manifest_prepared_at', 'lease_expires_at'
+  ]) assert.match(sql, new RegExp(`isfinite\\([^)]*${timestamp}`, 'i'));
 });
