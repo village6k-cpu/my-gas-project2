@@ -34,6 +34,7 @@ import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-n
 import { digestScheduleWindow, runDigestCycle } from '../work-orchestrator-v2/digest-runner.mjs';
 import { processPendingWorkAction } from '../work-orchestrator-v2/work-actions.mjs';
 import {
+  buildHumanWorkCandidates,
   buildV2P0DeliveryClaim,
   encodeWorkActionValue,
   v2P0ReminderDecision
@@ -42,6 +43,7 @@ import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shad
 import { createSlackClient } from '../work-orchestrator-v2/slack-client.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
 import { readWorkOrchestratorHealth } from '../work-orchestrator-v2/observability.mjs';
+import { runNoticeCleanupSweep } from '../work-orchestrator-v2/notice-cleanup.mjs';
 
 export { buildGatewayHealthReadback } from './hermes-gateway-http.mjs';
 export { validateWorkOrchestratorV2CutoverConfig } from '../work-orchestrator-v2/contracts.mjs';
@@ -109,6 +111,155 @@ export function resolveSlackActionPollIntervalMs(value) {
     : 10_000;
 }
 
+const NOTICE_CLEANUP_BOT_USER = /^U[A-Z0-9]{1,79}$/;
+const NOTICE_CLEANUP_BOT = /^B[A-Z0-9]{1,79}$/;
+const NOTICE_CLEANUP_TEAM = /^T[A-Z0-9]{1,79}$/;
+
+function exactNoticeCleanupText(value, maximum) {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum && value === value.trim()
+    ? value
+    : '';
+}
+
+function boundedNoticeCleanupInteger(value, fallback, minimum, maximum) {
+  const raw = value === undefined || value === null || value === '' ? String(fallback) : String(value);
+  if (!/^[0-9]+$/.test(raw)) return null;
+  const number = Number(raw);
+  return Number.isSafeInteger(number) && number >= minimum && number <= maximum ? number : null;
+}
+
+export function resolveWorkOrchestratorNoticeCleanupConfig({
+  environment = process.env,
+  pid = process.pid
+} = {}) {
+  const botUserId = exactNoticeCleanupText(environment.WORK_ORCHESTRATOR_V2_SLACK_BOT_USER_ID, 80);
+  const botId = exactNoticeCleanupText(environment.WORK_ORCHESTRATOR_V2_SLACK_BOT_ID, 80);
+  const teamId = exactNoticeCleanupText(environment.WORK_ORCHESTRATOR_V2_SLACK_TEAM_ID, 80);
+  const configuredOwner = environment.WORK_ORCHESTRATOR_V2_CLEANUP_OWNER;
+  const cleanupOwner = exactNoticeCleanupText(
+    configuredOwner === undefined || configuredOwner === null || configuredOwner === ''
+      ? `bridge:notice-cleanup:${pid}`
+      : configuredOwner,
+    200
+  );
+  const cleanupLeaseSeconds = boundedNoticeCleanupInteger(
+    environment.WORK_ORCHESTRATOR_V2_CLEANUP_LEASE_SECONDS, 120, 1, 900
+  );
+  const intervalMs = boundedNoticeCleanupInteger(
+    environment.WORK_ORCHESTRATOR_V2_CLEANUP_INTERVAL_MS, 300_000, 30_000, 3_600_000
+  );
+  const ready = NOTICE_CLEANUP_BOT_USER.test(botUserId)
+    && NOTICE_CLEANUP_BOT.test(botId)
+    && NOTICE_CLEANUP_TEAM.test(teamId)
+    && Boolean(cleanupOwner)
+    && cleanupLeaseSeconds !== null
+    && intervalMs !== null;
+  return {
+    ready,
+    botUserId,
+    botId,
+    teamId,
+    cleanupOwner,
+    cleanupLeaseSeconds,
+    intervalMs
+  };
+}
+
+export function createWorkOrchestratorNoticeCleanupRuntime({
+  config = {},
+  environment = process.env,
+  store = null,
+  slack = null,
+  now = () => new Date().toISOString(),
+  runSweep = runNoticeCleanupSweep,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+  pid = process.pid,
+  state = {}
+} = {}) {
+  const enabled = config.cleanupEnabled === true;
+  const cleanupConfig = resolveWorkOrchestratorNoticeCleanupConfig({ environment, pid });
+  const dependenciesReady = Boolean(store
+    && typeof store.claimCleanupBatch === 'function'
+    && typeof store.markCleanupDeleted === 'function'
+    && typeof store.markCleanupFailed === 'function'
+    && slack
+    && typeof slack.authTest === 'function'
+    && typeof slack.deleteMessage === 'function');
+  const ready = enabled && cleanupConfig.ready && dependenciesReady;
+  state.noticeCleanupRunning = false;
+  state.lastNoticeCleanup = null;
+  let timer = null;
+
+  const count = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 25 ? value : 0;
+  const sweep = async (trigger = 'manual') => {
+    if (!enabled) return { status: 'disabled', trigger };
+    if (!ready) return { status: 'not_ready', trigger };
+    if (state.noticeCleanupRunning) return { status: 'running', trigger };
+    state.noticeCleanupRunning = true;
+    const atValue = now();
+    const at = new Date(atValue);
+    try {
+      if (Number.isNaN(at.getTime())) throw new Error('invalid notice cleanup clock');
+      const raw = await runSweep({
+        store,
+        slack,
+        config: {
+          botUserId: cleanupConfig.botUserId,
+          botId: cleanupConfig.botId,
+          teamId: cleanupConfig.teamId,
+          cleanupOwner: cleanupConfig.cleanupOwner,
+          cleanupLeaseSeconds: cleanupConfig.cleanupLeaseSeconds
+        },
+        now: at.toISOString()
+      });
+      const result = {
+        at: at.toISOString(),
+        trigger: ['startup', 'interval', 'manual'].includes(trigger) ? trigger : 'manual',
+        status: count(raw?.failed) > 0 || count(raw?.excluded) > 0 ? 'error' : 'ok',
+        claimed: count(raw?.claimed),
+        deleted: count(raw?.deleted),
+        alreadyAbsent: count(raw?.alreadyAbsent),
+        failed: count(raw?.failed),
+        blockedP0: count(raw?.blockedP0),
+        excluded: count(raw?.excluded)
+      };
+      state.lastNoticeCleanup = result;
+      return result;
+    } catch {
+      const result = {
+        at: Number.isNaN(at.getTime()) ? '' : at.toISOString(),
+        trigger: ['startup', 'interval', 'manual'].includes(trigger) ? trigger : 'manual',
+        status: 'error', claimed: 0, deleted: 0, alreadyAbsent: 0,
+        failed: 1, blockedP0: 0, excluded: 0
+      };
+      state.lastNoticeCleanup = result;
+      return result;
+    } finally {
+      state.noticeCleanupRunning = false;
+    }
+  };
+
+  return {
+    enabled,
+    ready,
+    localConfigReady: !enabled || ready,
+    state,
+    sweep,
+    async start() {
+      if (!ready || timer !== null) return false;
+      await sweep('startup');
+      timer = setIntervalImpl(() => { sweep('interval').catch(() => {}); }, cleanupConfig.intervalMs);
+      timer?.unref?.();
+      return true;
+    },
+    stop() {
+      if (timer !== null) clearIntervalImpl(timer);
+      timer = null;
+    }
+  };
+}
+
 export function kakaoSendAllowedForTransport(value) {
   return resolveHermesTransport(value) !== 'gateway_no_send';
 }
@@ -170,7 +321,7 @@ const CONFIG = {
   supabaseRecoveryLookbackHours: Number(process.env.SUPABASE_RECOVERY_LOOKBACK_HOURS || 36),
   supabaseRecoveryErrorRetryMs: Number(process.env.SUPABASE_RECOVERY_ERROR_RETRY_MS || 900_000),
   supabaseRecoveryMaxAttempts: Number(process.env.SUPABASE_RECOVERY_MAX_ATTEMPTS || 2),
-  slackActionPollEnabled: readBooleanEnvironment(process.env.SLACK_ACTION_POLL_ENABLED, true),
+  slackActionPollEnabled: CUTOVER_CONFIG.legacyActionPollEnabled,
   slackActionPollIntervalMs: resolveSlackActionPollIntervalMs(process.env.SLACK_ACTION_POLL_INTERVAL_MS),
   p0SlackEscalationEnabled: CUTOVER_CONFIG.legacyP0Enabled,
   p0SlackEscalationIntervalMs: Math.max(15_000, Number(process.env.P0_SLACK_ESCALATION_INTERVAL_MS || 60_000)),
@@ -220,6 +371,9 @@ export function buildHealthConfig(config = {}) {
   };
   if (config.workOrchestrator) {
     health.workOrchestrator = {
+      ...(['legacy', 'v2'].includes(config.workOrchestrator.runtimeMode)
+        ? { runtimeMode: config.workOrchestrator.runtimeMode }
+        : {}),
       shadowWrites: Boolean(config.workOrchestrator.shadowWrites),
       immediateEnabled: Boolean(config.workOrchestrator.immediateEnabled),
       workItemsEnabled: Boolean(config.workOrchestrator.workItemsEnabled),
@@ -232,6 +386,9 @@ export function buildHealthConfig(config = {}) {
       shadowReady: Boolean(config.workOrchestratorShadowReady),
       // This proves local values and clients were constructed only. Durable-store and Slack connectivity require separate readback.
       immediateLocalConfigReady: Boolean(config.workOrchestratorImmediateLocalConfigReady),
+      ...(Object.hasOwn(config, 'workOrchestratorCleanupLocalConfigReady')
+        ? { cleanupLocalConfigReady: Boolean(config.workOrchestratorCleanupLocalConfigReady) }
+        : {}),
       ...(Object.hasOwn(config, 'workOrchestratorP0LocalConfigReady')
         ? { p0LocalConfigReady: Boolean(config.workOrchestratorP0LocalConfigReady) }
         : {}),
@@ -357,11 +514,34 @@ export function buildWorkOrchestratorHealthState(value = {}) {
           : null
       }
     : healthWithActions;
+  const noticeCleanup = value.lastNoticeCleanup;
+  const noticeCount = (input) => Number.isSafeInteger(input) && input >= 0 && input <= 25 ? input : 0;
+  const healthWithNoticeCleanup = Object.hasOwn(value, 'lastNoticeCleanup')
+    ? {
+        ...healthWithP0,
+        noticeCleanupRunning: value.noticeCleanupRunning === true,
+        lastNoticeCleanup: noticeCleanup && typeof noticeCleanup === 'object' && !Array.isArray(noticeCleanup)
+          ? {
+              at: safeShadowTimestamp(noticeCleanup.at),
+              trigger: ['startup', 'interval', 'manual'].includes(noticeCleanup.trigger) ? noticeCleanup.trigger : 'manual',
+              status: ['ok', 'error', 'disabled', 'not_ready', 'running'].includes(noticeCleanup.status)
+                ? noticeCleanup.status
+                : 'error',
+              claimed: noticeCount(noticeCleanup.claimed),
+              deleted: noticeCount(noticeCleanup.deleted),
+              alreadyAbsent: noticeCount(noticeCleanup.alreadyAbsent),
+              failed: noticeCount(noticeCleanup.failed),
+              blockedP0: noticeCount(noticeCleanup.blockedP0),
+              excluded: noticeCount(noticeCleanup.excluded)
+            }
+          : null
+      }
+    : healthWithP0;
   const hasDigestState = [
     'digestRunning', 'lastDigestRun', 'lastDigestSuccessAt', 'lastDigestFailureAt',
     'nextScheduledAt', 'digestFailureCount', 'omittedEligibleCount'
   ].some((key) => Object.hasOwn(value, key));
-  if (!hasDigestState) return healthWithP0;
+  if (!hasDigestState) return healthWithNoticeCleanup;
 
   const count = (input, maximum) => {
     const numeric = input;
@@ -395,7 +575,7 @@ export function buildWorkOrchestratorHealthState(value = {}) {
     return result;
   };
   return {
-    ...healthWithP0,
+    ...healthWithNoticeCleanup,
     digestRunning: value.digestRunning === true,
     lastDigestRun: safeLastRun(value.lastDigestRun),
     lastDigestSuccessAt: safeShadowTimestamp(value.lastDigestSuccessAt) || null,
@@ -1754,7 +1934,8 @@ const workOrchestratorShadowRuntime = createWorkOrchestratorShadowRuntime({
 let workOrchestratorSlackClient = null;
 if ((CONFIG.workOrchestrator.immediateEnabled
     || CONFIG.workOrchestrator.workItemsEnabled
-    || CONFIG.workOrchestrator.digestEnabled)
+    || CONFIG.workOrchestrator.digestEnabled
+    || CONFIG.workOrchestrator.cleanupEnabled)
   && CONFIG.slackBotToken.trim()) {
   try {
     workOrchestratorSlackClient = createSlackClient({ token: CONFIG.slackBotToken });
@@ -1825,6 +2006,14 @@ const workOrchestratorP0Runtime = createWorkOrchestratorP0Runtime({
     .filter(Boolean)
 });
 CONFIG.workOrchestratorP0LocalConfigReady = workOrchestratorP0Runtime.localConfigReady;
+const workOrchestratorNoticeCleanupRuntime = createWorkOrchestratorNoticeCleanupRuntime({
+  config: CONFIG.workOrchestrator,
+  environment: process.env,
+  store: workOrchestratorStore,
+  slack: workOrchestratorSlackClient,
+  state: workOrchestratorShadowRuntime.state
+});
+CONFIG.workOrchestratorCleanupLocalConfigReady = workOrchestratorNoticeCleanupRuntime.localConfigReady;
 
 const state = {
   startedAt: new Date().toISOString(),
@@ -1854,11 +2043,9 @@ const state = {
   activeWorkerJobIds: new Set(),
   seenGroupingTexts: new Set(),
   lastContentScriptStartedAtMs: 0,
-  workOrchestrator: {
-    ...workOrchestratorShadowRuntime.state,
-    lastP0Readback: null
-  }
+  workOrchestrator: workOrchestratorShadowRuntime.state
 };
+state.workOrchestrator.lastP0Readback = null;
 
 const gatewayTransportSelected = ['gateway', 'gateway_no_send'].includes(CONFIG.hermesTransport);
 const gatewayTransportEnabled = gatewayTransportSelected && Boolean(CONFIG.hermesBridgeToken.trim());
@@ -2479,7 +2666,9 @@ export async function runP0EscalationPair({
 
 export function createWorkOrchestratorP0Runtime({
   config = {}, store = null, slack = null, now = () => new Date(), mentionUserIds = [],
-  reconciliationOwner = crypto.randomUUID()
+  reconciliationOwner = crypto.randomUUID(),
+  catchUpDelayMs = 60_000,
+  scheduleCatchUp = (callback, delayMs) => setTimeout(callback, delayMs)
 } = {}) {
   const readbackEnabled = config.workItemsEnabled === true && config.p0ReadbackEnabled === true;
   const cutoverEnabled = readbackEnabled && config.p0CutoverEnabled === true;
@@ -2494,8 +2683,13 @@ export function createWorkOrchestratorP0Runtime({
     && slack && typeof slack.postMessage === 'function'
     && typeof slack.findMessageByClientId === 'function';
   const owner = String(reconciliationOwner || '').trim();
+  const boundedCatchUpDelayMs = Number(catchUpDelayMs);
+  const catchUpReady = typeof scheduleCatchUp === 'function'
+    && Number.isSafeInteger(boundedCatchUpDelayMs)
+    && boundedCatchUpDelayMs >= 60_000
+    && boundedCatchUpDelayMs <= 300_000;
   const localConfigReady = !enabled || Boolean(listReady && (!cutoverEnabled
-    || channel && deliveryReady && WORK_ACTION_UUID.test(owner)));
+    || channel && deliveryReady && WORK_ACTION_UUID.test(owner) && catchUpReady));
   if (!localConfigReady) throw new Error('Work Orchestrator P0 local configuration is missing');
 
   const settleKnownCoordinates = async ({ row, delivery, expectedStatus, posted }) => {
@@ -2504,7 +2698,6 @@ export function createWorkOrchestratorP0Runtime({
       try {
         input = {
           id: row.id,
-          expectedVersion: row.version,
           expectedStatus,
           expectedGeneration: delivery.generation,
           clientMessageId: delivery.clientMessageId,
@@ -2527,7 +2720,6 @@ export function createWorkOrchestratorP0Runtime({
       try {
         readback = await store.readP0Delivery({
           id: row.id,
-          expectedVersion: row.version,
           expectedGeneration: delivery.generation,
           clientMessageId: delivery.clientMessageId
         });
@@ -2543,7 +2735,10 @@ export function createWorkOrchestratorP0Runtime({
     return false;
   };
 
-  const sweep = async () => {
+  let sweep;
+  let activeSweep = null;
+  let catchUpPending = false;
+  const runSweep = async (reason = 'manual') => {
     if (!enabled) return { status: 'disabled', mode: 'disabled' };
     const result = {
       status: 'ok', scanned: 0, claimed: 0, delivered: 0, reconciled: 0,
@@ -2615,11 +2810,8 @@ export function createWorkOrchestratorP0Runtime({
       };
     }
     result.ready = listed.omittedCount === 0 && result.errors.length === 0;
-    if (!result.ready) {
-      if (listed.omittedCount > 0) result.errors.push('p0_eligible_overflow');
-      result.status = 'error';
-      return result;
-    }
+    if (listed.omittedCount > 0) result.errors.push('p0_eligible_overflow');
+    if (!result.ready) result.status = 'error';
 
     for (const [index, row] of listed.rows.entries()) {
       const decision = decisions[index];
@@ -2652,7 +2844,6 @@ export function createWorkOrchestratorP0Runtime({
           try {
             const recorded = await store.settleP0Delivery({
               id: reconciliationRow.id,
-              expectedVersion: reconciliationRow.version,
               expectedStatus: 'reconciling',
               expectedGeneration: leasedDelivery.generation,
               clientMessageId: leasedDelivery.client_message_id,
@@ -2738,7 +2929,6 @@ export function createWorkOrchestratorP0Runtime({
         try {
           const recorded = await store.settleP0Delivery({
             id: row.id,
-            expectedVersion: claimedRow.version,
             expectedStatus: 'claimed',
             expectedGeneration: claim.generation,
             clientMessageId: claim.clientMessageId,
@@ -2767,7 +2957,41 @@ export function createWorkOrchestratorP0Runtime({
       }
     }
     if (result.errors.length || result.omissions > 0) result.status = 'error';
+    if (result.omittedCount > 0 && reason !== 'catch_up' && !catchUpPending) {
+      catchUpPending = true;
+      try {
+        const timer = scheduleCatchUp(async () => {
+          catchUpPending = false;
+          try {
+            return await sweep('catch_up');
+          } catch {
+            return null;
+          }
+        }, boundedCatchUpDelayMs);
+        timer?.unref?.();
+      } catch {
+        catchUpPending = false;
+      }
+    }
+    if (result.omittedCount > 0) result.catchUpScheduled = catchUpPending;
     return result;
+  };
+
+  sweep = async (reason = 'manual') => {
+    if (activeSweep) {
+      return {
+        status: 'not_ready', mode: cutoverEnabled ? 'cutover' : 'readback',
+        eligibleCount: 0, selectedCount: 0, omittedCount: 0,
+        scanned: 0, ready: false, errors: []
+      };
+    }
+    const pending = runSweep(reason);
+    activeSweep = pending;
+    try {
+      return await pending;
+    } finally {
+      if (activeSweep === pending) activeSweep = null;
+    }
   };
 
   return { enabled, readbackEnabled, cutoverEnabled, localConfigReady, sweep };
@@ -3792,8 +4016,7 @@ function followUpConfig() {
   };
 }
 
-async function createWorkerFailureFollowUp(job = {}, error = new Error('worker failed'), context = {}) {
-  if (!supabaseConfigured()) return { skipped: true, reason: 'supabase_not_configured' };
+function buildWorkerFailureFollowUpRow(job = {}, error = new Error('worker failed'), context = {}) {
   const preview = previewForJob(job);
   const customerName = customerNameForJob(job);
   const jobId = String(job.jobId || job.eventHash || job.id || 'unknown-job');
@@ -3832,22 +4055,127 @@ async function createWorkerFailureFollowUp(job = {}, error = new Error('worker f
       recovery_context: context
     }
   };
-  const upsertResult = await upsertFollowUpRows(followUpConfig(), [row]);
-  if (CONFIG.slackCardDeliveryEnabled && upsertResult?.rows?.length) {
+  return row;
+}
+
+function buildWorkerFailureWorkRow(row = {}) {
+  const timeout = row.payload?.failure_kind === 'worker_timeout';
+  const recommendedAction = String(row.recommended_action || '').slice(0, 1200);
+  return {
+    work_key: row.follow_up_key,
+    room_key: row.room_key,
+    work_type: row.decision_classification,
+    priority: row.priority,
+    status: 'open',
+    title: row.title,
+    summary: timeout
+      ? '자동 처리 제한 시간을 넘겨 사람 확인으로 전환됐습니다.'
+      : '자동 처리 오류로 사람 확인이 필요합니다.',
+    automation_state: 'needs_human',
+    blocking_reason: timeout
+      ? '자동 처리 제한 시간 초과로 사람 확인 전환'
+      : '자동 처리 오류로 사람 확인 전환',
+    recommended_action: recommendedAction,
+    payload: {
+      requires_human_action: true,
+      action_family: 'worker_failure_review',
+      business_key: row.follow_up_key,
+      alert_reason: timeout ? 'worker_timeout' : 'worker_error',
+      recommended_action: recommendedAction
+    }
+  };
+}
+
+export async function routeWorkerFailureFollowUp({
+  job = {},
+  error = new Error('worker failed'),
+  context = {},
+  legacyEnabled = false,
+  workItemsEnabled = false,
+  slackEnabled = false,
+  legacyUpsert = null,
+  legacyDeliver = null,
+  workStore = null,
+  now = new Date()
+} = {}) {
+  const disabled = Object.freeze({ skipped: true, reason: 'disabled' });
+  if (!legacyEnabled && !workItemsEnabled) {
+    return {
+      skipped: true,
+      reason: 'disabled',
+      inserted: 0,
+      rows: [],
+      legacy: disabled,
+      workOrchestratorV2: disabled
+    };
+  }
+
+  const row = buildWorkerFailureFollowUpRow(job, error, context);
+  let legacy = disabled;
+  if (legacyEnabled) {
+    if (typeof legacyUpsert !== 'function') throw new Error('legacy worker failure store is required');
+    legacy = await legacyUpsert([row]);
+    if (slackEnabled && legacy?.rows?.length) {
+      if (typeof legacyDeliver !== 'function') throw new Error('legacy worker failure Slack delivery is required');
+      try {
+        legacy = { ...legacy, slackDeliveryResult: await legacyDeliver(legacy.rows) };
+      } catch (deliveryError) {
+        legacy = { ...legacy, slackDeliveryError: String(deliveryError?.message || deliveryError).slice(0, 1000) };
+      }
+    }
+  }
+
+  let workOrchestratorV2 = disabled;
+  if (workItemsEnabled) {
+    if (!workStore || typeof workStore.upsertWorkItem !== 'function') {
+      throw new Error('v2 worker failure store is required');
+    }
+    const candidates = buildHumanWorkCandidates({
+      job,
+      followUpRows: [buildWorkerFailureWorkRow(row)],
+      now
+    });
+    if (candidates.length !== 1) throw new Error('v2 worker failure candidate is required');
+    workOrchestratorV2 = await workStore.upsertWorkItem(candidates[0]);
+    if (workOrchestratorV2?.applied !== true || !workOrchestratorV2?.row) {
+      throw new Error('v2 worker failure upsert was not applied');
+    }
+  }
+
+  const legacyResult = legacyEnabled ? legacy : { inserted: 0, rows: [] };
+  return {
+    ...legacyResult,
+    skipped: false,
+    legacy,
+    workOrchestratorV2
+  };
+}
+
+async function createWorkerFailureFollowUp(job = {}, error = new Error('worker failed'), context = {}) {
+  const followUp = followUpConfig();
+  const result = await routeWorkerFailureFollowUp({
+    job,
+    error,
+    context,
+    legacyEnabled: CONFIG.followUpRowsEnabled,
+    workItemsEnabled: CONFIG.workOrchestrator.workItemsEnabled,
+    slackEnabled: CONFIG.slackCardDeliveryEnabled,
+    legacyUpsert: (rows) => upsertFollowUpRows(followUp, rows),
+    legacyDeliver: (rows) => deliverSlackFollowUpRows(followUp, rows),
+    workStore: workOrchestratorStore,
+    now: nowIso()
+  });
+  if (result?.slackDeliveryError) {
     try {
-      const slackDeliveryResult = await deliverSlackFollowUpRows(followUpConfig(), upsertResult.rows);
-      return { ...upsertResult, slackDeliveryResult };
-    } catch (deliveryError) {
       appendNdjson('errors.ndjson', {
         at: nowIso(),
         type: 'worker_failure_followup_slack_delivery',
-        message: deliveryError.message,
-        jobId
+        message: result.slackDeliveryError,
+        jobId: String(job.jobId || job.eventHash || job.id || 'unknown-job')
       });
-      return { ...upsertResult, slackDeliveryError: deliveryError.message };
-    }
+    } catch {}
   }
-  return upsertResult;
+  return result;
 }
 
 export function shouldDetachWorkerProcess(platform = process.platform) {
@@ -6122,5 +6450,6 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     if (CONFIG.workOrchestrator.digestEnabled) {
       workOrchestratorDigestRuntime.start().catch(() => {});
     }
+    workOrchestratorNoticeCleanupRuntime.start().catch(() => {});
   });
 }

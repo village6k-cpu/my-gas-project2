@@ -32,7 +32,6 @@ const AUTOMATION_STATES = new Set(['not_attempted', 'running', 'succeeded', 'fai
 const PRIORITY_RANK = Object.freeze({ low: 0, normal: 1, urgent: 2, p0: 3 });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
-const VERIFIED_AUTO_REPLY_REASON = /^sent_via_(?:chrome|devtools)_verified(?:_|$)/;
 const MAX_ACTION_VALUE_LENGTH = 1000;
 const PAYLOAD_STRING_LIMITS = Object.freeze({
   action_family: 100,
@@ -253,41 +252,7 @@ export function buildHumanWorkCandidates(input = {}) {
     eligible.push({ row, type, workType: type, workKey: stableWorkKey(row) });
   }
 
-  const autoReplyResult = isRecord(input.autoReplyResult) ? input.autoReplyResult : {};
-  const verifiedReason = boundedText(autoReplyResult.reason, 100);
-  const nestedVerifiedReason = boundedText(autoReplyResult?.sendResult?.reason, 100);
-  const verifiedReply = autoReplyResult.sent === true
-    && (autoReplyResult.readbackConfirmed === true
-      || autoReplyResult.readback_confirmed === true
-      || VERIFIED_AUTO_REPLY_REASON.test(verifiedReason)
-      || (autoReplyResult?.sendResult?.sent === true
-        && VERIFIED_AUTO_REPLY_REASON.test(nestedVerifiedReason)));
-  const completedKeyValues = verifiedReply
-    ? [
-        autoReplyResult.completed_work_key,
-        autoReplyResult.completedWorkKey,
-        autoReplyResult.completed_follow_up_key,
-        autoReplyResult.completedFollowUpKey,
-        autoReplyResult.work_key,
-        autoReplyResult.workKey,
-        autoReplyResult.follow_up_key,
-        autoReplyResult.followUpKey
-      ].filter((value) => value !== undefined && value !== null)
-    : [];
-  const completedKeys = completedKeyValues.map(exactStableKey);
-  if (new Set(completedKeys).size > 1) throw new Error('verified auto reply work_key is ambiguous');
-  const completedKey = completedKeys[0] || null;
-  const replyKeys = [...new Set(eligible
-    .filter((entry) => entry.type === 'reply_needed')
-    .map((entry) => entry.workKey))];
-  const suppressReplyKey = verifiedReply
-    ? (completedKey && replyKeys.includes(completedKey)
-        ? completedKey
-        : (!completedKey && replyKeys.length === 1 ? replyKeys[0] : null))
-    : null;
-
   return eligible
-    .filter((entry) => !(entry.type === 'reply_needed' && entry.workKey === suppressReplyKey))
     .map((entry) => candidateFor(entry.row, input, changedAt, entry));
 }
 

@@ -4445,8 +4445,9 @@ async function mergeFollowUpRowsWithActiveHistory(config, rows) {
   return { rowsToInsert, updatedRows };
 }
 
-export function filterFollowUpRowsAfterAutoReply(rows = [], autoReplyResult = {}) {
-  if (!autoReplyResult?.sent) return rows;
+export function filterFollowUpRowsAfterAutoReply(rows = [], automationResolution = {}) {
+  if (automationResolution?.state !== 'succeeded'
+    || automationResolution?.resolutionKind !== 'auto_reply_readback') return rows;
   return rows.filter((row) => row.type !== 'reply_needed');
 }
 
@@ -7267,6 +7268,31 @@ function normalizeVerificationText(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+export function autoReplyTextHash(value = '') {
+  const normalized = normalizeVerificationText(value);
+  if (!normalized) return null;
+  return createHash('sha256').update(normalized).digest('hex');
+}
+
+export function buildAutoReplyReadbackReceipt({
+  sourceEventKey,
+  replyText,
+  observedReplyHash,
+  confirmedAt
+} = {}) {
+  const source = canonicalSourceEventKey(sourceEventKey);
+  const expectedReplyHash = autoReplyTextHash(replyText);
+  if (!expectedReplyHash || observedReplyHash !== expectedReplyHash) return null;
+  const confirmation = new Date(confirmedAt);
+  if (Number.isNaN(confirmation.getTime())) return null;
+  return {
+    id: `reply-readback-${createHash('sha256')
+      .update(`village-auto-reply-readback:${source}:${expectedReplyHash}`)
+      .digest('hex')}`,
+    confirmedAt: confirmation.toISOString()
+  };
+}
+
 export function kakaoConversationContainsMessage(treeMarkdown = '', message = '') {
   const expected = normalizeVerificationText(message);
   if (!expected) return false;
@@ -7379,6 +7405,10 @@ export async function sendKakaoMessageViaDevtools(textToSend, navigationContext 
       : (attachmentResult?.reason || result?.reason || 'devtools_send_unknown'),
     window_title: result?.window_title || target.title || '',
     via_devtools: true,
+    ...(sent && textValue ? {
+      readback_confirmed: true,
+      observed_reply_hash: autoReplyTextHash(textValue)
+    } : {}),
     ...(files.length ? { attachments: attachmentResult } : {})
   };
 }
@@ -7670,6 +7700,8 @@ export async function sendKakaoMessageViaChrome(textToSend, navigationContext = 
     element_index: elementIndex,
     send_button_index: clickResult?.sendButtonIndex || sendButtonIndex || null,
     retried_after_frontmost_activation: Boolean(clickResult?.retriedAfterFrontmostActivation),
+    readback_confirmed: true,
+    observed_reply_hash: autoReplyTextHash(textToSend),
     ...(files.length ? { attachments: attachmentResult } : {})
   };
 }
@@ -7927,7 +7959,7 @@ export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWind
   return { eligible: false, reason: 'preview_not_live_time_format' };
 }
 
-export async function maybeAutoSendReply({ config, decision, job, navigationContext }) {
+export async function maybeAutoSendReply({ config, decision, job, navigationContext, dependencies = {} }) {
   const liveGate = isAutoSendEligibleLiveJob(job);
   if (!liveGate.eligible) {
     const result = { attempted: false, sent: false, gate: { allowed: false, reason: liveGate.reason } };
@@ -7986,7 +8018,8 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   }
   let sendResult;
   try {
-    sendResult = await sendKakaoMessageViaChrome(gate.text, navigationContext, {
+    const sendMessage = dependencies.sendKakaoMessage || sendKakaoMessageViaChrome;
+    sendResult = await sendMessage(gate.text, navigationContext, {
       timeoutMs: config.autoSendTimeoutMs,
       cuaDriverCommand: config.cuaDriverCommand,
       attachmentPaths: gate.attachmentPaths || [],
@@ -7997,7 +8030,30 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   } catch (error) {
     sendResult = { sent: false, reason: 'send_error', error: error.message.slice(0, 500) };
   }
-  const result = { attempted: true, sent: Boolean(sendResult.sent), gate, sendResult, text: gate.text, ragSupport, ...(priceVerification ? { priceVerification } : {}) };
+  let readbackReceipt = null;
+  if (sendResult.sent === true && sendResult.readback_confirmed === true) {
+    try {
+      const clock = typeof dependencies.now === 'function' ? dependencies.now() : new Date();
+      readbackReceipt = buildAutoReplyReadbackReceipt({
+        sourceEventKey: job.sourceEventKey || job.eventHash || job.jobId || job.id,
+        replyText: gate.text,
+        observedReplyHash: sendResult.observed_reply_hash,
+        confirmedAt: clock
+      });
+    } catch {
+      readbackReceipt = null;
+    }
+  }
+  const result = {
+    attempted: true,
+    sent: Boolean(sendResult.sent),
+    gate,
+    sendResult,
+    ...(readbackReceipt ? { readbackReceipt } : {}),
+    text: gate.text,
+    ragSupport,
+    ...(priceVerification ? { priceVerification } : {})
+  };
   logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey, roomReplyKey, ragSupport });
   return result;
 }
@@ -10458,7 +10514,7 @@ function workOrchestratorV2Store({ config, dependencies }) {
   });
 }
 
-async function upsertWorkOrchestratorV2Items({ config, job, prepared, autoReplyResult, dependencies, store = null }) {
+async function upsertWorkOrchestratorV2Items({ config, job, prepared, followUpRows, dependencies, store = null }) {
   if (config.workOrchestratorV2WorkItemsEnabled !== true) return emptyWorkOrchestratorResult(true);
   const result = emptyWorkOrchestratorResult(false);
   let candidates;
@@ -10466,8 +10522,7 @@ async function upsertWorkOrchestratorV2Items({ config, job, prepared, autoReplyR
     candidates = buildHumanWorkCandidates({
       decision: prepared.decision,
       job,
-      followUpRows: prepared.availabilityAwareRows || [],
-      autoReplyResult,
+      followUpRows,
       sheetResult: prepared.sheetResult,
       postActionResult: prepared.postActionResult
     });
@@ -10517,14 +10572,7 @@ function automationResultEnvelope(resolution) {
   };
 }
 
-async function applyAutomationResolution({ config, job, prepared, autoReplyResult, dependencies }) {
-  const resolution = deriveAutomationResolution({
-    decision: prepared.decision,
-    sheetResult: prepared.sheetResult,
-    postActionResult: prepared.postActionResult,
-    autoReplyResult,
-    operationReceipt: prepared.operationReceipt
-  });
+async function applyAutomationResolution({ config, job, resolution, dependencies }) {
   const result = automationResultEnvelope(resolution);
   if (config.workOrchestratorV2WorkItemsEnabled !== true) return { result, store: null };
 
@@ -10619,8 +10667,18 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
       autoReplyResult
     };
   }
-  const followUpRows = filterFollowUpRowsAfterAutoReply(prepared.availabilityAwareRows || [], autoReplyResult);
-  const caseRows = buildCanonicalFollowUpCases(prepared.decision, job, followUpRows, { autoReplySent: autoReplyResult?.sent === true });
+  const automationResolution = deriveAutomationResolution({
+    decision: prepared.decision,
+    sheetResult: prepared.sheetResult,
+    postActionResult: prepared.postActionResult,
+    autoReplyResult,
+    operationReceipt: prepared.operationReceipt
+  });
+  const followUpRows = filterFollowUpRowsAfterAutoReply(prepared.availabilityAwareRows || [], automationResolution);
+  const caseRows = buildCanonicalFollowUpCases(prepared.decision, job, followUpRows, {
+    autoReplySent: automationResolution.state === 'succeeded'
+      && automationResolution.resolutionKind === 'auto_reply_readback'
+  });
   let followUpResult;
   if (config.followUpRowsEnabled === false) {
     followUpResult = { inserted: 0, skipped: true, reason: 'kakao_follow_up_rows_disabled', rows: caseRows };
@@ -10641,14 +10699,14 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
     }
   }
   const automationApplied = await applyAutomationResolution({
-    config, job, prepared, autoReplyResult, dependencies
+    config, job, resolution: automationResolution, dependencies
   });
   let workOrchestratorResult;
   if (automationApplied.result.state === 'succeeded') {
     workOrchestratorResult = emptyWorkOrchestratorResult(config.workOrchestratorV2WorkItemsEnabled !== true);
   } else {
     workOrchestratorResult = await upsertWorkOrchestratorV2Items({
-      config, job, prepared, autoReplyResult, dependencies, store: automationApplied.store
+      config, job, prepared, followUpRows, dependencies, store: automationApplied.store
     });
     workOrchestratorResult = await persistHumanAutomationState({
       workOrchestratorResult,

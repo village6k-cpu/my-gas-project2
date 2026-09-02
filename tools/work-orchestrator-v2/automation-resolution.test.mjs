@@ -8,20 +8,41 @@ async function derive(input) {
   return deriveAutomationResolution(input);
 }
 
-test('verified auto reply with typed transport id succeeds', async () => {
+test('verified auto reply succeeds only with a content-free correlated readback receipt', async () => {
   const result = await derive({
     autoReplyResult: {
       sent: true,
-      readbackConfirmed: true,
-      transportMessageId: 'kakao-1'
+      readbackReceipt: {
+        id: `reply-readback-${'a'.repeat(64)}`,
+        confirmedAt: '2026-09-02T01:02:03.000Z'
+      }
     }
   });
 
   assert.equal(result.state, 'succeeded');
   assert.equal(result.resolutionKind, 'auto_reply_readback');
   assert.deepEqual(result.evidence, {
-    autoReply: { id: 'kakao-1', status: 'readback_confirmed' }
+    autoReply: {
+      id: `reply-readback-${'a'.repeat(64)}`,
+      timestamp: '2026-09-02T01:02:03.000Z',
+      status: 'readback_confirmed'
+    }
   });
+});
+
+test('transport ids and asserted booleans can never impersonate conversation readback', async () => {
+  const result = await derive({
+    autoReplyResult: {
+      sent: true,
+      readbackConfirmed: true,
+      transportMessageId: 'kakao-1',
+      confirmedAt: '2026-09-02T01:02:03.000Z'
+    }
+  });
+
+  assert.equal(result.state, 'needs_human');
+  assert.equal(result.resolutionKind, 'missing_authoritative_readback');
+  assert.deepEqual(result.evidence, {});
 });
 
 test('sent auto reply without authoritative readback needs human review', async () => {
@@ -136,7 +157,7 @@ test('evidence excludes unrecognized receipt status text', async () => {
   });
 });
 
-test('auto reply evidence omits unsafe transport message identifiers', async () => {
+test('auto reply evidence ignores every transport message identifier', async () => {
   for (const transportMessageId of [
     ' kakao-3',
     'customer asked for a discount',
@@ -149,9 +170,7 @@ test('auto reply evidence omits unsafe transport message identifiers', async () 
     });
 
     assert.equal(result.state, 'needs_human');
-    assert.deepEqual(result.evidence, {
-      autoReply: { status: 'readback_confirmed' }
-    });
+    assert.deepEqual(result.evidence, {});
     assert.equal(JSON.stringify(result).includes(transportMessageId), false);
   }
 });
@@ -176,9 +195,10 @@ test('evidence removes customer bodies, secrets, and arbitrary nested payloads',
   const result = await derive({
     autoReplyResult: {
       sent: true,
-      readbackConfirmed: true,
-      transportMessageId: 'kakao-2',
-      sentAt: '2026-08-31T01:02:03.000Z',
+      readbackReceipt: {
+        id: `reply-readback-${'b'.repeat(64)}`,
+        confirmedAt: '2026-08-31T01:02:03.000Z'
+      },
       customerMessageBody: 'customer-private-message',
       apiToken: 'secret-token',
       metadata: { rawBody: 'never retain this' }
@@ -187,7 +207,7 @@ test('evidence removes customer bodies, secrets, and arbitrary nested payloads',
 
   assert.deepEqual(result.evidence, {
     autoReply: {
-      id: 'kakao-2',
+      id: `reply-readback-${'b'.repeat(64)}`,
       timestamp: '2026-08-31T01:02:03.000Z',
       status: 'readback_confirmed'
     }

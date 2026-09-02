@@ -6,7 +6,8 @@ import {
   canonicalSourceEventKey,
   deterministicClientMessageId,
   loadWorkOrchestratorConfig,
-  notificationReceiptInput
+  notificationReceiptInput,
+  resolveWorkOrchestratorV2CutoverConfig
 } from './contracts.mjs';
 
 const event = {
@@ -100,4 +101,80 @@ test('loadWorkOrchestratorConfig falls back to safe finite numeric defaults', ()
   assert.equal(config.autoNoticeTtlMinutes, 180);
   assert.equal(Number.isFinite(config.digestIntervalMinutes), true);
   assert.equal(Number.isFinite(config.autoNoticeTtlMinutes), true);
+});
+
+test('runtime mode defaults to the exact legacy rollback contract and rejects unknown modes', () => {
+  assert.deepEqual(resolveWorkOrchestratorV2CutoverConfig({}), {
+    runtimeMode: 'legacy',
+    shadowWrites: false,
+    immediateEnabled: false,
+    workItemsEnabled: false,
+    digestEnabled: false,
+    cleanupEnabled: false,
+    inboxChannelId: '',
+    digestChannelId: '',
+    digestIntervalMinutes: 180,
+    autoNoticeTtlMinutes: 180,
+    legacyCardsEnabled: true,
+    legacyWorkRowsEnabled: true,
+    legacyP0Enabled: true,
+    p0ReadbackEnabled: false,
+    p0CutoverEnabled: false,
+    legacyActionPollEnabled: true
+  });
+  assert.throws(
+    () => resolveWorkOrchestratorV2CutoverConfig({ WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'shadow' }),
+    /runtime mode.*legacy.*v2/i
+  );
+});
+
+test('runtime mode validates the exact v2 target and exact legacy rollback sender contracts', () => {
+  const exactV2 = resolveWorkOrchestratorV2CutoverConfig({
+    WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
+    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
+    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
+    AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
+    KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
+    SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+    SLACK_ACTION_POLL_ENABLED: '0',
+    P0_SLACK_ESCALATION_ENABLED: '0'
+  });
+  assert.equal(exactV2.runtimeMode, 'v2');
+  assert.equal(exactV2.legacyP0Enabled, false);
+  assert.equal(exactV2.p0CutoverEnabled, true);
+  assert.equal(exactV2.legacyActionPollEnabled, false);
+
+  assert.throws(
+    () => resolveWorkOrchestratorV2CutoverConfig({
+      WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'legacy',
+      P0_SLACK_ESCALATION_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1'
+    }),
+    /legacy runtime mode.*exact rollback/i
+  );
+});
+
+test('effective v2 P0 rejects legacy-off unless work items, readback, and cutover are all enabled', () => {
+  assert.throws(
+    () => resolveWorkOrchestratorV2CutoverConfig({
+      WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
+      AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
+      KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+      SLACK_ACTION_POLL_ENABLED: '0',
+      P0_SLACK_ESCALATION_ENABLED: '0'
+    }),
+    /legacy P0.*work items.*readback.*cutover/i
+  );
 });

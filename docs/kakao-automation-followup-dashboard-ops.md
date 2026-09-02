@@ -70,6 +70,7 @@ readback is healthy. Apply it only during the separately authorized cutover
 task after each runtime-specific readback is available.
 
 ```dotenv
+WORK_ORCHESTRATOR_V2_RUNTIME_MODE=v2
 WORK_ORCHESTRATOR_V2_SHADOW_WRITES=1
 WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=1
 WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED=1
@@ -81,17 +82,30 @@ AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0
 KAKAO_FOLLOW_UP_ITEMS_ENABLED=0
 SLACK_AGENT_CARD_DELIVERY_ENABLED=0
 P0_SLACK_ESCALATION_ENABLED=0
+SLACK_ACTION_POLL_ENABLED=0
+WORK_ORCHESTRATOR_V2_SLACK_BOT_USER_ID=U_FROM_AUTH_TEST
+WORK_ORCHESTRATOR_V2_SLACK_BOT_ID=B_FROM_AUTH_TEST
+WORK_ORCHESTRATOR_V2_SLACK_TEAM_ID=T_FROM_AUTH_TEST
+WORK_ORCHESTRATOR_V2_CLEANUP_OWNER=bridge:notice-cleanup
+WORK_ORCHESTRATOR_V2_CLEANUP_LEASE_SECONDS=120
+WORK_ORCHESTRATOR_V2_CLEANUP_INTERVAL_MS=300000
 ```
 
 The startup guard refuses an incomplete relationship: legacy cards require v2
 immediate notifications; disabled legacy work rows require v2 work items;
-disabled legacy P0 requires both v2 P0 readback and v2 P0 cutover; and v2
+disabled legacy P0 requires v2 work items, v2 P0 readback, and v2 P0 cutover; and v2
 cleanup requires v2 immediate notifications. It leaves the Slack bot token,
 watcher, bridge, Hermes, auto-send policy, and bounded Village tools unchanged.
+The three cleanup identity values must be copied from the same bot token's exact
+`auth.test` readback before cutover. Cleanup claims at most 25 durable rows per
+sweep and deletes only their stored channel/timestamp coordinates; it never
+searches Slack. Missing or mismatched identity keeps readiness false and starts
+no cleanup timer.
 
-For rollback, restore the previously recorded legacy flags (`AI_WORKER_FOLLOW_UP_ITEMS_ENABLED`,
-`KAKAO_FOLLOW_UP_ITEMS_ENABLED`, `SLACK_AGENT_CARD_DELIVERY_ENABLED`, and
-`P0_SLACK_ESCALATION_ENABLED`) before turning the v2 flags back to `0`. Then
+For rollback, first persist `WORK_ORCHESTRATOR_V2_RUNTIME_MODE=legacy`, restore
+`AI_WORKER_FOLLOW_UP_ITEMS_ENABLED`, `KAKAO_FOLLOW_UP_ITEMS_ENABLED`,
+`SLACK_AGENT_CARD_DELIVERY_ENABLED`, `P0_SLACK_ESCALATION_ENABLED`, and
+`SLACK_ACTION_POLL_ENABLED` to `1`, and turn every v2 flag back to `0`. Then
 restart only through the authorized runbook and capture fresh readback; do not
 infer a healthy rollback from a port, `/health` response, or static env file.
 

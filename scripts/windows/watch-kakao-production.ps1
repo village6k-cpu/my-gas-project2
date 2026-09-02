@@ -33,8 +33,11 @@ Import-Module (Join-Path $PSScriptRoot 'KakaoLive.Common.psm1') -Force
 $stopScriptPath = Join-Path $PSScriptRoot 'stop-kakao-staging.ps1'
 $startScriptPath = Join-Path $PSScriptRoot 'start-kakao-staging.ps1'
 $liveStartScriptPath = Join-Path $PSScriptRoot 'start-kakao-live.ps1'
+$resolvedEnvFile = (Resolve-Path -LiteralPath $EnvFile -ErrorAction Stop).Path
 $resolvedHermesPythonPath = (Resolve-Path -LiteralPath $HermesPythonPath -ErrorAction Stop).Path
 $watcherInjector = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\tools\kakao-dom-bridge\inject-watcher-cdp.py') -ErrorAction Stop).Path
+Import-DotEnvFile -Path $resolvedEnvFile
+Set-KakaoLiveRuntimeEnvironment
 
 function Write-WatchdogLog {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -92,7 +95,7 @@ function Get-KakaoDirectProbe {
 }
 
 function Invoke-KakaoLiveEvaluator {
-    & $liveStartScriptPath -EnvFile $EnvFile -ChromePath $ChromePath -NodePath $NodePath `
+    & $liveStartScriptPath -EnvFile $resolvedEnvFile -ChromePath $ChromePath -NodePath $NodePath `
         -HermesPythonPath $resolvedHermesPythonPath -Confirm:$false | Out-Null
 }
 
@@ -136,7 +139,7 @@ catch {
 
 try {
     $startParameters = @{
-        EnvFile      = $EnvFile
+        EnvFile      = $resolvedEnvFile
         ChromePath   = $ChromePath
         NodePath     = $NodePath
         HermesPythonPath = $resolvedHermesPythonPath

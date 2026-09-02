@@ -2150,7 +2150,7 @@ test('v2 P0 review round 2 reconciliation lease has one winner, rotates on expir
     assert.notEqual(reclaimed.row.payload.p0_delivery.reconcile_token, first.row.payload.p0_delivery.reconcile_token);
 
     const settleSql = `select public.settle_p0_delivery_v2(
-      $1::uuid, 1, 'reconciling', 1, $2::uuid, $3::text,
+      $1::uuid, 'reconciling', 1, $2::uuid, $3::text,
       $4::timestamptz, $5::text, $6::text, $7::uuid, $8::uuid
     ) as result`;
     const stale = (await db.query(settleSql, [
@@ -2203,7 +2203,7 @@ test('v2 P0 review round 2 reconciliation RPC remains service-role only', async 
   }
 });
 
-test('v2 P0 review round 2 self-review rejects malformed claims and terminal settlements', async () => {
+test('v2 P0 review round 2 rejects malformed claims and preserves terminal business state during exact settlement', async () => {
   const db = await createP0ReconciliationDatabase();
   const clientId = '77777777-7777-5777-8777-777777777777';
   const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -2233,11 +2233,96 @@ test('v2 P0 review round 2 self-review rejects malformed claims and terminal set
       '2026-09-02T06:00:00.000Z'::timestamptz
     ) as result`, [malformedId, clientId, owner])).rows[0].result;
     const terminal = (await db.query(`select public.settle_p0_delivery_v2(
-      $1::uuid, 1, 'claimed', 1, $2::uuid, 'delivered',
+      $1::uuid, 'claimed', 1, $2::uuid, 'delivered',
       '2026-09-02T06:00:01.000Z'::timestamptz, 'CP0', '100.1', null::uuid, null::uuid
     ) as result`, [terminalId, clientId])).rows[0].result;
     assert.equal(malformed.claimed, false);
-    assert.equal(terminal.applied, false);
+    assert.equal(terminal.applied, true);
+    assert.equal(terminal.row.state, 'resolved');
+    assert.equal(terminal.row.payload.p0_delivery.status, 'delivered');
+  } finally {
+    await db.close();
+  }
+});
+
+test('P0 immutable transport fence survives ack/version interleaving and leaves the notice cleanup eligible', async () => {
+  const db = await createHealthAggregateDatabase();
+  const workId = '21111111-1111-4111-8111-111111111111';
+  const receiptId = '31111111-1111-4111-8111-111111111111';
+  const clientId = '77777777-7777-5777-8777-777777777777';
+  const claimedAt = '2026-09-02T06:00:00.000Z';
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, source_event_keys, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload
+      ) values (
+        $1, 'interleaving:p0', array['event:p0-interleaving'], 'room:p0', 'P0', 'before action',
+        'human_review', 'p0', 'open', $2, $2::timestamptz - interval '20 minutes', $2,
+        '{"requires_human_action":true}'::jsonb
+      )
+    `, [workId, claimedAt]);
+    const claimed = (await db.query(`select public.claim_p0_delivery_v2(
+      $1::uuid, 1, 0, 1, 1, $2::uuid, $3::timestamptz,
+      $3::timestamptz + interval '2 minutes'
+    ) as result`, [workId, clientId, claimedAt])).rows[0].result;
+    assert.equal(claimed.applied, true);
+
+    const requested = (await db.query(`select public.request_work_item_action_v2(
+      $1::uuid, 1, '{"type":"ack_p0"}'::jsonb, 'UACK'
+    ) as result`, [workId])).rows[0].result;
+    assert.equal(requested.applied, true);
+    await db.query(`
+      update public.work_items_v2
+      set payload = jsonb_set(payload, '{p0_acknowledged_at}', to_jsonb($2::text), true),
+          pending_action = '{}'::jsonb,
+          summary = 'newer business state', owner_id = 'UOWNER', version = version + 1
+      where id = $1
+    `, [workId, '2026-09-02T06:00:00.500Z']);
+
+    const settled = (await db.query(`select public.settle_p0_delivery_v2(
+      $1::uuid, 'claimed', 1, $2::uuid, 'delivered',
+      '2026-09-02T06:00:01.000Z'::timestamptz, 'CP0', '100.9', null::uuid, null::uuid
+    ) as result`, [workId, clientId])).rows[0].result;
+    assert.equal(settled.applied, true);
+    assert.equal(settled.row.version, 3);
+    assert.equal(settled.row.summary, 'newer business state');
+    assert.equal(settled.row.owner_id, 'UOWNER');
+    assert.deepEqual(settled.row.pending_action, {});
+    assert.equal(settled.row.payload.p0_acknowledged_at, '2026-09-02T06:00:00.500Z');
+    assert.equal(settled.row.payload.p0_delivery.readback.message_ts, '100.9');
+
+    const readback = (await db.query(`select public.read_p0_delivery_v2(
+      $1::uuid, 1, $2::uuid
+    ) as result`, [workId, clientId])).rows[0].result;
+    assert.equal(readback.matched, true);
+    assert.equal(readback.row.version, 3);
+
+    await db.query(`
+      insert into public.message_notification_receipts (
+        id, source, source_event_key, room_key, received_at, urgency,
+        notification_state, client_message_id, slack_channel_id, slack_message_ts,
+        delivered_at, payload, created_at
+      ) values (
+        $1, 'kakao', 'event:p0-interleaving', 'room:p0', '2026-09-02T05:50:00Z', 'p0',
+        'delivered', gen_random_uuid(), 'CNOTICE', '200.1', '2026-09-02T05:50:01Z', '{}',
+        '2026-09-02T05:50:00Z'
+      )
+    `, [receiptId]);
+    await db.query(`
+      insert into public.digest_runs (
+        window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, slack_channel_id, slack_message_ts, delivered_at
+      ) values (
+        '2026-09-02T03:00:00Z', '2026-09-02T06:00:00Z', '2026-09-02T06:00:00Z',
+        'delivered', 'slack:CNOTICE', $1::jsonb, '2026-09-02T06:00:00Z',
+        'CNOTICE', '999.9', '2026-09-02T06:00:02Z'
+      )
+    `, [JSON.stringify([{ id: workId, version: 3, inclusionReason: 'p0', priority: 'p0' }])]);
+    const cleanup = (await db.query(`select public.claim_notice_cleanup_batch_v2(
+      '2026-09-02T06:00:03.000Z'::timestamptz, 'bridge:p0-interleaving', 120, 25
+    ) as result`)).rows[0].result;
+    assert.equal(cleanup.find((row) => row.id === receiptId)?.cleanup_state, 'pending');
   } finally {
     await db.close();
   }

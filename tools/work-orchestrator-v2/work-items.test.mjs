@@ -54,7 +54,7 @@ function activeItem(overrides = {}) {
   };
 }
 
-test('verified auto reply suppresses only the reply obligation it completed', () => {
+test('work candidate builder never independently suppresses a reply obligation', () => {
   const candidates = buildHumanWorkCandidates({
     now: NOW,
     autoReplyResult: { sent: true, readbackConfirmed: true },
@@ -70,7 +70,7 @@ test('verified auto reply suppresses only the reply obligation it completed', ()
     ]
   });
 
-  assert.deepEqual(candidates.map((item) => item.work_key), ['trade:1:tax-invoice']);
+  assert.deepEqual(candidates.map((item) => item.work_key), ['room:1:reply', 'trade:1:tax-invoice']);
 });
 
 test('verified auto reply without an exact key keeps two distinct reply obligations', () => {
@@ -89,7 +89,7 @@ test('verified auto reply without an exact key keeps two distinct reply obligati
   ]);
 });
 
-test('verified auto reply suppresses only its exact confirmed work key', () => {
+test('raw completed work keys cannot independently suppress classifier-owned work', () => {
   const candidates = buildHumanWorkCandidates({
     now: NOW,
     autoReplyResult: {
@@ -106,11 +106,12 @@ test('verified auto reply suppresses only its exact confirmed work key', () => {
 
   assert.deepEqual(candidates.map((item) => item.work_key), [
     'room:1:reply:a',
+    'room:1:reply:b',
     'trade:1:payment'
   ]);
 });
 
-test('one reply obligation uses the real verified send-result contract as a safe fallback', () => {
+test('nested verified send reasons cannot independently suppress work', () => {
   const candidates = buildHumanWorkCandidates({
     now: NOW,
     autoReplyResult: {
@@ -123,10 +124,10 @@ test('one reply obligation uses the real verified send-result contract as a safe
     ]
   });
 
-  assert.deepEqual(candidates.map((item) => item.work_key), ['trade:1:document']);
+  assert.deepEqual(candidates.map((item) => item.work_key), ['room:1:reply', 'trade:1:document']);
 });
 
-test('one reply obligation accepts the current top-level verified send result only', () => {
+test('top-level verified send reasons cannot independently suppress work', () => {
   const verified = buildHumanWorkCandidates({
     now: NOW,
     autoReplyResult: { sent: true, reason: 'sent_via_chrome_verified' },
@@ -144,7 +145,10 @@ test('one reply obligation accepts the current top-level verified send result on
     ]
   });
 
-  assert.deepEqual(verified.map((item) => item.work_key), ['trade:1:payment']);
+  assert.deepEqual(verified.map((item) => item.work_key), [
+    'room:1:reply',
+    'trade:1:payment'
+  ]);
   assert.deepEqual(unverified.map((item) => item.work_key), [
     'room:1:reply',
     'trade:1:payment'

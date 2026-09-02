@@ -184,9 +184,33 @@ revoke execute on function public.settle_p0_delivery_v2(uuid,integer,text,intege
   from public, anon, authenticated, service_role;
 drop function public.settle_p0_delivery_v2(uuid,integer,text,integer,uuid,text,timestamptz,text,text);
 
+revoke execute on function public.read_p0_delivery_v2(uuid,integer,integer,uuid)
+  from public, anon, authenticated, service_role;
+drop function public.read_p0_delivery_v2(uuid,integer,integer,uuid);
+
+create function public.read_p0_delivery_v2(
+  p_id uuid,
+  p_expected_generation integer,
+  p_client_message_id uuid
+) returns jsonb language plpgsql stable security invoker set search_path = '' as $$
+declare
+  v_row public.work_items_v2%rowtype;
+begin
+  if p_id is null or p_expected_generation is null or p_expected_generation < 1
+    or p_client_message_id is null
+    or p_client_message_id::text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
+    raise exception 'invalid P0 delivery readback' using errcode = '22023';
+  end if;
+  select * into v_row from public.work_items_v2
+  where id = p_id
+    and payload->'p0_delivery'->>'generation' = p_expected_generation::text
+    and payload->'p0_delivery'->>'client_message_id' = p_client_message_id::text;
+  return jsonb_build_object('matched', found, 'row', case when found then to_jsonb(v_row) else null end);
+end;
+$$;
+
 create function public.settle_p0_delivery_v2(
   p_id uuid,
-  p_expected_version integer,
   p_expected_status text,
   p_expected_generation integer,
   p_client_message_id uuid,
@@ -204,8 +228,7 @@ declare
   v_attempt integer;
   v_next_at timestamptz;
 begin
-  if p_id is null or p_expected_version is null or p_expected_version < 1
-    or p_expected_status not in ('claimed','reconciling')
+  if p_id is null or p_expected_status not in ('claimed','reconciling')
     or p_expected_generation is null or p_expected_generation < 1
     or p_client_message_id is null
     or p_client_message_id::text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
@@ -220,9 +243,7 @@ begin
     raise exception 'invalid P0 delivery settlement' using errcode = '22023';
   end if;
   select * into v_row from public.work_items_v2 where id = p_id for update;
-  if not found or v_row.version <> p_expected_version or v_row.priority <> 'p0'
-    or v_row.state not in ('open','in_progress','snoozed')
-    or public.is_effective_p0_ack_v2(v_row.payload, p_recorded_at) then
+  if not found then
     return jsonb_build_object('applied', false, 'row', null);
   end if;
   v_previous := v_row.payload->'p0_delivery';
@@ -297,9 +318,13 @@ $$;
 
 revoke execute on function public.claim_p0_reconciliation_v2(uuid,integer,text,integer,uuid,uuid,integer,timestamptz)
   from public, anon, authenticated;
-revoke execute on function public.settle_p0_delivery_v2(uuid,integer,text,integer,uuid,text,timestamptz,text,text,uuid,uuid)
+revoke execute on function public.settle_p0_delivery_v2(uuid,text,integer,uuid,text,timestamptz,text,text,uuid,uuid)
+  from public, anon, authenticated;
+revoke execute on function public.read_p0_delivery_v2(uuid,integer,uuid)
   from public, anon, authenticated;
 grant execute on function public.claim_p0_reconciliation_v2(uuid,integer,text,integer,uuid,uuid,integer,timestamptz)
   to service_role;
-grant execute on function public.settle_p0_delivery_v2(uuid,integer,text,integer,uuid,text,timestamptz,text,text,uuid,uuid)
+grant execute on function public.settle_p0_delivery_v2(uuid,text,integer,uuid,text,timestamptz,text,text,uuid,uuid)
+  to service_role;
+grant execute on function public.read_p0_delivery_v2(uuid,integer,uuid)
   to service_role;

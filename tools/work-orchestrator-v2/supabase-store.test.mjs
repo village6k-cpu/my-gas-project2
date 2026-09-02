@@ -840,12 +840,12 @@ test('v2 P0 review round 1 store uses authoritative list and atomic delivery RPC
     claimedAt: '2026-09-01T06:00:00.000Z', claimExpiresAt: '2026-09-01T06:02:00.000Z'
   });
   await store.settleP0Delivery({
-    id: WORK_ID, expectedVersion: 1, expectedStatus: 'claimed', expectedGeneration: 1,
+    id: WORK_ID, expectedStatus: 'claimed', expectedGeneration: 1,
     clientMessageId: '77777777-7777-5777-8777-777777777777', status: 'delivered',
     recordedAt: '2026-09-01T06:00:01.000Z', channelId: 'CP0', messageTs: '100.1'
   });
   await store.readP0Delivery({
-    id: WORK_ID, expectedVersion: 1, expectedGeneration: 1,
+    id: WORK_ID, expectedGeneration: 1,
     clientMessageId: '77777777-7777-5777-8777-777777777777'
   });
 
@@ -857,7 +857,6 @@ test('v2 P0 review round 1 store uses authoritative list and atomic delivery RPC
   ]);
   assert.deepEqual(JSON.parse(fetch.requests[2].init.body), {
     p_id: WORK_ID,
-    p_expected_version: 1,
     p_expected_status: 'claimed',
     p_expected_generation: 1,
     p_client_message_id: '77777777-7777-5777-8777-777777777777',
@@ -907,7 +906,7 @@ test('v2 P0 review round 2 store claims reconciliation and settles with the exac
   });
   assert.equal(claimed.claimed, true);
   await store.settleP0Delivery({
-    id: WORK_ID, expectedVersion: 1, expectedStatus: 'reconciling', expectedGeneration: 1,
+    id: WORK_ID, expectedStatus: 'reconciling', expectedGeneration: 1,
     clientMessageId: clientId, status: 'retry_pending', recordedAt: '2026-09-02T06:00:01.000Z',
     channelId: null, messageTs: null, reconcileOwner: owner, reconcileToken: token
   });
@@ -922,10 +921,64 @@ test('v2 P0 review round 2 store claims reconciliation and settles with the exac
     p_reconcile_owner: owner, p_lease_seconds: 120, p_now: '2026-09-02T06:00:00.000Z'
   });
   assert.deepEqual(JSON.parse(fetch.requests[1].init.body), {
-    p_id: WORK_ID, p_expected_version: 1, p_expected_status: 'reconciling',
+    p_id: WORK_ID, p_expected_status: 'reconciling',
     p_expected_generation: 1, p_client_message_id: clientId, p_status: 'retry_pending',
     p_recorded_at: '2026-09-02T06:00:01.000Z', p_channel_id: null, p_message_ts: null,
     p_reconcile_owner: owner, p_reconcile_token: token
+  });
+});
+
+test('P0 transport settlement and readback use immutable generation and client id after business version changes', async () => {
+  const clientId = '77777777-7777-5777-8777-777777777777';
+  const delivered = workRow({
+    version: 3,
+    priority: 'p0',
+    payload: {
+      requires_human_action: true,
+      p0_acknowledged_at: '2026-09-02T06:00:00.500Z',
+      p0_delivery: {
+        status: 'delivered', generation: 1, attempt: 1, client_message_id: clientId,
+        claimed_at: '2026-09-02T06:00:00.000Z', claim_expires_at: '2026-09-02T06:02:00.000Z',
+        last_attempt_at: '2026-09-02T06:00:01.000Z', next_at: '2026-09-02T06:20:01.000Z',
+        delivered_at: '2026-09-02T06:00:01.000Z',
+        readback: { channel_id: 'CP0', message_ts: '100.9', confirmed_at: '2026-09-02T06:00:01.000Z' }
+      }
+    }
+  });
+  const fetch = createFetch([
+    response({ data: { applied: true, row: delivered } }),
+    response({ data: { matched: true, row: delivered } })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const settlement = await store.settleP0Delivery({
+    id: WORK_ID,
+    expectedStatus: 'claimed', expectedGeneration: 1, clientMessageId: clientId,
+    status: 'delivered', recordedAt: '2026-09-02T06:00:01.000Z',
+    channelId: 'CP0', messageTs: '100.9'
+  });
+  const readback = await store.readP0Delivery({
+    id: WORK_ID, expectedGeneration: 1, clientMessageId: clientId
+  });
+
+  assert.equal(settlement.row.version, 3);
+  assert.equal(readback.row.payload.p0_acknowledged_at, '2026-09-02T06:00:00.500Z');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_id: WORK_ID,
+    p_expected_status: 'claimed',
+    p_expected_generation: 1,
+    p_client_message_id: clientId,
+    p_status: 'delivered',
+    p_recorded_at: '2026-09-02T06:00:01.000Z',
+    p_channel_id: 'CP0',
+    p_message_ts: '100.9',
+    p_reconcile_owner: null,
+    p_reconcile_token: null
+  });
+  assert.deepEqual(JSON.parse(fetch.requests[1].init.body), {
+    p_id: WORK_ID, p_expected_generation: 1, p_client_message_id: clientId
   });
 });
 
@@ -992,7 +1045,7 @@ test('v2 P0 review round 3 store rejects valid delivery facts that do not match 
     clientMessageId: clientId, claimedAt, claimExpiresAt
   };
   const deliveredInput = {
-    id: WORK_ID, expectedVersion: 1, expectedStatus: 'claimed', expectedGeneration: 1,
+    id: WORK_ID, expectedStatus: 'claimed', expectedGeneration: 1,
     clientMessageId: clientId, status: 'delivered', recordedAt,
     channelId: 'CP0', messageTs: '100.1'
   };

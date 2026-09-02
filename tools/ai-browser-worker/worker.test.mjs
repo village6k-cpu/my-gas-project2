@@ -7,10 +7,13 @@ import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { customerClusterHash } from './follow-up-policy.mjs';
 import * as workerModule from './worker.mjs';
+import { loadWorkOrchestratorConfig } from '../work-orchestrator-v2/contracts.mjs';
 
 const SAFE_PRE_CUTOVER_ENV = Object.freeze({
+  WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'legacy',
   WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '0',
   WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
   WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '0',
@@ -21,7 +24,8 @@ const SAFE_PRE_CUTOVER_ENV = Object.freeze({
   AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
   KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
   SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
-  P0_SLACK_ESCALATION_ENABLED: '1'
+  P0_SLACK_ESCALATION_ENABLED: '1',
+  SLACK_ACTION_POLL_ENABLED: '1'
 });
 Object.assign(process.env, SAFE_PRE_CUTOVER_ENV);
 
@@ -1878,6 +1882,17 @@ function workOrchestratorV2FinalizeInput({
   };
 }
 
+function verifiedAutoReplyResult(seed = 'a', confirmedAt = '2026-08-31T01:00:00.000Z') {
+  return {
+    attempted: true,
+    sent: true,
+    readbackReceipt: {
+      id: `reply-readback-${seed.repeat(64).slice(0, 64)}`,
+      confirmedAt
+    }
+  };
+}
+
 function failIfWorkOrchestratorEarlyReturnTouchesDependencies() {
   const fail = async () => assert.fail('non-ai-prepared finalization must not call stores or Slack');
   return {
@@ -1967,30 +1982,19 @@ test('Work Orchestrator v2 work item flag OFF preserves legacy result without a 
 });
 
 test('Work Orchestrator v2 work item flag uses strict boolean syntax', () => {
-  const keys = ['HERMES_HOME', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED'];
-  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
-  delete process.env.HERMES_HOME;
-  process.env.SUPABASE_URL = 'https://supabase.example';
-  process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-test-secret-123';
-
-  try {
-    for (const [value, expected] of [[undefined, false], ['', false], ['0', false], ['false', false], ['true', true], ['1', true]]) {
-      if (value === undefined) delete process.env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED;
-      else process.env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED = value;
-      assert.equal(requireConfig().workOrchestratorV2WorkItemsEnabled, expected, `unexpected parse for ${String(value)}`);
-    }
-    process.env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED = 'yes';
-    assert.throws(() => requireConfig(), /invalid boolean/i);
-  } finally {
-    for (const key of keys) {
-      if (previous[key] === undefined) delete process.env[key];
-      else process.env[key] = previous[key];
-    }
+  for (const [value, expected] of [[undefined, false], ['', false], ['0', false], ['false', false], ['true', true], ['1', true]]) {
+    const env = value === undefined ? {} : { WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: value };
+    assert.equal(loadWorkOrchestratorConfig(env).workItemsEnabled, expected, `unexpected parse for ${String(value)}`);
   }
+  assert.throws(
+    () => loadWorkOrchestratorConfig({ WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: 'yes' }),
+    /invalid boolean/i
+  );
 });
 
 test('v2 cutover guard normalizes every legacy relationship and rejects unsafe values', () => {
   const validTarget = {
+    WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
     WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
     WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
@@ -2001,7 +2005,8 @@ test('v2 cutover guard normalizes every legacy relationship and rejects unsafe v
     AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
     KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
     SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
-    P0_SLACK_ESCALATION_ENABLED: '0'
+    P0_SLACK_ESCALATION_ENABLED: '0',
+    SLACK_ACTION_POLL_ENABLED: '0'
   };
 
   assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig(validTarget));
@@ -2014,10 +2019,9 @@ test('v2 cutover guard normalizes every legacy relationship and rejects unsafe v
     }),
     /legacy cards.*immediate/i
   );
-  for (const legacyCardsDisabled of [undefined, '0', 'false']) {
+  for (const legacyCardsDisabled of ['0', 'false']) {
     const input = { ...SAFE_PRE_CUTOVER_ENV };
-    if (legacyCardsDisabled === undefined) delete input.SLACK_AGENT_CARD_DELIVERY_ENABLED;
-    else input.SLACK_AGENT_CARD_DELIVERY_ENABLED = legacyCardsDisabled;
+    input.SLACK_AGENT_CARD_DELIVERY_ENABLED = legacyCardsDisabled;
     assert.throws(() => validateWorkOrchestratorV2CutoverConfig(input), /legacy cards.*immediate/i);
   }
   for (const mixedLegacyWork of [
@@ -2034,7 +2038,7 @@ test('v2 cutover guard normalizes every legacy relationship and rejects unsafe v
       ...SAFE_PRE_CUTOVER_ENV,
       P0_SLACK_ESCALATION_ENABLED: 'false'
     }),
-    /legacy P0.*v2 P0/i
+    /legacy P0.*work items.*readback.*cutover/i
   );
   assert.throws(
     () => validateWorkOrchestratorV2CutoverConfig({
@@ -2063,7 +2067,7 @@ test('v2 cutover guard normalizes every legacy relationship and rejects unsafe v
       WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
       WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0'
     }),
-    /legacy P0.*v2 P0/i
+    /legacy P0.*work items.*readback.*cutover/i
   );
   assert.throws(
     () => validateWorkOrchestratorV2CutoverConfig({
@@ -2081,7 +2085,6 @@ test('v2 cutover guard normalizes every legacy relationship and rejects unsafe v
 test('v2 cutover guard blocks invalid worker process startup before stdin work', () => {
   const workerDirectory = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1'));
   for (const [name, overrides, omitted] of [
-    ['missing legacy card flag', {}, ['SLACK_AGENT_CARD_DELIVERY_ENABLED']],
     ['false legacy card flag', { SLACK_AGENT_CARD_DELIVERY_ENABLED: 'false' }, []],
     ['mixed legacy work flags', { AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0' }, []],
     ['legacy P0 false', { P0_SLACK_ESCALATION_ENABLED: 'false' }, []],
@@ -2112,6 +2115,7 @@ test('worker CLI loads isolated supported env files before enforcing the cutover
   const writeEnvironment = (legacyCardValue) => {
     fs.mkdirSync(envDirectory, { recursive: true });
     fs.writeFileSync(envPath, [
+      'WORK_ORCHESTRATOR_V2_RUNTIME_MODE=legacy',
       'WORK_ORCHESTRATOR_V2_SHADOW_WRITES=0',
       'WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=0',
       'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED=0',
@@ -2122,7 +2126,8 @@ test('worker CLI loads isolated supported env files before enforcing the cutover
       'AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=1',
       'KAKAO_FOLLOW_UP_ITEMS_ENABLED=1',
       `SLACK_AGENT_CARD_DELIVERY_ENABLED=${legacyCardValue}`,
-      'P0_SLACK_ESCALATION_ENABLED=1'
+      'P0_SLACK_ESCALATION_ENABLED=1',
+      'SLACK_ACTION_POLL_ENABLED=1'
     ].join('\n'));
   };
   const runWorker = () => spawnSync(process.execPath, ['worker.mjs', '--rag-lookup'], {
@@ -2154,8 +2159,12 @@ test('Work Orchestrator v2 work item verified automatic reply writes zero v2 row
       type: 'reply_needed'
     })],
     autoReplyResult: {
-      attempted: true, sent: true, readbackConfirmed: true,
-      transportMessageId: 'kakao-1', reason: 'sent_via_devtools_verified'
+      attempted: true, sent: true,
+      readbackReceipt: {
+        id: `reply-readback-${'1'.repeat(64)}`,
+        confirmedAt: '2026-09-02T01:02:03.000Z'
+      },
+      reason: 'sent_via_devtools_verified'
     },
     dependencies: {
       workOrchestratorStore: {
@@ -2177,15 +2186,41 @@ test('Work Orchestrator v2 work item verified automatic reply writes zero v2 row
   });
 });
 
+test('fake transport ids do not suppress the authoritative human work candidate', async () => {
+  let upsertCalls = 0;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow({
+      follow_up_key: 'room:reply:fake-transport', type: 'reply_needed'
+    })],
+    autoReplyResult: {
+      attempted: true, sent: true, readbackConfirmed: true,
+      transportMessageId: 'kakao-999', reason: 'sent_via_devtools_verified'
+    },
+    dependencies: { workOrchestratorStore: {
+      upsertWorkItem: async (candidate) => {
+        upsertCalls += 1;
+        return {
+          applied: true, created: true,
+          row: { id: '11111111-1111-4111-8111-111111111999', version: 1, work_key: candidate.work_key }
+        };
+      },
+      markAutomationState: async ({ id, expectedVersion }) => ({
+        applied: true, row: { id, version: expectedVersion + 1, state: 'open' }
+      })
+    } }
+  }));
+
+  assert.equal(result.automationResolutionResult.state, 'needs_human');
+  assert.equal(upsertCalls, 1);
+  assert.equal(result.workOrchestratorResult.rows.length, 1);
+});
+
 test('authoritative automation resolution resolves a referenced work CAS, requests exact-key TTL update, and creates no human item', async () => {
   const calls = [];
   const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
     rows: [workOrchestratorV2FollowUpRow()],
     workItem: { id: '11111111-1111-4111-8111-111111111111', version: 4 },
-    autoReplyResult: {
-      attempted: true, sent: true, readbackConfirmed: true,
-      transportMessageId: 'kakao-31', readbackAt: '2026-08-31T01:00:00.000Z'
-    },
+    autoReplyResult: verifiedAutoReplyResult('c'),
     config: { workOrchestratorV2AutoNoticeTtlMinutes: 180 },
     dependencies: {
       now: () => new Date('2026-08-31T01:00:00.000Z'),
@@ -2264,7 +2299,7 @@ test('authoritative automation resolution notice update failure retries independ
   let resolved = false;
   const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
     workItem: { id: '11111111-1111-4111-8111-111111111111', version: 9 },
-    autoReplyResult: { sent: true, readbackConfirmed: true, transportMessageId: 'kakao-32' },
+    autoReplyResult: verifiedAutoReplyResult('d'),
     dependencies: {
       now: () => new Date('2026-08-31T01:00:00.000Z'),
       workOrchestratorStore: {
@@ -2353,7 +2388,7 @@ test('authoritative automation resolution persists v2 work and update request be
   await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
     rows: [workOrchestratorV2FollowUpRow()],
     workItem: { id: '11111111-1111-4111-8111-111111111115', version: 2 },
-    autoReplyResult: { sent: true, readbackConfirmed: true, transportMessageId: 'kakao-33' },
+    autoReplyResult: verifiedAutoReplyResult('e'),
     config: { followUpRowsEnabled: true },
     dependencies: {
       now: () => new Date('2026-08-31T01:00:00.000Z'),
@@ -2375,7 +2410,7 @@ test('authoritative automation resolution survives throwing legacy Slack deliver
   let resolved = false;
   const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
     workItem: { id: '11111111-1111-4111-8111-111111111116', version: 3 },
-    autoReplyResult: { sent: true, readbackConfirmed: true, transportMessageId: 'kakao-34' },
+    autoReplyResult: verifiedAutoReplyResult('f'),
     config: { followUpRowsEnabled: true },
     dependencies: {
       now: () => new Date('2026-08-31T01:00:00.000Z'),
@@ -9529,16 +9564,18 @@ test('upsertFollowUpRows merges same room when customer name has message or comp
   assert.ok(!requests.some((r) => r.init?.method === 'POST'));
 });
 
-test('filterFollowUpRowsAfterAutoReply suppresses reply card after successful auto-send', () => {
+test('filterFollowUpRowsAfterAutoReply follows only the authoritative classifier output', () => {
   const rows = [
     { type: 'reply_needed', title: '위치 문의 답변' },
     { type: 'price_review', title: '가격 확인' }
   ];
 
-  assert.deepEqual(filterFollowUpRowsAfterAutoReply(rows, { sent: true }), [
+  assert.deepEqual(filterFollowUpRowsAfterAutoReply(rows, {
+    state: 'succeeded', resolutionKind: 'auto_reply_readback'
+  }), [
     { type: 'price_review', title: '가격 확인' }
   ]);
-  assert.equal(filterFollowUpRowsAfterAutoReply(rows, { sent: false }).length, 2);
+  assert.equal(filterFollowUpRowsAfterAutoReply(rows, { sent: true, readbackConfirmed: true }).length, 2);
 });
 
 test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () => {
@@ -11430,7 +11467,57 @@ test('sendKakaoMessageViaChrome falls back to DevTools target when AX window is 
   assert.equal(result.sent, true);
   assert.equal(result.reason, 'sent_via_devtools_verified');
   assert.equal(result.via_devtools, true);
+  assert.equal(result.readback_confirmed, true);
+  assert.equal(result.observed_reply_hash, createHash('sha256').update('확인했습니다.').digest('hex'));
   assert.ok(evalCalls[0].expression.includes('textarea[placeholder*="메시지"]'));
+});
+
+test('actual auto-reply sender emits a source-correlated content-free readback receipt', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-reply-readback-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const replyText = '네 확인했습니다.';
+  const replyHash = createHash('sha256').update(replyText).digest('hex');
+  const sourceEventKey = 'event-readback-1';
+  const confirmedAt = '2026-09-02T01:02:03.000Z';
+  const result = await workerModule.maybeAutoSendReply({
+    config: {
+      autoSendEnabled: true,
+      autoSendLogPath: path.join(tmpDir, 'auto-replies.ndjson')
+    },
+    decision: {
+      classification: 'simple_ack', confidence: 'high', kill_switch_observed: 'active',
+      customer: { name: '테스트' },
+      reply_decision: {
+        replyMode: 'auto_send', confidence: 'high', text: replyText,
+        safetyClass: 'simple_ack', grounding: 'visible_conversation', requiresRag: false
+      },
+      safety_checks: {
+        kakao_conversation_opened: true,
+        did_not_classify_from_preview_only: true,
+        latest_customer_message_after_last_staff_reply: true
+      }
+    },
+    job: {
+      id: 'job-readback-1', sourceEventKey, room_key: 'room-readback-1',
+      preview_text: '테스트 문의', unread_count: 1,
+      events: [{ reason: 'top_rows_backstop', unread_count: 1 }]
+    },
+    navigationContext: {},
+    dependencies: {
+      now: () => new Date(confirmedAt),
+      sendKakaoMessage: async () => ({
+        sent: true, reason: 'sent_via_devtools_verified',
+        readback_confirmed: true, observed_reply_hash: replyHash
+      })
+    }
+  });
+
+  const expectedId = `reply-readback-${createHash('sha256')
+    .update(`village-auto-reply-readback:${sourceEventKey}:${replyHash}`)
+    .digest('hex')}`;
+  assert.deepEqual(result.readbackReceipt, { id: expectedId, confirmedAt });
+  assert.equal(JSON.stringify(result.readbackReceipt).includes(replyText), false);
+  assert.equal(Object.hasOwn(result, 'transportMessageId'), false);
 });
 
 test('sendKakaoMessageViaDevtools refuses sent=true without a conversation target', async () => {

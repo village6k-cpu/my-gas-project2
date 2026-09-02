@@ -1060,19 +1060,19 @@ function p0BaseInput(input, { claim = false, settle = false } = {}) {
     ? ['attempt','claimExpiresAt','claimedAt','clientMessageId','expectedGeneration','expectedVersion','generation','id']
     : settle
       ? input?.expectedStatus === 'reconciling'
-        ? ['channelId','clientMessageId','expectedGeneration','expectedStatus','expectedVersion','id','messageTs','reconcileOwner','reconcileToken','recordedAt','status']
-        : ['channelId','clientMessageId','expectedGeneration','expectedStatus','expectedVersion','id','messageTs','recordedAt','status']
-      : ['clientMessageId','expectedGeneration','expectedVersion','id'];
+        ? ['channelId','clientMessageId','expectedGeneration','expectedStatus','id','messageTs','reconcileOwner','reconcileToken','recordedAt','status']
+        : ['channelId','clientMessageId','expectedGeneration','expectedStatus','id','messageTs','recordedAt','status']
+      : ['clientMessageId','expectedGeneration','id'];
   if (!exactKeys(input, expected)) throw invalidInput();
   const result = {
     id: uuid(input.id),
-    expectedVersion: positiveVersion(input.expectedVersion),
     expectedGeneration: Number(input.expectedGeneration),
     clientMessageId: exactText(input.clientMessageId, 36)
   };
   if (!Number.isSafeInteger(result.expectedGeneration) || result.expectedGeneration < (claim ? 0 : 1)
     || !P0_CLIENT_MESSAGE_ID.test(result.clientMessageId)) throw invalidInput();
   if (claim) {
+    result.expectedVersion = positiveVersion(input.expectedVersion);
     result.generation = Number(input.generation);
     result.attempt = Number(input.attempt);
     result.claimedAt = isoTimestamp(input.claimedAt);
@@ -1164,7 +1164,7 @@ function p0SettlementResponse(data, input) {
   const row = p0AppliedResponseRow(data);
   if (row === null) return data;
   const delivery = row.payload.p0_delivery;
-  if (!isRecord(delivery) || row.id !== input.id || row.version !== input.expectedVersion
+  if (!isRecord(delivery) || row.id !== input.id
     || delivery.status !== input.status
     || delivery.generation !== input.expectedGeneration
     || delivery.attempt !== input.expectedGeneration
@@ -1768,7 +1768,6 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const { data } = await request('rpc/settle_p0_delivery_v2', {
         method: 'POST', body: safeJson({
           p_id: normalized.id,
-          p_expected_version: normalized.expectedVersion,
           p_expected_status: normalized.expectedStatus,
           p_expected_generation: normalized.expectedGeneration,
           p_client_message_id: normalized.clientMessageId,
@@ -1792,7 +1791,6 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       const { data } = await request('rpc/read_p0_delivery_v2', {
         method: 'POST', body: safeJson({
           p_id: normalized.id,
-          p_expected_version: normalized.expectedVersion,
           p_expected_generation: normalized.expectedGeneration,
           p_client_message_id: normalized.clientMessageId
         })
@@ -1804,8 +1802,8 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       }
       const row = p0WorkResponseRow(data.row);
       const delivery = row.payload.p0_delivery;
-      if (row.id !== normalized.id || row.version !== normalized.expectedVersion
-        || !isRecord(delivery) || delivery.generation !== normalized.expectedGeneration
+      if (row.id !== normalized.id || !isRecord(delivery)
+        || delivery.generation !== normalized.expectedGeneration
         || delivery.client_message_id !== normalized.clientMessageId) throw responseInvalid();
       return data;
     },

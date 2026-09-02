@@ -200,7 +200,7 @@ test('full-live startup contract keeps customer replies and approval polling whi
     const chromePath = path.join(temp, 'chrome.exe');
     const nodePath = path.join(temp, 'node.exe');
     const hermesPythonPath = path.join(temp, 'python.exe');
-    writeFileSync(envFile, 'AI_WORKER_AUTO_SEND=1\n');
+    writeFileSync(envFile, 'AI_WORKER_AUTO_SEND=1\nWORK_ORCHESTRATOR_V2_RUNTIME_MODE=v2\n');
     writeFileSync(chromePath, 'fixture');
     writeFileSync(nodePath, 'fixture');
     writeFileSync(hermesPythonPath, 'fixture');
@@ -208,6 +208,7 @@ test('full-live startup contract keeps customer replies and approval polling whi
     const modulePath = path.join(scripts, 'KakaoLive.Common.psm1');
     const health = parseJson(runPowerShell(`
       Import-Module ${psLiteral(modulePath)} -Force
+      $env:WORK_ORCHESTRATOR_V2_RUNTIME_MODE = 'v2'
       $env:SLACK_ACTION_POLL_ENABLED = '0'
       $env:WORKER_CATCHUP_TIMEOUT_MS = '75000'
       $env:HERMES_HOME = 'C:\\Village\\MacMiniMirror\\restored\\.hermes'
@@ -217,10 +218,10 @@ test('full-live startup contract keeps customer replies and approval polling whi
       }; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
         autoSendEnabled = $true; slackCardDeliveryEnabled = $false; followUpRowsEnabled = $false
-        slackActionPollEnabled = $true; p0SlackEscalationEnabled = $false; slackBotTokenPresent = $true
+        slackActionPollEnabled = $false; p0SlackEscalationEnabled = $false; slackBotTokenPresent = $true
         supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true; startupCatchupSupported = $true
         aiDomSplitEnabled = $true; aiDecisionConcurrency = 2
-        workOrchestrator = [pscustomobject]@{ shadowWrites = $true; immediateEnabled = $true; workItemsEnabled = $true; digestEnabled = $true; cleanupEnabled = $true; p0ReadbackEnabled = $true; p0CutoverEnabled = $true; storeConfigured = $true; immediateLocalConfigReady = $true; p0LocalConfigReady = $true; digestLocalConfigReady = $true; actionLocalConfigReady = $true }
+        workOrchestrator = [pscustomobject]@{ runtimeMode = 'v2'; shadowWrites = $true; immediateEnabled = $true; workItemsEnabled = $true; digestEnabled = $true; cleanupEnabled = $true; p0ReadbackEnabled = $true; p0CutoverEnabled = $true; storeConfigured = $true; immediateLocalConfigReady = $true; p0LocalConfigReady = $true; digestLocalConfigReady = $true; actionLocalConfigReady = $true; cleanupLocalConfigReady = $true }
       }}
       $legacy = [pscustomobject]@{ ok = $true; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
@@ -251,7 +252,7 @@ test('full-live startup contract keeps customer replies and approval polling whi
     assert.equal(health.watcherDown, false);
     const canonicalHermesHome = path.join(process.env.LOCALAPPDATA, 'hermes');
     assert.deepEqual(health.applied, {
-      actionPoll: '1',
+      actionPoll: '0',
       catchupTimeout: '300000',
       hermesHome: canonicalHermesHome
     });
@@ -259,11 +260,12 @@ test('full-live startup contract keeps customer replies and approval polling whi
       AI_WORKER_LIVE: '1',
       AI_WORKER_AUTO_SEND: '1',
       AI_WORKER_DRY_RUN: '0',
-      SLACK_ACTION_POLL_ENABLED: '1',
+      SLACK_ACTION_POLL_ENABLED: '0',
       SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
       AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
       KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
       P0_SLACK_ESCALATION_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
       WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
       WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
       WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
@@ -295,7 +297,7 @@ test('full-live startup contract keeps customer replies and approval polling whi
       `-EnvFile ${psLiteral(envFile)} -ChromePath ${psLiteral(chromePath)} ` +
       `-NodePath ${psLiteral(nodePath)} -HermesPythonPath ${psLiteral(hermesPythonPath)} -PlanOnly`));
     assert.equal(plan.runtime.AI_WORKER_AUTO_SEND, '1');
-    assert.equal(plan.runtime.SLACK_ACTION_POLL_ENABLED, '1');
+    assert.equal(plan.runtime.SLACK_ACTION_POLL_ENABLED, '0');
     assert.deepEqual(plan.steps, [
       'accept-already-healthy-live',
       'classify-kakao-runtime-state',

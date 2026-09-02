@@ -116,12 +116,22 @@ export function loadWorkOrchestratorConfig(env = process.env) {
   };
 }
 
+export function resolveWorkOrchestratorRuntimeMode(env = process.env) {
+  const runtimeMode = bounded(env.WORK_ORCHESTRATOR_V2_RUNTIME_MODE, 20).toLowerCase() || 'legacy';
+  if (runtimeMode !== 'legacy' && runtimeMode !== 'v2') {
+    throw new Error('Work Orchestrator v2 runtime mode must be legacy or v2');
+  }
+  return runtimeMode;
+}
+
 export function resolveWorkOrchestratorV2CutoverConfig(env = process.env) {
+  const runtimeMode = resolveWorkOrchestratorRuntimeMode(env);
   const workOrchestrator = loadWorkOrchestratorConfig(env);
-  const legacyCardsEnabled = readStrictBooleanEnvironment(env.SLACK_AGENT_CARD_DELIVERY_ENABLED, false, 'SLACK_AGENT_CARD_DELIVERY_ENABLED');
+  const legacyCardsEnabled = readStrictBooleanEnvironment(env.SLACK_AGENT_CARD_DELIVERY_ENABLED, runtimeMode === 'legacy', 'SLACK_AGENT_CARD_DELIVERY_ENABLED');
   const legacyWorkRowsEnabled = readStrictBooleanEnvironment(env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED, true, 'AI_WORKER_FOLLOW_UP_ITEMS_ENABLED')
     && readStrictBooleanEnvironment(env.KAKAO_FOLLOW_UP_ITEMS_ENABLED, true, 'KAKAO_FOLLOW_UP_ITEMS_ENABLED');
   const legacyP0Enabled = readStrictBooleanEnvironment(env.P0_SLACK_ESCALATION_ENABLED, true, 'P0_SLACK_ESCALATION_ENABLED');
+  const legacyActionPollEnabled = readStrictBooleanEnvironment(env.SLACK_ACTION_POLL_ENABLED, true, 'SLACK_ACTION_POLL_ENABLED');
   const p0ReadbackEnabled = readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED, false, 'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED');
   const p0CutoverEnabled = readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED, false, 'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED');
 
@@ -134,19 +144,42 @@ export function resolveWorkOrchestratorV2CutoverConfig(env = process.env) {
   if (!legacyWorkRowsEnabled && !workOrchestrator.workItemsEnabled) {
     throw new Error('Work Orchestrator v2 cutover guard: legacy work rows require v2 work items');
   }
-  if (!legacyP0Enabled && !(p0ReadbackEnabled && p0CutoverEnabled)) {
-    throw new Error('Work Orchestrator v2 cutover guard: legacy P0 requires v2 P0 readback and cutover');
+  if (!legacyP0Enabled && !(workOrchestrator.workItemsEnabled && p0ReadbackEnabled && p0CutoverEnabled)) {
+    throw new Error('Work Orchestrator v2 cutover guard: legacy P0 requires v2 work items, readback, and cutover');
   }
   if (workOrchestrator.cleanupEnabled && !workOrchestrator.immediateEnabled) {
     throw new Error('Work Orchestrator v2 cutover guard: cleanup requires v2 immediate notifications');
   }
+  const v2FlagsEnabled = workOrchestrator.shadowWrites
+    && workOrchestrator.immediateEnabled
+    && workOrchestrator.workItemsEnabled
+    && workOrchestrator.digestEnabled
+    && workOrchestrator.cleanupEnabled
+    && p0ReadbackEnabled
+    && p0CutoverEnabled;
+  const legacyFlagsEnabled = legacyCardsEnabled
+    && legacyWorkRowsEnabled
+    && legacyP0Enabled
+    && legacyActionPollEnabled;
+  if (runtimeMode === 'legacy' && (!legacyFlagsEnabled || v2FlagsEnabled
+    || workOrchestrator.shadowWrites || workOrchestrator.immediateEnabled
+    || workOrchestrator.workItemsEnabled || workOrchestrator.digestEnabled
+    || workOrchestrator.cleanupEnabled || p0ReadbackEnabled || p0CutoverEnabled)) {
+    throw new Error('Work Orchestrator legacy runtime mode requires the exact rollback contract');
+  }
+  if (runtimeMode === 'v2' && (!v2FlagsEnabled || legacyCardsEnabled
+    || legacyWorkRowsEnabled || legacyP0Enabled || legacyActionPollEnabled)) {
+    throw new Error('Work Orchestrator v2 runtime mode requires the exact cutover contract');
+  }
   return {
+    runtimeMode,
     ...workOrchestrator,
     legacyCardsEnabled,
     legacyWorkRowsEnabled,
     legacyP0Enabled,
     p0ReadbackEnabled,
-    p0CutoverEnabled
+    p0CutoverEnabled,
+    legacyActionPollEnabled
   };
 }
 

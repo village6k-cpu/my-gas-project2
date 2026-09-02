@@ -2,6 +2,7 @@ const MAX_EVIDENCE_IDENTIFIER_LENGTH = 100;
 const ISO_UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MACHINE_IDENTIFIER = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const AUTO_REPLY_READBACK_RECEIPT = /^reply-readback-[0-9a-f]{64}$/;
 
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -15,9 +16,12 @@ function typedMachineIdentifier(value) {
     : null;
 }
 
-function typedTransportMessageId(value) {
-  const identifier = typedMachineIdentifier(value);
-  return identifier && /^kakao-[0-9]+$/.test(identifier) ? identifier : null;
+function typedAutoReplyReadbackReceipt(value) {
+  if (!isRecord(value)) return null;
+  const id = typedMachineIdentifier(value.id);
+  const timestamp = typedTimestamp(value.confirmedAt);
+  if (!id || !AUTO_REPLY_READBACK_RECEIPT.test(id) || !timestamp) return null;
+  return { id, timestamp, status: 'readback_confirmed' };
 }
 
 function typedOperationId(value) {
@@ -67,9 +71,10 @@ function hasStaleEvidence(...results) {
 }
 
 function hasContradictoryEvidence({ sheetResult, postActionResult, autoReplyResult, operationReceipt }) {
+  const replyReceipt = typedAutoReplyReadbackReceipt(autoReplyResult?.readbackReceipt);
   if (isRecord(autoReplyResult)
     && autoReplyResult.sent === false
-    && autoReplyResult.readbackConfirmed === true) return true;
+    && replyReceipt) return true;
 
   if (isRecord(operationReceipt)
     && ((operationReceipt.state === 'completed' && operationReceipt.status === 'failed')
@@ -94,11 +99,7 @@ export function deriveAutomationResolution(input = {}) {
   const autoReplyResult = isRecord(input.autoReplyResult) ? input.autoReplyResult : {};
   const operationReceipt = isRecord(input.operationReceipt) ? input.operationReceipt : {};
 
-  const replyEvidence = typedEvidence(autoReplyResult, {
-    idFields: [{ field: 'transportMessageId', parse: typedTransportMessageId }],
-    timestampFields: ['readbackAt', 'sentAt', 'confirmedAt'],
-    status: autoReplyResult.readbackConfirmed === true ? 'readback_confirmed' : null
-  });
+  const replyEvidence = typedAutoReplyReadbackReceipt(autoReplyResult.readbackReceipt);
   const operationEvidence = typedEvidence(operationReceipt, {
     idFields: [
       { field: 'operationId', parse: typedOperationId },
@@ -153,8 +154,7 @@ export function deriveAutomationResolution(input = {}) {
   }
 
   if (autoReplyResult.sent === true
-    && autoReplyResult.readbackConfirmed === true
-    && typedTransportMessageId(autoReplyResult.transportMessageId)) {
+    && replyEvidence) {
     return result(
       'succeeded',
       'auto_reply_readback',
