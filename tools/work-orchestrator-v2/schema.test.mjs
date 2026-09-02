@@ -368,6 +368,26 @@ test('additive health migration exposes exactly one private read-only aggregate 
   assert.match(sql, /stale_conflict_count/i);
   assert.match(sql, /not public\.is_valid_pending_work_action_at_v2\(pending_action, version, p_now\)/i);
   assert.match(sql, /invalid_evidence_count/i);
+  const healthFunctionSql = sql.match(
+    /create function public\.read_work_orchestrator_health_v2\([\s\S]*?\n\$\$;/i
+  )?.[0];
+  const invalidEvidenceEnd = healthFunctionSql?.search(/\n\s*with recursive\b/i) ?? -1;
+  const invalidEvidencePhase = invalidEvidenceEnd > 0
+    ? healthFunctionSql.slice(0, invalidEvidenceEnd)
+    : null;
+  assert.ok(invalidEvidencePhase, 'the invalid-evidence phase is explicit and bounded');
+  const invalidEvidenceScanCounts = Object.fromEntries([
+    'message_notification_receipts', 'work_items_v2', 'digest_runs', 'digest_message_parts'
+  ].map((table) => [
+    table,
+    (invalidEvidencePhase.match(new RegExp(`from public\\.${table}\\b`, 'gi')) || []).length
+  ]));
+  assert.deepEqual(invalidEvidenceScanCounts, {
+    message_notification_receipts: 1,
+    work_items_v2: 1,
+    digest_runs: 1,
+    digest_message_parts: 1
+  }, 'the invalid-evidence phase scans each base table once');
   for (const timestamp of [
     'created_at', 'actionable_at', 'first_opened_at', 'delivered_at', 'cleanup_after',
     'cleanup_attempted_at', 'updated_at', 'cleanup_expires_at', 'scheduled_at',

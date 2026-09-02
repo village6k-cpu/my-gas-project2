@@ -1798,6 +1798,86 @@ test('health aggregate reports every stored PostgreSQL infinity that its classif
   }
 });
 
+test('health aggregate preserves one invalid-evidence count per consumed field when one row has several invalid timestamps', async () => {
+  const db = await createHealthAggregateDatabase();
+  const dropFiniteConstraints = async (table, columns) => {
+    const constraints = await db.query(`
+      select distinct constraint_value.conname
+      from pg_constraint as constraint_value
+      join pg_class as table_value on table_value.oid = constraint_value.conrelid
+      join pg_namespace as namespace_value on namespace_value.oid = table_value.relnamespace
+      where namespace_value.nspname = 'public' and table_value.relname = $1::text
+        and (${columns.map((_, index) => `pg_get_constraintdef(constraint_value.oid) ilike $${index + 2}::text`).join(' or ')})
+    `, [table, ...columns.map((column) => `%isfinite(${column})%`)]);
+    assert.ok(constraints.rows.length > 0, `expected finite constraints for ${table}`);
+    for (const { conname } of constraints.rows) {
+      assert.match(conname, /^[a-z0-9_]+$/i);
+      await db.exec(`alter table public.${table} drop constraint "${conname}"`);
+    }
+  };
+
+  try {
+    await dropFiniteConstraints('digest_runs', ['delivered_at']);
+    await dropFiniteConstraints(
+      'digest_message_parts', ['delivered_at', 'cleanup_attempted_at', 'cleanup_expires_at']
+    );
+    await db.exec(`
+      insert into public.message_notification_receipts (
+        source, source_event_key, room_key, received_at, notification_state,
+        client_message_id, cleanup_state, cleanup_expires_at, cleanup_attempted_at,
+        created_at, updated_at
+      ) values (
+        'internal', 'multi-invalid-receipt', 'private-room', '2026-09-02T10:00:00Z',
+        'pending', 'e5000000-0000-5000-8000-000000000001', 'pending',
+        'infinity', '-infinity', 'infinity', '2026-09-02T10:00:00Z'
+      );
+      insert into public.work_items_v2 (
+        work_key, room_key, title, work_type, state, actionable_at,
+        first_opened_at, last_activity_at
+      ) values (
+        'multi-invalid-work', 'private-room', 'private-title', 'review', 'open',
+        'infinity', '-infinity', '2026-09-02T10:00:00Z'
+      );
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, delivered_at
+      ) values (
+        'e5000000-0000-4000-8000-000000000002', '2026-09-02T09:00:00Z',
+        '2026-09-02T10:00:00Z', 'infinity', 'delivered', 'slack:private-destination',
+        '[]'::jsonb, '-infinity', 'infinity'
+      );
+      insert into public.digest_message_parts (
+        id, digest_run_id, part_kind, part_number, part_count, item_ids, payload_hash,
+        client_message_id, delivery_state, delivery_attempts, delivery_claimed_at,
+        slack_channel_id, slack_message_ts, delivered_at, cleanup_state,
+        cleanup_attempts, cleanup_owner, cleanup_token, cleanup_expires_at, cleanup_attempted_at
+      ) values (
+        'e5000000-0000-4000-8000-000000000003',
+        'e5000000-0000-4000-8000-000000000002', 'ordinary', 1, 1,
+        array['e5000000-0000-4000-8000-000000000004'::uuid], repeat('e', 64),
+        'e5000000-0000-5000-8000-000000000005', 'delivered', 1,
+        '2026-09-02T10:00:00Z', 'CPRIVATE', '500.1', 'infinity', 'deleting',
+        1, 'bridge:private-owner', 'e5000000-0000-4000-8000-000000000006',
+        '-infinity', 'infinity'
+      );
+    `);
+
+    const result = await db.query(`
+      select public.read_work_orchestrator_health_v2(
+        '2026-09-02T12:00:00.000Z'::timestamptz
+      ) as health
+    `);
+    const health = result.rows[0].health;
+    assert.equal(health.invalid_evidence_count, 11);
+    assert.doesNotMatch(
+      JSON.stringify(health),
+      /infinity|private-room|private-title|private-destination|private-owner|CPRIVATE|500\.1/i
+    );
+  } finally {
+    await db.close();
+  }
+});
+
 test('health stale action conflicts use the exact supplied-clock contract while valid resolve requests remain pending', async () => {
   const db = await createHealthAggregateDatabase();
   const insert = async (key, pendingAction, version = 2) => db.query(`

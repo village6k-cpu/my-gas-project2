@@ -76,77 +76,72 @@ begin
     raise exception 'invalid work orchestrator health clock' using errcode = '22023';
   end if;
 
-  select count(*)::bigint into v_invalid_evidence_count
+  select sum(invalid_by_table.invalid_count)::bigint into v_invalid_evidence_count
   from (
-    select 1 from public.message_notification_receipts as receipt
-    where receipt.notification_state in ('pending','delivering','failed')
-      and not isfinite(receipt.created_at)
+    select coalesce(sum(
+      (receipt.notification_state in ('pending','delivering','failed')
+        and not isfinite(receipt.created_at))::integer
+      + (receipt.cleanup_state = 'idle'
+        and receipt.notification_state = 'cleanup_pending'
+        and receipt.cleanup_after is not null
+        and not isfinite(receipt.cleanup_after))::integer
+      + (receipt.cleanup_state in ('pending','failed')
+        and receipt.cleanup_attempted_at is not null
+        and not isfinite(receipt.cleanup_attempted_at))::integer
+      + (receipt.cleanup_state in ('pending','failed')
+        and receipt.cleanup_attempted_at is null
+        and receipt.cleanup_after is null
+        and not isfinite(receipt.updated_at))::integer
+      + (receipt.cleanup_state in ('pending','failed')
+        and receipt.cleanup_attempted_at is null
+        and receipt.cleanup_after is not null
+        and not isfinite(receipt.cleanup_after))::integer
+      + (receipt.cleanup_state = 'pending'
+        and receipt.cleanup_expires_at is not null
+        and not isfinite(receipt.cleanup_expires_at))::integer
+    ), 0)::bigint as invalid_count
+    from public.message_notification_receipts as receipt
     union all
-    select 1 from public.message_notification_receipts as receipt
-    where receipt.cleanup_state = 'idle'
-      and receipt.notification_state = 'cleanup_pending'
-      and receipt.cleanup_after is not null and not isfinite(receipt.cleanup_after)
+    select coalesce(sum(
+      (work.state in ('open','in_progress','snoozed')
+        and not isfinite(work.actionable_at))::integer
+      + (work.state in ('open','in_progress','snoozed')
+        and not isfinite(work.first_opened_at))::integer
+    ), 0)::bigint as invalid_count
+    from public.work_items_v2 as work
     union all
-    select 1 from public.message_notification_receipts as receipt
-    where receipt.cleanup_state in ('pending','failed')
-      and receipt.cleanup_attempted_at is not null
-      and not isfinite(receipt.cleanup_attempted_at)
+    select coalesce(sum(
+      (digest.state in ('delivered','replaced')
+        and digest.delivered_at is not null
+        and not isfinite(digest.delivered_at))::integer
+      + (digest.state in ('delivered','replaced','diverged')
+        and not isfinite(digest.scheduled_at))::integer
+      + (digest.state in ('delivered','replaced','diverged')
+        and digest.manifest_prepared_at is not null
+        and not isfinite(digest.manifest_prepared_at))::integer
+      + (digest.state in ('failed','diverged')
+        and not isfinite(digest.updated_at))::integer
+      + (digest.state in ('building','delivering','failed')
+        and digest.lease_expires_at is not null
+        and not isfinite(digest.lease_expires_at))::integer
+    ), 0)::bigint as invalid_count
+    from public.digest_runs as digest
     union all
-    select 1 from public.message_notification_receipts as receipt
-    where receipt.cleanup_state in ('pending','failed')
-      and receipt.cleanup_attempted_at is null and receipt.cleanup_after is null
-      and not isfinite(receipt.updated_at)
-    union all
-    select 1 from public.message_notification_receipts as receipt
-    where receipt.cleanup_state in ('pending','failed')
-      and receipt.cleanup_attempted_at is null and receipt.cleanup_after is not null
-      and not isfinite(receipt.cleanup_after)
-    union all
-    select 1 from public.message_notification_receipts as receipt
-    where receipt.cleanup_state = 'pending' and receipt.cleanup_expires_at is not null
-      and not isfinite(receipt.cleanup_expires_at)
-    union all
-    select 1 from public.work_items_v2 as work
-    where work.state in ('open','in_progress','snoozed')
-      and not isfinite(work.actionable_at)
-    union all
-    select 1 from public.work_items_v2 as work
-    where work.state in ('open','in_progress','snoozed')
-      and not isfinite(work.first_opened_at)
-    union all
-    select 1 from public.digest_runs as digest
-    where digest.state in ('delivered','replaced') and digest.delivered_at is not null
-      and not isfinite(digest.delivered_at)
-    union all
-    select 1 from public.digest_runs as digest
-    where digest.state in ('delivered','replaced','diverged')
-      and not isfinite(digest.scheduled_at)
-    union all
-    select 1 from public.digest_runs as digest
-    where digest.state in ('delivered','replaced','diverged')
-      and digest.manifest_prepared_at is not null and not isfinite(digest.manifest_prepared_at)
-    union all
-    select 1 from public.digest_runs as digest
-    where digest.state in ('failed','diverged') and not isfinite(digest.updated_at)
-    union all
-    select 1 from public.digest_runs as digest
-    where digest.state in ('building','delivering','failed') and digest.lease_expires_at is not null
-      and not isfinite(digest.lease_expires_at)
-    union all
-    select 1 from public.digest_message_parts as part
-    where part.delivery_state = 'delivered'
-      and part.cleanup_state in ('idle','deleting','failed')
-      and part.delivered_at is not null and not isfinite(part.delivered_at)
-    union all
-    select 1 from public.digest_message_parts as part
-    where part.delivery_state = 'delivered'
-      and part.cleanup_state in ('idle','deleting','failed')
-      and part.cleanup_attempted_at is not null and not isfinite(part.cleanup_attempted_at)
-    union all
-    select 1 from public.digest_message_parts as part
-    where part.cleanup_state = 'deleting' and part.cleanup_expires_at is not null
-      and not isfinite(part.cleanup_expires_at)
-  ) as invalid_evidence;
+    select coalesce(sum(
+      (part.delivery_state = 'delivered'
+        and part.cleanup_state in ('idle','deleting','failed')
+        and part.delivered_at is not null
+        and not isfinite(part.delivered_at))::integer
+      + (part.delivery_state = 'delivered'
+        and part.cleanup_state in ('idle','deleting','failed')
+        and part.cleanup_attempted_at is not null
+        and not isfinite(part.cleanup_attempted_at))::integer
+      + (part.cleanup_state = 'deleting'
+        and part.cleanup_expires_at is not null
+        and not isfinite(part.cleanup_expires_at))::integer
+    ), 0)::bigint as invalid_count
+    from public.digest_message_parts as part
+  ) as invalid_by_table;
 
   with recursive
   notification_metrics as (
