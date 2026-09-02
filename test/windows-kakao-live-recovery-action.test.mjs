@@ -84,7 +84,7 @@ function combinedLiveHealth(runtimeState, { authenticated = true, watcherReady =
   const command = [
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
-    `$bridge=[pscustomobject]@{ok=$true; config=[pscustomobject]@{workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$true; slackActionPollEnabled=$true; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2}}`,
+    `$bridge=[pscustomobject]@{ok=$true; config=[pscustomobject]@{workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$false; followUpRowsEnabled=$false; slackActionPollEnabled=$true; p0SlackEscalationEnabled=$false; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2; workOrchestrator=[pscustomobject]@{shadowWrites=$true;immediateEnabled=$true;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true}}}`,
     `$probe=[pscustomobject]@{state='${runtimeState.replaceAll("'", "''")}'; cdpReady=$true; authenticated=$${authenticated ? 'true' : 'false'}; watcherReady=$${watcherReady ? 'true' : 'false'}}`,
     `[pscustomobject]@{state=(Get-KakaoLiveRuntimeState -Probe $probe); healthy=(Test-KakaoLiveHealth -Health $bridge -RuntimeProbe $probe)} | ConvertTo-Json -Compress`
   ].join('; ');
@@ -180,4 +180,22 @@ test('PowerShell builds the bounded stdin secret payload from exact refs', () =>
     password: 'fake-password',
     otp: '123456'
   });
+});
+
+test('v2 cutover guard rejects an invalid contract before stamping the Process environment', () => {
+  const escapedPath = modulePath.replaceAll("'", "''");
+  const command = [
+    `$ErrorActionPreference='Stop'`,
+    `Import-Module '${escapedPath}' -Force`,
+    `$env:AI_WORKER_LIVE='before-guard'`,
+    `$invalid=[ordered]@{WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED='0';WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED='1';WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED='0';WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED='1';WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED='1';AI_WORKER_FOLLOW_UP_ITEMS_ENABLED='0';KAKAO_FOLLOW_UP_ITEMS_ENABLED='0';SLACK_AGENT_CARD_DELIVERY_ENABLED='0';P0_SLACK_ESCALATION_ENABLED='0';AI_WORKER_LIVE='1'}`,
+    `$reason=''; try { Set-KakaoLiveRuntimeEnvironment -Contract $invalid } catch { $reason=$_.Exception.Message }`,
+    `[pscustomobject]@{reason=$reason;workerLive=$env:AI_WORKER_LIVE} | ConvertTo-Json -Compress`
+  ].join('; ');
+  const result = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+    encoding: 'utf8', windowsHide: true
+  });
+  const observed = JSON.parse(result);
+  assert.match(observed.reason, /legacy cards.*immediate/i);
+  assert.equal(observed.workerLive, 'before-guard');
 });

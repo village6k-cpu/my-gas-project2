@@ -61,6 +61,40 @@ scripts/kakao-automation status
 
 launchctl은 터미널보다 PATH가 짧다. 그래서 런처가 `node`, `hermes`, `cua-driver` 절대 경로를 찾아 runner에 주입한다. `status`에서 `Hermes worker > status: executable`과 `CUA driver > status: executable`이 떠야 live worker가 Hermes subprocess와 Mac 화면 제어까지 실행할 수 있다.
 
+## Work Orchestrator v2 cutover and rollback
+
+The following is an offline-reviewed, reversible configuration target. It does
+not authorize a runtime change and static configuration is not proof that the
+watcher, bridge, Hermes, Slack delivery, work items, digest, cleanup, or P0
+readback is healthy. Apply it only during the separately authorized cutover
+task after each runtime-specific readback is available.
+
+```dotenv
+WORK_ORCHESTRATOR_V2_SHADOW_WRITES=1
+WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=1
+WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED=1
+WORK_ORCHESTRATOR_V2_DIGEST_ENABLED=1
+WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED=1
+WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED=1
+WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED=1
+AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0
+KAKAO_FOLLOW_UP_ITEMS_ENABLED=0
+SLACK_AGENT_CARD_DELIVERY_ENABLED=0
+P0_SLACK_ESCALATION_ENABLED=0
+```
+
+The startup guard refuses an incomplete relationship: legacy cards require v2
+immediate notifications; disabled legacy work rows require v2 work items;
+disabled legacy P0 requires both v2 P0 readback and v2 P0 cutover; and v2
+cleanup requires v2 immediate notifications. It leaves the Slack bot token,
+watcher, bridge, Hermes, auto-send policy, and bounded Village tools unchanged.
+
+For rollback, restore the previously recorded legacy flags (`AI_WORKER_FOLLOW_UP_ITEMS_ENABLED`,
+`KAKAO_FOLLOW_UP_ITEMS_ENABLED`, `SLACK_AGENT_CARD_DELIVERY_ENABLED`, and
+`P0_SLACK_ESCALATION_ENABLED`) before turning the v2 flags back to `0`. Then
+restart only through the authorized runbook and capture fresh readback; do not
+infer a healthy rollback from a port, `/health` response, or static env file.
+
 ## 어떻게 끄는가?
 
 - `scripts/kakao-automation stop`을 실행한다.

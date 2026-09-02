@@ -193,7 +193,7 @@ test('live/no-send startup plan promotes staging ownership without enabling cust
   }
 });
 
-test('full-live startup contract enables customer replies, Slack cards, and approval polling', () => {
+test('full-live startup contract keeps customer replies and approval polling while cutting legacy cards to v2', () => {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'village-full-live-task-'));
   try {
     const envFile = path.join(temp, 'runtime.env');
@@ -216,13 +216,16 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
         state = 'healthy'; cdpReady = $true; authenticated = $true; watcherReady = $true
       }; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
-        autoSendEnabled = $true; slackCardDeliveryEnabled = $true; slackActionPollEnabled = $true
+        autoSendEnabled = $true; slackCardDeliveryEnabled = $false; followUpRowsEnabled = $false
+        slackActionPollEnabled = $true; p0SlackEscalationEnabled = $false
         supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true; startupCatchupSupported = $true
         aiDomSplitEnabled = $true; aiDecisionConcurrency = 2
+        workOrchestrator = [pscustomobject]@{ shadowWrites = $true; immediateEnabled = $true; workItemsEnabled = $true; digestEnabled = $true; cleanupEnabled = $true; p0ReadbackEnabled = $true; p0CutoverEnabled = $true }
       }}
       $legacy = [pscustomobject]@{ ok = $true; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
-        autoSendEnabled = $true; slackCardDeliveryEnabled = $true; slackActionPollEnabled = $true
+        autoSendEnabled = $true; slackCardDeliveryEnabled = $false; followUpRowsEnabled = $false
+        slackActionPollEnabled = $true; p0SlackEscalationEnabled = $false
         supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true
       }}
       [pscustomobject]@{
@@ -257,7 +260,17 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
       AI_WORKER_AUTO_SEND: '1',
       AI_WORKER_DRY_RUN: '0',
       SLACK_ACTION_POLL_ENABLED: '1',
-      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+      AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
+      KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
+      P0_SLACK_ESCALATION_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
       VILLAGE_WINDOWS_WRITES_ENABLED: '1',
       SUPABASE_RECOVERY_ENABLED: '1',
       KAKAO_TAB_CLEANUP_ENABLED: '1',

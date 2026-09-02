@@ -107,3 +107,30 @@ export function loadWorkOrchestratorConfig(env = process.env) {
     autoNoticeTtlMinutes: finiteMinutes(env.WORK_ORCHESTRATOR_V2_AUTO_NOTICE_TTL_MINUTES, 180, 30)
   };
 }
+
+export function validateWorkOrchestratorV2CutoverConfig(env = process.env) {
+  const workOrchestrator = loadWorkOrchestratorConfig(env);
+  const legacyCardsDisabled = env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '0';
+  const legacyWorkRowsDisabled = env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED === '0'
+    && env.KAKAO_FOLLOW_UP_ITEMS_ENABLED === '0';
+  const legacyP0Disabled = env.P0_SLACK_ESCALATION_ENABLED === '0';
+  const p0ReadbackEnabled = env.WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED === '1';
+  const p0CutoverEnabled = env.WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED === '1';
+
+  if (p0CutoverEnabled && !p0ReadbackEnabled) {
+    throw new Error('Work Orchestrator v2 P0 cutover requires readback');
+  }
+  if (legacyCardsDisabled && !workOrchestrator.immediateEnabled) {
+    throw new Error('Work Orchestrator v2 cutover guard: legacy cards require v2 immediate notifications');
+  }
+  if (legacyWorkRowsDisabled && !workOrchestrator.workItemsEnabled) {
+    throw new Error('Work Orchestrator v2 cutover guard: legacy work rows require v2 work items');
+  }
+  if (legacyP0Disabled && !(p0ReadbackEnabled && p0CutoverEnabled)) {
+    throw new Error('Work Orchestrator v2 cutover guard: legacy P0 requires v2 P0 readback and cutover');
+  }
+  if (workOrchestrator.cleanupEnabled && !workOrchestrator.immediateEnabled) {
+    throw new Error('Work Orchestrator v2 cutover guard: cleanup requires v2 immediate notifications');
+  }
+  return workOrchestrator;
+}

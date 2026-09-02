@@ -27,6 +27,7 @@ const {
   p0SlackEscalationBackoffMs,
   p0SlackEscalationDue,
   resolveWorkOrchestratorP0Config,
+  validateWorkOrchestratorV2CutoverConfig,
   runP0EscalationPair,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
@@ -2478,6 +2479,58 @@ test('v2 P0 review round 1 cutover controls are distinct, default OFF, and readb
     v2: async () => { calls.push('v2'); return { status: 'ok' }; }
   });
   assert.deepEqual(calls, ['v2']);
+});
+
+test('v2 cutover guard validates the bridge startup target independently', () => {
+  const validTarget = {
+    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
+    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
+    AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
+    KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
+    SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+    P0_SLACK_ESCALATION_ENABLED: '0'
+  };
+
+  assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig(validTarget));
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0'
+    }),
+    /legacy cards.*immediate/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '0'
+    }),
+    /legacy work rows.*work items/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0'
+    }),
+    /legacy P0.*v2 P0/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+      AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
+      KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
+      P0_SLACK_ESCALATION_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0'
+    }),
+    /cleanup.*immediate/i
+  );
 });
 
 test('v2 P0 review round 1 dry readback is authoritative and never claims, searches, or sends', async () => {

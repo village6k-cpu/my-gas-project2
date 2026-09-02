@@ -32,6 +32,13 @@ Keep the direct Kakao→Slack/board duplicate paths off in normal operation:
 - `SLACK_FOLLOW_UP_ENABLED=0`
 - `SLACK_AGENT_CARD_DELIVERY_ENABLED=0`
 
+For the reversible Work Orchestrator v2 cutover, these legacy-off flags must be
+paired with v2 immediate notifications, work items, digest, cleanup, and both
+P0 readback/cutover flags. The reviewed target and rollback order are in
+[`docs/kakao-automation-followup-dashboard-ops.md`](../../docs/kakao-automation-followup-dashboard-ops.md).
+This static configuration is not runtime proof; the watcher, bridge, Hermes,
+Slack, work, digest, cleanup, and P0 paths require their own readback.
+
 Channel defaults scanned by the Slack backstop:
 
 - `스케쥴-agent`

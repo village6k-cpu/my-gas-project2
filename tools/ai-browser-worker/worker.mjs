@@ -22,7 +22,12 @@ import { validateStaffConfirmedMutation } from './staff-confirmed-mutation.mjs';
 import { buildHumanWorkCandidates } from '../work-orchestrator-v2/work-items.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
 import { deriveAutomationResolution } from '../work-orchestrator-v2/automation-resolution.mjs';
-import { canonicalSourceEventKey } from '../work-orchestrator-v2/contracts.mjs';
+import {
+  canonicalSourceEventKey,
+  validateWorkOrchestratorV2CutoverConfig
+} from '../work-orchestrator-v2/contracts.mjs';
+
+export { validateWorkOrchestratorV2CutoverConfig } from '../work-orchestrator-v2/contracts.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -4494,6 +4499,7 @@ export function requireConfig() {
   if (!supabaseUrl || !serviceRoleKey) {
     throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Load tools/kakao-dom-bridge/.env first.');
   }
+  validateWorkOrchestratorV2CutoverConfig(process.env);
   const config = {
     ...buildSlackRoutingConfig(process.env),
     supabaseUrl,
@@ -10938,6 +10944,7 @@ function parseArgs(argv) {
 }
 
 async function main() {
+  validateWorkOrchestratorV2CutoverConfig(process.env);
   const args = parseArgs(process.argv.slice(2));
   const result = args.ragLookup
     ? await processRagLookup(await readStdinJson())

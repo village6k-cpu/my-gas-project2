@@ -27,7 +27,8 @@ import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/
 import {
   canonicalSourceEventKey,
   loadWorkOrchestratorConfig,
-  notificationReceiptInput
+  notificationReceiptInput,
+  validateWorkOrchestratorV2CutoverConfig
 } from '../work-orchestrator-v2/contracts.mjs';
 import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-notifications.mjs';
 import { digestScheduleWindow, runDigestCycle } from '../work-orchestrator-v2/digest-runner.mjs';
@@ -43,6 +44,7 @@ import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-st
 import { readWorkOrchestratorHealth } from '../work-orchestrator-v2/observability.mjs';
 
 export { buildGatewayHealthReadback } from './hermes-gateway-http.mjs';
+export { validateWorkOrchestratorV2CutoverConfig } from '../work-orchestrator-v2/contracts.mjs';
 
 const DEFAULT_VILLAGE_DOCUMENT_API_URL = 'https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec';
 
@@ -117,6 +119,7 @@ export function configForHermesTransport(config = {}, transport = 'cli') {
     : config;
 }
 
+validateWorkOrchestratorV2CutoverConfig(process.env);
 const P0_WORK_ORCHESTRATOR_CONFIG = resolveWorkOrchestratorP0Config(process.env);
 const WORK_ORCHESTRATOR_CONFIG = {
   ...loadWorkOrchestratorConfig(process.env),

@@ -33,6 +33,7 @@ import {
   askVillageAi,
   processRagLookup,
   requireConfig,
+  validateWorkOrchestratorV2CutoverConfig,
   buildReadOnlyLookupContext,
   buildHermesArgs,
   hermesDecisionTimeoutFromEnv,
@@ -785,7 +786,7 @@ function extractSourceFunction(source, name) {
 }
 
 function productionRunFunctionResponse(insertResult) {
-  const sheetApiSource = fs.readFileSync(path.resolve('sheetAPI.js'), 'utf8');
+  const sheetApiSource = fs.readFileSync(new URL('../../sheetAPI.js', import.meta.url), 'utf8');
   const context = { insertAndCheckRequest: () => structuredClone(insertResult) };
   vm.runInNewContext(
     `${extractSourceFunction(sheetApiSource, 'runFunction')}\nthis.runFunction = runFunction;`,
@@ -1969,6 +1970,59 @@ test('Work Orchestrator v2 work item flag accepts only the worker explicit truth
       else process.env[key] = previous[key];
     }
   }
+});
+
+test('v2 cutover guard rejects every legacy shutdown without its v2 replacement', () => {
+  const validTarget = {
+    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
+    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
+    AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
+    KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
+    SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+    P0_SLACK_ESCALATION_ENABLED: '0'
+  };
+
+  assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig({}));
+  assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig(validTarget));
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0'
+    }),
+    /legacy cards.*immediate/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '0'
+    }),
+    /legacy work rows.*work items/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0'
+    }),
+    /legacy P0.*v2 P0/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+      AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
+      KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
+      P0_SLACK_ESCALATION_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0'
+    }),
+    /cleanup.*immediate/i
+  );
 });
 
 test('Work Orchestrator v2 work item verified automatic reply writes zero v2 rows', async () => {

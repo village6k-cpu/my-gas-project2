@@ -10,7 +10,17 @@ function Get-KakaoLiveRuntimeContract {
         AI_WORKER_AUTO_SEND               = '1'
         AI_WORKER_DRY_RUN                 = '0'
         SLACK_ACTION_POLL_ENABLED         = '1'
-        SLACK_AGENT_CARD_DELIVERY_ENABLED = '1'
+        SLACK_AGENT_CARD_DELIVERY_ENABLED = '0'
+        AI_WORKER_FOLLOW_UP_ITEMS_ENABLED = '0'
+        KAKAO_FOLLOW_UP_ITEMS_ENABLED     = '0'
+        P0_SLACK_ESCALATION_ENABLED        = '0'
+        WORK_ORCHESTRATOR_V2_SHADOW_WRITES = '1'
+        WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED = '1'
+        WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED = '1'
+        WORK_ORCHESTRATOR_V2_DIGEST_ENABLED = '1'
+        WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED = '1'
+        WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED = '1'
+        WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED = '1'
         VILLAGE_WINDOWS_WRITES_ENABLED    = '1'
         SUPABASE_RECOVERY_ENABLED         = '1'
         KAKAO_TAB_CLEANUP_ENABLED         = '1'
@@ -29,11 +39,48 @@ function Get-KakaoLiveRuntimeContract {
     }
 }
 
+function Assert-KakaoLiveV2CutoverContract {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Contract
+    )
+
+    $legacyCardsDisabled = [string]$Contract['SLACK_AGENT_CARD_DELIVERY_ENABLED'] -eq '0'
+    $legacyWorkRowsDisabled = [string]$Contract['AI_WORKER_FOLLOW_UP_ITEMS_ENABLED'] -eq '0' -and
+        [string]$Contract['KAKAO_FOLLOW_UP_ITEMS_ENABLED'] -eq '0'
+    $legacyP0Disabled = [string]$Contract['P0_SLACK_ESCALATION_ENABLED'] -eq '0'
+    $immediateEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED'] -eq '1'
+    $workItemsEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED'] -eq '1'
+    $cleanupEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED'] -eq '1'
+    $p0ReadbackEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED'] -eq '1'
+    $p0CutoverEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED'] -eq '1'
+
+    if ($p0CutoverEnabled -and -not $p0ReadbackEnabled) {
+        throw 'Work Orchestrator v2 P0 cutover requires readback.'
+    }
+    if ($legacyCardsDisabled -and -not $immediateEnabled) {
+        throw 'Work Orchestrator v2 cutover guard: legacy cards require v2 immediate notifications.'
+    }
+    if ($legacyWorkRowsDisabled -and -not $workItemsEnabled) {
+        throw 'Work Orchestrator v2 cutover guard: legacy work rows require v2 work items.'
+    }
+    if ($legacyP0Disabled -and -not ($p0ReadbackEnabled -and $p0CutoverEnabled)) {
+        throw 'Work Orchestrator v2 cutover guard: legacy P0 requires v2 P0 readback and cutover.'
+    }
+    if ($cleanupEnabled -and -not $immediateEnabled) {
+        throw 'Work Orchestrator v2 cutover guard: cleanup requires v2 immediate notifications.'
+    }
+}
+
 function Set-KakaoLiveRuntimeEnvironment {
     [CmdletBinding()]
-    param()
+    param(
+        [System.Collections.IDictionary]$Contract = (Get-KakaoLiveRuntimeContract)
+    )
 
-    foreach ($entry in (Get-KakaoLiveRuntimeContract).GetEnumerator()) {
+    Assert-KakaoLiveV2CutoverContract -Contract $Contract
+    foreach ($entry in $Contract.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
     }
 }
@@ -55,6 +102,18 @@ function Test-KakaoLiveBridgeContract {
         $null -ne $Health.config -and
         $Health.config.PSObject.Properties.Name -contains 'aiDecisionConcurrency'
     ) { [int]$Health.config.aiDecisionConcurrency } else { 0 }
+    $workOrchestrator = if (
+        $null -ne $Health.config -and
+        $Health.config.PSObject.Properties.Name -contains 'workOrchestrator'
+    ) { $Health.config.workOrchestrator } else { $null }
+    $workOrchestratorCutoverEnabled = $null -ne $workOrchestrator -and
+        $workOrchestrator.shadowWrites -eq $true -and
+        $workOrchestrator.immediateEnabled -eq $true -and
+        $workOrchestrator.workItemsEnabled -eq $true -and
+        $workOrchestrator.digestEnabled -eq $true -and
+        $workOrchestrator.cleanupEnabled -eq $true -and
+        $workOrchestrator.p0ReadbackEnabled -eq $true -and
+        $workOrchestrator.p0CutoverEnabled -eq $true
 
     return [bool](
         $Health.ok -eq $true -and
@@ -63,12 +122,15 @@ function Test-KakaoLiveBridgeContract {
         $Health.config.workerDryRun -eq $false -and
         $Health.config.windowsWritesEnabled -eq $true -and
         $Health.config.autoSendEnabled -eq $true -and
-        $Health.config.slackCardDeliveryEnabled -eq $true -and
+        $Health.config.slackCardDeliveryEnabled -eq $false -and
+        $Health.config.followUpRowsEnabled -eq $false -and
         $Health.config.slackActionPollEnabled -eq $true -and
+        $Health.config.p0SlackEscalationEnabled -eq $false -and
         $Health.config.supabaseRecoveryEnabled -eq $true -and
         $Health.config.kakaoTabCleanupEnabled -eq $true -and
         $aiDomSplitEnabled -and
         $aiDecisionConcurrency -eq 2 -and
+        $workOrchestratorCutoverEnabled -and
         $startupCatchupSupported
     )
 }
@@ -326,6 +388,7 @@ function Get-KakaoLiveStartupPlan {
 
 Export-ModuleMember -Function @(
     'Get-KakaoLiveRuntimeContract',
+    'Assert-KakaoLiveV2CutoverContract',
     'Set-KakaoLiveRuntimeEnvironment',
     'Test-KakaoLiveBridgeContract',
     'Get-KakaoLiveRuntimeState',
