@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthedRequest as requireUser } from "@/lib/server/authCache";
+import { getAuthedUser, isAuthedRequest as requireUser } from "@/lib/server/authCache";
 import { dedupeFollowUpItems, duplicateFollowUpIdsForItem, duplicateFollowUpIdsForItems, shouldHideLowValueActiveItem, summarize } from "@/lib/followups/logic";
 
 // 후속조치(카톡 AI봇) 보드 API — ai_follow_up_items(public 스키마).
@@ -8,6 +8,8 @@ const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TABLE = process.env.SUPABASE_FOLLOW_UP_TABLE || "ai_follow_up_items";
+const V2_DASHBOARD_ENABLED = process.env.WORK_ORCHESTRATOR_V2_DASHBOARD_ENABLED === "1";
+const V2_TABLE = "work_items_v2";
 
 const FIELDS =
   "id,follow_up_key,job_id,room_key,customer_name,type,priority,status,title,summary,recommended_action,suggested_reply_draft,evidence,blocking_reason,due_hint,decision_classification,decision_confidence,created_at,updated_at,completed_at";
@@ -16,6 +18,56 @@ const FIELDS =
 // suggested_reply_draft 등 큰 텍스트 컬럼을 후보 500건 조회에서 뺀다.
 // ⚠️ evidence는 combinedFollowUpText가 의미키 계산에 사용하므로 제외 금지.
 const DEDUPE_FIELDS = "id,follow_up_key,room_key,customer_name,type,title,summary,recommended_action,evidence";
+
+// v2는 display-safe 컬럼과 명시적 payload scalar만 투영한다. payload 전체나 원문 이벤트,
+// work_key, pending_action, resolution_evidence는 대시보드로 읽거나 전달하지 않는다.
+const V2_FIELDS = [
+  "id",
+  "room_key",
+  "title",
+  "summary",
+  "work_type",
+  "priority",
+  "state",
+  "due_at",
+  "first_opened_at",
+  "updated_at",
+  "recommended_action:payload->>recommended_action",
+  "blocking_reason:payload->>blocking_reason",
+  "due_hint:payload->>due_hint",
+].join(",");
+
+const V2_TYPE_TO_LEGACY_TYPE: Record<string, string> = {
+  human_review: "reply_needed",
+  reply_needed: "reply_needed",
+  quote_send: "quote_send",
+  tax_invoice: "tax_invoice",
+  schedule_check: "schedule_check",
+  reservation_review: "reservation_review",
+  price_review: "price_review",
+  payment_check: "payment_check",
+  contract_document: "contract_document",
+  return_extension: "return_extension",
+  damage_repair: "damage_repair",
+  sheet_duplicate_check: "sheet_duplicate_check",
+  reservation_review_timeout: "reservation_review",
+  automation_error_review: "reply_needed",
+};
+
+const V2_PRIORITY_TO_LEGACY_PRIORITY: Record<string, string> = {
+  p0: "urgent",
+  urgent: "urgent",
+  normal: "normal",
+  low: "low",
+};
+
+const V2_STATE_TO_LEGACY_STATUS: Record<string, string> = {
+  open: "open",
+  in_progress: "in_progress",
+  snoozed: "waiting_internal",
+  resolved: "done",
+  dismissed: "dismissed",
+};
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 async function supaFetch(pathAndQuery: string, init: RequestInit = {}): Promise<any> {
@@ -39,7 +91,57 @@ async function supaFetch(pathAndQuery: string, init: RequestInit = {}): Promise<
   return data;
 }
 
+function mapV2Item(row: any) {
+  const item: Record<string, any> = {
+    id: String(row?.id || ""),
+    room_key: String(row?.room_key || ""),
+    type: V2_TYPE_TO_LEGACY_TYPE[String(row?.work_type || "")] || "reply_needed",
+    priority: V2_PRIORITY_TO_LEGACY_PRIORITY[String(row?.priority || "")] || "normal",
+    status: V2_STATE_TO_LEGACY_STATUS[String(row?.state || "")] || "open",
+    title: String(row?.title || ""),
+    summary: String(row?.summary || ""),
+    created_at: row?.first_opened_at || null,
+    updated_at: row?.updated_at || null,
+  };
+  for (const field of ["recommended_action", "blocking_reason", "due_hint"] as const) {
+    if (typeof row?.[field] === "string" && row[field].trim()) item[field] = row[field];
+  }
+  return item;
+}
+
+async function getV2FollowUps(req: NextRequest) {
+  const serviceKey = SERVICE_KEY;
+  if (!serviceKey) return NextResponse.json({ error: "work orchestrator unavailable" }, { status: 503 });
+  try {
+    const sp = req.nextUrl.searchParams;
+    const status = sp.get("status") || "active";
+    const limit = Math.min(Number(sp.get("limit") || 200) || 200, 500);
+    const filters = [`select=${V2_FIELDS}`, `limit=${limit}`, "order=first_opened_at.desc"];
+    if (status === "active") filters.push("state=in.(open,in_progress,snoozed)");
+    else if (status === "done") filters.push("state=eq.resolved");
+    else if (status === "dismissed") filters.push("state=eq.dismissed");
+    const res = await fetch(`${SUPA_URL}/rest/v1/${V2_TABLE}?${filters.join("&")}`, {
+      signal: AbortSignal.timeout(15_000),
+      headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}`, "content-type": "application/json" },
+    });
+    if (!res.ok) throw new Error("v2 fetch failed");
+    const txt = await res.text();
+    if (!txt) throw new Error("v2 response invalid");
+    let raw: any;
+    try { raw = JSON.parse(txt); } catch { throw new Error("v2 response invalid"); }
+    if (!Array.isArray(raw)) throw new Error("v2 response invalid");
+    const items = raw.map(mapV2Item);
+    return NextResponse.json({ ok: true, source: "work_items_v2", updatedAt: new Date().toISOString(), summary: summarize(items), items });
+  } catch {
+    return NextResponse.json({ error: "work orchestrator unavailable" }, { status: 503 });
+  }
+}
+
 export async function GET(req: NextRequest) {
+  if (V2_DASHBOARD_ENABLED) {
+    if (!(await getAuthedUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
+    return getV2FollowUps(req);
+  }
   if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   try {
     const sp = req.nextUrl.searchParams;
@@ -57,6 +159,10 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
+  if (V2_DASHBOARD_ENABLED) {
+    if (!(await getAuthedUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
+    return NextResponse.json({ error: "work orchestrator v2 is read-only" }, { status: 409 });
+  }
   if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   try {
     const body = await req.json().catch(() => ({}));

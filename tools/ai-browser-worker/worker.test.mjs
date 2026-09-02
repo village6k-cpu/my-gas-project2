@@ -7,8 +7,27 @@ import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { customerClusterHash } from './follow-up-policy.mjs';
 import * as workerModule from './worker.mjs';
+import { loadWorkOrchestratorConfig } from '../work-orchestrator-v2/contracts.mjs';
+
+const SAFE_PRE_CUTOVER_ENV = Object.freeze({
+  WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'legacy',
+  WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '0',
+  WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0',
+  AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
+  KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
+  SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+  P0_SLACK_ESCALATION_ENABLED: '1',
+  SLACK_ACTION_POLL_ENABLED: '1'
+});
+Object.assign(process.env, SAFE_PRE_CUTOVER_ENV);
 
 import {
   buildBrainContext,
@@ -33,6 +52,7 @@ import {
   askVillageAi,
   processRagLookup,
   requireConfig,
+  validateWorkOrchestratorV2CutoverConfig,
   buildReadOnlyLookupContext,
   buildHermesArgs,
   hermesDecisionTimeoutFromEnv,
@@ -785,7 +805,7 @@ function extractSourceFunction(source, name) {
 }
 
 function productionRunFunctionResponse(insertResult) {
-  const sheetApiSource = fs.readFileSync(path.resolve('sheetAPI.js'), 'utf8');
+  const sheetApiSource = fs.readFileSync(new URL('../../sheetAPI.js', import.meta.url), 'utf8');
   const context = { insertAndCheckRequest: () => structuredClone(insertResult) };
   vm.runInNewContext(
     `${extractSourceFunction(sheetApiSource, 'runFunction')}\nthis.runFunction = runFunction;`,
@@ -1809,6 +1829,798 @@ test('superseded prepared work never creates a stale card or customer reply', as
   assert.equal(result.superseded, true);
   assert.equal(result.followUpResult.skipped, true);
   assert.deepEqual(result.followUpResult.rows, []);
+});
+
+function workOrchestratorV2FollowUpRow(overrides = {}) {
+  return {
+    follow_up_key: 'trade:260829-001:reservation-approval',
+    room_key: 'chat:work-orchestrator-v2',
+    type: 'reservation_review',
+    priority: 'normal',
+    status: 'open',
+    title: '예약 승인 필요',
+    summary: '예약 조건을 확인합니다.',
+    payload: {
+      requires_human_action: true,
+      action_family: 'reservation_approval',
+      business_key: 'trade:260829-001'
+    },
+    ...overrides
+  };
+}
+
+function workOrchestratorV2FinalizeInput({
+  rows = [], autoReplyResult, decision = {}, sheetResult = null, postActionResult = null,
+  operationReceipt = null, workItem = null, config = {}, dependencies = {}
+} = {}) {
+  return {
+    config: {
+      followUpRowsEnabled: false,
+      workOrchestratorV2WorkItemsEnabled: true,
+      ...config
+    },
+    job: {
+      jobId: '00000000-0000-4000-8000-000000000031',
+      eventHash: 'event-authoritative-31',
+      roomKey: 'chat:work-orchestrator-v2',
+      receivedAt: '2026-08-29T03:00:00.000Z',
+      ...(workItem ? { workItem } : {})
+    },
+    applied: {
+      prepared: {
+        status: 'ai_prepared',
+        snapshot: { schema: 'kakao-room-snapshot/v1' },
+        decision: { should_write_to_sheet: false, ...decision },
+        availabilityAwareRows: rows,
+        sheetResult,
+        postActionResult,
+        operationReceipt
+      },
+      autoReplyResult: autoReplyResult || { attempted: false, sent: false, reason: 'not_attempted' }
+    },
+    dependencies
+  };
+}
+
+function verifiedAutoReplyResult(seed = 'a', confirmedAt = '2026-08-31T01:00:00.000Z') {
+  return {
+    attempted: true,
+    sent: true,
+    readbackReceipt: {
+      id: `reply-readback-${seed.repeat(64).slice(0, 64)}`,
+      confirmedAt
+    }
+  };
+}
+
+function failIfWorkOrchestratorEarlyReturnTouchesDependencies() {
+  const fail = async () => assert.fail('non-ai-prepared finalization must not call stores or Slack');
+  return {
+    upsertFollowUpCaseRows: fail,
+    upsertFollowUpRows: fail,
+    deliverSlackFollowUpRows: fail,
+    workOrchestratorStore: { upsertWorkItem: fail }
+  };
+}
+
+test('Work Orchestrator v2 work item dry-run early return preserves fields and skips every dependency', async () => {
+  const prepared = {
+    status: 'dry_run',
+    decision: { should_write_to_sheet: false },
+    snapshot: { schema: 'kakao-room-snapshot/v1' },
+    dryRunEvidence: { untouched: true }
+  };
+
+  const result = await finalizePreparedKakaoDecision({
+    applied: { prepared },
+    dependencies: failIfWorkOrchestratorEarlyReturnTouchesDependencies()
+  });
+
+  assert.deepEqual(result, {
+    ...prepared,
+    workOrchestratorResult: {
+      skipped: true,
+      inserted: 0,
+      merged: 0,
+      rows: [],
+      error: null
+    }
+  });
+});
+
+test('Work Orchestrator v2 work item already-superseded early return preserves fields and skips every dependency', async () => {
+  const prepared = {
+    status: 'superseded_by_newer_room_event',
+    superseded: true,
+    followUpResult: { inserted: 0, skipped: true, reason: 'superseded_by_newer_room_event', rows: [] },
+    slackDeliveryResult: { skipped: true, reason: 'superseded_by_newer_room_event', results: [] },
+    supersededEvidence: { roomRevision: 9 }
+  };
+
+  const result = await finalizePreparedKakaoDecision({
+    applied: { prepared },
+    dependencies: failIfWorkOrchestratorEarlyReturnTouchesDependencies()
+  });
+
+  assert.deepEqual(result, {
+    ...prepared,
+    workOrchestratorResult: {
+      skipped: true,
+      inserted: 0,
+      merged: 0,
+      rows: [],
+      error: null
+    }
+  });
+});
+
+test('Work Orchestrator v2 work item flag OFF preserves legacy result without a v2 store', async () => {
+  const input = workOrchestratorV2FinalizeInput({
+    config: { workOrchestratorV2WorkItemsEnabled: false },
+    dependencies: {
+      workOrchestratorStore: {
+        upsertWorkItem: async () => assert.fail('flag OFF must not require or call a v2 store')
+      }
+    }
+  });
+
+  const result = await finalizePreparedKakaoDecision(input);
+
+  assert.deepEqual(result.followUpResult, {
+    inserted: 0,
+    skipped: true,
+    reason: 'kakao_follow_up_rows_disabled',
+    rows: []
+  });
+  assert.deepEqual(result.workOrchestratorResult, {
+    skipped: true,
+    inserted: 0,
+    merged: 0,
+    rows: [],
+    error: null
+  });
+});
+
+test('Work Orchestrator v2 work item flag uses strict boolean syntax', () => {
+  for (const [value, expected] of [[undefined, false], ['', false], ['0', false], ['false', false], ['true', true], ['1', true]]) {
+    const env = value === undefined ? {} : { WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: value };
+    assert.equal(loadWorkOrchestratorConfig(env).workItemsEnabled, expected, `unexpected parse for ${String(value)}`);
+  }
+  assert.throws(
+    () => loadWorkOrchestratorConfig({ WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: 'yes' }),
+    /invalid boolean/i
+  );
+});
+
+test('v2 cutover guard normalizes every legacy relationship and rejects unsafe values', () => {
+  const validTarget = {
+    WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
+    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
+    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
+    AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
+    KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
+    SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+    P0_SLACK_ESCALATION_ENABLED: '0',
+    SLACK_ACTION_POLL_ENABLED: '0'
+  };
+
+  assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig(validTarget));
+  assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig(SAFE_PRE_CUTOVER_ENV));
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0'
+    }),
+    /legacy cards.*immediate/i
+  );
+  for (const legacyCardsDisabled of ['0', 'false']) {
+    const input = { ...SAFE_PRE_CUTOVER_ENV };
+    input.SLACK_AGENT_CARD_DELIVERY_ENABLED = legacyCardsDisabled;
+    assert.throws(() => validateWorkOrchestratorV2CutoverConfig(input), /legacy cards.*immediate/i);
+  }
+  for (const mixedLegacyWork of [
+    { AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0', KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1' },
+    { AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: 'false', KAKAO_FOLLOW_UP_ITEMS_ENABLED: 'true' }
+  ]) {
+    assert.throws(
+      () => validateWorkOrchestratorV2CutoverConfig({ ...SAFE_PRE_CUTOVER_ENV, ...mixedLegacyWork }),
+      /legacy work rows.*work items/i
+    );
+  }
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...SAFE_PRE_CUTOVER_ENV,
+      P0_SLACK_ESCALATION_ENABLED: 'false'
+    }),
+    /legacy P0.*work items.*readback.*cutover/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...SAFE_PRE_CUTOVER_ENV,
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1'
+    }),
+    /P0 cutover requires readback/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...SAFE_PRE_CUTOVER_ENV,
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: 'unexpected'
+    }),
+    /invalid boolean/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '0'
+    }),
+    /legacy work rows.*work items/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0'
+    }),
+    /legacy P0.*work items.*readback.*cutover/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+      AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
+      KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
+      P0_SLACK_ESCALATION_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0'
+    }),
+    /cleanup.*immediate/i
+  );
+});
+
+test('v2 cutover guard blocks invalid worker process startup before stdin work', () => {
+  const workerDirectory = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1'));
+  for (const [name, overrides, omitted] of [
+    ['false legacy card flag', { SLACK_AGENT_CARD_DELIVERY_ENABLED: 'false' }, []],
+    ['mixed legacy work flags', { AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0' }, []],
+    ['legacy P0 false', { P0_SLACK_ESCALATION_ENABLED: 'false' }, []],
+    ['cleanup without immediate', { WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1' }, []]
+  ]) {
+    const env = { ...process.env, ...SAFE_PRE_CUTOVER_ENV, ...overrides };
+    for (const key of omitted) delete env[key];
+    const result = spawnSync(process.execPath, ['worker.mjs', '--rag-lookup'], {
+      cwd: workerDirectory, env, input: '{}', encoding: 'utf8'
+    });
+    assert.equal(result.status, 1, name);
+    assert.match(`${result.stdout}\n${result.stderr}`, /cutover guard/i, name);
+  }
+});
+
+test('worker CLI loads isolated supported env files before enforcing the cutover guard', () => {
+  const temporaryHome = fs.mkdtempSync(path.join(os.tmpdir(), 'village-worker-cutover-env-'));
+  const envDirectory = path.join(temporaryHome, '.hermes');
+  const envPath = path.join(envDirectory, '.env');
+  const workerDirectory = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1'));
+  const baseEnvironment = {
+    PATH: process.env.PATH,
+    SystemRoot: process.env.SystemRoot,
+    ComSpec: process.env.ComSpec,
+    HOME: temporaryHome,
+    USERPROFILE: temporaryHome
+  };
+  const writeEnvironment = (legacyCardValue) => {
+    fs.mkdirSync(envDirectory, { recursive: true });
+    fs.writeFileSync(envPath, [
+      'WORK_ORCHESTRATOR_V2_RUNTIME_MODE=legacy',
+      'WORK_ORCHESTRATOR_V2_SHADOW_WRITES=0',
+      'WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_DIGEST_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED=0',
+      'AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=1',
+      'KAKAO_FOLLOW_UP_ITEMS_ENABLED=1',
+      `SLACK_AGENT_CARD_DELIVERY_ENABLED=${legacyCardValue}`,
+      'P0_SLACK_ESCALATION_ENABLED=1',
+      'SLACK_ACTION_POLL_ENABLED=1'
+    ].join('\n'));
+  };
+  const runWorker = () => spawnSync(process.execPath, ['worker.mjs', '--rag-lookup'], {
+    cwd: workerDirectory, env: baseEnvironment, input: '', encoding: 'utf8'
+  });
+
+  try {
+    writeEnvironment('1');
+    const safe = runWorker();
+    assert.equal(safe.status, 1);
+    assert.match(`${safe.stdout}\n${safe.stderr}`, /No stdin JSON received/i);
+    assert.doesNotMatch(`${safe.stdout}\n${safe.stderr}`, /cutover guard/i);
+
+    writeEnvironment('false');
+    const unsafe = runWorker();
+    assert.equal(unsafe.status, 1);
+    assert.match(`${unsafe.stdout}\n${unsafe.stderr}`, /cutover guard/i);
+    assert.doesNotMatch(`${unsafe.stdout}\n${unsafe.stderr}`, /No stdin JSON received/i);
+  } finally {
+    fs.rmSync(temporaryHome, { recursive: true, force: true });
+  }
+});
+
+test('Work Orchestrator v2 work item verified automatic reply writes zero v2 rows', async () => {
+  let upsertCalls = 0;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow({
+      follow_up_key: 'room:reply:verified',
+      type: 'reply_needed'
+    })],
+    autoReplyResult: {
+      attempted: true, sent: true,
+      readbackReceipt: {
+        id: `reply-readback-${'1'.repeat(64)}`,
+        confirmedAt: '2026-09-02T01:02:03.000Z'
+      },
+      reason: 'sent_via_devtools_verified'
+    },
+    dependencies: {
+      workOrchestratorStore: {
+        upsertWorkItem: async () => {
+          upsertCalls += 1;
+          return { applied: true, created: true, row: { id: 'must-not-exist' } };
+        }
+      }
+    }
+  }));
+
+  assert.equal(upsertCalls, 0);
+  assert.deepEqual(result.workOrchestratorResult, {
+    skipped: false,
+    inserted: 0,
+    merged: 0,
+    rows: [],
+    error: null
+  });
+});
+
+test('fake transport ids do not suppress the authoritative human work candidate', async () => {
+  let upsertCalls = 0;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow({
+      follow_up_key: 'room:reply:fake-transport', type: 'reply_needed'
+    })],
+    autoReplyResult: {
+      attempted: true, sent: true, readbackConfirmed: true,
+      transportMessageId: 'kakao-999', reason: 'sent_via_devtools_verified'
+    },
+    dependencies: { workOrchestratorStore: {
+      upsertWorkItem: async (candidate) => {
+        upsertCalls += 1;
+        return {
+          applied: true, created: true,
+          row: { id: '11111111-1111-4111-8111-111111111999', version: 1, work_key: candidate.work_key }
+        };
+      },
+      markAutomationState: async ({ id, expectedVersion }) => ({
+        applied: true, row: { id, version: expectedVersion + 1, state: 'open' }
+      })
+    } }
+  }));
+
+  assert.equal(result.automationResolutionResult.state, 'needs_human');
+  assert.equal(upsertCalls, 1);
+  assert.equal(result.workOrchestratorResult.rows.length, 1);
+});
+
+test('authoritative automation resolution resolves a referenced work CAS, requests exact-key TTL update, and creates no human item', async () => {
+  const calls = [];
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    workItem: { id: '11111111-1111-4111-8111-111111111111', version: 4 },
+    autoReplyResult: verifiedAutoReplyResult('c'),
+    config: { workOrchestratorV2AutoNoticeTtlMinutes: 180 },
+    dependencies: {
+      now: () => new Date('2026-08-31T01:00:00.000Z'),
+      workOrchestratorStore: {
+        upsertWorkItem: async () => assert.fail('verified success must create no human item'),
+        resolveWorkItem: async (input) => {
+          calls.push(['resolve', input]);
+          return { applied: true, row: { id: input.id, state: 'resolved', version: 5 } };
+        },
+        requestImmediateNoticeUpdate: async (input) => {
+          calls.push(['notice', input]);
+          return { applied: true, row: { source_event_key: input.sourceEventKey, notification_state: 'cleanup_pending' } };
+        }
+      }
+    }
+  }));
+
+  assert.equal(result.automationResolutionResult.state, 'succeeded');
+  assert.equal(result.automationResolutionResult.work.status, 'resolved');
+  assert.equal(result.automationResolutionResult.noticeUpdate.status, 'requested');
+  assert.equal(calls[0][1].expectedVersion, 4);
+  assert.equal(calls[1][1].sourceEventKey, 'event-authoritative-31');
+  assert.equal(calls[1][1].cleanupAfter, '2026-08-31T04:00:00.000Z');
+  assert.equal(result.workOrchestratorResult.inserted, 0);
+});
+
+test('authoritative automation resolution leaves unverified work open and records needs_human without notice update', async () => {
+  const calls = [];
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    autoReplyResult: { attempted: true, sent: true, readbackConfirmed: false },
+    dependencies: {
+      workOrchestratorStore: {
+        upsertWorkItem: async (candidate) => ({
+          applied: true, created: true,
+          row: { id: '11111111-1111-4111-8111-111111111111', version: 1, work_key: candidate.work_key }
+        }),
+        markAutomationState: async (input) => {
+          calls.push(input);
+          return { applied: true, row: { id: input.id, state: 'open', version: 2, automation_state: 'needs_human' } };
+        },
+        requestImmediateNoticeUpdate: async () => assert.fail('unverified output must not update notice')
+      }
+    }
+  }));
+
+  assert.equal(result.automationResolutionResult.state, 'needs_human');
+  assert.equal(result.automationResolutionResult.work.status, 'open');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].resolution.resolutionKind, 'missing_authoritative_readback');
+});
+
+test('authoritative automation resolution keeps owner approval open despite authoritative preliminary execution', async () => {
+  const states = [];
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    decision: { requires_owner_approval: true },
+    sheetResult: { success: true },
+    operationReceipt: { state: 'completed', authoritativeReadback: true, operationId: 'operation-31' },
+    dependencies: {
+      workOrchestratorStore: {
+        upsertWorkItem: async (candidate) => ({ applied: true, created: true, row: { id: '11111111-1111-4111-8111-111111111111', version: 1, work_key: candidate.work_key } }),
+        markAutomationState: async (input) => {
+          states.push(input.resolution.state);
+          return { applied: true, row: { id: input.id, state: 'open', version: 2 } };
+        }
+      }
+    }
+  }));
+  assert.equal(result.automationResolutionResult.resolutionKind, 'owner_approval_required');
+  assert.deepEqual(states, ['needs_human']);
+});
+
+test('authoritative automation resolution notice update failure retries independently and never corrupts resolved work', async () => {
+  const privateError = 'customer-private secret-token';
+  let resolved = false;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    workItem: { id: '11111111-1111-4111-8111-111111111111', version: 9 },
+    autoReplyResult: verifiedAutoReplyResult('d'),
+    dependencies: {
+      now: () => new Date('2026-08-31T01:00:00.000Z'),
+      workOrchestratorStore: {
+        resolveWorkItem: async () => { resolved = true; return { applied: true, row: { state: 'resolved' } }; },
+        requestImmediateNoticeUpdate: async () => { throw new Error(privateError); },
+        upsertWorkItem: async () => assert.fail('success must not upsert')
+      }
+    }
+  }));
+  assert.equal(resolved, true);
+  assert.equal(result.automationResolutionResult.work.status, 'resolved');
+  assert.equal(result.automationResolutionResult.noticeUpdate.status, 'error');
+  assert.equal(JSON.stringify(result.automationResolutionResult).includes(privateError), false);
+});
+
+test('authoritative automation resolution marks referenced human-required work even when no candidate is created', async () => {
+  const calls = [];
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [],
+    workItem: { id: '11111111-1111-4111-8111-111111111112', version: 6 },
+    autoReplyResult: { attempted: true, sent: true, readbackConfirmed: false },
+    dependencies: { workOrchestratorStore: {
+      upsertWorkItem: async () => assert.fail('no candidate must be created'),
+      markAutomationState: async (input) => {
+        calls.push(input);
+        return { applied: true, row: { id: input.id, version: 7, state: 'open', automation_state: 'needs_human' } };
+      }
+    } }
+  }));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].id, '11111111-1111-4111-8111-111111111112');
+  assert.equal(calls[0].expectedVersion, 6);
+  assert.equal(result.automationResolutionResult.work.status, 'open');
+  assert.equal(result.workOrchestratorResult.rows.length, 0);
+});
+
+test('authoritative automation resolution marks referenced work independently from a different candidate key', async () => {
+  const calls = [];
+  const candidateKeys = [];
+  const referencedId = '11111111-1111-4111-8111-111111111113';
+  const candidateId = '22222222-2222-4222-8222-222222222223';
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow({ follow_up_key: 'room:different-candidate' })],
+    workItem: { id: referencedId, version: 8, workKey: 'referenced-work-key' },
+    autoReplyResult: { attempted: true, sent: true, readbackConfirmed: false },
+    dependencies: { workOrchestratorStore: {
+      upsertWorkItem: async (candidate) => {
+        candidateKeys.push(candidate.work_key);
+        return { applied: true, created: true, row: { id: candidateId, version: 1, work_key: candidate.work_key } };
+      },
+      markAutomationState: async (input) => {
+        calls.push(input);
+        return { applied: true, row: { id: input.id, version: input.expectedVersion + 1, state: 'open', automation_state: 'needs_human' } };
+      }
+    } }
+  }));
+
+  assert.deepEqual(calls.map(({ id, expectedVersion }) => ({ id, expectedVersion })), [
+    { id: referencedId, expectedVersion: 8 },
+    { id: candidateId, expectedVersion: 1 }
+  ]);
+  assert.equal(candidateKeys.length, 1);
+  assert.notEqual(candidateKeys[0], 'referenced-work-key');
+  assert.equal(result.automationResolutionResult.work.status, 'open');
+});
+
+test('authoritative automation resolution treats stale referenced human-required work as a finite conflict', async () => {
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [],
+    workItem: { id: '11111111-1111-4111-8111-111111111114', version: 9 },
+    autoReplyResult: { attempted: true, sent: true, readbackConfirmed: false },
+    dependencies: { workOrchestratorStore: {
+      markAutomationState: async () => ({ applied: false, row: null })
+    } }
+  }));
+
+  assert.deepEqual(result.automationResolutionResult.work, {
+    status: 'conflict', code: 'stale_work_version'
+  });
+  assert.equal(result.workOrchestratorResult.error, null);
+});
+
+test('authoritative automation resolution persists v2 work and update request before legacy Slack delivery', async () => {
+  const order = [];
+  await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    workItem: { id: '11111111-1111-4111-8111-111111111115', version: 2 },
+    autoReplyResult: verifiedAutoReplyResult('e'),
+    config: { followUpRowsEnabled: true },
+    dependencies: {
+      now: () => new Date('2026-08-31T01:00:00.000Z'),
+      upsertFollowUpRows: async () => ({ inserted: 1, rows: [{ id: 'legacy-row' }] }),
+      deliverSlackFollowUpRows: async () => { order.push('legacy'); return { skipped: false, results: [] }; },
+      workOrchestratorStore: {
+        resolveWorkItem: async () => { order.push('resolve'); return { applied: true, row: { state: 'resolved' } }; },
+        requestImmediateNoticeUpdate: async () => { order.push('notice'); return { applied: true, row: {} }; },
+        upsertWorkItem: async () => assert.fail('safe success must not create human work')
+      }
+    }
+  }));
+
+  assert.deepEqual(order, ['resolve', 'notice', 'legacy']);
+});
+
+test('authoritative automation resolution survives throwing legacy Slack delivery with finite isolated status', async () => {
+  const privateError = 'customer-private legacy-slack-error';
+  let resolved = false;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    workItem: { id: '11111111-1111-4111-8111-111111111116', version: 3 },
+    autoReplyResult: verifiedAutoReplyResult('f'),
+    config: { followUpRowsEnabled: true },
+    dependencies: {
+      now: () => new Date('2026-08-31T01:00:00.000Z'),
+      upsertFollowUpRows: async () => ({ inserted: 1, rows: [{ id: 'legacy-row' }] }),
+      deliverSlackFollowUpRows: async () => { throw new Error(privateError); },
+      workOrchestratorStore: {
+        resolveWorkItem: async () => { resolved = true; return { applied: true, row: { state: 'resolved' } }; },
+        requestImmediateNoticeUpdate: async () => ({ applied: true, row: {} }),
+        upsertWorkItem: async () => assert.fail('safe success must not create human work')
+      }
+    }
+  }));
+
+  assert.equal(resolved, true);
+  assert.deepEqual(result.slackDeliveryResult, {
+    skipped: false, error: 'legacy_slack_delivery_failed', results: []
+  });
+  assert.equal(JSON.stringify(result).includes(privateError), false);
+});
+
+test('Work Orchestrator v2 work item approval candidate inserts one exact stable key', async () => {
+  const candidates = [];
+  const storedRow = { id: 'work-item-1', work_key: 'trade:260829-001:reservation-approval', version: 1 };
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    dependencies: {
+      workOrchestratorStore: {
+        upsertWorkItem: async (candidate) => {
+          candidates.push(candidate);
+          return { applied: true, created: true, row: storedRow };
+        },
+        markAutomationState: async ({ id, expectedVersion }) => ({
+          applied: true, row: { ...storedRow, id, version: expectedVersion + 1, automation_state: 'needs_human' }
+        })
+      }
+    }
+  }));
+
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].work_key, 'trade:260829-001:reservation-approval');
+  assert.equal(candidates[0].work_type, 'reservation_review');
+  assert.deepEqual(result.workOrchestratorResult, {
+    skipped: false,
+    inserted: 1,
+    merged: 0,
+    rows: [{ ...storedRow, version: 2, automation_state: 'needs_human' }],
+    error: null
+  });
+});
+
+test('Work Orchestrator v2 work item duplicate processing submits the same key and reports merge', async () => {
+  const submittedKeys = [];
+  const store = {
+    upsertWorkItem: async (candidate) => {
+      submittedKeys.push(candidate.work_key);
+      const created = submittedKeys.length === 1;
+      return {
+        applied: true,
+        created,
+        row: { id: 'work-item-stable', work_key: candidate.work_key, version: created ? 1 : 2 }
+      };
+    },
+    markAutomationState: async ({ id, expectedVersion }) => ({
+      applied: true, row: { id, version: expectedVersion + 1, state: 'open', automation_state: 'needs_human' }
+    })
+  };
+  const input = workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    dependencies: { workOrchestratorStore: store }
+  });
+
+  const first = await finalizePreparedKakaoDecision(input);
+  const duplicate = await finalizePreparedKakaoDecision(input);
+
+  assert.deepEqual(submittedKeys, [
+    'trade:260829-001:reservation-approval',
+    'trade:260829-001:reservation-approval'
+  ]);
+  assert.equal(first.workOrchestratorResult.inserted, 1);
+  assert.equal(first.workOrchestratorResult.merged, 0);
+  assert.equal(duplicate.workOrchestratorResult.inserted, 0);
+  assert.equal(duplicate.workOrchestratorResult.merged, 1);
+  assert.equal(duplicate.workOrchestratorResult.rows[0].id, 'work-item-stable');
+});
+
+test('Work Orchestrator v2 work item partial failure keeps exact completed counts without changing legacy Slack', async () => {
+  const legacyRows = [{ id: 'legacy-row-1', follow_up_key: 'legacy:1' }];
+  const slackResult = { skipped: false, reason: null, results: [{ status: 'delivered' }] };
+  const delivered = [];
+  let attempts = 0;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [
+      workOrchestratorV2FollowUpRow(),
+      workOrchestratorV2FollowUpRow({ follow_up_key: 'trade:260829-001:tax-invoice', type: 'tax_invoice' })
+    ],
+    config: { followUpRowsEnabled: true },
+    dependencies: {
+      upsertFollowUpRows: async () => ({ inserted: 1, rows: legacyRows }),
+      deliverSlackFollowUpRows: async (_config, rows) => {
+        delivered.push(...rows);
+        return slackResult;
+      },
+      workOrchestratorStore: {
+        upsertWorkItem: async (candidate) => {
+          attempts += 1;
+          if (attempts === 2) throw new Error('raw customer content and service-role-secret');
+          return { applied: true, created: true, row: { id: 'v2-row-1', work_key: candidate.work_key } };
+        }
+      }
+    }
+  }));
+
+  assert.deepEqual(delivered, legacyRows);
+  assert.deepEqual(result.followUpResult, { inserted: 1, rows: legacyRows });
+  assert.equal(result.slackDeliveryResult, slackResult);
+  assert.deepEqual(result.workOrchestratorResult, {
+    skipped: false,
+    inserted: 1,
+    merged: 0,
+    rows: [{ id: 'v2-row-1', work_key: 'trade:260829-001:reservation-approval' }],
+    error: 'work_orchestrator_v2_store_failed'
+  });
+});
+
+test('Work Orchestrator v2 work item rejects a missing typed key without name fallback', async () => {
+  let upsertCalls = 0;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [{
+      type: 'reservation_review',
+      customer_name: '동명이인',
+      title: '예약 확인',
+      payload: { requires_human_action: true }
+    }],
+    dependencies: {
+      workOrchestratorStore: {
+        upsertWorkItem: async () => {
+          upsertCalls += 1;
+          return { applied: true, created: true, row: {} };
+        }
+      }
+    }
+  }));
+
+  assert.equal(upsertCalls, 0);
+  assert.deepEqual(result.workOrchestratorResult, {
+    skipped: false,
+    inserted: 0,
+    merged: 0,
+    rows: [],
+    error: 'work_orchestrator_v2_validation_failed'
+  });
+  assert.doesNotMatch(result.workOrchestratorResult.error, /동명이인|예약 확인/);
+});
+
+test('Work Orchestrator v2 work item never passes v2 rows to legacy Slack delivery', async () => {
+  const legacyStoredRow = { id: 'legacy-row-only', follow_up_key: 'legacy:stable' };
+  const v2StoredRow = { id: 'v2-row-only', work_key: 'trade:260829-001:reservation-approval' };
+  let deliveredRows = null;
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    config: { followUpRowsEnabled: true },
+    dependencies: {
+      upsertFollowUpRows: async () => ({ inserted: 1, rows: [legacyStoredRow] }),
+      deliverSlackFollowUpRows: async (_config, rows) => {
+        deliveredRows = rows;
+        return { skipped: false, results: [] };
+      },
+      workOrchestratorStore: {
+        upsertWorkItem: async () => ({ applied: true, created: true, row: { ...v2StoredRow, version: 1 } }),
+        markAutomationState: async ({ id, expectedVersion }) => ({
+          applied: true, row: { ...v2StoredRow, id, version: expectedVersion + 1, automation_state: 'needs_human' }
+        })
+      }
+    }
+  }));
+
+  assert.deepEqual(deliveredRows, [legacyStoredRow]);
+  assert.notEqual(deliveredRows[0], v2StoredRow);
+  assert.deepEqual(result.workOrchestratorResult.rows, [{ ...v2StoredRow, version: 2, automation_state: 'needs_human' }]);
+});
+
+test('Work Orchestrator v2 work item errors never return or log secrets and raw customer content', async (t) => {
+  const secret = 'service-role-secret-never-return';
+  const customerContent = '고객 원문 절대 노출 금지';
+  const logged = [];
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  console.error = (...args) => logged.push(args.join(' '));
+  console.warn = (...args) => logged.push(args.join(' '));
+  t.after(() => {
+    console.error = originalError;
+    console.warn = originalWarn;
+  });
+
+  const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+    rows: [workOrchestratorV2FollowUpRow()],
+    dependencies: {
+      workOrchestratorStore: {
+        upsertWorkItem: async () => {
+          throw new Error(`${secret}: ${customerContent}`);
+        }
+      }
+    }
+  }));
+
+  assert.equal(result.status, 'ai_completed');
+  assert.equal(result.followUpResult.skipped, true);
+  assert.equal(result.workOrchestratorResult.error, 'work_orchestrator_v2_store_failed');
+  assert.doesNotMatch(JSON.stringify(result.workOrchestratorResult), new RegExp(`${secret}|${customerContent}`));
+  assert.doesNotMatch(logged.join('\n'), new RegExp(`${secret}|${customerContent}`));
 });
 
 test('buildCanonicalFollowUpCases suppresses inquiry duplication when human work exists', () => {
@@ -8752,16 +9564,18 @@ test('upsertFollowUpRows merges same room when customer name has message or comp
   assert.ok(!requests.some((r) => r.init?.method === 'POST'));
 });
 
-test('filterFollowUpRowsAfterAutoReply suppresses reply card after successful auto-send', () => {
+test('filterFollowUpRowsAfterAutoReply follows only the authoritative classifier output', () => {
   const rows = [
     { type: 'reply_needed', title: '위치 문의 답변' },
     { type: 'price_review', title: '가격 확인' }
   ];
 
-  assert.deepEqual(filterFollowUpRowsAfterAutoReply(rows, { sent: true }), [
+  assert.deepEqual(filterFollowUpRowsAfterAutoReply(rows, {
+    state: 'succeeded', resolutionKind: 'auto_reply_readback'
+  }), [
     { type: 'price_review', title: '가격 확인' }
   ]);
-  assert.equal(filterFollowUpRowsAfterAutoReply(rows, { sent: false }).length, 2);
+  assert.equal(filterFollowUpRowsAfterAutoReply(rows, { sent: true, readbackConfirmed: true }).length, 2);
 });
 
 test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () => {
@@ -10653,7 +11467,57 @@ test('sendKakaoMessageViaChrome falls back to DevTools target when AX window is 
   assert.equal(result.sent, true);
   assert.equal(result.reason, 'sent_via_devtools_verified');
   assert.equal(result.via_devtools, true);
+  assert.equal(result.readback_confirmed, true);
+  assert.equal(result.observed_reply_hash, createHash('sha256').update('확인했습니다.').digest('hex'));
   assert.ok(evalCalls[0].expression.includes('textarea[placeholder*="메시지"]'));
+});
+
+test('actual auto-reply sender emits a source-correlated content-free readback receipt', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-reply-readback-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const replyText = '네 확인했습니다.';
+  const replyHash = createHash('sha256').update(replyText).digest('hex');
+  const sourceEventKey = 'event-readback-1';
+  const confirmedAt = '2026-09-02T01:02:03.000Z';
+  const result = await workerModule.maybeAutoSendReply({
+    config: {
+      autoSendEnabled: true,
+      autoSendLogPath: path.join(tmpDir, 'auto-replies.ndjson')
+    },
+    decision: {
+      classification: 'simple_ack', confidence: 'high', kill_switch_observed: 'active',
+      customer: { name: '테스트' },
+      reply_decision: {
+        replyMode: 'auto_send', confidence: 'high', text: replyText,
+        safetyClass: 'simple_ack', grounding: 'visible_conversation', requiresRag: false
+      },
+      safety_checks: {
+        kakao_conversation_opened: true,
+        did_not_classify_from_preview_only: true,
+        latest_customer_message_after_last_staff_reply: true
+      }
+    },
+    job: {
+      id: 'job-readback-1', sourceEventKey, room_key: 'room-readback-1',
+      preview_text: '테스트 문의', unread_count: 1,
+      events: [{ reason: 'top_rows_backstop', unread_count: 1 }]
+    },
+    navigationContext: {},
+    dependencies: {
+      now: () => new Date(confirmedAt),
+      sendKakaoMessage: async () => ({
+        sent: true, reason: 'sent_via_devtools_verified',
+        readback_confirmed: true, observed_reply_hash: replyHash
+      })
+    }
+  });
+
+  const expectedId = `reply-readback-${createHash('sha256')
+    .update(`village-auto-reply-readback:${sourceEventKey}:${replyHash}`)
+    .digest('hex')}`;
+  assert.deepEqual(result.readbackReceipt, { id: expectedId, confirmedAt });
+  assert.equal(JSON.stringify(result.readbackReceipt).includes(replyText), false);
+  assert.equal(Object.hasOwn(result, 'transportMessageId'), false);
 });
 
 test('sendKakaoMessageViaDevtools refuses sent=true without a conversation target', async () => {

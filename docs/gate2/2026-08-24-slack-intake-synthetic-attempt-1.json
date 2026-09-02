@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "gate2-slack-synthetic-proof/v1",
+  "status": "BLOCKED",
+  "checkedAt": "2026-08-24T13:33:24.264Z",
+  "proofId": "f47f13e46b415436",
+  "evidence": {
+    "syntheticEnvelopeUsed": true,
+    "realSlackConnected": false,
+    "homeTaxTouched": false,
+    "gate1ReadOnlyPassed": false,
+    "firstExecutionRecorded": true,
+    "duplicateSuppressed": true,
+    "duplicateExecutionSkipped": true,
+    "resultPostedOnce": true,
+    "ledgerCompleted": true,
+    "ledgerCleaned": true
+  },
+  "errorClass": "gate2_not_ready"
+}

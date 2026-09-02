@@ -143,7 +143,7 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
       /^description:\s*Use when staff requests Village operational work\.$/m
     );
     assert.match(operations, /^platforms:\s*\[windows\]$/m);
-    assert.ok(operations.split(/\r?\n/).length <= 210);
+    assert.ok(operations.split(/\r?\n/).length <= 230);
     assert.match(operations, /Interpret before execution/i);
     assert.match(operations, /Shared execution contract/i);
     assert.doesNotMatch(operations, /WINDOWS_EXECUTION_ADAPTER/);

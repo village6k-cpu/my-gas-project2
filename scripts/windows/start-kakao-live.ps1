@@ -24,8 +24,10 @@ $resolvedNodePath = (Resolve-Path -LiteralPath $NodePath -ErrorAction Stop).Path
 $resolvedHermesPythonPath = (Resolve-Path -LiteralPath $HermesPythonPath -ErrorAction Stop).Path
 $watcherInjector = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\tools\kakao-dom-bridge\inject-watcher-cdp.py') -ErrorAction Stop).Path
 $loginRunner = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'kakao-login-recover.mjs') -ErrorAction Stop).Path
+Import-DotEnvFile -Path $resolvedEnvFile
 $gatewayCutoverRequested = ($ConfirmKakaoGatewayCutover.IsPresent -and -not $GatewayMaintenance.IsPresent) -or $RollbackToCli.IsPresent
 $liveHermesTransport = if ($GatewayMaintenance.IsPresent) { 'gateway' } else { 'cli' }
+Set-KakaoLiveRuntimeEnvironment -HermesTransport $liveHermesTransport
 $plan = if ($gatewayCutoverRequested) {
     Get-KakaoGatewayCutoverPlan -BenchmarkReportPath $BenchmarkReportPath -RollbackToCli:$RollbackToCli.IsPresent
 }

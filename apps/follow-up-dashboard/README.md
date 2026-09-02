@@ -32,6 +32,13 @@ Keep the direct Kakao→Slack/board duplicate paths off in normal operation:
 - `SLACK_FOLLOW_UP_ENABLED=0`
 - `SLACK_AGENT_CARD_DELIVERY_ENABLED=0`
 
+For the reversible Work Orchestrator v2 cutover, these legacy-off flags must be
+paired with v2 immediate notifications, work items, digest, cleanup, and both
+P0 readback/cutover flags. The reviewed target and rollback order are in
+[`docs/kakao-automation-followup-dashboard-ops.md`](../../docs/kakao-automation-followup-dashboard-ops.md).
+This static configuration is not runtime proof; the watcher, bridge, Hermes,
+Slack, work, digest, cleanup, and P0 paths require their own readback.
+
 Channel defaults scanned by the Slack backstop:
 
 - `스케쥴-agent`
@@ -42,6 +49,9 @@ Channel defaults scanned by the Slack backstop:
 
 Local bridge / worker env:
 
+- `WORK_ORCHESTRATOR_V2_RUNTIME_MODE=legacy` is the persistent default. A
+  missing selector also resolves to `legacy`; any value other than `legacy` or
+  `v2` is rejected.
 - `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0`
 - `SLACK_FOLLOW_UP_ENABLED=0`
 - `SLACK_AGENT_CARD_DELIVERY_ENABLED=0`
@@ -52,7 +62,11 @@ Local bridge / worker env:
 - `SLACK_CHANNEL_SETTLEMENT_AGENT=정산-agent`
 - `SLACK_CHANNEL_OTHER_AGENT=기타문의`
 - `SLACK_DASHBOARD_URL=https://village-follow-up-dashboard.vercel.app`
-- `SLACK_ACTION_POLL_ENABLED=true`
+- `SLACK_ACTION_POLL_ENABLED=true` only in `legacy` mode. The reviewed `v2`
+  contract pins this legacy action-row poller to `0` while leaving the Work
+  Orchestrator v2 action poller active. Rollback persists `legacy`, restores
+  every legacy card/work/P0/action flag, and disables every v2 flag before the
+  bounded recovery path verifies selected-mode health readback.
 
 Slack button handling:
 
