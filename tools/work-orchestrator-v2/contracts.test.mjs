@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -20,6 +21,26 @@ const event = {
   customerName: '고객',
   messagePreview: ''
 };
+
+function readPlanEnvironment(marker) {
+  const plan = readFileSync(new URL(
+    '../../docs/superpowers/plans/2026-08-29-work-orchestrator-v2-automation-cleanup-cutover.md',
+    import.meta.url
+  ), 'utf8');
+  const markerIndex = plan.indexOf(marker);
+  assert.notEqual(markerIndex, -1, `missing plan marker: ${marker}`);
+  const match = plan.slice(markerIndex + marker.length).match(/```dotenv\r?\n([\s\S]*?)```/);
+  assert.ok(match, `missing dotenv block after: ${marker}`);
+  return Object.fromEntries(match[1]
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf('=');
+      assert.ok(separator > 0, `invalid dotenv line: ${line}`);
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }));
+}
 
 test('notificationReceiptInput normalizes a Kakao event into a receipt with a deterministic client id', () => {
   assert.deepEqual(notificationReceiptInput(event), {
@@ -159,6 +180,70 @@ test('runtime mode validates the exact v2 target and exact legacy rollback sende
     }),
     /legacy runtime mode.*exact rollback/i
   );
+});
+
+test('binding Task 7 target and rollback blocks pass the real exact-mode guard', () => {
+  const target = readPlanEnvironment('The valid production target is:');
+  const rollback = readPlanEnvironment('Rollback flags:');
+
+  assert.deepEqual({
+    runtimeMode: target.WORK_ORCHESTRATOR_V2_RUNTIME_MODE,
+    p0Readback: target.WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED,
+    p0Cutover: target.WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED,
+    legacyP0: target.P0_SLACK_ESCALATION_ENABLED,
+    legacyActions: target.SLACK_ACTION_POLL_ENABLED,
+    botUserId: target.WORK_ORCHESTRATOR_V2_SLACK_BOT_USER_ID,
+    botId: target.WORK_ORCHESTRATOR_V2_SLACK_BOT_ID,
+    teamId: target.WORK_ORCHESTRATOR_V2_SLACK_TEAM_ID,
+    cleanupOwner: target.WORK_ORCHESTRATOR_V2_CLEANUP_OWNER,
+    cleanupLeaseSeconds: target.WORK_ORCHESTRATOR_V2_CLEANUP_LEASE_SECONDS,
+    cleanupIntervalMs: target.WORK_ORCHESTRATOR_V2_CLEANUP_INTERVAL_MS
+  }, {
+    runtimeMode: 'v2',
+    p0Readback: '1',
+    p0Cutover: '1',
+    legacyP0: '0',
+    legacyActions: '0',
+    botUserId: 'U_FROM_AUTH_TEST',
+    botId: 'B_FROM_AUTH_TEST',
+    teamId: 'T_FROM_AUTH_TEST',
+    cleanupOwner: 'bridge:notice-cleanup',
+    cleanupLeaseSeconds: '120',
+    cleanupIntervalMs: '300000'
+  });
+  assert.equal(resolveWorkOrchestratorV2CutoverConfig(target).runtimeMode, 'v2');
+
+  const restored = { ...target, ...rollback };
+  assert.deepEqual({
+    runtimeMode: restored.WORK_ORCHESTRATOR_V2_RUNTIME_MODE,
+    shadowWrites: restored.WORK_ORCHESTRATOR_V2_SHADOW_WRITES,
+    immediate: restored.WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED,
+    workItems: restored.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED,
+    digest: restored.WORK_ORCHESTRATOR_V2_DIGEST_ENABLED,
+    cleanup: restored.WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED,
+    p0Readback: restored.WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED,
+    p0Cutover: restored.WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED,
+    workerLegacy: restored.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED,
+    bridgeLegacy: restored.KAKAO_FOLLOW_UP_ITEMS_ENABLED,
+    legacyCards: restored.SLACK_AGENT_CARD_DELIVERY_ENABLED,
+    legacyP0: restored.P0_SLACK_ESCALATION_ENABLED,
+    legacyActions: restored.SLACK_ACTION_POLL_ENABLED
+  }, {
+    runtimeMode: 'legacy',
+    shadowWrites: '0',
+    immediate: '0',
+    workItems: '0',
+    digest: '0',
+    cleanup: '0',
+    p0Readback: '0',
+    p0Cutover: '0',
+    workerLegacy: '1',
+    bridgeLegacy: '1',
+    legacyCards: '1',
+    legacyP0: '1',
+    legacyActions: '1'
+  });
+  assert.equal(resolveWorkOrchestratorV2CutoverConfig(restored).runtimeMode, 'legacy');
 });
 
 test('effective v2 P0 rejects legacy-off unless work items, readback, and cutover are all enabled', () => {
