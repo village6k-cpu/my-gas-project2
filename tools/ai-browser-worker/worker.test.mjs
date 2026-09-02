@@ -10,6 +10,21 @@ import { spawnSync } from 'node:child_process';
 import { customerClusterHash } from './follow-up-policy.mjs';
 import * as workerModule from './worker.mjs';
 
+const SAFE_PRE_CUTOVER_ENV = Object.freeze({
+  WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '0',
+  WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0',
+  AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
+  KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
+  SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+  P0_SLACK_ESCALATION_ENABLED: '1'
+});
+Object.assign(process.env, SAFE_PRE_CUTOVER_ENV);
+
 import {
   buildBrainContext,
   buildHermesPrompt,
@@ -1951,7 +1966,7 @@ test('Work Orchestrator v2 work item flag OFF preserves legacy result without a 
   });
 });
 
-test('Work Orchestrator v2 work item flag accepts only the worker explicit truthy value', () => {
+test('Work Orchestrator v2 work item flag uses strict boolean syntax', () => {
   const keys = ['HERMES_HOME', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED'];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   delete process.env.HERMES_HOME;
@@ -1959,11 +1974,13 @@ test('Work Orchestrator v2 work item flag accepts only the worker explicit truth
   process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-test-secret-123';
 
   try {
-    for (const [value, expected] of [[undefined, false], ['', false], ['0', false], ['true', false], ['yes', false], ['1', true]]) {
+    for (const [value, expected] of [[undefined, false], ['', false], ['0', false], ['false', false], ['true', true], ['1', true]]) {
       if (value === undefined) delete process.env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED;
       else process.env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED = value;
       assert.equal(requireConfig().workOrchestratorV2WorkItemsEnabled, expected, `unexpected parse for ${String(value)}`);
     }
+    process.env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED = 'yes';
+    assert.throws(() => requireConfig(), /invalid boolean/i);
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key];
@@ -1972,7 +1989,7 @@ test('Work Orchestrator v2 work item flag accepts only the worker explicit truth
   }
 });
 
-test('v2 cutover guard rejects every legacy shutdown without its v2 replacement', () => {
+test('v2 cutover guard normalizes every legacy relationship and rejects unsafe values', () => {
   const validTarget = {
     WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
     WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
@@ -1987,8 +2004,8 @@ test('v2 cutover guard rejects every legacy shutdown without its v2 replacement'
     P0_SLACK_ESCALATION_ENABLED: '0'
   };
 
-  assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig({}));
   assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig(validTarget));
+  assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig(SAFE_PRE_CUTOVER_ENV));
   assert.throws(
     () => validateWorkOrchestratorV2CutoverConfig({
       ...validTarget,
@@ -1996,6 +2013,42 @@ test('v2 cutover guard rejects every legacy shutdown without its v2 replacement'
       WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0'
     }),
     /legacy cards.*immediate/i
+  );
+  for (const legacyCardsDisabled of [undefined, '0', 'false']) {
+    const input = { ...SAFE_PRE_CUTOVER_ENV };
+    if (legacyCardsDisabled === undefined) delete input.SLACK_AGENT_CARD_DELIVERY_ENABLED;
+    else input.SLACK_AGENT_CARD_DELIVERY_ENABLED = legacyCardsDisabled;
+    assert.throws(() => validateWorkOrchestratorV2CutoverConfig(input), /legacy cards.*immediate/i);
+  }
+  for (const mixedLegacyWork of [
+    { AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0', KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1' },
+    { AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: 'false', KAKAO_FOLLOW_UP_ITEMS_ENABLED: 'true' }
+  ]) {
+    assert.throws(
+      () => validateWorkOrchestratorV2CutoverConfig({ ...SAFE_PRE_CUTOVER_ENV, ...mixedLegacyWork }),
+      /legacy work rows.*work items/i
+    );
+  }
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...SAFE_PRE_CUTOVER_ENV,
+      P0_SLACK_ESCALATION_ENABLED: 'false'
+    }),
+    /legacy P0.*v2 P0/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...SAFE_PRE_CUTOVER_ENV,
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1'
+    }),
+    /P0 cutover requires readback/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...SAFE_PRE_CUTOVER_ENV,
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: 'unexpected'
+    }),
+    /invalid boolean/i
   );
   assert.throws(
     () => validateWorkOrchestratorV2CutoverConfig({
@@ -2023,6 +2076,25 @@ test('v2 cutover guard rejects every legacy shutdown without its v2 replacement'
     }),
     /cleanup.*immediate/i
   );
+});
+
+test('v2 cutover guard blocks invalid worker process startup before stdin work', () => {
+  const workerDirectory = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1'));
+  for (const [name, overrides, omitted] of [
+    ['missing legacy card flag', {}, ['SLACK_AGENT_CARD_DELIVERY_ENABLED']],
+    ['false legacy card flag', { SLACK_AGENT_CARD_DELIVERY_ENABLED: 'false' }, []],
+    ['mixed legacy work flags', { AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0' }, []],
+    ['legacy P0 false', { P0_SLACK_ESCALATION_ENABLED: 'false' }, []],
+    ['cleanup without immediate', { WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1' }, []]
+  ]) {
+    const env = { ...process.env, ...SAFE_PRE_CUTOVER_ENV, ...overrides };
+    for (const key of omitted) delete env[key];
+    const result = spawnSync(process.execPath, ['worker.mjs', '--rag-lookup'], {
+      cwd: workerDirectory, env, input: '{}', encoding: 'utf8'
+    });
+    assert.equal(result.status, 1, name);
+    assert.match(`${result.stdout}\n${result.stderr}`, /cutover guard/i, name);
+  }
 });
 
 test('Work Orchestrator v2 work item verified automatic reply writes zero v2 rows', async () => {

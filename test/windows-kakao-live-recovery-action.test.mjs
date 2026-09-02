@@ -84,7 +84,7 @@ function combinedLiveHealth(runtimeState, { authenticated = true, watcherReady =
   const command = [
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
-    `$bridge=[pscustomobject]@{ok=$true; config=[pscustomobject]@{workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$false; followUpRowsEnabled=$false; slackActionPollEnabled=$true; p0SlackEscalationEnabled=$false; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2; workOrchestrator=[pscustomobject]@{shadowWrites=$true;immediateEnabled=$true;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true}}}`,
+    `$bridge=[pscustomobject]@{ok=$true; workOrchestrator=[pscustomobject]@{ok=$true}; config=[pscustomobject]@{workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$false; followUpRowsEnabled=$false; slackActionPollEnabled=$true; p0SlackEscalationEnabled=$false; slackBotTokenPresent=$true; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2; workOrchestrator=[pscustomobject]@{shadowWrites=$true;immediateEnabled=$true;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$true;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true}}}`,
     `$probe=[pscustomobject]@{state='${runtimeState.replaceAll("'", "''")}'; cdpReady=$true; authenticated=$${authenticated ? 'true' : 'false'}; watcherReady=$${watcherReady ? 'true' : 'false'}}`,
     `[pscustomobject]@{state=(Get-KakaoLiveRuntimeState -Probe $probe); healthy=(Test-KakaoLiveHealth -Health $bridge -RuntimeProbe $probe)} | ConvertTo-Json -Compress`
   ].join('; ');
@@ -127,6 +127,28 @@ test('bridge health is combined with the direct CDP authentication and watcher p
     state: 'watcher_repair_required',
     healthy: false
   });
+});
+
+test('v2 cutover health rejects every missing or false local/runtime proof', () => {
+  const escapedPath = modulePath.replaceAll("'", "''");
+  const command = [
+    `$ErrorActionPreference='Stop'`,
+    `Import-Module '${escapedPath}' -Force`,
+    `$valid=[pscustomobject]@{ok=$true;workOrchestrator=[pscustomobject]@{ok=$true};config=[pscustomobject]@{workerLive=$true;workerDryRun=$false;windowsWritesEnabled=$true;autoSendEnabled=$true;slackCardDeliveryEnabled=$false;followUpRowsEnabled=$false;slackActionPollEnabled=$true;p0SlackEscalationEnabled=$false;slackBotTokenPresent=$true;supabaseRecoveryEnabled=$true;kakaoTabCleanupEnabled=$true;startupCatchupSupported=$true;aiDomSplitEnabled=$true;aiDecisionConcurrency=2;workOrchestrator=[pscustomobject]@{shadowWrites=$true;immediateEnabled=$true;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$true;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true}}}`,
+    `$results=[ordered]@{valid=(Test-KakaoLiveBridgeContract -Health $valid)}`,
+    `foreach($name in @('slackBotTokenPresent')){$broken=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$broken.config.$name=$false;$results["false_$name"]=Test-KakaoLiveBridgeContract -Health $broken;$missing=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$missing.config.PSObject.Properties.Remove($name);$results["missing_$name"]=Test-KakaoLiveBridgeContract -Health $missing}`,
+    `foreach($name in @('shadowWrites','immediateEnabled','workItemsEnabled','digestEnabled','cleanupEnabled','p0ReadbackEnabled','p0CutoverEnabled','storeConfigured','immediateLocalConfigReady','p0LocalConfigReady','digestLocalConfigReady','actionLocalConfigReady')){$broken=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$broken.config.workOrchestrator.$name=$false;$results["false_$name"]=Test-KakaoLiveBridgeContract -Health $broken;$missing=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$missing.config.workOrchestrator.PSObject.Properties.Remove($name);$results["missing_$name"]=Test-KakaoLiveBridgeContract -Health $missing}`,
+    `$invariant=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$invariant.workOrchestrator.ok=$false;$results['invariantHealth']=Test-KakaoLiveBridgeContract -Health $invariant`,
+    `$missingInvariant=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$missingInvariant.workOrchestrator.PSObject.Properties.Remove('ok');$results['missingInvariantHealth']=Test-KakaoLiveBridgeContract -Health $missingInvariant`,
+    `$results|ConvertTo-Json -Compress`
+  ].join('; ');
+  const observed = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+    encoding: 'utf8', windowsHide: true
+  }));
+  assert.equal(observed.valid, true);
+  for (const [name, result] of Object.entries(observed)) {
+    if (name !== 'valid') assert.equal(result, false, name);
+  }
 });
 
 test('new bridge source waits for a fully idle runtime before restart', () => {
@@ -188,7 +210,7 @@ test('v2 cutover guard rejects an invalid contract before stamping the Process e
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
     `$env:AI_WORKER_LIVE='before-guard'`,
-    `$invalid=[ordered]@{WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED='0';WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED='1';WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED='0';WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED='1';WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED='1';AI_WORKER_FOLLOW_UP_ITEMS_ENABLED='0';KAKAO_FOLLOW_UP_ITEMS_ENABLED='0';SLACK_AGENT_CARD_DELIVERY_ENABLED='0';P0_SLACK_ESCALATION_ENABLED='0';AI_WORKER_LIVE='1'}`,
+    `$invalid=Get-KakaoLiveRuntimeContract;$invalid['WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED']='0'`,
     `$reason=''; try { Set-KakaoLiveRuntimeEnvironment -Contract $invalid } catch { $reason=$_.Exception.Message }`,
     `[pscustomobject]@{reason=$reason;workerLive=$env:AI_WORKER_LIVE} | ConvertTo-Json -Compress`
   ].join('; ');
@@ -198,4 +220,31 @@ test('v2 cutover guard rejects an invalid contract before stamping the Process e
   const observed = JSON.parse(result);
   assert.match(observed.reason, /legacy cards.*immediate/i);
   assert.equal(observed.workerLive, 'before-guard');
+});
+
+test('v2 cutover environment stamp validates exact contract shape and rolls back partial writes', () => {
+  const escapedPath = modulePath.replaceAll("'", "''");
+  const command = [
+    `$ErrorActionPreference='Stop'`,
+    `Import-Module '${escapedPath}' -Force`,
+    `$base=Get-KakaoLiveRuntimeContract`,
+    `$missing=[ordered]@{};foreach($entry in $base.GetEnumerator()){if($entry.Key -ne 'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED'){$missing[$entry.Key]=$entry.Value}}`,
+    `$extra=[ordered]@{};foreach($entry in $base.GetEnumerator()){$extra[$entry.Key]=$entry.Value};$extra['UNAPPROVED_RUNTIME_FLAG']='1'`,
+    `$missingReason='';try{Set-KakaoLiveRuntimeEnvironment -Contract $missing}catch{$missingReason=$_.Exception.Message}`,
+    `$extraReason='';try{Set-KakaoLiveRuntimeEnvironment -Contract $extra}catch{$extraReason=$_.Exception.Message}`,
+    `$env:AI_WORKER_LIVE='before-marker';$env:WORKER_TIMEOUT_MS='before-timeout'`,
+    `$setter={param($name,$value)if($name -eq 'WORKER_TIMEOUT_MS'){throw 'injected set failure'};[Environment]::SetEnvironmentVariable($name,$value,'Process')}`,
+    `$failureReason='';try{Set-KakaoLiveRuntimeEnvironment -Contract $base -SetEnvironmentVariable $setter}catch{$failureReason=$_.Exception.Message};$rollbackMarker=$env:AI_WORKER_LIVE;$rollbackTimeout=$env:WORKER_TIMEOUT_MS`,
+    `Set-KakaoLiveRuntimeEnvironment -Contract $base;$actual=[ordered]@{};foreach($entry in $base.GetEnumerator()){$actual[$entry.Key]=[Environment]::GetEnvironmentVariable($entry.Key,'Process')}`,
+    `[pscustomobject]@{missingReason=$missingReason;extraReason=$extraReason;failureReason=$failureReason;marker=$rollbackMarker;timeout=$rollbackTimeout;stamped=($actual|ConvertTo-Json -Compress);expected=($base|ConvertTo-Json -Compress)}|ConvertTo-Json -Compress`
+  ].join('; ');
+  const observed = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+    encoding: 'utf8', windowsHide: true
+  }));
+  assert.match(observed.missingReason, /missing.*cleanup/i);
+  assert.match(observed.extraReason, /not allowed/i);
+  assert.match(observed.failureReason, /injected set failure/i);
+  assert.equal(observed.marker, 'before-marker');
+  assert.equal(observed.timeout, 'before-timeout');
+  assert.deepEqual(JSON.parse(observed.stamped), JSON.parse(observed.expected));
 });

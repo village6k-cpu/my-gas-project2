@@ -55,7 +55,7 @@ scripts/kakao-automation start
 scripts/kakao-automation status
 ```
 
-운영 기본값은 `AI_WORKER_LIVE=1`, `AI_WORKER_AUTO_SEND=1`, `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0`이다. 즉 AI worker가 실제 카카오 화면을 열어 읽고, 확인요청/안전한 자동답장 후보를 처리하지만, 카카오 DOM 이벤트를 사람용 후속조치판에 직접 중복 적재하지 않는다. 후속조치판은 Slack backstop이 Slack의 미해결 태스크를 선별해 채운다. 임시 점검 때만 `AI_WORKER_LIVE=0` 또는 `AI_WORKER_AUTO_SEND=0`으로 낮춘다.
+v2 cutover 전의 안전한 기본값은 `AI_WORKER_LIVE=1`, `AI_WORKER_AUTO_SEND=1`과 legacy work/card/P0 경로 ON이다. `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0` 같은 legacy-off 값은 아래 Work Orchestrator v2 target의 immediate/work/P0 flags와 함께만 적용할 수 있다. 즉 AI worker의 카카오 읽기·확인요청·안전한 자동답장 정책은 유지하면서, 승인된 cutover 뒤에만 중복 durable output을 v2로 넘긴다. 임시 점검 때만 `AI_WORKER_LIVE=0` 또는 `AI_WORKER_AUTO_SEND=0`으로 낮춘다.
 
 `scripts/kakao-automation status`에서 `Automation Chrome profile > DevTools status: reachable`가 떠야 worker가 일반 Chrome이 아니라 자동화 profile의 탭을 제어한다. 기존에 포트 없이 떠 있던 자동화 Chrome은 `scripts/kakao-automation start` 또는 `restart` 때 자동으로 닫고 다시 연다.
 

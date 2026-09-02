@@ -26,8 +26,8 @@ import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
 import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
 import {
   canonicalSourceEventKey,
-  loadWorkOrchestratorConfig,
   notificationReceiptInput,
+  readStrictBooleanEnvironment,
   validateWorkOrchestratorV2CutoverConfig
 } from '../work-orchestrator-v2/contracts.mjs';
 import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-notifications.mjs';
@@ -73,8 +73,8 @@ function readBooleanEnvironment(value, defaultValue = false) {
 }
 
 export function resolveWorkOrchestratorP0Config(env = {}) {
-  const readbackEnabled = readBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED, false);
-  const cutoverEnabled = readBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED, false);
+  const readbackEnabled = readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED, false, 'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED');
+  const cutoverEnabled = readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED, false, 'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED');
   if (cutoverEnabled && !readbackEnabled) {
     throw new Error('Work Orchestrator v2 P0 cutover requires readback');
   }
@@ -119,10 +119,13 @@ export function configForHermesTransport(config = {}, transport = 'cli') {
     : config;
 }
 
-validateWorkOrchestratorV2CutoverConfig(process.env);
-const P0_WORK_ORCHESTRATOR_CONFIG = resolveWorkOrchestratorP0Config(process.env);
+const CUTOVER_CONFIG = validateWorkOrchestratorV2CutoverConfig(process.env);
+const P0_WORK_ORCHESTRATOR_CONFIG = {
+  readbackEnabled: CUTOVER_CONFIG.p0ReadbackEnabled,
+  cutoverEnabled: CUTOVER_CONFIG.p0CutoverEnabled
+};
 const WORK_ORCHESTRATOR_CONFIG = {
-  ...loadWorkOrchestratorConfig(process.env),
+  ...CUTOVER_CONFIG,
   p0ReadbackEnabled: P0_WORK_ORCHESTRATOR_CONFIG.readbackEnabled,
   p0CutoverEnabled: P0_WORK_ORCHESTRATOR_CONFIG.cutoverEnabled
 };
@@ -169,7 +172,7 @@ const CONFIG = {
   supabaseRecoveryMaxAttempts: Number(process.env.SUPABASE_RECOVERY_MAX_ATTEMPTS || 2),
   slackActionPollEnabled: readBooleanEnvironment(process.env.SLACK_ACTION_POLL_ENABLED, true),
   slackActionPollIntervalMs: resolveSlackActionPollIntervalMs(process.env.SLACK_ACTION_POLL_INTERVAL_MS),
-  p0SlackEscalationEnabled: readBooleanEnvironment(process.env.P0_SLACK_ESCALATION_ENABLED, true),
+  p0SlackEscalationEnabled: CUTOVER_CONFIG.legacyP0Enabled,
   p0SlackEscalationIntervalMs: Math.max(15_000, Number(process.env.P0_SLACK_ESCALATION_INTERVAL_MS || 60_000)),
   // 재알림은 10분에서 시작해 회차마다 2배(상한 1시간) 백오프. 구 기본값
   // 3분 × 160회는 2026-08-19 야간 @channel 308연발 사고로 폐기.
@@ -182,8 +185,8 @@ const CONFIG = {
     return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 3;
   })(),
   slackBotToken: process.env.SLACK_BOT_TOKEN || '',
-  followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
-  slackCardDeliveryEnabled: process.env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1',
+  followUpRowsEnabled: CUTOVER_CONFIG.legacyWorkRowsEnabled,
+  slackCardDeliveryEnabled: CUTOVER_CONFIG.legacyCardsEnabled,
   slackChannels: {
     schedule: process.env.SLACK_CHANNEL_SCHEDULE_AGENT || '스케쥴-agent',
     document: process.env.SLACK_CHANNEL_DOCUMENT_AGENT || '서류발송-agent',

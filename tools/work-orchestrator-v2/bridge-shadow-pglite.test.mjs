@@ -9,6 +9,18 @@ import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { recordShadowNotificationObligation } from './shadow-receipts.mjs';
 
 process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
+Object.assign(process.env, {
+  AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
+  KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
+  SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+  P0_SLACK_ESCALATION_ENABLED: '1',
+  WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0'
+});
 const {
   createWorkOrchestratorShadowRuntime,
   handleEvent

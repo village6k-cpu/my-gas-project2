@@ -4499,7 +4499,7 @@ export function requireConfig() {
   if (!supabaseUrl || !serviceRoleKey) {
     throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Load tools/kakao-dom-bridge/.env first.');
   }
-  validateWorkOrchestratorV2CutoverConfig(process.env);
+  const cutoverConfig = validateWorkOrchestratorV2CutoverConfig(process.env);
   const config = {
     ...buildSlackRoutingConfig(process.env),
     supabaseUrl,
@@ -4533,8 +4533,8 @@ export function requireConfig() {
     brainContextPath: process.env.VILLAGE_BRAIN_CONTEXT_PATH || 'C:\\Village\\VILLAGE_Brain\\Ops\\brain-context-latest.md',
     brainCustomerProfilesPath: process.env.VILLAGE_BRAIN_CUSTOMER_PROFILES_PATH || 'C:\\Village\\VILLAGE_Brain\\Ops\\customer-profiles.jsonl',
     followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items',
-    followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
-    workOrchestratorV2WorkItemsEnabled: process.env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED === '1',
+    followUpRowsEnabled: cutoverConfig.legacyWorkRowsEnabled,
+    workOrchestratorV2WorkItemsEnabled: cutoverConfig.workItemsEnabled,
     workOrchestratorV2AutoNoticeTtlMinutes: (() => {
       const value = Number(process.env.WORK_ORCHESTRATOR_V2_AUTO_NOTICE_TTL_MINUTES || 180);
       return Number.isFinite(value) ? Math.min(1440, Math.max(30, value)) : 180;
@@ -4550,7 +4550,7 @@ export function requireConfig() {
     customerDocumentAssetPaths: normalizeKakaoAttachmentPaths(process.env.VILLAGE_CUSTOMER_DOCUMENT_ATTACHMENT_PATHS).length
       ? normalizeKakaoAttachmentPaths(process.env.VILLAGE_CUSTOMER_DOCUMENT_ATTACHMENT_PATHS)
       : defaultCustomerDocumentAssetPaths(),
-    slackFollowUpEnabled: process.env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1',
+    slackFollowUpEnabled: cutoverConfig.legacyCardsEnabled,
     slackThreadFollowUpsEnabled: process.env.SLACK_FOLLOW_UP_THREAD_REPLIES !== '0',
     slackBotToken: process.env.SLACK_BOT_TOKEN || '',
     slackMentionUserIds: String(process.env.SLACK_CARD_MENTION_USER_IDS || '').split(/[\s,]+/).filter(Boolean),

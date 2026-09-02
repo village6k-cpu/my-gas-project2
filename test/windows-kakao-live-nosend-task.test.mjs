@@ -212,15 +212,15 @@ test('full-live startup contract keeps customer replies and approval polling whi
       $env:WORKER_CATCHUP_TIMEOUT_MS = '75000'
       $env:HERMES_HOME = 'C:\\Village\\MacMiniMirror\\restored\\.hermes'
       Set-KakaoLiveRuntimeEnvironment
-      $value = [pscustomobject]@{ ok = $true; runtime = [pscustomobject]@{
+      $value = [pscustomobject]@{ ok = $true; workOrchestrator = [pscustomobject]@{ ok = $true }; runtime = [pscustomobject]@{
         state = 'healthy'; cdpReady = $true; authenticated = $true; watcherReady = $true
       }; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
         autoSendEnabled = $true; slackCardDeliveryEnabled = $false; followUpRowsEnabled = $false
-        slackActionPollEnabled = $true; p0SlackEscalationEnabled = $false
+        slackActionPollEnabled = $true; p0SlackEscalationEnabled = $false; slackBotTokenPresent = $true
         supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true; startupCatchupSupported = $true
         aiDomSplitEnabled = $true; aiDecisionConcurrency = 2
-        workOrchestrator = [pscustomobject]@{ shadowWrites = $true; immediateEnabled = $true; workItemsEnabled = $true; digestEnabled = $true; cleanupEnabled = $true; p0ReadbackEnabled = $true; p0CutoverEnabled = $true }
+        workOrchestrator = [pscustomobject]@{ shadowWrites = $true; immediateEnabled = $true; workItemsEnabled = $true; digestEnabled = $true; cleanupEnabled = $true; p0ReadbackEnabled = $true; p0CutoverEnabled = $true; storeConfigured = $true; immediateLocalConfigReady = $true; p0LocalConfigReady = $true; digestLocalConfigReady = $true; actionLocalConfigReady = $true }
       }}
       $legacy = [pscustomobject]@{ ok = $true; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true

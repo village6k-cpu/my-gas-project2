@@ -46,6 +46,29 @@ function Assert-KakaoLiveV2CutoverContract {
         [System.Collections.IDictionary]$Contract
     )
 
+    $allowedKeys = @(
+        'AI_WORKER_LIVE', 'AI_WORKER_AUTO_SEND', 'AI_WORKER_DRY_RUN',
+        'SLACK_ACTION_POLL_ENABLED', 'SLACK_AGENT_CARD_DELIVERY_ENABLED',
+        'AI_WORKER_FOLLOW_UP_ITEMS_ENABLED', 'KAKAO_FOLLOW_UP_ITEMS_ENABLED',
+        'P0_SLACK_ESCALATION_ENABLED', 'WORK_ORCHESTRATOR_V2_SHADOW_WRITES',
+        'WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED', 'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED',
+        'WORK_ORCHESTRATOR_V2_DIGEST_ENABLED', 'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED',
+        'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED', 'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED',
+        'VILLAGE_WINDOWS_WRITES_ENABLED', 'SUPABASE_RECOVERY_ENABLED', 'KAKAO_TAB_CLEANUP_ENABLED',
+        'HERMES_WORKER_COMMAND_MODE', 'HERMES_HOME', 'DEBOUNCE_MS', 'MAX_WAIT_MS',
+        'WORKER_SLOW_ALERT_MS', 'WORKER_TIMEOUT_MS', 'WORKER_CATCHUP_TIMEOUT_MS',
+        'HERMES_WORKER_TIMEOUT_MS', 'HERMES_WORKER_MAX_TURNS', 'HERMES_WORKER_SKILLS',
+        'KAKAO_AI_DOM_SPLIT_ENABLED', 'KAKAO_AI_DECISION_CONCURRENCY'
+    )
+    foreach ($key in $allowedKeys) {
+        if (-not $Contract.Contains($key)) { throw "Kakao live runtime contract is missing $key." }
+        if ($Contract[$key] -isnot [string]) { throw "Kakao live runtime contract value for $key must be a string." }
+    }
+    foreach ($key in $Contract.Keys) {
+        if ($allowedKeys -notcontains [string]$key) { throw "Kakao live runtime contract key $key is not allowed." }
+    }
+    if ($Contract.Count -ne $allowedKeys.Count) { throw 'Kakao live runtime contract must contain exactly the allowed keys.' }
+
     $legacyCardsDisabled = [string]$Contract['SLACK_AGENT_CARD_DELIVERY_ENABLED'] -eq '0'
     $legacyWorkRowsDisabled = [string]$Contract['AI_WORKER_FOLLOW_UP_ITEMS_ENABLED'] -eq '0' -and
         [string]$Contract['KAKAO_FOLLOW_UP_ITEMS_ENABLED'] -eq '0'
@@ -76,13 +99,49 @@ function Assert-KakaoLiveV2CutoverContract {
 function Set-KakaoLiveRuntimeEnvironment {
     [CmdletBinding()]
     param(
-        [System.Collections.IDictionary]$Contract = (Get-KakaoLiveRuntimeContract)
+        [System.Collections.IDictionary]$Contract = (Get-KakaoLiveRuntimeContract),
+        [scriptblock]$SetEnvironmentVariable = {
+            param([string]$Name, [string]$Value)
+            [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
+        }
     )
 
     Assert-KakaoLiveV2CutoverContract -Contract $Contract
+    $prior = [ordered]@{}
     foreach ($entry in $Contract.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        $prior[[string]$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, 'Process')
     }
+    try {
+        foreach ($entry in $Contract.GetEnumerator()) {
+            & $SetEnvironmentVariable ([string]$entry.Key) ([string]$entry.Value)
+        }
+    }
+    catch {
+        $failure = $_
+        foreach ($entry in $prior.GetEnumerator()) {
+            try {
+                [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, 'Process')
+            }
+            catch {}
+        }
+        throw $failure
+    }
+}
+
+function Test-KakaoLiveHealthProperty {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [psobject]$Object,
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [object]$ExpectedValue
+    )
+
+    if ($null -eq $Object) { return $false }
+    $property = $Object.PSObject.Properties[$Name]
+    return $null -ne $property -and $property.Value -eq $ExpectedValue
 }
 
 function Test-KakaoLiveBridgeContract {
@@ -92,45 +151,49 @@ function Test-KakaoLiveBridgeContract {
         [psobject]$Health
     )
 
-    $startupCatchupSupported = $null -ne $Health.config -and
-        $Health.config.PSObject.Properties.Name -contains 'startupCatchupSupported' -and
-        $Health.config.startupCatchupSupported -eq $true
-    $aiDomSplitEnabled = $null -ne $Health.config -and
-        $Health.config.PSObject.Properties.Name -contains 'aiDomSplitEnabled' -and
-        $Health.config.aiDomSplitEnabled -eq $true
-    $aiDecisionConcurrency = if (
-        $null -ne $Health.config -and
-        $Health.config.PSObject.Properties.Name -contains 'aiDecisionConcurrency'
-    ) { [int]$Health.config.aiDecisionConcurrency } else { 0 }
-    $workOrchestrator = if (
-        $null -ne $Health.config -and
-        $Health.config.PSObject.Properties.Name -contains 'workOrchestrator'
-    ) { $Health.config.workOrchestrator } else { $null }
-    $workOrchestratorCutoverEnabled = $null -ne $workOrchestrator -and
-        $workOrchestrator.shadowWrites -eq $true -and
-        $workOrchestrator.immediateEnabled -eq $true -and
-        $workOrchestrator.workItemsEnabled -eq $true -and
-        $workOrchestrator.digestEnabled -eq $true -and
-        $workOrchestrator.cleanupEnabled -eq $true -and
-        $workOrchestrator.p0ReadbackEnabled -eq $true -and
-        $workOrchestrator.p0CutoverEnabled -eq $true
+    $configProperty = $Health.PSObject.Properties['config']
+    $config = if ($null -ne $configProperty) { $configProperty.Value } else { $null }
+    $startupCatchupSupported = Test-KakaoLiveHealthProperty -Object $config -Name 'startupCatchupSupported' -ExpectedValue $true
+    $aiDomSplitEnabled = Test-KakaoLiveHealthProperty -Object $config -Name 'aiDomSplitEnabled' -ExpectedValue $true
+    $aiDecisionConcurrency = Test-KakaoLiveHealthProperty -Object $config -Name 'aiDecisionConcurrency' -ExpectedValue 2
+    $workOrchestratorProperty = if ($null -ne $config) { $config.PSObject.Properties['workOrchestrator'] } else { $null }
+    $workOrchestrator = if ($null -ne $workOrchestratorProperty) { $workOrchestratorProperty.Value } else { $null }
+    $workOrchestratorCutoverEnabled = $null -ne $workOrchestrator
+    if ($workOrchestratorCutoverEnabled) {
+        foreach ($propertyName in @(
+            'shadowWrites', 'immediateEnabled', 'workItemsEnabled', 'digestEnabled', 'cleanupEnabled',
+            'p0ReadbackEnabled', 'p0CutoverEnabled', 'storeConfigured', 'immediateLocalConfigReady',
+            'p0LocalConfigReady', 'digestLocalConfigReady', 'actionLocalConfigReady'
+        )) {
+            if (-not (Test-KakaoLiveHealthProperty -Object $workOrchestrator -Name $propertyName -ExpectedValue $true)) {
+                $workOrchestratorCutoverEnabled = $false
+                break
+            }
+        }
+    }
+    $healthWorkOrchestratorProperty = $Health.PSObject.Properties['workOrchestrator']
+    $healthWorkOrchestrator = if ($null -ne $healthWorkOrchestratorProperty) { $healthWorkOrchestratorProperty.Value } else { $null }
+    $workOrchestratorInvariantHealthy = Test-KakaoLiveHealthProperty -Object $healthWorkOrchestrator -Name 'ok' -ExpectedValue $true
+    $slackBotTokenPresent = Test-KakaoLiveHealthProperty -Object $config -Name 'slackBotTokenPresent' -ExpectedValue $true
 
     return [bool](
-        $Health.ok -eq $true -and
-        $null -ne $Health.config -and
-        $Health.config.workerLive -eq $true -and
-        $Health.config.workerDryRun -eq $false -and
-        $Health.config.windowsWritesEnabled -eq $true -and
-        $Health.config.autoSendEnabled -eq $true -and
-        $Health.config.slackCardDeliveryEnabled -eq $false -and
-        $Health.config.followUpRowsEnabled -eq $false -and
-        $Health.config.slackActionPollEnabled -eq $true -and
-        $Health.config.p0SlackEscalationEnabled -eq $false -and
-        $Health.config.supabaseRecoveryEnabled -eq $true -and
-        $Health.config.kakaoTabCleanupEnabled -eq $true -and
+        (Test-KakaoLiveHealthProperty -Object $Health -Name 'ok' -ExpectedValue $true) -and
+        $null -ne $config -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'workerLive' -ExpectedValue $true) -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'workerDryRun' -ExpectedValue $false) -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'windowsWritesEnabled' -ExpectedValue $true) -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'autoSendEnabled' -ExpectedValue $true) -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'slackCardDeliveryEnabled' -ExpectedValue $false) -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'followUpRowsEnabled' -ExpectedValue $false) -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'slackActionPollEnabled' -ExpectedValue $true) -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'p0SlackEscalationEnabled' -ExpectedValue $false) -and
+        $slackBotTokenPresent -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'supabaseRecoveryEnabled' -ExpectedValue $true) -and
+        (Test-KakaoLiveHealthProperty -Object $config -Name 'kakaoTabCleanupEnabled' -ExpectedValue $true) -and
         $aiDomSplitEnabled -and
-        $aiDecisionConcurrency -eq 2 -and
+        $aiDecisionConcurrency -and
         $workOrchestratorCutoverEnabled -and
+        $workOrchestratorInvariantHealthy -and
         $startupCatchupSupported
     )
 }
