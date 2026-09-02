@@ -10692,10 +10692,14 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
   };
 }
 
-export function loadKakaoWorkerRuntimeConfig() {
+export function loadKakaoWorkerEnvironment() {
   loadEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'));
   loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
   loadEnvFile(path.resolve(__dirname, '.env'));
+}
+
+export function loadKakaoWorkerRuntimeConfig() {
+  loadKakaoWorkerEnvironment();
   return requireConfig();
 }
 
@@ -10944,6 +10948,7 @@ function parseArgs(argv) {
 }
 
 async function main() {
+  loadKakaoWorkerEnvironment();
   validateWorkOrchestratorV2CutoverConfig(process.env);
   const args = parseArgs(process.argv.slice(2));
   const result = args.ragLookup

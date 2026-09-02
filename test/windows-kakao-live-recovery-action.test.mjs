@@ -232,17 +232,25 @@ test('v2 cutover environment stamp validates exact contract shape and rolls back
     `$extra=[ordered]@{};foreach($entry in $base.GetEnumerator()){$extra[$entry.Key]=$entry.Value};$extra['UNAPPROVED_RUNTIME_FLAG']='1'`,
     `$missingReason='';try{Set-KakaoLiveRuntimeEnvironment -Contract $missing}catch{$missingReason=$_.Exception.Message}`,
     `$extraReason='';try{Set-KakaoLiveRuntimeEnvironment -Contract $extra}catch{$extraReason=$_.Exception.Message}`,
+    `$booleanResults=[ordered]@{}`,
+    `foreach($case in @(@{name='cardsFalseImmediateFalse';values=@{SLACK_AGENT_CARD_DELIVERY_ENABLED='false';WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED='false';WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED='false'}},@{name='mixedWork';values=@{AI_WORKER_FOLLOW_UP_ITEMS_ENABLED='false';KAKAO_FOLLOW_UP_ITEMS_ENABLED='true';WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED='false'}},@{name='p0False';values=@{P0_SLACK_ESCALATION_ENABLED='false';WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED='false';WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED='false'}},@{name='unknown';values=@{SLACK_AGENT_CARD_DELIVERY_ENABLED='unexpected'}})){$candidate=[ordered]@{};foreach($entry in $base.GetEnumerator()){$candidate[$entry.Key]=$entry.Value};foreach($entry in $case.values.GetEnumerator()){$candidate[$entry.Key]=$entry.Value};try{Assert-KakaoLiveV2CutoverContract -Contract $candidate;$booleanResults[$case.name]='accepted'}catch{$booleanResults[$case.name]=$_.Exception.Message}}`,
+    `$normalized=[ordered]@{};foreach($entry in $base.GetEnumerator()){$normalized[$entry.Key]=$entry.Value};$normalized['SLACK_AGENT_CARD_DELIVERY_ENABLED']=' FALSE ';$normalized['WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED']=' TRUE ';$normalized['AI_WORKER_FOLLOW_UP_ITEMS_ENABLED']=' FALSE ';$normalized['KAKAO_FOLLOW_UP_ITEMS_ENABLED']=' FALSE ';$normalized['WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED']=' TRUE ';$normalized['P0_SLACK_ESCALATION_ENABLED']=' FALSE ';$normalized['WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED']=' TRUE ';$normalized['WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED']=' TRUE ';$normalized['WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED']=' TRUE ';$normalizedResult='';try{Assert-KakaoLiveV2CutoverContract -Contract $normalized;$normalizedResult='accepted'}catch{$normalizedResult=$_.Exception.Message}`,
     `$env:AI_WORKER_LIVE='before-marker';$env:WORKER_TIMEOUT_MS='before-timeout'`,
     `$setter={param($name,$value)if($name -eq 'WORKER_TIMEOUT_MS'){throw 'injected set failure'};[Environment]::SetEnvironmentVariable($name,$value,'Process')}`,
     `$failureReason='';try{Set-KakaoLiveRuntimeEnvironment -Contract $base -SetEnvironmentVariable $setter}catch{$failureReason=$_.Exception.Message};$rollbackMarker=$env:AI_WORKER_LIVE;$rollbackTimeout=$env:WORKER_TIMEOUT_MS`,
     `Set-KakaoLiveRuntimeEnvironment -Contract $base;$actual=[ordered]@{};foreach($entry in $base.GetEnumerator()){$actual[$entry.Key]=[Environment]::GetEnvironmentVariable($entry.Key,'Process')}`,
-    `[pscustomobject]@{missingReason=$missingReason;extraReason=$extraReason;failureReason=$failureReason;marker=$rollbackMarker;timeout=$rollbackTimeout;stamped=($actual|ConvertTo-Json -Compress);expected=($base|ConvertTo-Json -Compress)}|ConvertTo-Json -Compress`
+    `[pscustomobject]@{missingReason=$missingReason;extraReason=$extraReason;booleanResults=$booleanResults;normalizedResult=$normalizedResult;failureReason=$failureReason;marker=$rollbackMarker;timeout=$rollbackTimeout;stamped=($actual|ConvertTo-Json -Compress);expected=($base|ConvertTo-Json -Compress)}|ConvertTo-Json -Compress`
   ].join('; ');
   const observed = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
     encoding: 'utf8', windowsHide: true
   }));
   assert.match(observed.missingReason, /missing.*cleanup/i);
   assert.match(observed.extraReason, /not allowed/i);
+  assert.match(observed.booleanResults.cardsFalseImmediateFalse, /legacy cards.*immediate/i);
+  assert.match(observed.booleanResults.mixedWork, /legacy work rows.*work items/i);
+  assert.match(observed.booleanResults.p0False, /legacy P0.*v2 P0/i);
+  assert.match(observed.booleanResults.unknown, /invalid boolean/i);
+  assert.equal(observed.normalizedResult, 'accepted');
   assert.match(observed.failureReason, /injected set failure/i);
   assert.equal(observed.marker, 'before-marker');
   assert.equal(observed.timeout, 'before-timeout');

@@ -39,6 +39,24 @@ function Get-KakaoLiveRuntimeContract {
     }
 }
 
+function ConvertFrom-KakaoLiveContractBoolean {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    switch ($Value.Trim().ToLowerInvariant()) {
+        '1' { return $true }
+        'true' { return $true }
+        '0' { return $false }
+        'false' { return $false }
+        default { throw "Invalid boolean value for Kakao live runtime contract key $Name." }
+    }
+}
+
 function Assert-KakaoLiveV2CutoverContract {
     [CmdletBinding()]
     param(
@@ -69,26 +87,28 @@ function Assert-KakaoLiveV2CutoverContract {
     }
     if ($Contract.Count -ne $allowedKeys.Count) { throw 'Kakao live runtime contract must contain exactly the allowed keys.' }
 
-    $legacyCardsDisabled = [string]$Contract['SLACK_AGENT_CARD_DELIVERY_ENABLED'] -eq '0'
-    $legacyWorkRowsDisabled = [string]$Contract['AI_WORKER_FOLLOW_UP_ITEMS_ENABLED'] -eq '0' -and
-        [string]$Contract['KAKAO_FOLLOW_UP_ITEMS_ENABLED'] -eq '0'
-    $legacyP0Disabled = [string]$Contract['P0_SLACK_ESCALATION_ENABLED'] -eq '0'
-    $immediateEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED'] -eq '1'
-    $workItemsEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED'] -eq '1'
-    $cleanupEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED'] -eq '1'
-    $p0ReadbackEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED'] -eq '1'
-    $p0CutoverEnabled = [string]$Contract['WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED'] -eq '1'
+    $legacyCardsEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'SLACK_AGENT_CARD_DELIVERY_ENABLED' -Value $Contract['SLACK_AGENT_CARD_DELIVERY_ENABLED']
+    $legacyWorkRowsEnabled = (ConvertFrom-KakaoLiveContractBoolean -Name 'AI_WORKER_FOLLOW_UP_ITEMS_ENABLED' -Value $Contract['AI_WORKER_FOLLOW_UP_ITEMS_ENABLED']) -and
+        (ConvertFrom-KakaoLiveContractBoolean -Name 'KAKAO_FOLLOW_UP_ITEMS_ENABLED' -Value $Contract['KAKAO_FOLLOW_UP_ITEMS_ENABLED'])
+    $legacyP0Enabled = ConvertFrom-KakaoLiveContractBoolean -Name 'P0_SLACK_ESCALATION_ENABLED' -Value $Contract['P0_SLACK_ESCALATION_ENABLED']
+    $shadowWritesEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_SHADOW_WRITES' -Value $Contract['WORK_ORCHESTRATOR_V2_SHADOW_WRITES']
+    $immediateEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED']
+    $workItemsEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED']
+    $digestEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_DIGEST_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_DIGEST_ENABLED']
+    $cleanupEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED']
+    $p0ReadbackEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED']
+    $p0CutoverEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED']
 
     if ($p0CutoverEnabled -and -not $p0ReadbackEnabled) {
         throw 'Work Orchestrator v2 P0 cutover requires readback.'
     }
-    if ($legacyCardsDisabled -and -not $immediateEnabled) {
+    if (-not $legacyCardsEnabled -and -not $immediateEnabled) {
         throw 'Work Orchestrator v2 cutover guard: legacy cards require v2 immediate notifications.'
     }
-    if ($legacyWorkRowsDisabled -and -not $workItemsEnabled) {
+    if (-not $legacyWorkRowsEnabled -and -not $workItemsEnabled) {
         throw 'Work Orchestrator v2 cutover guard: legacy work rows require v2 work items.'
     }
-    if ($legacyP0Disabled -and -not ($p0ReadbackEnabled -and $p0CutoverEnabled)) {
+    if (-not $legacyP0Enabled -and -not ($p0ReadbackEnabled -and $p0CutoverEnabled)) {
         throw 'Work Orchestrator v2 cutover guard: legacy P0 requires v2 P0 readback and cutover.'
     }
     if ($cleanupEnabled -and -not $immediateEnabled) {

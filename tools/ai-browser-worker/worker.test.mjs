@@ -2097,6 +2097,55 @@ test('v2 cutover guard blocks invalid worker process startup before stdin work',
   }
 });
 
+test('worker CLI loads isolated supported env files before enforcing the cutover guard', () => {
+  const temporaryHome = fs.mkdtempSync(path.join(os.tmpdir(), 'village-worker-cutover-env-'));
+  const envDirectory = path.join(temporaryHome, '.hermes');
+  const envPath = path.join(envDirectory, '.env');
+  const workerDirectory = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1'));
+  const baseEnvironment = {
+    PATH: process.env.PATH,
+    SystemRoot: process.env.SystemRoot,
+    ComSpec: process.env.ComSpec,
+    HOME: temporaryHome,
+    USERPROFILE: temporaryHome
+  };
+  const writeEnvironment = (legacyCardValue) => {
+    fs.mkdirSync(envDirectory, { recursive: true });
+    fs.writeFileSync(envPath, [
+      'WORK_ORCHESTRATOR_V2_SHADOW_WRITES=0',
+      'WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_DIGEST_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED=0',
+      'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED=0',
+      'AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=1',
+      'KAKAO_FOLLOW_UP_ITEMS_ENABLED=1',
+      `SLACK_AGENT_CARD_DELIVERY_ENABLED=${legacyCardValue}`,
+      'P0_SLACK_ESCALATION_ENABLED=1'
+    ].join('\n'));
+  };
+  const runWorker = () => spawnSync(process.execPath, ['worker.mjs', '--rag-lookup'], {
+    cwd: workerDirectory, env: baseEnvironment, input: '', encoding: 'utf8'
+  });
+
+  try {
+    writeEnvironment('1');
+    const safe = runWorker();
+    assert.equal(safe.status, 1);
+    assert.match(`${safe.stdout}\n${safe.stderr}`, /No stdin JSON received/i);
+    assert.doesNotMatch(`${safe.stdout}\n${safe.stderr}`, /cutover guard/i);
+
+    writeEnvironment('false');
+    const unsafe = runWorker();
+    assert.equal(unsafe.status, 1);
+    assert.match(`${unsafe.stdout}\n${unsafe.stderr}`, /cutover guard/i);
+    assert.doesNotMatch(`${unsafe.stdout}\n${unsafe.stderr}`, /No stdin JSON received/i);
+  } finally {
+    fs.rmSync(temporaryHome, { recursive: true, force: true });
+  }
+});
+
 test('Work Orchestrator v2 work item verified automatic reply writes zero v2 rows', async () => {
   let upsertCalls = 0;
   const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
