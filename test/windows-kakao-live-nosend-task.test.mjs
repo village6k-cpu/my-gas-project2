@@ -231,7 +231,7 @@ test('full-live startup contract keeps customer replies and approval polling whi
         slackActionPollEnabled = $false; p0SlackEscalationEnabled = $false; slackBotTokenPresent = $true
         supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true; startupCatchupSupported = $true
         aiDomSplitEnabled = $true; aiDecisionConcurrency = 2
-        workOrchestrator = [pscustomobject]@{ runtimeMode = 'v2'; shadowWrites = $true; immediateEnabled = $true; workItemsEnabled = $true; digestEnabled = $true; cleanupEnabled = $true; p0ReadbackEnabled = $true; p0CutoverEnabled = $true; storeConfigured = $true; immediateLocalConfigReady = $true; p0LocalConfigReady = $true; digestLocalConfigReady = $true; actionLocalConfigReady = $true; cleanupLocalConfigReady = $true }
+        workOrchestrator = [pscustomobject]@{ runtimeMode = 'v2'; shadowWrites = $false; immediateEnabled = $false; workItemsEnabled = $true; digestEnabled = $true; cleanupEnabled = $true; p0ReadbackEnabled = $true; p0CutoverEnabled = $true; storeConfigured = $true; immediateLocalConfigReady = $false; p0LocalConfigReady = $true; digestLocalConfigReady = $true; actionLocalConfigReady = $true; cleanupLocalConfigReady = $true }
       }}
       $legacy = [pscustomobject]@{ ok = $true; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true

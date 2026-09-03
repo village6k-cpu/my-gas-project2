@@ -159,7 +159,7 @@ export function resolveWorkOrchestratorV2CutoverConfig(env = process.env) {
     || workOrchestrator.shadowWrites || workOrchestrator.immediateEnabled
     || workOrchestrator.workItemsEnabled || workOrchestrator.digestEnabled
     || workOrchestrator.cleanupEnabled || p0ReadbackEnabled || p0CutoverEnabled)) {
-    throw new Error('Work Orchestrator legacy runtime mode requires the exact rollback contract');
+    throw new Error('Work Orchestrator cutover guard: legacy runtime mode requires the exact rollback contract');
   }
   if (runtimeMode === 'v2' && (!v2FlagsEnabled || legacyCardsEnabled
     || legacyWorkRowsEnabled || legacyP0Enabled || legacyActionPollEnabled)) {
