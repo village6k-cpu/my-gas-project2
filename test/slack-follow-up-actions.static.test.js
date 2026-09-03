@@ -4,12 +4,13 @@ import fs from 'node:fs';
 
 const worker = fs.readFileSync('tools/ai-browser-worker/worker.mjs', 'utf8');
 const bridge = fs.readFileSync('tools/kakao-dom-bridge/server.mjs', 'utf8');
+const contracts = fs.readFileSync('tools/work-orchestrator-v2/contracts.mjs', 'utf8');
 const schema = fs.readFileSync('tools/kakao-dom-bridge/supabase-schema.sql', 'utf8');
 const slackActions = fs.readFileSync('apps/follow-up-dashboard/api/slack-actions.js', 'utf8');
 const kakaoAutomation = fs.readFileSync('scripts/kakao-automation', 'utf8');
 const hermesPatch = fs.readFileSync('scripts/patch-hermes-village-followup-slack', 'utf8');
 
-test('Slack follow-up agent-card delivery is opt-in only', () => {
+test('Slack follow-up agent-card delivery follows the exact legacy or v2 runtime mode', () => {
   assert.match(worker, /스케쥴-agent/);
   assert.match(worker, /서류발송-agent/);
   assert.match(worker, /정산-agent/);
@@ -17,13 +18,20 @@ test('Slack follow-up agent-card delivery is opt-in only', () => {
   assert.match(worker, /기타문의/);
   assert.match(worker, /routeFollowUpToSlack/);
   assert.match(worker, /chat\.postMessage/);
-  assert.match(worker, /SLACK_AGENT_CARD_DELIVERY_ENABLED/);
+  assert.match(worker, /validateWorkOrchestratorV2CutoverConfig/);
+  assert.match(worker, /slackFollowUpEnabled:\s*cutoverConfig\.legacyCardsEnabled/);
+  assert.match(contracts, /SLACK_AGENT_CARD_DELIVERY_ENABLED/);
+  assert.match(contracts, /runtimeMode === 'v2'/);
+  assert.match(contracts, /legacyCardsEnabled/);
   assert.doesNotMatch(worker, /slackFollowUpEnabled:\s*process\.env\.SLACK_FOLLOW_UP_ENABLED\s*===\s*'1'/);
 });
 
-test('Bridge health exposes follow-up row and Slack card delivery gates', () => {
-  assert.match(bridge, /followUpRowsEnabled:\s*process\.env\.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0'/);
-  assert.match(bridge, /slackCardDeliveryEnabled:\s*process\.env\.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1'/);
+test('Bridge health exposes runtime-mode-derived follow-up and Slack gates', () => {
+  assert.match(bridge, /const CUTOVER_CONFIG = validateWorkOrchestratorV2CutoverConfig\(process\.env\)/);
+  assert.match(bridge, /followUpRowsEnabled:\s*CUTOVER_CONFIG\.legacyWorkRowsEnabled/);
+  assert.match(bridge, /slackCardDeliveryEnabled:\s*CUTOVER_CONFIG\.legacyCardsEnabled/);
+  assert.match(bridge, /slackActionPollEnabled:\s*CUTOVER_CONFIG\.legacyActionPollEnabled/);
+  assert.match(bridge, /runtimeMode:\s*config\.workOrchestrator\.runtimeMode/);
   assert.match(bridge, /slackBotTokenPresent:\s*Boolean\(CONFIG\.slackBotToken\)/);
   assert.match(bridge, /slackChannels:\s*CONFIG\.slackChannels/);
 });
@@ -32,15 +40,19 @@ test('Bridge failure follow-ups are delivered to Slack, not only inserted into S
   assert.match(bridge, /import \{ buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows \}/);
   assert.match(bridge, /slackFollowUpEnabled:\s*CONFIG\.slackCardDeliveryEnabled/);
   assert.match(bridge, /slackBotToken:\s*CONFIG\.slackBotToken/);
-  assert.match(bridge, /const upsertResult = await upsertFollowUpRows\(followUpConfig\(\), \[row\]\)/);
-  assert.match(bridge, /deliverSlackFollowUpRows\(followUpConfig\(\), upsertResult\.rows\)/);
+  assert.match(bridge, /legacyEnabled:\s*CONFIG\.followUpRowsEnabled/);
+  assert.match(bridge, /workItemsEnabled:\s*CONFIG\.workOrchestrator\.workItemsEnabled/);
+  assert.match(bridge, /legacyUpsert:\s*\(rows\) => upsertFollowUpRows\(followUp, rows\)/);
+  assert.match(bridge, /legacyDeliver:\s*\(rows\) => deliverSlackFollowUpRows\(followUp, rows\)/);
+  assert.match(bridge, /if \(legacyEnabled\)[\s\S]*?legacy = await legacyUpsert\(\[row\]\)/);
+  assert.match(bridge, /if \(workItemsEnabled\)[\s\S]*?workStore\.upsertWorkItem/);
   assert.match(bridge, /worker_failure_followup_slack_delivery/);
 });
 
 test('Bridge card delivery honours two-channel routing and tags failure rows as inquiry cards', () => {
   const configBlock = bridge.match(/function followUpConfig\(\)[\s\S]*?\n\}/)?.[0] || '';
   assert.match(configBlock, /\.\.\.buildSlackRoutingConfig\(process\.env\)/);
-  const failureRow = bridge.match(/async function createWorkerFailureFollowUp[\s\S]*?const upsertResult/)?.[0] || '';
+  const failureRow = bridge.match(/function buildWorkerFailureFollowUpRow[\s\S]*?return row;/)?.[0] || '';
   assert.match(failureRow, /card_kind:\s*'inquiry_case'/);
 });
 
@@ -68,11 +80,14 @@ test('Slack interaction endpoint verifies signatures and supports send modal flo
 });
 
 test('Local bridge polls Slack send requests and uses the existing manual-send path', () => {
-  assert.match(bridge, /SLACK_ACTION_POLL_ENABLED/);
+  assert.match(bridge, /slackActionPollEnabled:\s*CUTOVER_CONFIG\.legacyActionPollEnabled/);
   assert.match(bridge, /fetchPendingSlackActionRows/);
   assert.match(bridge, /enqueueManualSend/);
   assert.match(bridge, /payload\?\.slack_action\?\.status === 'pending'/);
   assert.match(bridge, /mergeFollowUpPayloadById/);
+  assert.match(bridge, /const legacyEnabled = CONFIG\.slackActionPollEnabled && supabaseConfigured\(\)/);
+  assert.match(bridge, /!legacyEnabled && !workOrchestratorActionPoller\.enabled/);
+  assert.match(bridge, /result\.workOrchestratorV2 = safeWorkActionPollResult/);
   assert.match(bridge, /\/slack\/actions/);
   assert.match(bridge, /village_followup_edit_send_submit/);
 });
