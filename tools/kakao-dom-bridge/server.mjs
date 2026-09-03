@@ -5984,7 +5984,7 @@ function kakaoDevtoolsBaseUrl() {
 }
 
 function isMainKakaoChatListUrl(url = '') {
-  return /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats(?:[?#]|$)/.test(String(url || ''));
+  return /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats(?:[?#]|$)/.test(String(url || ''));
 }
 
 function isKakaoConversationUrl(url = '') {

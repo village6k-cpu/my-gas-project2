@@ -249,14 +249,14 @@ open_chrome_profile() {
 chrome_devtools_has_chat_tab() {
   chrome_devtools_ready || return 1
   curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
-    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); const ok = tabs.some(t => t.type === "page" && /https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats/.test(t.url || "")); process.exit(ok ? 0 : 1); });'
+    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); const ok = tabs.some(t => t.type === "page" && /https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats/.test(t.url || "")); process.exit(ok ? 0 : 1); });'
 }
 
 chrome_devtools_close_non_chat_kakao_tabs() {
   chrome_devtools_ready || return 0
   local ids
   ids="$(curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
-    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); for (const t of tabs) { const url = t.url || ""; const isKakao = /^https:\/\/(business|center-pf)\.kakao\.com\//.test(url); const isMainChatList = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats(?:[?#]|$)/.test(url); if (t.type === "page" && t.id && isKakao && !isMainChatList) console.log(t.id); } });')"
+    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); for (const t of tabs) { const url = t.url || ""; const isKakao = /^https:\/\/(business|center-pf)\.kakao\.com\//.test(url); const isMainChatList = /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats(?:[?#]|$)/.test(url); if (t.type === "page" && t.id && isKakao && !isMainChatList) console.log(t.id); } });')"
   for id in $ids; do
     curl -sS --max-time 2 -X PUT "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
       || curl -sS --max-time 2 "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
@@ -268,7 +268,7 @@ chrome_devtools_close_non_kakao_page_tabs() {
   chrome_devtools_ready || return 0
   local ids
   ids="$(curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
-    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); for (const t of tabs) { const url = t.url || ""; const isMainChatList = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats(?:[?#]|$)/.test(url); if (t.type === "page" && t.id && !isMainChatList) console.log(t.id); } });')"
+    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); for (const t of tabs) { const url = t.url || ""; const isMainChatList = /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats(?:[?#]|$)/.test(url); if (t.type === "page" && t.id && !isMainChatList) console.log(t.id); } });')"
   for id in $ids; do
     curl -sS --max-time 2 -X PUT "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
       || curl -sS --max-time 2 "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
@@ -280,7 +280,7 @@ chrome_devtools_activate_chat_tab() {
   chrome_devtools_ready || return 0
   local id
   id="$(curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
-    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); const tab = tabs.find(t => t.type === "page" && /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats(?:[?#]|$)/.test(t.url || "")); if (tab && tab.id) console.log(tab.id); });')"
+    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); const tab = tabs.find(t => t.type === "page" && /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats(?:[?#]|$)/.test(t.url || "")); if (tab && tab.id) console.log(tab.id); });')"
   if [[ -n "$id" ]]; then
     curl -sS --max-time 2 -X PUT "$(chrome_devtools_url)/json/activate/${id}" >/dev/null \
       || curl -sS --max-time 2 "$(chrome_devtools_url)/json/activate/${id}" >/dev/null \

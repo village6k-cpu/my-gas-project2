@@ -5237,6 +5237,19 @@ test('pickKakaoMainListTarget accepts the Kakao chat-list trailing slash', () =>
   assert.equal(target?.id, 'only-tab');
 });
 
+test('Kakao DevTools targeting accepts current space channel routes', () => {
+  const listUrl = 'https://business.kakao.com/space/353491/channel/_xhPMls/chats';
+  const target = pickKakaoMainListTarget([
+    { type: 'page', title: 'Kakao channel manager', url: listUrl, id: 'current-list' }
+  ]);
+  const conversation = pickKakaoConversationTarget([
+    { type: 'page', title: '고객 - 빌리지 - 카카오비즈니스 파트너센터', url: `${listUrl}/123`, id: 'current-chat' }
+  ], ['고객'], ['123']);
+
+  assert.equal(target?.id, 'current-list');
+  assert.equal(conversation?.id, 'current-chat');
+});
+
 test('same-target Kakao navigation is marked unsafe to close', async () => {
   let listCalls = 0;
   const fetchImpl = async () => {

@@ -103,7 +103,7 @@ test('CDP fallback injects into the main list only and can reach the loopback br
     'utf8'
   );
 
-  assert.match(injector, /re\.fullmatch\(r"\/_\[\^\/\]\+\/chats\/\?", parsed\.path\)/);
+  assert.match(injector, /CHAT_LIST_PATH_RE = re\.compile\(r"[^\n]*space\/\[\^\/\]\+\/channel/);
   assert.match(shim, /runtime\.sendMessage/);
   assert.match(shim, /127\.0\.0\.1.*localhost/);
   assert.match(shim, /url\.pathname !== '\/events'/);

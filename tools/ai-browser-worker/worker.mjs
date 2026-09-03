@@ -5573,7 +5573,7 @@ end run
 function isKakaoMainListTarget(target = {}) {
   const targetUrl = String(target.url || '');
   const targetTitle = String(target.title || '');
-  const isChatListUrl = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats\/?(?:[?#]|$)/.test(targetUrl);
+  const isChatListUrl = /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats\/?(?:[?#]|$)/.test(targetUrl);
   const isMainTitle = targetTitle === '카카오비즈니스 파트너센터';
   const isConversationPopup = targetTitle.includes(' - 빌리지 - 카카오비즈니스');
   return target.type === 'page' && !isConversationPopup && (isChatListUrl || isMainTitle);
@@ -6469,7 +6469,7 @@ export function pickKakaoConversationTarget(targets = [], hints = [], roomIds = 
     const roomId = url.match(/\/chats\/(\d+)(?:[/?#]|$)/)?.[1] || '';
     const roomExact = safeRoomIds.includes(roomId);
     return target?.type === 'page' &&
-      /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats\/\d+/.test(url) &&
+      /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats\/\d+/.test(url) &&
       (roomExact || (
         title.includes(' - 빌리지 - 카카오비즈니스') &&
         ((!safeRoomIds.length && !safeHints.length) || safeHints.some((hint) => title.includes(hint)))

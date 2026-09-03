@@ -15,6 +15,8 @@ const {
 test('authenticated Kakao chat URLs include list and detail pages but not login pages', () => {
   assert.equal(isAuthenticatedKakaoChatUrl('https://business.kakao.com/_xhPMls/chats'), true);
   assert.equal(isAuthenticatedKakaoChatUrl('https://business.kakao.com/_xhPMls/chats/4845268282772547'), true);
+  assert.equal(isAuthenticatedKakaoChatUrl('https://business.kakao.com/space/353491/channel/_xhPMls/chats'), true);
+  assert.equal(isAuthenticatedKakaoChatUrl('https://business.kakao.com/space/353491/channel/_xhPMls/chats/4845268282772547'), true);
   assert.equal(isAuthenticatedKakaoChatUrl('https://accounts.kakao.com/login/'), false);
 });
 
