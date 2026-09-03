@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const registerProduction = read('scripts/windows/register-kakao-production-tasks.ps1');
 const watchdog = read('scripts/windows/watch-kakao-production.ps1');
+const stagingStart = read('scripts/windows/start-kakao-staging.ps1');
 const runbook = read('docs/windows-kakao-hermes-migration-runbook.md');
 const routingConfig = read('scripts/windows/configure-hermes-village-routing.py');
 const overlaySync = read('scripts/windows/sync-hermes-profile-overlay.ps1');
@@ -82,6 +83,15 @@ test('the watchdog observes first and only restarts through the ownership-valida
     /catch\s*\{[\s\S]*?manual intervention required[\s\S]*?throw/,
     'an ownership mismatch must abort the automatic restart'
   );
+});
+
+test('the owned Chrome launcher preserves one bounded generation of startup diagnostics', () => {
+  assert.match(stagingStart, /chrome\.out\.log/);
+  assert.match(stagingStart, /chrome\.err\.log/);
+  assert.match(stagingStart, /foreach \(\$stream in @\('out', 'err'\)\)/);
+  assert.match(stagingStart, /chrome\.\{0\}\.prev\.log/);
+  assert.match(stagingStart, /-RedirectStandardOutput/);
+  assert.match(stagingStart, /-RedirectStandardError/);
 });
 
 test('busy bridge handoff requires a current per-job phase proof for stdin Hermes', () => {

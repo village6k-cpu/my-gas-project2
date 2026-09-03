@@ -189,7 +189,16 @@ try {
     # Chromium can relaunch itself and normalize --user-data-dir quoting.  The
     # unique profile path is stable while the full argument spelling is not.
     $chromeCommandMarker = $chromeProfilePath
-    $chromeProcess = Start-Process -FilePath $ChromePath -ArgumentList $chromeCommandLine -PassThru -ErrorAction Stop
+    $chromeLogRoot = Get-KakaoStagingRoot
+    foreach ($stream in @('out', 'err')) {
+        $cur = Join-Path $chromeLogRoot ("chrome.{0}.log" -f $stream)
+        if (Test-Path -LiteralPath $cur) {
+            Move-Item -LiteralPath $cur -Destination (Join-Path $chromeLogRoot ("chrome.{0}.prev.log" -f $stream)) -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $chromeProcess = Start-Process -FilePath $ChromePath -ArgumentList $chromeCommandLine -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput (Join-Path $chromeLogRoot 'chrome.out.log') `
+        -RedirectStandardError (Join-Path $chromeLogRoot 'chrome.err.log')
     $chromeStarted = [pscustomobject]@{
         Name           = 'chrome'
         Process        = $chromeProcess
