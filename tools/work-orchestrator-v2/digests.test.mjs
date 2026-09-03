@@ -44,7 +44,10 @@ function workItem(overrides = {}) {
     last_digest_at: null,
     next_reminder_at: null,
     version: 4,
-    payload: { requires_human_action: true },
+    payload: {
+      requires_human_action: true,
+      recommended_action: '정산 원장을 확인하고 필요한 처리를 완료하세요.'
+    },
     ...overrides
   };
 }
@@ -162,7 +165,14 @@ test('P0 acknowledgement is canonical, present, and not later than the supplied 
 
   for (const [name, payload, cutoff, expectedIds] of cases) {
     await t.test(name, () => {
-      const selected = selectDigestItems([workItem({ priority: 'p0', payload })], cutoff);
+      const ownerPayload = payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+        ? {
+            requires_human_action: true,
+            recommended_action: '즉시 확인하세요.',
+            ...payload
+          }
+        : payload;
+      const selected = selectDigestItems([workItem({ priority: 'p0', payload: ownerPayload })], cutoff);
       assert.deepEqual(selected.map(({ id }) => id), expectedIds);
     });
   }
@@ -172,7 +182,11 @@ test('selection returns the exact render allowlist and no caller object aliases'
   const input = workItem({
     customer_name: 'PRIVATE CUSTOMER',
     source_event_keys: ['PRIVATE EVENT'],
-    payload: { requires_human_action: true, secret: 'PRIVATE SECRET' }
+    payload: {
+      requires_human_action: true,
+      recommended_action: '정산 원장을 확인하고 필요한 처리를 완료하세요.',
+      secret: 'PRIVATE SECRET'
+    }
   });
   const before = structuredClone(input);
 
@@ -184,6 +198,8 @@ test('selection returns the exact render allowlist and no caller object aliases'
     version: 4,
     title: 'Payment review',
     summary: 'Verify the typed payment outcome.',
+    workType: 'payment_check',
+    recommendedAction: '정산 원장을 확인하고 필요한 처리를 완료하세요.',
     ownerId: 'owner-primary',
     roomKey: 'room:1',
     priority: 'normal',
@@ -195,6 +211,63 @@ test('selection returns the exact render allowlist and no caller object aliases'
     dailyReminderDue: false
   }]);
   assert.doesNotMatch(JSON.stringify(selected), /PRIVATE|work_key|payload|customer/i);
+});
+
+test('digest keeps only explicit semantic owner actions and renders an employee handoff', () => {
+  const selected = selectDigestItems([
+    workItem({
+      id: UUIDS[0],
+      title: '견적 발송',
+      summary: '고객이 최종 견적서를 요청했고 자동 발송 조건은 충족되지 않았습니다.',
+      work_type: 'quote_send',
+      payload: {
+        requires_human_action: true,
+        recommended_action: '확정 견적서를 검토한 뒤 고객에게 발송하세요.'
+      }
+    }),
+    workItem({
+      id: UUIDS[1],
+      work_type: 'automation_error_review',
+      summary: 'worker timeout database transport error',
+      payload: { requires_human_action: true, recommended_action: '로그를 확인하세요.' }
+    }),
+    workItem({
+      id: UUIDS[2],
+      work_type: 'reservation_review_timeout',
+      summary: 'automation timeout',
+      payload: { requires_human_action: true, recommended_action: '재시도하세요.' }
+    }),
+    workItem({
+      id: UUIDS[3],
+      work_type: 'payment_check',
+      payload: { requires_human_action: false, recommended_action: '처리하지 않음' }
+    }),
+    workItem({
+      id: UUIDS[4],
+      work_type: 'schedule_check',
+      payload: { recommended_action: '명시되지 않은 작업' }
+    })
+  ], NOW);
+
+  assert.deepEqual(selected.map(({ id, workType, recommendedAction }) => ({ id, workType, recommendedAction })), [{
+    id: UUIDS[0],
+    workType: 'quote_send',
+    recommendedAction: '확정 견적서를 검토한 뒤 고객에게 발송하세요.'
+  }]);
+
+  const rendered = buildDigestSlackMessage(selected, renderConfig);
+  const text = itemSections(rendered)[0].text.text;
+  assert.match(text, /직원이 정리한 내용: 고객이 최종 견적서를 요청/);
+  assert.match(text, /대표님이 할 일: 확정 견적서를 검토한 뒤 고객에게 발송하세요/);
+  assert.doesNotMatch(text, /automation|error|timeout|worker|database/i);
+});
+
+test('renderer rejects operational work even if a caller forges the selected shape', () => {
+  const selected = selectedItem();
+  assert.throws(
+    () => buildDigestSlackMessage([{ ...selected, workType: 'automation_error_review' }], renderConfig),
+    { message: 'invalid digest input' }
+  );
 });
 
 test('section precedence and deterministic due-age-UUID ordering place every eligible row exactly once', () => {
@@ -349,7 +422,11 @@ test('ordinary digest actions never render acknowledgement, including for an ack
     workItem({
       id: UUIDS[1],
       priority: 'p0',
-      payload: { p0_acknowledged_at: NOW }
+      payload: {
+        requires_human_action: true,
+        recommended_action: '즉시 확인하세요.',
+        p0_acknowledged_at: NOW
+      }
     })
   ], NOW);
   const result = buildDigestSlackMessage(selected, renderConfig);
