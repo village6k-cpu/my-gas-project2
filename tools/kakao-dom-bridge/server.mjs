@@ -594,6 +594,7 @@ export function createWorkOrchestratorShadowRuntime({
   record = recordShadowNotificationObligation,
   now = () => new Date().toISOString()
 } = {}) {
+  const enabled = config.shadowWrites === true;
   const state = {
     shadowClaims: 0,
     shadowDuplicates: 0,
@@ -612,6 +613,7 @@ export function createWorkOrchestratorShadowRuntime({
   }
 
   return {
+    enabled,
     state,
     recordAccepted(event, roomVersion = {}) {
       if (roomVersion.changed !== true) return null;
@@ -6159,7 +6161,7 @@ export async function handleEvent(req, res, dependencies = {}) {
   event.roomRevision = roomVersion.revision;
   dependencies.onRoomRevisionAccepted?.(event, roomVersion);
 
-  if (roomVersion.changed) {
+  if (roomVersion.changed && shadowRuntime?.enabled === true) {
     try {
       const shadowObservation = shadowRuntime?.recordAccepted?.(event, roomVersion);
       if (shadowObservation && typeof shadowObservation.catch === 'function') {

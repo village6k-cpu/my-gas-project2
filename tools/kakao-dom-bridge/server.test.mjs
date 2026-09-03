@@ -4565,7 +4565,7 @@ test('immediate notification gate rejects every non-delivered runtime result bef
   }
 });
 
-test('immediate notification OFF makes zero store or Slack calls and preserves legacy duplicate behavior', async () => {
+test('silent v2 intake persists and queues accepted events without shadow receipts or Slack calls', async () => {
   const calls = [];
   const runtime = createWorkOrchestratorImmediateRuntime({
     config: { immediateEnabled: false },
@@ -4579,7 +4579,10 @@ test('immediate notification OFF makes zero store or Slack calls and preserves l
   });
   const dependencies = {
     appendNdjson: () => {},
-    shadowRuntime: { recordAccepted: (_, roomVersion) => calls.push(`shadow:${roomVersion.changed}`) },
+    shadowRuntime: {
+      enabled: false,
+      recordAccepted: () => calls.push('shadow-receipt')
+    },
     immediateRuntime: runtime,
     writeSupabaseEvent: async () => calls.push('legacy-write'),
     scheduleDebouncedJob: () => calls.push('legacy-queue')
@@ -4590,7 +4593,7 @@ test('immediate notification OFF makes zero store or Slack calls and preserves l
 
   assert.deepEqual(first.body, { ok: true, roomKey: 'chat:immediate-off', eventHash: 'immediate-off-1' });
   assert.deepEqual(duplicate.body, first.body);
-  assert.deepEqual(calls, ['shadow:true', 'legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
+  assert.deepEqual(calls, ['legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
 });
 
 test('immediate notification startup is locally fail-closed and performs no network at construction', () => {
@@ -4666,6 +4669,7 @@ test('Work Orchestrator shadow starts after revision acceptance and does not blo
   let settleShadow;
   const shadowPending = new Promise((resolve) => { settleShadow = resolve; });
   const shadowRuntime = {
+    enabled: true,
     recordAccepted(event, roomVersion) {
       calls.push(`shadow:${event.roomRevision}:${roomVersion.changed}`);
       return shadowPending;
