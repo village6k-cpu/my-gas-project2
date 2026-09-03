@@ -8,11 +8,12 @@ function Get-KakaoLiveNoSendRuntimeContract {
     return [ordered]@{
         AI_WORKER_LIVE                    = '1'
         AI_WORKER_AUTO_SEND               = '0'
-        AI_WORKER_DRY_RUN                 = '0'
+        AI_WORKER_DRY_RUN                 = '1'
         SLACK_ACTION_POLL_ENABLED         = '0'
-        SLACK_AGENT_CARD_DELIVERY_ENABLED = '1'
-        VILLAGE_WINDOWS_WRITES_ENABLED    = '1'
+        SLACK_AGENT_CARD_DELIVERY_ENABLED = '0'
+        VILLAGE_WINDOWS_WRITES_ENABLED    = '0'
         HERMES_WORKER_COMMAND_MODE        = 'python_module'
+        KAKAO_HERMES_TRANSPORT            = 'gateway_no_send'
     }
 }
 
@@ -25,11 +26,18 @@ function Test-KakaoLiveNoSendHealth {
 
     return [bool](
         $Health.ok -eq $true -and
+        $null -ne $Health.gateway -and
+        $Health.gateway.gatewayReady -eq $true -and
+        $null -ne $Health.gateway.consumer -and
+        $Health.gateway.consumer.fresh -eq $true -and
         $null -ne $Health.config -and
         $Health.config.workerLive -eq $true -and
+        $Health.config.workerDryRun -eq $true -and
+        $Health.config.windowsWritesEnabled -eq $false -and
         $Health.config.autoSendEnabled -eq $false -and
-        $Health.config.slackCardDeliveryEnabled -eq $true -and
-        $Health.config.slackActionPollEnabled -eq $false
+        $Health.config.slackCardDeliveryEnabled -eq $false -and
+        $Health.config.slackActionPollEnabled -eq $false -and
+        $Health.config.hermesTransport -eq 'gateway_no_send'
     )
 }
 
@@ -44,6 +52,8 @@ function Get-KakaoLiveNoSendStartupPlan {
             'stop-owned-remnants-if-unhealthy'
             'start-owned-staging-with-writes'
             'promote-bridge-to-live-nosend'
+            'verify-kakaoworker-plugin-hash'
+            'verify-gateway-consumer-heartbeat'
             'verify-live-nosend-health'
         )
     }

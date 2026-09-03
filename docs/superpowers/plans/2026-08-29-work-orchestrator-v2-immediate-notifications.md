@@ -14,7 +14,7 @@
 
 - The first notice is mandatory for every accepted customer-message event and cannot wait for Hermes.
 - Heartbeats, diagnostic snapshots, stale dated events, page containers, and action chrome are not customer-message events and must not notify.
-- Delivery is exact-once by `source_event_key`; an ambiguous Slack response must reconcile before retry.
+- Delivery is exact-once by canonical `source_event_key`; bounded identifiers are preserved byte-for-byte, surrounding whitespace is rejected, and identifiers over 500 characters become `v2-long-sha256:` plus SHA-256 of the complete identifier. An ambiguous Slack response must reconcile before retry.
 - Store exact `channel_id` and `message_ts` only after Slack readback/success.
 - Do not send any customer-facing Kakao message, write Sheets/GAS, disable legacy cards, or delete Slack messages in this plan.
 - A live internal Slack test message is an explicit cutover gate; mocked tests and shadow writes run first.
@@ -156,8 +156,9 @@ git commit -m "feat: add bounded Slack notification client"
 - Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
 
 **Interfaces:**
-- Consumes: `store.claimNotificationReceipt`, `store.transitionNotification`, `slack.postMessage`, `slack.findMessageByClientId`.
+- Consumes: `store.claimNotificationReceipt`, `store.claimNotificationDelivery`, `store.getNotificationByEventKey`, `store.markNotificationDelivered`, `store.markNotificationFailed`, `slack.postMessage`, `slack.findMessageByClientId`.
 - Produces: `ensureImmediateNotification({event,config,store,slack,now}) -> {status,receipt,delivery,reconciled}`.
+- `store.claimNotificationReceipt(...)` returns `{created,row}`. The receipt is always `claim.row`; after validating the single `canonicalSourceEventKey` contract (including idempotent long-key hashes), require `row.client_message_id === deterministicClientMessageId(row.source_event_key)` exactly.
 
 - [ ] **Step 1: Write RED tests for the state machine**
 
@@ -166,9 +167,12 @@ Required cases:
 1. a new receipt transitions `pending -> delivering -> delivered` and posts once;
 2. a duplicate event whose receipt is `delivered` posts zero times;
 3. two concurrent calls allow only one `pending|failed -> delivering` claim;
-4. an ambiguous timeout finds the exact `client_msg_id`, stores coordinates, and does not repost;
+4. a pre-existing `delivering` row searches history before any post: only a result whose `client_msg_id` exactly equals the receipt `client_message_id` stores coordinates; missing/mismatched IDs are no match, and a history failure leaves the row delivering;
 5. an ambiguous timeout with no readback moves to `failed` with `last_delivery_error`;
-6. P0 is not inferred before Hermes; the immediate event starts with `urgency=normal` unless the source event carries an explicit trusted alert level.
+6. delivered persistence failure and empty compare-and-swap results are never reported as successful delivery;
+7. every claimed receipt and delivery-CAS row has a non-empty canonical `source_event_key` of at most 500 characters and an exact lowercase identity equal to `deterministicClientMessageId(source_event_key)` before any post/history call or subsequent delivery transition; a shape-valid unrelated UUID v5 is rejected;
+8. customer content cannot inject Slack mentions, special broadcasts, links, bold, italic, strike, or code markup;
+9. P0 is not inferred from customer text or Hermes. No reviewed trusted-alert transport field exists, so receipt urgency remains the schema default `normal`.
 
 Use an expected delivered row:
 
@@ -193,12 +197,12 @@ Expected: FAIL because the state machine is missing.
 Add:
 
 ```js
-claimNotificationDelivery({ id })
-markNotificationDelivered({ id, channelId, messageTs, deliveredAt })
-markNotificationFailed({ id, error, attemptedAt })
+claimNotificationDelivery({ id, expectedDeliveryAttempts })
+markNotificationDelivered({ id, expectedDeliveryAttempts, channelId, messageTs, deliveredAt })
+markNotificationFailed({ id, expectedDeliveryAttempts, failureCode })
 ```
 
-`claimNotificationDelivery` must filter `notification_state=in.(pending,failed)` and increment `delivery_attempts`. Empty representation means another process owns the claim.
+`claimNotificationDelivery` must atomically filter by `id`, `notification_state=in.(pending,failed)`, and the observed `delivery_attempts`, then set exactly `observed+1`, clear `last_delivery_error`, and refuse a fourth attempt. Empty representation means another process owns the claim and must remain observable. Both delivery terminal methods compare-and-swap only from `delivering` and the same positive `expectedDeliveryAttempts` generation returned by the delivery claim, so a stale attempt N writer cannot mutate attempt N+1. Failure accepts only reviewed bounded tokens and never writes an `attempted_at` column.
 
 - [ ] **Step 4: Implement rendering and delivery**
 
@@ -206,9 +210,14 @@ Export:
 
 ```js
 export function buildImmediateNotice(event = {}, { mentionUserIds = [] } = {}) {
-  const mentions = [...new Set(mentionUserIds)].map((id) => `<@${id}>`).join(' ');
-  const customer = String(event.customerName || '고객명 미확인').slice(0, 200);
-  const preview = String(event.messagePreview || event.previewText || '내용 확인 필요').slice(0, 1000);
+  const mentions = [...new Set(mentionUserIds)]
+    .filter((id) => /^[UW][A-Z0-9]{1,79}$/.test(id))
+    .map((id) => `<@${id}>`).join(' ');
+  const escape = (value, fallback, max) => String(value || fallback).slice(0, max)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('*', '＊').replaceAll('_', '＿').replaceAll('~', '～').replaceAll('`', '｀');
+  const customer = escape(event.customerName, '고객명 미확인', 200);
+  const preview = escape(event.messagePreview || event.previewText, '내용 확인 필요', 1000);
   return {
     text: `${mentions ? `${mentions} ` : ''}💬 카카오 새 메시지 · ${customer} · ${preview}`.slice(0, 2900),
     blocks: [
@@ -219,49 +228,47 @@ export function buildImmediateNotice(event = {}, { mentionUserIds = [] } = {}) {
 }
 
 export async function ensureImmediateNotification({ event, config, store, slack, now = () => new Date() } = {}) {
-  const receipt = await store.claimNotificationReceipt(notificationReceiptInput(event));
+  const claim = await store.claimNotificationReceipt(notificationReceiptInput(event));
+  const receipt = claim.row;
+  assertCanonicalReceiptIdentity(receipt); // exact deterministicClientMessageId(receipt.source_event_key)
   if (receipt.notification_state === 'delivered') return { status: 'delivered', receipt, delivery: null, reconciled: false };
-  const claimed = await store.claimNotificationDelivery({ id: receipt.id });
+  if (receipt.notification_state === 'delivering') return reconcileExactHistoryOrThrowUnconfirmed(receipt);
+  if (receipt.delivery_attempts >= 3) throw new ImmediateNotificationError('attempts_exhausted', 'exhausted');
+  const claimed = await store.claimNotificationDelivery({
+    id: receipt.id,
+    expectedDeliveryAttempts: receipt.delivery_attempts
+  });
   if (!claimed.applied) {
-    const current = await store.getNotificationByEventKey(receipt.source_event_key);
-    return { status: current?.notification_state || 'busy', receipt: current || receipt, delivery: null, reconciled: false };
+    await store.getNotificationByEventKey(receipt.source_event_key);
+    throw new ImmediateNotificationError('claim_conflict', 'unconfirmed');
   }
+  assertCanonicalReceiptIdentity(claimed.row);
   const notice = buildImmediateNotice(event, { mentionUserIds: config.mentionUserIds });
+  let delivery;
   try {
-    const delivery = await slack.postMessage({
+    delivery = await slack.postMessage({
       channel: config.inboxChannelId,
       ...notice,
-      clientMsgId: claimed.row.slack_client_msg_id
+      clientMsgId: claimed.row.client_message_id
     });
-    const delivered = await store.markNotificationDelivered({ id: receipt.id, channelId: delivery.channel, messageTs: delivery.ts, deliveredAt: now().toISOString() });
-    return { status: 'delivered', receipt: delivered.row, delivery, reconciled: false };
   } catch (error) {
-    if (error?.ambiguous) {
-      const createdAt = Date.parse(receipt.created_at);
-      const match = await slack.findMessageByClientId({
-        channel: config.inboxChannelId,
-        clientMsgId: claimed.row.slack_client_msg_id,
-        oldest: (createdAt - 300000) / 1000,
-        latest: (now().getTime() + 300000) / 1000
-      });
-      if (match) {
-        const delivered = await store.markNotificationDelivered({ id: receipt.id, channelId: config.inboxChannelId, messageTs: match.ts, deliveredAt: now().toISOString() });
-        return { status: 'delivered', receipt: delivered.row, delivery: match, reconciled: true };
-      }
-    }
-    await store.markNotificationFailed({ id: receipt.id, error: String(error?.message || error).slice(0, 500), attemptedAt: now().toISOString() });
-    throw error;
+    if (error?.ambiguous) return reconcileExactHistoryOrThrowUnconfirmed(claimed.row);
+    await store.markNotificationFailed({ id: receipt.id, expectedDeliveryAttempts: claimed.row.delivery_attempts, failureCode: 'post_rejected' });
+    throw new ImmediateNotificationError('post_rejected', 'failed');
   }
+  const delivered = await store.markNotificationDelivered({ id: receipt.id, expectedDeliveryAttempts: claimed.row.delivery_attempts, channelId: delivery.channel, messageTs: delivery.ts, deliveredAt: now().toISOString() });
+  if (!delivered.applied) throw new ImmediateNotificationError('delivery_persistence_failed', 'unconfirmed');
+  return { status: 'delivered', receipt: delivered.row, delivery, reconciled: false };
 }
 ```
 
-On ambiguous error, search from five minutes before receipt creation to five minutes after the attempt. Do not retry inside the same call unless reconciliation proves absence and `delivery_attempts < 3`.
+`reconcileExactHistoryOrThrowUnconfirmed` searches the exact `client_message_id` only in a five-minute window on each side of the delivering row's `updated_at`, which is the database timestamp returned by the delivery-claim generation. Receipt creation time and the current recovery time never widen that window. Missing or invalid `updated_at` fails unconfirmed before history or repost. The readback independently requires `match.client_msg_id === receipt.client_message_id` before storing coordinates. Missing/mismatched IDs are no match. A match is successful only after the same-generation delivered CAS readback applies. No match records the reviewed `delivery_unconfirmed` token through the same-generation failed CAS and throws typed unconfirmed; history or persistence failure also throws bounded typed unconfirmed without copying store/Slack data. It never reposts inside the same call. A later exact retry may claim a failed row only while `delivery_attempts < 3`.
 
 - [ ] **Step 5: Run GREEN and commit**
 
 ```powershell
 node --test tools\work-orchestrator-v2\supabase-store.test.mjs tools\work-orchestrator-v2\immediate-notifications.test.mjs
-git add -- tools/work-orchestrator-v2/supabase-store.mjs tools/work-orchestrator-v2/supabase-store.test.mjs tools/work-orchestrator-v2/immediate-notifications.mjs tools/work-orchestrator-v2/immediate-notifications.test.mjs
+git add -- docs/superpowers/plans/2026-08-29-work-orchestrator-v2-immediate-notifications.md tools/work-orchestrator-v2/package.json tools/work-orchestrator-v2/supabase-store.mjs tools/work-orchestrator-v2/supabase-store.test.mjs tools/work-orchestrator-v2/immediate-notifications.mjs tools/work-orchestrator-v2/immediate-notifications.test.mjs
 git commit -m "feat: deliver idempotent immediate notifications"
 ```
 
@@ -273,6 +280,8 @@ git commit -m "feat: deliver idempotent immediate notifications"
 - Modify: `tools/kakao-dom-bridge/server.mjs:3903-4000,4040-4130`
 - Modify: `tools/kakao-dom-bridge/server.test.mjs`
 - Modify: `tools/kakao-dom-bridge/.env.example`
+- Modify: `tools/work-orchestrator-v2/supabase-store.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
 
 **Interfaces:**
 - Consumes: `ensureImmediateNotification` and the existing accepted normalized event.
@@ -289,6 +298,10 @@ assert.equal(response.statusCode, 202);
 
 Add a worker-slow test where the response includes the delivered notification before any Hermes promise resolves, a duplicate event test with one Slack post, and a failed-delivery test expecting HTTP 503 plus no worker scheduling. The 503 is intentional: accepting an event without the mandatory notice would violate the first-notification invariant.
 
+Add the exact-retry recovery cases required by Ruling 4: `503` on a new revision, the same exact source event retry finding its existing receipt and completing delivery before legacy scheduling, an already-delivered duplicate posting zero times, A-B-retry-A where the first A failed before receipt creation and the later A cannot create, and two genuinely distinct exact event keys remaining eligible even when their semantic previews match. Add the concurrent visibility gap where the first exact receipt is not query-visible yet; the concurrent duplicate also returns `503` and cannot create or notify. Include two over-500-character identifiers with the same first 500 characters and different suffixes, proving distinct canonical receipt keys, client IDs, and notice attempts through `handleEvent`. A `503` response alone does not schedule a retry; recovery depends on the watcher/source retrying the exact event key.
+
+Add a store RED test for a bounded oldest-backlog query that selects only `created_at` from at most one `pending|delivering|failed` receipt. Health age must come from this durable readback, not process memory.
+
 - [ ] **Step 2: Run RED**
 
 ```powershell
@@ -301,11 +314,17 @@ Expected: FAIL because `handleEvent` does not call the v2 delivery path.
 
 When `WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=1`:
 
-1. require `WORK_ORCHESTRATOR_V2_INBOX_CHANNEL_ID` and Slack token at startup;
+1. require a locally constructed store client and Slack client plus non-empty `WORK_ORCHESTRATOR_V2_INBOX_CHANNEL_ID` and Slack token at startup; construction proves local configuration only, never connectivity;
 2. call `ensureImmediateNotification` after event acceptance and before `writeSupabaseEvent`;
 3. return 503 with `{ok:false,error:'immediate_notification_unconfirmed',eventHash}` if it is not delivered;
-4. append a bounded error record without message content;
+4. append a bounded error record without message content; derive a SHA-256 correlation from the bounded event identifier and never copy caller-controlled `eventHash` into the persistent error log;
 5. leave `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED`, `KAKAO_FOLLOW_UP_ITEMS_ENABLED`, and `SLACK_AGENT_CARD_DELIVERY_ENABLED` untouched.
+6. synchronously claim the canonical source event key in a bounded exact attempt guard before the first asynchronous receipt call. The production guard persists only a SHA-256 digest in `immediate-notification-attempts.ndjson`, reloads it after restart, and bounds both memory and file entries. Startup parsing is strict: every non-empty line must be an exact one-field digest record or startup fails unavailable. Compaction writes and flushes a same-directory temporary file, atomically renames it over the live file, and only then replaces the in-memory authoritative set; a failed replacement preserves the prior live file and set. An already-attempted exact key may resume only when its exact receipt exists; a missing receipt is unconfirmed and returns `503` with zero Slack/legacy write/schedule. This is independent of the last semantic room identity, so A-B-retry-A stays closed while a genuinely new exact key remains eligible;
+7. after confirmed exact-retry recovery, continue the unchanged legacy Supabase write and worker scheduling path.
+
+The handler gate is positive: only an explicit `{status:'delivered'}` result may reach the legacy write/schedule path. Skipped, missing, busy, unconfirmed, exhausted, malformed, unknown, and thrown outcomes all return the same generic `503` contract.
+
+Parse mention IDs only from the existing server-owned `SLACK_CARD_MENTION_USER_IDS`; the immediate notice builder remains the strict validator. Construction and tests perform no network calls.
 
 Add health fields:
 
@@ -316,6 +335,8 @@ state.workOrchestrator.immediateDuplicates
 state.workOrchestrator.immediateFailed
 state.workOrchestrator.oldestPendingNotificationAgeMs
 ```
+
+Also expose explicitly named local-configuration and durable backlog-readback states without IDs or content. Refresh `oldestPendingNotificationAgeMs` from the bounded store query above; query failure returns `null` plus a generic readback error state.
 
 - [ ] **Step 4: Run focused and full GREEN**
 

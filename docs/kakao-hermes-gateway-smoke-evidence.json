@@ -1,0 +1,9 @@
+{
+  "schema": "village-kakao-native-smoke/v1",
+  "nativeSessionResult": "pass",
+  "scheduleOwnerReviewRequired": true,
+  "sendCount": 0,
+  "writeCount": 0,
+  "killSwitchObserved": "active",
+  "benchmarkRunId": "20260822-122749-c7e628"
+}

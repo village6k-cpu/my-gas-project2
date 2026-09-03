@@ -24,8 +24,29 @@ import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { buildGatewayHealthReadback, createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
 import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
+import {
+  canonicalSourceEventKey,
+  notificationReceiptInput,
+  readStrictBooleanEnvironment,
+  validateWorkOrchestratorV2CutoverConfig
+} from '../work-orchestrator-v2/contracts.mjs';
+import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-notifications.mjs';
+import { digestScheduleWindow, runDigestCycle } from '../work-orchestrator-v2/digest-runner.mjs';
+import { processPendingWorkAction } from '../work-orchestrator-v2/work-actions.mjs';
+import {
+  buildHumanWorkCandidates,
+  buildV2P0DeliveryClaim,
+  encodeWorkActionValue,
+  v2P0ReminderDecision
+} from '../work-orchestrator-v2/work-items.mjs';
+import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shadow-receipts.mjs';
+import { createSlackClient } from '../work-orchestrator-v2/slack-client.mjs';
+import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
+import { readWorkOrchestratorHealth } from '../work-orchestrator-v2/observability.mjs';
+import { runNoticeCleanupSweep } from '../work-orchestrator-v2/notice-cleanup.mjs';
 
 export { buildGatewayHealthReadback } from './hermes-gateway-http.mjs';
+export { validateWorkOrchestratorV2CutoverConfig } from '../work-orchestrator-v2/contracts.mjs';
 
 const DEFAULT_VILLAGE_DOCUMENT_API_URL = 'https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec';
 
@@ -53,6 +74,15 @@ function readBooleanEnvironment(value, defaultValue = false) {
   return ['1', 'true'].includes(String(value).trim().toLowerCase());
 }
 
+export function resolveWorkOrchestratorP0Config(env = {}) {
+  const readbackEnabled = readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED, false, 'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED');
+  const cutoverEnabled = readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED, false, 'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED');
+  if (cutoverEnabled && !readbackEnabled) {
+    throw new Error('Work Orchestrator v2 P0 cutover requires readback');
+  }
+  return { readbackEnabled, cutoverEnabled };
+}
+
 export function resolveHermesTransport(value) {
   const normalized = String(value ?? '').trim() || 'cli';
   if (!['cli', 'gateway', 'gateway_no_send'].includes(normalized)) {
@@ -71,6 +101,165 @@ export function resolveHermesMaxAttempts(value) {
   return attempts;
 }
 
+export function resolveSlackActionPollIntervalMs(value) {
+  if (value === undefined || value === null || value === '') return 10_000;
+  const parsed = typeof value === 'number'
+    ? value
+    : (/^[0-9]+$/.test(value) ? Number(value) : Number.NaN);
+  return Number.isSafeInteger(parsed) && parsed >= 1_000 && parsed <= 300_000
+    ? parsed
+    : 10_000;
+}
+
+const NOTICE_CLEANUP_BOT_USER = /^U[A-Z0-9]{1,79}$/;
+const NOTICE_CLEANUP_BOT = /^B[A-Z0-9]{1,79}$/;
+const NOTICE_CLEANUP_TEAM = /^T[A-Z0-9]{1,79}$/;
+
+function exactNoticeCleanupText(value, maximum) {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum && value === value.trim()
+    ? value
+    : '';
+}
+
+function boundedNoticeCleanupInteger(value, fallback, minimum, maximum) {
+  const raw = value === undefined || value === null || value === '' ? String(fallback) : String(value);
+  if (!/^[0-9]+$/.test(raw)) return null;
+  const number = Number(raw);
+  return Number.isSafeInteger(number) && number >= minimum && number <= maximum ? number : null;
+}
+
+export function resolveWorkOrchestratorNoticeCleanupConfig({
+  environment = process.env,
+  pid = process.pid
+} = {}) {
+  const botUserId = exactNoticeCleanupText(environment.WORK_ORCHESTRATOR_V2_SLACK_BOT_USER_ID, 80);
+  const botId = exactNoticeCleanupText(environment.WORK_ORCHESTRATOR_V2_SLACK_BOT_ID, 80);
+  const teamId = exactNoticeCleanupText(environment.WORK_ORCHESTRATOR_V2_SLACK_TEAM_ID, 80);
+  const configuredOwner = environment.WORK_ORCHESTRATOR_V2_CLEANUP_OWNER;
+  const cleanupOwner = exactNoticeCleanupText(
+    configuredOwner === undefined || configuredOwner === null || configuredOwner === ''
+      ? `bridge:notice-cleanup:${pid}`
+      : configuredOwner,
+    200
+  );
+  const cleanupLeaseSeconds = boundedNoticeCleanupInteger(
+    environment.WORK_ORCHESTRATOR_V2_CLEANUP_LEASE_SECONDS, 120, 1, 900
+  );
+  const intervalMs = boundedNoticeCleanupInteger(
+    environment.WORK_ORCHESTRATOR_V2_CLEANUP_INTERVAL_MS, 300_000, 30_000, 3_600_000
+  );
+  const ready = NOTICE_CLEANUP_BOT_USER.test(botUserId)
+    && NOTICE_CLEANUP_BOT.test(botId)
+    && NOTICE_CLEANUP_TEAM.test(teamId)
+    && Boolean(cleanupOwner)
+    && cleanupLeaseSeconds !== null
+    && intervalMs !== null;
+  return {
+    ready,
+    botUserId,
+    botId,
+    teamId,
+    cleanupOwner,
+    cleanupLeaseSeconds,
+    intervalMs
+  };
+}
+
+export function createWorkOrchestratorNoticeCleanupRuntime({
+  config = {},
+  environment = process.env,
+  store = null,
+  slack = null,
+  now = () => new Date().toISOString(),
+  runSweep = runNoticeCleanupSweep,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+  pid = process.pid,
+  state = {}
+} = {}) {
+  const enabled = config.cleanupEnabled === true;
+  const cleanupConfig = resolveWorkOrchestratorNoticeCleanupConfig({ environment, pid });
+  const dependenciesReady = Boolean(store
+    && typeof store.claimCleanupBatch === 'function'
+    && typeof store.markCleanupDeleted === 'function'
+    && typeof store.markCleanupFailed === 'function'
+    && slack
+    && typeof slack.authTest === 'function'
+    && typeof slack.deleteMessage === 'function');
+  const ready = enabled && cleanupConfig.ready && dependenciesReady;
+  state.noticeCleanupRunning = false;
+  state.lastNoticeCleanup = null;
+  let timer = null;
+
+  const count = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 25 ? value : 0;
+  const sweep = async (trigger = 'manual') => {
+    if (!enabled) return { status: 'disabled', trigger };
+    if (!ready) return { status: 'not_ready', trigger };
+    if (state.noticeCleanupRunning) return { status: 'running', trigger };
+    state.noticeCleanupRunning = true;
+    const atValue = now();
+    const at = new Date(atValue);
+    try {
+      if (Number.isNaN(at.getTime())) throw new Error('invalid notice cleanup clock');
+      const raw = await runSweep({
+        store,
+        slack,
+        config: {
+          botUserId: cleanupConfig.botUserId,
+          botId: cleanupConfig.botId,
+          teamId: cleanupConfig.teamId,
+          cleanupOwner: cleanupConfig.cleanupOwner,
+          cleanupLeaseSeconds: cleanupConfig.cleanupLeaseSeconds
+        },
+        now: at.toISOString()
+      });
+      const result = {
+        at: at.toISOString(),
+        trigger: ['startup', 'interval', 'manual'].includes(trigger) ? trigger : 'manual',
+        status: count(raw?.failed) > 0 || count(raw?.excluded) > 0 ? 'error' : 'ok',
+        claimed: count(raw?.claimed),
+        deleted: count(raw?.deleted),
+        alreadyAbsent: count(raw?.alreadyAbsent),
+        failed: count(raw?.failed),
+        blockedP0: count(raw?.blockedP0),
+        excluded: count(raw?.excluded)
+      };
+      state.lastNoticeCleanup = result;
+      return result;
+    } catch {
+      const result = {
+        at: Number.isNaN(at.getTime()) ? '' : at.toISOString(),
+        trigger: ['startup', 'interval', 'manual'].includes(trigger) ? trigger : 'manual',
+        status: 'error', claimed: 0, deleted: 0, alreadyAbsent: 0,
+        failed: 1, blockedP0: 0, excluded: 0
+      };
+      state.lastNoticeCleanup = result;
+      return result;
+    } finally {
+      state.noticeCleanupRunning = false;
+    }
+  };
+
+  return {
+    enabled,
+    ready,
+    localConfigReady: !enabled || ready,
+    state,
+    sweep,
+    async start() {
+      if (!ready || timer !== null) return false;
+      await sweep('startup');
+      timer = setIntervalImpl(() => { sweep('interval').catch(() => {}); }, cleanupConfig.intervalMs);
+      timer?.unref?.();
+      return true;
+    },
+    stop() {
+      if (timer !== null) clearIntervalImpl(timer);
+      timer = null;
+    }
+  };
+}
+
 export function kakaoSendAllowedForTransport(value) {
   return resolveHermesTransport(value) !== 'gateway_no_send';
 }
@@ -80,6 +269,17 @@ export function configForHermesTransport(config = {}, transport = 'cli') {
     ? { ...config, autoSendEnabled: false, windowsWritesEnabled: false }
     : config;
 }
+
+const CUTOVER_CONFIG = validateWorkOrchestratorV2CutoverConfig(process.env);
+const P0_WORK_ORCHESTRATOR_CONFIG = {
+  readbackEnabled: CUTOVER_CONFIG.p0ReadbackEnabled,
+  cutoverEnabled: CUTOVER_CONFIG.p0CutoverEnabled
+};
+const WORK_ORCHESTRATOR_CONFIG = {
+  ...CUTOVER_CONFIG,
+  p0ReadbackEnabled: P0_WORK_ORCHESTRATOR_CONFIG.readbackEnabled,
+  p0CutoverEnabled: P0_WORK_ORCHESTRATOR_CONFIG.cutoverEnabled
+};
 
 const CONFIG = {
   port: Number(process.env.PORT || 8787),
@@ -96,6 +296,7 @@ const CONFIG = {
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   supabaseTable: process.env.SUPABASE_TABLE || '',
+  workOrchestrator: WORK_ORCHESTRATOR_CONFIG,
   processInitialScan: process.env.PROCESS_INITIAL_SCAN !== 'false',
   ignoreShiftedRows: process.env.IGNORE_SHIFTED_ROWS === 'true',
   workerCommand: process.env.VILLAGE_AI_WORKER_CMD || '',
@@ -120,9 +321,9 @@ const CONFIG = {
   supabaseRecoveryLookbackHours: Number(process.env.SUPABASE_RECOVERY_LOOKBACK_HOURS || 36),
   supabaseRecoveryErrorRetryMs: Number(process.env.SUPABASE_RECOVERY_ERROR_RETRY_MS || 900_000),
   supabaseRecoveryMaxAttempts: Number(process.env.SUPABASE_RECOVERY_MAX_ATTEMPTS || 2),
-  slackActionPollEnabled: readBooleanEnvironment(process.env.SLACK_ACTION_POLL_ENABLED, true),
-  slackActionPollIntervalMs: Number(process.env.SLACK_ACTION_POLL_INTERVAL_MS || 10_000),
-  p0SlackEscalationEnabled: readBooleanEnvironment(process.env.P0_SLACK_ESCALATION_ENABLED, true),
+  slackActionPollEnabled: CUTOVER_CONFIG.legacyActionPollEnabled,
+  slackActionPollIntervalMs: resolveSlackActionPollIntervalMs(process.env.SLACK_ACTION_POLL_INTERVAL_MS),
+  p0SlackEscalationEnabled: CUTOVER_CONFIG.legacyP0Enabled,
   p0SlackEscalationIntervalMs: Math.max(15_000, Number(process.env.P0_SLACK_ESCALATION_INTERVAL_MS || 60_000)),
   // 재알림은 10분에서 시작해 회차마다 2배(상한 1시간) 백오프. 구 기본값
   // 3분 × 160회는 2026-08-19 야간 @channel 308연발 사고로 폐기.
@@ -135,8 +336,8 @@ const CONFIG = {
     return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 3;
   })(),
   slackBotToken: process.env.SLACK_BOT_TOKEN || '',
-  followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
-  slackCardDeliveryEnabled: process.env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1',
+  followUpRowsEnabled: CUTOVER_CONFIG.legacyWorkRowsEnabled,
+  slackCardDeliveryEnabled: CUTOVER_CONFIG.legacyCardsEnabled,
   slackChannels: {
     schedule: process.env.SLACK_CHANNEL_SCHEDULE_AGENT || '스케쥴-agent',
     document: process.env.SLACK_CHANNEL_DOCUMENT_AGENT || '서류발송-agent',
@@ -161,12 +362,1303 @@ const CONFIG = {
 };
 
 export function buildHealthConfig(config = {}) {
-  return {
+  const health = {
     workerLive: Boolean(config.workerLive),
     autoSendEnabled: Boolean(config.autoSendEnabled),
     workerDryRun: Boolean(config.workerDryRun),
     windowsWritesEnabled: Boolean(config.windowsWritesEnabled),
-    startupCatchupSupported: Boolean(config.startupCatchupSupported)
+    startupCatchupSupported: Boolean(config.startupCatchupSupported),
+    scheduleOwnerReviewRequired: true,
+    killSwitchPolicyEnforced: true
+  };
+  if (config.workOrchestrator) {
+    health.workOrchestrator = {
+      ...(['legacy', 'v2'].includes(config.workOrchestrator.runtimeMode)
+        ? { runtimeMode: config.workOrchestrator.runtimeMode }
+        : {}),
+      shadowWrites: Boolean(config.workOrchestrator.shadowWrites),
+      immediateEnabled: Boolean(config.workOrchestrator.immediateEnabled),
+      workItemsEnabled: Boolean(config.workOrchestrator.workItemsEnabled),
+      p0ReadbackEnabled: Boolean(config.workOrchestrator.p0ReadbackEnabled),
+      p0CutoverEnabled: Boolean(config.workOrchestrator.p0CutoverEnabled),
+      digestEnabled: Boolean(config.workOrchestrator.digestEnabled),
+      cleanupEnabled: Boolean(config.workOrchestrator.cleanupEnabled),
+      storeConfigured: Boolean(config.workOrchestratorStoreConfigured),
+      // True means shadow writes are disabled or the local store client was constructed; it does not prove Supabase connectivity.
+      shadowReady: Boolean(config.workOrchestratorShadowReady),
+      // This proves local values and clients were constructed only. Durable-store and Slack connectivity require separate readback.
+      immediateLocalConfigReady: Boolean(config.workOrchestratorImmediateLocalConfigReady),
+      ...(Object.hasOwn(config, 'workOrchestratorCleanupLocalConfigReady')
+        ? { cleanupLocalConfigReady: Boolean(config.workOrchestratorCleanupLocalConfigReady) }
+        : {}),
+      ...(Object.hasOwn(config, 'workOrchestratorP0LocalConfigReady')
+        ? { p0LocalConfigReady: Boolean(config.workOrchestratorP0LocalConfigReady) }
+        : {}),
+      ...(Object.hasOwn(config, 'workOrchestratorDigestLocalConfigReady')
+        ? { digestLocalConfigReady: Boolean(config.workOrchestratorDigestLocalConfigReady) }
+        : {}),
+      ...(Object.hasOwn(config, 'workOrchestratorActionLocalConfigReady')
+        ? { actionLocalConfigReady: Boolean(config.workOrchestratorActionLocalConfigReady) }
+        : {})
+    };
+  }
+  return health;
+}
+
+export async function readBridgeWorkOrchestratorHealth({
+  store = null,
+  now = () => new Date().toISOString()
+} = {}) {
+  let measuredAt;
+  try {
+    measuredAt = now();
+  } catch {
+    measuredAt = null;
+  }
+  return readWorkOrchestratorHealth({ store, now: measuredAt });
+}
+
+export function attachWorkOrchestratorInvariantHealth(bridgeHealth, workOrchestratorHealth) {
+  if (!bridgeHealth || typeof bridgeHealth !== 'object' || Array.isArray(bridgeHealth)
+    || !workOrchestratorHealth || typeof workOrchestratorHealth !== 'object'
+    || Array.isArray(workOrchestratorHealth)) {
+    throw new Error('Bridge health response is invalid');
+  }
+  return { ...bridgeHealth, workOrchestrator: workOrchestratorHealth };
+}
+
+function genericShadowError(value) {
+  if (value === 'shadow_receipt_store_failed') return 'shadow_receipt_store_failed';
+  if (value === 'shadow_store_unavailable') return 'shadow_store_unavailable';
+  return 'shadow_receipt_failed';
+}
+
+function safeShadowTimestamp(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
+}
+
+function safeShadowOutcome(value) {
+  return ['created', 'duplicate', 'error', 'configuration_error'].includes(value)
+    ? value
+    : 'error';
+}
+
+export function buildWorkOrchestratorHealthState(value = {}) {
+  const receipt = value.lastShadowReceipt;
+  const backlogReadback = ['disabled', 'not_checked', 'ok', 'error'].includes(value.immediateBacklogReadback)
+    ? value.immediateBacklogReadback
+    : 'disabled';
+  const hasOldestAge = value.oldestPendingNotificationAgeMs !== null
+    && value.oldestPendingNotificationAgeMs !== undefined
+    && value.oldestPendingNotificationAgeMs !== '';
+  const oldestAge = Number(value.oldestPendingNotificationAgeMs);
+  const health = {
+    shadowClaims: Math.max(0, Number(value.shadowClaims || 0)),
+    shadowDuplicates: Math.max(0, Number(value.shadowDuplicates || 0)),
+    shadowErrors: Math.max(0, Number(value.shadowErrors || 0)),
+    lastShadowReceipt: receipt && typeof receipt === 'object'
+      ? {
+          at: safeShadowTimestamp(receipt.at),
+          outcome: safeShadowOutcome(receipt.outcome),
+          ...(receipt.error ? { error: genericShadowError(receipt.error) } : {})
+        }
+      : null,
+    immediateDelivered: Math.max(0, Number(value.immediateDelivered || 0)),
+    immediateDuplicates: Math.max(0, Number(value.immediateDuplicates || 0)),
+    immediateFailed: Math.max(0, Number(value.immediateFailed || 0)),
+    oldestPendingNotificationAgeMs: hasOldestAge && Number.isFinite(oldestAge) && oldestAge >= 0 ? oldestAge : null,
+    immediateBacklogReadback: backlogReadback
+  };
+  const hasWorkActionState = ['workActionPollRunning', 'lastWorkActionPoll']
+    .some((key) => Object.hasOwn(value, key));
+  const actionCount = (input) => Number.isSafeInteger(input) && input >= 0 && input <= 10 ? input : 0;
+  const action = value.lastWorkActionPoll;
+  const safeAction = hasWorkActionState && action && typeof action === 'object' && !Array.isArray(action)
+    ? {
+        status: ['ok', 'error', 'disabled', 'running'].includes(action.status) ? action.status : 'error',
+        trigger: ['startup', 'interval', 'manual'].includes(action.trigger) ? action.trigger : 'manual',
+        scanned: actionCount(action.scanned),
+        applied: actionCount(action.applied),
+        awaitingResolution: actionCount(action.awaitingResolution),
+        conflicts: actionCount(action.conflicts),
+        invalid: actionCount(action.invalid)
+      }
+    : null;
+  const healthWithActions = hasWorkActionState
+    ? { ...health, workActionPollRunning: value.workActionPollRunning === true, lastWorkActionPoll: safeAction }
+    : health;
+  const p0Readback = value.lastP0Readback;
+  const p0Count = (input) => Number.isSafeInteger(input) && input >= 0 && input <= Number.MAX_SAFE_INTEGER
+    ? input
+    : 0;
+  const healthWithP0 = Object.hasOwn(value, 'lastP0Readback')
+    ? {
+        ...healthWithActions,
+        lastP0Readback: p0Readback && typeof p0Readback === 'object' && !Array.isArray(p0Readback)
+          ? {
+              status: ['ok', 'not_ready', 'error', 'disabled'].includes(p0Readback.status)
+                ? p0Readback.status
+                : 'error',
+              mode: ['readback', 'cutover', 'disabled'].includes(p0Readback.mode)
+                ? p0Readback.mode
+                : 'disabled',
+              eligibleCount: p0Count(p0Readback.eligibleCount),
+              selectedCount: p0Count(p0Readback.selectedCount),
+              omittedCount: p0Count(p0Readback.omittedCount),
+              ready: p0Readback.ready === true,
+              errors: Array.isArray(p0Readback.errors)
+                ? p0Readback.errors.filter((error) => [
+                    'p0_eligible_overflow', 'list_failed', 'invalid_list', 'invalid_delivery'
+                  ].includes(error)).slice(0, 3)
+                : []
+            }
+          : null
+      }
+    : healthWithActions;
+  const noticeCleanup = value.lastNoticeCleanup;
+  const noticeCount = (input) => Number.isSafeInteger(input) && input >= 0 && input <= 25 ? input : 0;
+  const healthWithNoticeCleanup = Object.hasOwn(value, 'lastNoticeCleanup')
+    ? {
+        ...healthWithP0,
+        noticeCleanupRunning: value.noticeCleanupRunning === true,
+        lastNoticeCleanup: noticeCleanup && typeof noticeCleanup === 'object' && !Array.isArray(noticeCleanup)
+          ? {
+              at: safeShadowTimestamp(noticeCleanup.at),
+              trigger: ['startup', 'interval', 'manual'].includes(noticeCleanup.trigger) ? noticeCleanup.trigger : 'manual',
+              status: ['ok', 'error', 'disabled', 'not_ready', 'running'].includes(noticeCleanup.status)
+                ? noticeCleanup.status
+                : 'error',
+              claimed: noticeCount(noticeCleanup.claimed),
+              deleted: noticeCount(noticeCleanup.deleted),
+              alreadyAbsent: noticeCount(noticeCleanup.alreadyAbsent),
+              failed: noticeCount(noticeCleanup.failed),
+              blockedP0: noticeCount(noticeCleanup.blockedP0),
+              excluded: noticeCount(noticeCleanup.excluded)
+            }
+          : null
+      }
+    : healthWithP0;
+  const hasDigestState = [
+    'digestRunning', 'lastDigestRun', 'lastDigestSuccessAt', 'lastDigestFailureAt',
+    'nextScheduledAt', 'digestFailureCount', 'omittedEligibleCount'
+  ].some((key) => Object.hasOwn(value, key));
+  if (!hasDigestState) return healthWithNoticeCleanup;
+
+  const count = (input, maximum) => {
+    const numeric = input;
+    return Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= maximum ? numeric : 0;
+  };
+  const safeLastRun = (run) => {
+    if (!run || typeof run !== 'object' || Array.isArray(run)) return null;
+    const status = ['delivered', 'not_claimed', 'failed'].includes(run.status) ? run.status : 'failed';
+    const trigger = ['startup', 'interval', 'manual'].includes(run.trigger) ? run.trigger : 'manual';
+    const result = {
+      at: safeShadowTimestamp(run.at),
+      trigger,
+      status,
+      scheduledAt: safeShadowTimestamp(run.scheduledAt),
+      selectedCount: count(run.selectedCount, Number.MAX_SAFE_INTEGER),
+      renderedCount: count(run.renderedCount, 500),
+      omittedEligibleCount: count(run.omittedEligibleCount, Number.MAX_SAFE_INTEGER),
+      partCount: count(run.partCount, 50),
+      deliveredPartCount: count(run.deliveredPartCount, 50),
+      cleanupFailed: count(run.cleanupFailed, 500)
+    };
+    if (run.error) {
+      result.error = ['digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed',
+        'digest_delivery_unconfirmed', 'digest_cycle_failed',
+        'digest_omission_detected', 'digest_cleanup_failed', 'digest_eligible_overflow',
+        'digest_history_incomplete', 'digest_generation_handoff_failed',
+        'digest_generation_diverged'].includes(run.error)
+        ? run.error
+        : 'digest_cycle_failed';
+    }
+    return result;
+  };
+  return {
+    ...healthWithNoticeCleanup,
+    digestRunning: value.digestRunning === true,
+    lastDigestRun: safeLastRun(value.lastDigestRun),
+    lastDigestSuccessAt: safeShadowTimestamp(value.lastDigestSuccessAt) || null,
+    lastDigestFailureAt: safeShadowTimestamp(value.lastDigestFailureAt) || null,
+    nextScheduledAt: safeShadowTimestamp(value.nextScheduledAt) || null,
+    digestFailureCount: count(value.digestFailureCount, Number.MAX_SAFE_INTEGER),
+    omittedEligibleCount: count(value.omittedEligibleCount, Number.MAX_SAFE_INTEGER)
+  };
+}
+
+export function createWorkOrchestratorShadowRuntime({
+  config = {},
+  store = null,
+  record = recordShadowNotificationObligation,
+  now = () => new Date().toISOString()
+} = {}) {
+  const state = {
+    shadowClaims: 0,
+    shadowDuplicates: 0,
+    shadowErrors: 0,
+    lastShadowReceipt: null
+  };
+  const active = new Set();
+
+  if (config.shadowWrites && !store) {
+    state.shadowErrors = 1;
+    state.lastShadowReceipt = {
+      at: String(now()).slice(0, 40),
+      outcome: 'configuration_error',
+      error: 'shadow_store_unavailable'
+    };
+  }
+
+  return {
+    state,
+    recordAccepted(event, roomVersion = {}) {
+      if (roomVersion.changed !== true) return null;
+
+      let claim;
+      try {
+        claim = Promise.resolve(record({ event, config, store }));
+      } catch {
+        claim = Promise.resolve({ skipped: false, created: false, error: 'shadow_receipt_failed' });
+      }
+      const observed = claim.then((result) => {
+        if (result?.skipped === true) return result;
+        const at = String(now()).slice(0, 40);
+        if (result?.created === true) {
+          state.shadowClaims += 1;
+          state.lastShadowReceipt = { at, outcome: 'created' };
+        } else if (!result?.error && result?.created === false) {
+          state.shadowDuplicates += 1;
+          state.lastShadowReceipt = { at, outcome: 'duplicate' };
+        } else {
+          state.shadowErrors += 1;
+          state.lastShadowReceipt = {
+            at,
+            outcome: 'error',
+            error: genericShadowError(result?.error)
+          };
+        }
+        return result;
+      }, () => {
+        state.shadowErrors += 1;
+        state.lastShadowReceipt = {
+          at: String(now()).slice(0, 40),
+          outcome: 'error',
+          error: 'shadow_receipt_failed'
+        };
+      }).finally(() => active.delete(observed));
+      active.add(observed);
+      return observed;
+    },
+    settled() {
+      return Promise.allSettled([...active]);
+    }
+  };
+}
+
+const IMMEDIATE_FAILURE_CODES = new Set([
+  'attempts_exhausted',
+  'claim_conflict',
+  'clock_unavailable',
+  'delivery_persistence_failed',
+  'history_no_match',
+  'history_unavailable',
+  'post_rejected',
+  'receipt_identity_invalid',
+  'receipt_persistence_failed',
+  'receipt_state_unavailable',
+  'receipt_unavailable'
+]);
+
+function genericImmediateFailureCode(value) {
+  return IMMEDIATE_FAILURE_CODES.has(value) ? value : 'immediate_notification_failed';
+}
+
+function immediateRuntimeDate(now) {
+  const value = now();
+  const date = value instanceof Date ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error('Immediate notification clock is invalid');
+  return date;
+}
+
+const IMMEDIATE_ATTEMPT_FILENAME = 'immediate-notification-attempts.ndjson';
+const IMMEDIATE_ATTEMPT_DIGEST = /^[0-9a-f]{64}$/;
+
+function immediateAttemptDigest(sourceEventKey) {
+  return sha256(`village-immediate-notification-attempt:${canonicalSourceEventKey(sourceEventKey)}`);
+}
+
+function createMemoryImmediateNotificationAttemptGuard(maxEntries = 10_000) {
+  const entries = new Map();
+  return {
+    claim(sourceEventKey) {
+      const digest = immediateAttemptDigest(sourceEventKey);
+      if (entries.has(digest)) return false;
+      entries.set(digest, true);
+      while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+      return true;
+    }
+  };
+}
+
+export function createImmediateNotificationAttemptGuard({
+  queueDir = CONFIG.queueDir,
+  maxEntries = 10_000,
+  fileSystem = fs
+} = {}) {
+  if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 100_000) {
+    throw new Error('Immediate notification attempt guard configuration is invalid');
+  }
+  const resolvedQueueDir = path.resolve(queueDir);
+  const filePath = path.join(resolvedQueueDir, IMMEDIATE_ATTEMPT_FILENAME);
+  const entries = new Map();
+
+  const serialized = (source) => [...source.keys()]
+    .map((digest) => `${JSON.stringify({ source_event_key_sha256: digest })}\n`)
+    .join('');
+
+  const atomicReplace = (nextEntries) => {
+    fileSystem.mkdirSync(resolvedQueueDir, { recursive: true });
+    const temporaryPath = path.join(
+      resolvedQueueDir,
+      `.${IMMEDIATE_ATTEMPT_FILENAME}.${process.pid}.${crypto.randomUUID()}.tmp`
+    );
+    let descriptor = null;
+    try {
+      descriptor = fileSystem.openSync(temporaryPath, 'wx');
+      fileSystem.writeFileSync(descriptor, serialized(nextEntries), 'utf8');
+      if (typeof fileSystem.fsyncSync === 'function') fileSystem.fsyncSync(descriptor);
+      fileSystem.closeSync(descriptor);
+      descriptor = null;
+      fileSystem.renameSync(temporaryPath, filePath);
+    } catch {
+      if (descriptor !== null) {
+        try { fileSystem.closeSync(descriptor); } catch {}
+      }
+      try { fileSystem.unlinkSync(temporaryPath); } catch {}
+      throw new Error('Immediate notification attempt guard is unavailable');
+    }
+  };
+
+  try {
+    const lines = fileSystem.readFileSync(filePath, 'utf8').split(/\r?\n/);
+    const loadedEntries = new Map();
+    for (const [index, line] of lines.entries()) {
+      if (line === '' && index === lines.length - 1) continue;
+      if (!line) throw new Error('invalid attempt guard record');
+      const record = JSON.parse(line);
+      if (
+        !record
+        || typeof record !== 'object'
+        || Array.isArray(record)
+        || Object.keys(record).length !== 1
+        || !IMMEDIATE_ATTEMPT_DIGEST.test(record.source_event_key_sha256)
+      ) throw new Error('invalid attempt guard record');
+      loadedEntries.delete(record.source_event_key_sha256);
+      loadedEntries.set(record.source_event_key_sha256, true);
+    }
+    if (loadedEntries.size > maxEntries) {
+      const boundedEntries = new Map([...loadedEntries.entries()].slice(-maxEntries));
+      atomicReplace(boundedEntries);
+      for (const [digest] of boundedEntries) entries.set(digest, true);
+    } else {
+      for (const [digest] of loadedEntries) entries.set(digest, true);
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw new Error('Immediate notification attempt guard is unavailable');
+  }
+
+  return {
+    claim(sourceEventKey) {
+      const digest = immediateAttemptDigest(sourceEventKey);
+      if (entries.has(digest)) return false;
+      if (entries.size >= maxEntries) {
+        const nextEntries = new Map(entries);
+        nextEntries.set(digest, true);
+        while (nextEntries.size > maxEntries) nextEntries.delete(nextEntries.keys().next().value);
+        atomicReplace(nextEntries);
+        entries.clear();
+        for (const [nextDigest] of nextEntries) entries.set(nextDigest, true);
+        return true;
+      }
+
+      entries.set(digest, true);
+      try {
+        fileSystem.mkdirSync(resolvedQueueDir, { recursive: true });
+        fileSystem.appendFileSync(
+          filePath,
+          `${JSON.stringify({ source_event_key_sha256: digest })}\n`,
+          'utf8'
+        );
+      } catch {
+        throw new Error('Immediate notification attempt guard is unavailable');
+      }
+      return true;
+    }
+  };
+}
+
+export function createWorkOrchestratorImmediateRuntime({
+  config = {},
+  store = null,
+  slack = null,
+  slackToken = '',
+  ensure = ensureImmediateNotification,
+  now = () => new Date(),
+  state: sharedState = null,
+  attemptGuard = null
+} = {}) {
+  const enabled = config.immediateEnabled === true;
+  const inboxChannelId = String(config.inboxChannelId || '').trim();
+  const storeReady = Boolean(
+    store
+    && typeof store.getNotificationByEventKey === 'function'
+    && typeof store.getOldestPendingNotificationCreatedAt === 'function'
+  );
+  const slackReady = Boolean(
+    slack
+    && typeof slack.postMessage === 'function'
+    && typeof slack.findMessageByClientId === 'function'
+  );
+  const localConfigReady = Boolean(
+    enabled
+    && storeReady
+    && slackReady
+    && String(slackToken || '').trim()
+    && inboxChannelId
+    && typeof ensure === 'function'
+  );
+  if (enabled && !localConfigReady) {
+    throw new Error('Work Orchestrator immediate notification local configuration is missing');
+  }
+  const resolvedAttemptGuard = attemptGuard || createMemoryImmediateNotificationAttemptGuard();
+  if (!resolvedAttemptGuard || typeof resolvedAttemptGuard.claim !== 'function') {
+    throw new Error('Work Orchestrator immediate notification attempt guard is missing');
+  }
+
+  const runtimeState = sharedState && typeof sharedState === 'object' ? sharedState : {};
+  runtimeState.shadowClaims = Math.max(0, Number(runtimeState.shadowClaims || 0));
+  runtimeState.shadowDuplicates = Math.max(0, Number(runtimeState.shadowDuplicates || 0));
+  runtimeState.shadowErrors = Math.max(0, Number(runtimeState.shadowErrors || 0));
+  runtimeState.lastShadowReceipt = runtimeState.lastShadowReceipt || null;
+  runtimeState.immediateDelivered = Math.max(0, Number(runtimeState.immediateDelivered || 0));
+  runtimeState.immediateDuplicates = Math.max(0, Number(runtimeState.immediateDuplicates || 0));
+  runtimeState.immediateFailed = Math.max(0, Number(runtimeState.immediateFailed || 0));
+  runtimeState.oldestPendingNotificationAgeMs = null;
+  runtimeState.immediateBacklogReadback = enabled ? 'not_checked' : 'disabled';
+
+  const fail = (error) => {
+    runtimeState.immediateFailed += 1;
+    const wrapped = new Error('Immediate notification is unconfirmed');
+    wrapped.code = genericImmediateFailureCode(error?.code);
+    throw wrapped;
+  };
+
+  const deliverAccepted = async (event, roomVersion = {}) => {
+    if (!enabled) return null;
+    try {
+      const sourceEventKey = notificationReceiptInput(event).sourceEventKey;
+      const firstAttempt = resolvedAttemptGuard.claim(sourceEventKey);
+      if (typeof firstAttempt !== 'boolean') {
+        const guardError = new Error('Exact notification attempt guard result is invalid');
+        guardError.code = 'delivery_persistence_failed';
+        throw guardError;
+      }
+      if (!firstAttempt) {
+        let existing;
+        try {
+          existing = await store.getNotificationByEventKey(sourceEventKey);
+        } catch {
+          const lookupError = new Error('Exact notification receipt lookup failed');
+          lookupError.code = 'delivery_persistence_failed';
+          throw lookupError;
+        }
+        if (!existing) {
+          const missingReceipt = new Error('Exact notification receipt is unavailable');
+          missingReceipt.code = 'receipt_unavailable';
+          throw missingReceipt;
+        }
+      }
+
+      const result = await ensure({
+        event,
+        config: {
+          inboxChannelId,
+          mentionUserIds: Array.isArray(config.mentionUserIds) ? config.mentionUserIds : []
+        },
+        store,
+        slack,
+        now
+      });
+      if (result?.status !== 'delivered') {
+        const resultError = new Error('Immediate notification result is unconfirmed');
+        resultError.code = 'delivery_persistence_failed';
+        throw resultError;
+      }
+      const duplicate = result.delivery === null;
+      if (duplicate) runtimeState.immediateDuplicates += 1;
+      else runtimeState.immediateDelivered += 1;
+      return {
+        status: 'delivered',
+        duplicate,
+        reconciled: result.reconciled === true
+      };
+    } catch (error) {
+      return fail(error);
+    }
+  };
+
+  const refreshBacklogHealth = async () => {
+    if (!enabled) {
+      runtimeState.oldestPendingNotificationAgeMs = null;
+      runtimeState.immediateBacklogReadback = 'disabled';
+      return;
+    }
+    try {
+      const createdAt = await store.getOldestPendingNotificationCreatedAt();
+      if (createdAt === null) {
+        runtimeState.oldestPendingNotificationAgeMs = null;
+      } else {
+        const createdAtMs = Date.parse(createdAt);
+        if (!Number.isFinite(createdAtMs)) throw new Error('Immediate backlog response is invalid');
+        runtimeState.oldestPendingNotificationAgeMs = Math.max(0, immediateRuntimeDate(now).getTime() - createdAtMs);
+      }
+      runtimeState.immediateBacklogReadback = 'ok';
+    } catch {
+      runtimeState.oldestPendingNotificationAgeMs = null;
+      runtimeState.immediateBacklogReadback = 'error';
+    }
+  };
+
+  return {
+    enabled,
+    localConfigReady,
+    state: runtimeState,
+    store,
+    deliverAccepted,
+    refreshBacklogHealth
+  };
+}
+
+const DIGEST_STORE_METHODS = [
+  'claimDivergentDigestRun', 'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
+  'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
+  'markDigestGenerationDiverged',
+  'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
+];
+
+const WORK_ACTION_ROW_FIELDS = Object.freeze([
+  'id', 'state', 'priority', 'actionable_at', 'snoozed_until', 'resolution_kind',
+  'resolution_evidence', 'resolved_at', 'resolved_by', 'pending_action', 'version',
+  'payload', 'updated_at'
+]);
+const WORK_ACTION_PATCH_FIELDS = new Set([
+  'state', 'actionable_at', 'snoozed_until', 'payload', 'resolution_kind',
+  'resolution_evidence', 'resolved_at', 'resolved_by', 'pending_action', 'version', 'updated_at'
+]);
+const WORK_ACTION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const WORK_ACTION_ACTIVE_STATES = new Set(['open', 'in_progress', 'snoozed']);
+const WORK_ACTION_TRIGGERS = new Set(['startup', 'interval', 'manual']);
+const WORK_ACTION_TIMESTAMP_FIELDS = new Set(['actionable_at', 'snoozed_until', 'resolved_at']);
+
+function workActionRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function workActionExactKeys(value, allowed) {
+  if (!workActionRecord(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...allowed].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function workActionSameJson(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => workActionSameJson(value, right[index]));
+  }
+  if (!workActionRecord(left) || !workActionRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && workActionSameJson(left[key], right[key]));
+}
+
+function safeWorkActionTrigger(value) {
+  return WORK_ACTION_TRIGGERS.has(value) ? value : 'manual';
+}
+
+function safeWorkActionPollResult(value, trigger) {
+  const empty = {
+    status: 'error', trigger: safeWorkActionTrigger(trigger), scanned: 0, applied: 0,
+    awaitingResolution: 0, conflicts: 0, invalid: 0
+  };
+  if (!workActionRecord(value) || !['ok', 'error', 'disabled', 'running'].includes(value.status)
+    || value.trigger !== empty.trigger) return empty;
+  const result = { status: value.status, trigger: value.trigger };
+  for (const key of ['scanned', 'applied', 'awaitingResolution', 'conflicts', 'invalid']) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > 10) return empty;
+    result[key] = value[key];
+  }
+  if (result.applied + result.awaitingResolution + result.conflicts + result.invalid > result.scanned) return empty;
+  return result;
+}
+
+function validatePendingWorkActionRow(row) {
+  if (!workActionExactKeys(row, WORK_ACTION_ROW_FIELDS)
+    || typeof row.id !== 'string' || !WORK_ACTION_UUID.test(row.id)
+    || !WORK_ACTION_ACTIVE_STATES.has(row.state)
+    || !Number.isSafeInteger(row.version) || row.version < 2
+    || !workActionRecord(row.pending_action) || row.pending_action.status !== 'pending') {
+    throw new Error('Work Orchestrator action response invalid');
+  }
+  return row;
+}
+
+async function workActionFetchJson(url, init, fetchImpl) {
+  try {
+    const response = await fetchImpl(url, init);
+    const text = await response.text();
+    if (!response.ok) throw new Error('invalid');
+    return JSON.parse(text);
+  } catch {
+    throw new Error('Work Orchestrator action request failed');
+  }
+}
+
+function workActionHeaders(serviceRoleKey, prefer = null) {
+  const headers = {
+    apikey: serviceRoleKey,
+    authorization: `Bearer ${serviceRoleKey}`,
+    'content-type': 'application/json'
+  };
+  if (prefer) headers.prefer = prefer;
+  return headers;
+}
+
+function workActionEndpoint(supabaseUrl) {
+  const base = String(supabaseUrl || '').trim().replace(/\/$/, '');
+  if (!/^https?:\/\/[^\s]+$/i.test(base)) throw new Error('Work Orchestrator action configuration invalid');
+  return `${base}/rest/v1/work_items_v2`;
+}
+
+function workActionRpcEndpoint(supabaseUrl, functionName) {
+  const base = String(supabaseUrl || '').trim().replace(/\/$/, '');
+  if (!/^https?:\/\/[^\s]+$/i.test(base)) throw new Error('Work Orchestrator action configuration invalid');
+  return `${base}/rest/v1/rpc/${functionName}`;
+}
+
+export async function listPendingWorkActionsV2({
+  supabaseUrl,
+  serviceRoleKey,
+  limit = 3,
+  fetchImpl = fetch
+} = {}) {
+  try {
+    const key = String(serviceRoleKey || '').trim();
+    if (!key || typeof fetchImpl !== 'function'
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('invalid');
+    const data = await workActionFetchJson(
+      workActionRpcEndpoint(supabaseUrl, 'list_pending_work_actions_v2'), {
+      method: 'POST', headers: workActionHeaders(key), body: JSON.stringify({ p_limit: limit })
+    }, fetchImpl);
+    if (!Array.isArray(data) || data.length > limit) throw new Error('invalid');
+    return data.map(validatePendingWorkActionRow);
+  } catch {
+    throw new Error('Work Orchestrator action request failed');
+  }
+}
+
+function validateWorkActionPatch(row, transition) {
+  if (!workActionRecord(transition) || transition.status !== 'ready'
+    || transition.expectedVersion !== row.version || transition.expectedPendingStatus !== 'pending'
+    || !workActionRecord(transition.patch)
+    || !workActionExactKeys(transition.patch.pending_action, [])
+    || transition.patch.version !== row.version + 1
+    || typeof transition.patch.updated_at !== 'string'
+    || !Number.isFinite(Date.parse(transition.patch.updated_at))) throw new Error('invalid');
+  const keys = Object.keys(transition.patch);
+  if (keys.some((key) => !WORK_ACTION_PATCH_FIELDS.has(key))
+    || !keys.includes('pending_action') || !keys.includes('version') || !keys.includes('updated_at')) {
+    throw new Error('invalid');
+  }
+  return transition.patch;
+}
+
+export async function applyPendingWorkActionPatchV2({
+  supabaseUrl,
+  serviceRoleKey,
+  row,
+  transition,
+  fetchImpl = fetch
+} = {}) {
+  try {
+    validatePendingWorkActionRow(row);
+    const patch = validateWorkActionPatch(row, transition);
+    const databasePatch = Object.fromEntries(
+      Object.entries(patch).filter(([field]) => field !== 'updated_at')
+    );
+    const key = String(serviceRoleKey || '').trim();
+    if (!key || typeof fetchImpl !== 'function') throw new Error('invalid');
+    const url = new URL(workActionEndpoint(supabaseUrl));
+    url.searchParams.set('select', WORK_ACTION_ROW_FIELDS.join(','));
+    url.searchParams.set('id', `eq.${row.id}`);
+    url.searchParams.set('version', `eq.${row.version}`);
+    url.searchParams.set('state', 'in.(open,in_progress,snoozed)');
+    url.searchParams.set('pending_action->>status', 'eq.pending');
+    const data = await workActionFetchJson(url.toString(), {
+      method: 'PATCH',
+      headers: workActionHeaders(key, 'return=representation'),
+      body: JSON.stringify(databasePatch)
+    }, fetchImpl);
+    if (!Array.isArray(data) || data.length > 1) throw new Error('invalid');
+    if (data.length === 0) return { applied: false };
+    const updated = validatePendingWorkActionRowAfterApply(data[0], row, databasePatch);
+    if (!updated) throw new Error('invalid');
+    return { applied: true };
+  } catch {
+    throw new Error('Work Orchestrator action request failed');
+  }
+}
+
+function validatePendingWorkActionRowAfterApply(updated, row, patch) {
+  if (!workActionExactKeys(updated, WORK_ACTION_ROW_FIELDS)
+    || updated.id !== row.id || updated.version !== patch.version
+    || !workActionExactKeys(updated.pending_action, [])
+    || typeof updated.updated_at !== 'string' || !Number.isFinite(Date.parse(updated.updated_at))) return false;
+  return Object.entries(patch).every(([key, value]) => {
+    if (WORK_ACTION_TIMESTAMP_FIELDS.has(key) && value !== null) {
+      return typeof updated[key] === 'string'
+        && Number.isFinite(Date.parse(updated[key]))
+        && Date.parse(updated[key]) === Date.parse(value);
+    }
+    return workActionSameJson(updated[key], value);
+  });
+}
+
+export function createWorkOrchestratorActionPoller({
+  config = {},
+  storeReady = false,
+  list = null,
+  apply = null,
+  now = () => new Date(),
+  state: sharedState = null
+} = {}) {
+  const localState = sharedState && workActionRecord(sharedState) ? sharedState : {};
+  const enabled = config.workItemsEnabled === true && storeReady === true
+    && typeof list === 'function' && typeof apply === 'function';
+  let running = false;
+
+  const poll = async (reason = 'interval') => {
+    const trigger = safeWorkActionTrigger(reason);
+    const result = {
+      status: enabled ? 'ok' : 'disabled', trigger, scanned: 0, applied: 0,
+      awaitingResolution: 0, conflicts: 0, invalid: 0
+    };
+    if (!enabled) return result;
+    if (running) return { ...result, status: 'running' };
+    running = true;
+    localState.workActionPollRunning = true;
+    try {
+      let changedAt;
+      try {
+        const supplied = typeof now === 'function' ? now() : now;
+        const date = supplied instanceof Date ? new Date(supplied.getTime()) : new Date(supplied);
+        if (Number.isNaN(date.getTime())) throw new Error('invalid');
+        changedAt = date.toISOString();
+      } catch {
+        result.status = 'error';
+        return result;
+      }
+      let rows;
+      try {
+        rows = await list({ limit: 10, now: changedAt });
+        if (!Array.isArray(rows) || rows.length > 10) throw new Error('invalid');
+      } catch {
+        result.status = 'error';
+        return result;
+      }
+      result.scanned = rows.length;
+      for (const row of rows) {
+        let transition;
+        try {
+          transition = processPendingWorkAction({ row, action: row?.pending_action, now: changedAt });
+        } catch {
+          result.invalid += 1;
+          continue;
+        }
+        if (transition.status === 'awaiting_authoritative_resolution') {
+          result.awaitingResolution += 1;
+          continue;
+        }
+        try {
+          const applied = await apply({ row, transition });
+          if (!workActionExactKeys(applied, ['applied']) || typeof applied.applied !== 'boolean') throw new Error('invalid');
+          if (applied.applied) result.applied += 1;
+          else result.conflicts += 1;
+        } catch {
+          result.status = 'error';
+        }
+      }
+      return result;
+    } finally {
+      running = false;
+      localState.workActionPollRunning = false;
+      localState.lastWorkActionPoll = safeWorkActionPollResult(result, trigger);
+    }
+  };
+
+  return { enabled, localConfigReady: enabled, state: localState, poll };
+}
+
+const IMMEDIATE_NOTICE_RESOLUTION_TEXT = Object.freeze({
+  auto_reply_readback: '자동 답변이 실제 전송 확인까지 완료되었습니다.',
+  operation_readback: '자동 처리가 실제 결과 확인까지 완료되었습니다.'
+});
+
+function immediateNoticeUpdateRow(row) {
+  const update = row?.payload?.automation_notice_update;
+  if (!workActionRecord(row) || typeof row.source_event_key !== 'string'
+    || !row.source_event_key || row.source_event_key.length > 500
+    || typeof row.slack_channel_id !== 'string' || !/^[A-Z0-9][A-Z0-9_-]{0,79}$/.test(row.slack_channel_id)
+    || typeof row.slack_message_ts !== 'string' || !/^[0-9]{1,20}\.[0-9]{1,20}$/.test(row.slack_message_ts)
+    || typeof row.updated_at !== 'string' || Number.isNaN(Date.parse(row.updated_at))
+    || !workActionRecord(update) || update.status !== 'pending'
+    || !Object.hasOwn(IMMEDIATE_NOTICE_RESOLUTION_TEXT, update.resolution_kind)) {
+    throw new Error('Immediate notice update request is invalid');
+  }
+  return { row, update };
+}
+
+function immediateNoticeRequestedContent(update) {
+  const text = `✅ 자동 처리 완료 · ${IMMEDIATE_NOTICE_RESOLUTION_TEXT[update.resolution_kind]}`;
+  return {
+    text,
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }]
+  };
+}
+
+function authoritativeImmediateNoticeReadback(delivery, row, requested) {
+  if (delivery?.channel !== row.slack_channel_id || delivery?.ts !== row.slack_message_ts
+    || !workActionRecord(delivery.message)
+    || delivery.message.text !== requested.text
+    || !workActionSameJson(delivery.message.blocks, requested.blocks)) {
+    throw new Error('Immediate notice update readback is invalid');
+  }
+  return sha256(JSON.stringify(requested));
+}
+
+export function createImmediateNoticeUpdatePoller({
+  config = {}, store = null, slack = null, now = () => new Date()
+} = {}) {
+  const enabled = config.immediateEnabled === true && config.workItemsEnabled === true
+    && typeof store?.listImmediateNoticeUpdateRequests === 'function'
+    && typeof store?.markImmediateNoticeUpdated === 'function'
+    && typeof slack?.updateMessage === 'function';
+  let running = false;
+
+  const poll = async (reason = 'interval') => {
+    const trigger = safeWorkActionTrigger(reason);
+    const result = {
+      status: enabled ? 'ok' : 'disabled', trigger, scanned: 0, updated: 0, failed: 0, conflicts: 0
+    };
+    if (!enabled) return result;
+    if (running) return { ...result, status: 'running' };
+    running = true;
+    try {
+      let rows;
+      try {
+        rows = await store.listImmediateNoticeUpdateRequests({ limit: 10 });
+        if (!Array.isArray(rows) || rows.length > 10) throw new Error('invalid');
+      } catch {
+        return { ...result, status: 'error' };
+      }
+      result.scanned = rows.length;
+      for (const candidate of rows) {
+        try {
+          const { row, update } = immediateNoticeUpdateRow(candidate);
+          const requested = immediateNoticeRequestedContent(update);
+          const delivery = await slack.updateMessage({
+            channel: row.slack_channel_id,
+            ts: row.slack_message_ts,
+            ...requested
+          });
+          const contentHash = authoritativeImmediateNoticeReadback(delivery, row, requested);
+          const supplied = typeof now === 'function' ? now() : now;
+          const updatedAt = new Date(supplied);
+          if (Number.isNaN(updatedAt.getTime())) throw new Error('clock unavailable');
+          const recorded = await store.markImmediateNoticeUpdated({
+            sourceEventKey: row.source_event_key,
+            expectedUpdatedAt: row.updated_at,
+            channelId: delivery.channel,
+            messageTs: delivery.ts,
+            updatedAt: updatedAt.toISOString(),
+            contentHash
+          });
+          if (recorded?.applied) result.updated += 1;
+          else result.conflicts += 1;
+        } catch {
+          result.failed += 1;
+        }
+      }
+      return result;
+    } finally {
+      running = false;
+    }
+  };
+
+  return { enabled, poll };
+}
+
+export async function runSlackActionPollPair({
+  reason = 'manual',
+  legacy = null,
+  workActions = null
+} = {}) {
+  const trigger = safeWorkActionTrigger(reason);
+  const result = { legacy: null, workOrchestratorV2: null };
+  try {
+    result.legacy = typeof legacy === 'function' ? await legacy() : null;
+  } catch {
+    result.legacyError = true;
+  }
+  try {
+    result.workOrchestratorV2 = workActions && typeof workActions.poll === 'function'
+      ? safeWorkActionPollResult(await workActions.poll(trigger), trigger)
+      : safeWorkActionPollResult({
+          status: 'disabled', trigger, scanned: 0, applied: 0,
+          awaitingResolution: 0, conflicts: 0, invalid: 0
+        }, trigger);
+  } catch {
+    result.workOrchestratorV2 = safeWorkActionPollResult(null, trigger);
+  }
+  return result;
+}
+
+export function slackActionMaintenanceSucceeded(result = {}) {
+  if (!workActionRecord(result) || result.legacyError === true) return false;
+  const legacyErrors = Array.isArray(result.errors)
+    ? result.errors
+    : (Array.isArray(result.legacy?.errors) ? result.legacy.errors : []);
+  return legacyErrors.length === 0
+    && workActionRecord(result.workOrchestratorV2)
+    && result.workOrchestratorV2.status !== 'error';
+}
+
+function digestRuntimeIso(now) {
+  let value;
+  try {
+    value = typeof now === 'function' ? now() : now;
+  } catch {
+    throw new Error('Work Orchestrator digest clock is invalid');
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error('Work Orchestrator digest clock is invalid');
+  return date.toISOString();
+}
+
+function digestRuntimeCount(value, maximum) {
+  const numeric = value;
+  if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > maximum) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  return numeric;
+}
+
+function safeDigestRuntimeResult(value, scheduledAt) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !['delivered', 'not_claimed', 'failed'].includes(value.status)) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  const selectedCount = digestRuntimeCount(value.selectedCount, Number.MAX_SAFE_INTEGER);
+  const renderedCount = digestRuntimeCount(value.renderedCount, 500);
+  const partCount = digestRuntimeCount(value.partCount, 50);
+  const deliveredPartCount = digestRuntimeCount(value.deliveredPartCount, 50);
+  if (renderedCount > selectedCount || deliveredPartCount > partCount) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  const cleanup = value.cleanup;
+  if (!cleanup || typeof cleanup !== 'object' || Array.isArray(cleanup)) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  const safeCleanup = {
+    attempted: digestRuntimeCount(cleanup.attempted, 500),
+    settled: digestRuntimeCount(cleanup.settled, 500),
+    failed: digestRuntimeCount(cleanup.failed, 500)
+  };
+  const exactOmission = selectedCount - renderedCount;
+  const resultScheduledAt = safeShadowTimestamp(value.scheduledAt);
+  if (!resultScheduledAt || resultScheduledAt !== scheduledAt) {
+    throw new Error('Work Orchestrator digest result is invalid');
+  }
+  const result = {
+    status: value.status,
+    scheduledAt: resultScheduledAt,
+    runId: typeof value.runId === 'string' && /^[0-9a-f-]{36}$/i.test(value.runId) ? value.runId : null,
+    selectedCount,
+    renderedCount,
+    omittedEligibleCount: exactOmission,
+    partCount,
+    deliveredPartCount,
+    cleanup: safeCleanup
+  };
+  if (value.retryable === true) result.retryable = true;
+  if (value.status === 'failed') {
+    result.error = [
+      'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
+      'digest_eligible_overflow', 'digest_history_incomplete', 'digest_generation_handoff_failed',
+      'digest_generation_diverged'
+    ].includes(value.error)
+      ? value.error
+      : 'digest_cycle_failed';
+  }
+  return result;
+}
+
+export function createWorkOrchestratorDigestRuntime({
+  config = {},
+  store = null,
+  slack = null,
+  run = runDigestCycle,
+  now = () => new Date(),
+  leaseOwner = `bridge:digest:${process.pid}`,
+  state: sharedState = null,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval
+} = {}) {
+  const enabled = config.digestEnabled === true;
+  const channelId = String(config.digestChannelId || '').trim();
+  const intervalMinutes = config.digestIntervalMinutes === undefined ? 180 : Number(config.digestIntervalMinutes);
+  const cleanupEnabled = config.cleanupEnabled === true;
+  const storeReady = Boolean(store && DIGEST_STORE_METHODS.every((method) => typeof store[method] === 'function'));
+  const slackReady = Boolean(slack
+    && typeof slack.postMessage === 'function'
+    && typeof slack.findMessageByClientId === 'function'
+    && typeof slack.deleteMessage === 'function');
+  const localConfigReady = Boolean(enabled
+    && storeReady
+    && slackReady
+    && /^[A-Z0-9][A-Z0-9_-]{0,79}$/.test(channelId)
+    && Number.isSafeInteger(intervalMinutes)
+    && intervalMinutes >= 60
+    && intervalMinutes <= 7 * 24 * 60
+    && typeof run === 'function'
+    && typeof now === 'function'
+    && typeof setIntervalImpl === 'function'
+    && typeof clearIntervalImpl === 'function'
+    && typeof leaseOwner === 'string'
+    && leaseOwner.trim() === leaseOwner
+    && leaseOwner.length > 0
+    && leaseOwner.length <= 200);
+  if (enabled && !localConfigReady) {
+    throw new Error('Work Orchestrator digest local configuration is missing');
+  }
+
+  const runtimeState = sharedState && typeof sharedState === 'object' ? sharedState : {};
+  runtimeState.digestRunning = false;
+  runtimeState.lastDigestRun = runtimeState.lastDigestRun || null;
+  runtimeState.lastDigestSuccessAt = runtimeState.lastDigestSuccessAt || null;
+  runtimeState.lastDigestFailureAt = runtimeState.lastDigestFailureAt || null;
+  runtimeState.nextScheduledAt = runtimeState.nextScheduledAt || null;
+  runtimeState.digestFailureCount = Math.max(0, Number(runtimeState.digestFailureCount || 0));
+  runtimeState.omittedEligibleCount = Math.max(0, Number(runtimeState.omittedEligibleCount || 0));
+
+  let timer = null;
+  let lastAttemptedScheduledAt = null;
+
+  const recordFailure = (at, trigger, scheduledAt, error = 'digest_cycle_failed') => {
+    const safeError = [
+      'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
+      'digest_omission_detected', 'digest_cleanup_failed', 'digest_eligible_overflow',
+      'digest_history_incomplete', 'digest_generation_handoff_failed', 'digest_generation_diverged'
+    ].includes(error) ? error : 'digest_cycle_failed';
+    runtimeState.digestFailureCount += 1;
+    runtimeState.lastDigestFailureAt = at;
+    runtimeState.lastDigestRun = {
+      at,
+      trigger,
+      status: 'failed',
+      scheduledAt,
+      selectedCount: 0,
+      renderedCount: 0,
+      omittedEligibleCount: 0,
+      partCount: 0,
+      deliveredPartCount: 0,
+      cleanupFailed: 0,
+      error: safeError
+    };
+    runtimeState.omittedEligibleCount = 0;
+    return {
+      status: 'failed', scheduledAt, runId: null,
+      selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+      partCount: 0, deliveredPartCount: 0,
+      cleanup: { attempted: 0, settled: 0, failed: 0 },
+      error: safeError
+    };
+  };
+
+  const runAt = async (trigger, { force = false } = {}) => {
+    if (!enabled) return { status: 'disabled' };
+    let at;
+    let window;
+    try {
+      at = digestRuntimeIso(now);
+      window = digestScheduleWindow(at, intervalMinutes);
+    } catch {
+      return recordFailure('', trigger, '', 'digest_cycle_failed');
+    }
+    runtimeState.nextScheduledAt = window.nextScheduledAt;
+    const cleanupRetryDue = (Number(runtimeState.lastDigestRun?.cleanupFailed || 0) > 0
+      || runtimeState.lastDigestRun?.retryable === true)
+      && window.scheduledAt === lastAttemptedScheduledAt;
+    const cleanupSweepDue = cleanupEnabled && window.scheduledAt === lastAttemptedScheduledAt;
+    if (!force && !cleanupRetryDue && !cleanupSweepDue && lastAttemptedScheduledAt !== null
+      && Date.parse(window.scheduledAt) <= Date.parse(lastAttemptedScheduledAt)) {
+      return { status: 'not_due', scheduledAt: window.scheduledAt };
+    }
+    if (runtimeState.digestRunning) return { status: 'already_running', scheduledAt: window.scheduledAt };
+
+    lastAttemptedScheduledAt = window.scheduledAt;
+    runtimeState.digestRunning = true;
+    try {
+      let result;
+      try {
+        result = safeDigestRuntimeResult(await run({
+          store,
+          slack,
+          config: {
+            channelId,
+            destinationKey: `slack:${channelId}`,
+            intervalMinutes,
+            leaseSeconds: 120,
+            cleanupEnabled,
+            cleanupLeaseSeconds: 120,
+            cleanupBacklogLimit: 10,
+            reconcileWindowSeconds: 300,
+            ownerSlackIds: config.ownerSlackIds || {}
+          },
+          now: at,
+          leaseOwner
+        }), window.scheduledAt);
+      } catch {
+        return recordFailure(at, trigger, window.scheduledAt, 'digest_cycle_failed');
+      }
+
+      let error = result.error || null;
+      if (result.status === 'delivered' && result.omittedEligibleCount !== 0) {
+        result.status = 'failed';
+        result.error = 'digest_omission_detected';
+        error = result.error;
+      } else if (result.cleanup.failed > 0) {
+        error = 'digest_cleanup_failed';
+      }
+      runtimeState.omittedEligibleCount = result.omittedEligibleCount;
+      runtimeState.lastDigestRun = {
+        at,
+        trigger,
+        status: result.status,
+        scheduledAt: result.scheduledAt,
+        selectedCount: result.selectedCount,
+        renderedCount: result.renderedCount,
+        omittedEligibleCount: result.omittedEligibleCount,
+        partCount: result.partCount,
+        deliveredPartCount: result.deliveredPartCount,
+        cleanupFailed: result.cleanup.failed,
+        retryable: result.retryable === true,
+        ...(error ? { error } : {})
+      };
+      if (result.status === 'delivered') runtimeState.lastDigestSuccessAt = at;
+      if (result.status === 'failed' || result.cleanup.failed > 0) {
+        runtimeState.digestFailureCount += 1;
+        runtimeState.lastDigestFailureAt = at;
+      }
+      return result;
+    } finally {
+      runtimeState.digestRunning = false;
+    }
+  };
+
+  return {
+    enabled,
+    localConfigReady,
+    state: runtimeState,
+    async start() {
+      if (!enabled) return { status: 'disabled' };
+      if (timer === null) timer = setIntervalImpl(() => runAt('interval'), 60_000);
+      return runAt('startup');
+    },
+    stop() {
+      if (timer !== null) clearIntervalImpl(timer);
+      timer = null;
+    },
+    runNow(trigger = 'manual') {
+      return runAt(['startup', 'interval', 'manual'].includes(trigger) ? trigger : 'manual', { force: trigger === 'manual' });
+    },
+    check() {
+      return runAt('interval');
+    }
+  };
+}
+
+function safeMaintenanceDigestResult(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { status: 'failed', error: 'digest_cycle_failed' };
+  }
+  const result = {};
+  if (['disabled', 'not_due', 'already_running', 'delivered', 'not_claimed', 'failed'].includes(value.status)) {
+    result.status = value.status;
+  } else {
+    result.status = 'failed';
+  }
+  for (const key of ['scheduledAt', 'runId']) {
+    if (typeof value[key] === 'string' && value[key].length <= 40) result[key] = value[key];
+  }
+  if (['startup', 'interval', 'manual'].includes(value.trigger)) result.trigger = value.trigger;
+  if (value.retryable === true) result.retryable = true;
+  for (const [key, maximum] of Object.entries({
+    selectedCount: Number.MAX_SAFE_INTEGER, renderedCount: 500,
+    omittedEligibleCount: Number.MAX_SAFE_INTEGER,
+    partCount: 50, deliveredPartCount: 50
+  })) {
+    const numeric = Number(value[key]);
+    if (Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= maximum) result[key] = numeric;
+  }
+  if (value.cleanup && typeof value.cleanup === 'object' && !Array.isArray(value.cleanup)) {
+    result.cleanup = {};
+    for (const key of ['attempted', 'settled', 'failed']) {
+      const numeric = value.cleanup[key];
+      if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > 500) {
+        return { status: 'failed', error: 'digest_cycle_failed' };
+      }
+      result.cleanup[key] = numeric;
+    }
+  }
+  if (result.status === 'failed') {
+    result.error = [
+      'digest_claim_failed', 'digest_build_failed', 'digest_delivery_failed', 'digest_delivery_unconfirmed',
+      'digest_omission_detected', 'digest_cleanup_failed', 'digest_eligible_overflow',
+      'digest_history_incomplete', 'digest_generation_handoff_failed', 'digest_generation_diverged'
+    ].includes(value.error) ? value.error : 'digest_cycle_failed';
+  }
+  return result;
+}
+
+export async function handleWorkOrchestratorDigestMaintenance(runtime) {
+  if (!runtime || typeof runtime.runNow !== 'function') {
+    return { statusCode: 503, body: { ok: false, result: { status: 'failed', error: 'digest_cycle_failed' } } };
+  }
+  let result;
+  try {
+    result = safeMaintenanceDigestResult(await runtime.runNow('manual'));
+  } catch {
+    result = { status: 'failed', error: 'digest_cycle_failed' };
+  }
+  return {
+    statusCode: result.status === 'failed' ? 502 : 200,
+    body: { ok: result.status !== 'failed', result }
   };
 }
 
@@ -421,6 +1913,110 @@ async function fetchWithDnsFallback(endpoint, init = {}) {
   });
 }
 
+const workOrchestratorCredentialsPresent = Boolean(
+  CONFIG.supabaseUrl.trim() && CONFIG.supabaseServiceRoleKey.trim()
+);
+let workOrchestratorStore = null;
+if (workOrchestratorCredentialsPresent) {
+  try {
+    workOrchestratorStore = createWorkOrchestratorStore({
+      supabaseUrl: CONFIG.supabaseUrl,
+      serviceRoleKey: CONFIG.supabaseServiceRoleKey
+    });
+  } catch {
+    workOrchestratorStore = null;
+  }
+}
+CONFIG.workOrchestratorStoreConfigured = Boolean(workOrchestratorStore);
+CONFIG.workOrchestratorShadowReady = !CONFIG.workOrchestrator.shadowWrites || Boolean(workOrchestratorStore);
+const workOrchestratorShadowRuntime = createWorkOrchestratorShadowRuntime({
+  config: CONFIG.workOrchestrator,
+  store: workOrchestratorStore
+});
+let workOrchestratorSlackClient = null;
+if ((CONFIG.workOrchestrator.immediateEnabled
+    || CONFIG.workOrchestrator.workItemsEnabled
+    || CONFIG.workOrchestrator.digestEnabled
+    || CONFIG.workOrchestrator.cleanupEnabled)
+  && CONFIG.slackBotToken.trim()) {
+  try {
+    workOrchestratorSlackClient = createSlackClient({ token: CONFIG.slackBotToken });
+  } catch {
+    workOrchestratorSlackClient = null;
+  }
+}
+const workOrchestratorImmediateAttemptGuard = CONFIG.workOrchestrator.immediateEnabled
+  ? createImmediateNotificationAttemptGuard({ queueDir: CONFIG.queueDir })
+  : null;
+const workOrchestratorImmediateRuntime = createWorkOrchestratorImmediateRuntime({
+  config: {
+    ...CONFIG.workOrchestrator,
+    mentionUserIds: String(process.env.SLACK_CARD_MENTION_USER_IDS || '')
+      .split(/[\s,]+/)
+      .filter(Boolean)
+  },
+  store: workOrchestratorStore,
+  slack: workOrchestratorSlackClient,
+  slackToken: CONFIG.slackBotToken,
+  state: workOrchestratorShadowRuntime.state,
+  attemptGuard: workOrchestratorImmediateAttemptGuard
+});
+CONFIG.workOrchestratorImmediateLocalConfigReady = workOrchestratorImmediateRuntime.localConfigReady;
+const workOrchestratorDigestRuntime = createWorkOrchestratorDigestRuntime({
+  config: CONFIG.workOrchestrator,
+  store: workOrchestratorStore,
+  slack: workOrchestratorSlackClient,
+  state: workOrchestratorShadowRuntime.state,
+  leaseOwner: `bridge:digest:${process.pid}`
+});
+CONFIG.workOrchestratorDigestLocalConfigReady = workOrchestratorDigestRuntime.localConfigReady;
+const workOrchestratorActionPoller = createWorkOrchestratorActionPoller({
+  config: CONFIG.workOrchestrator,
+  storeReady: Boolean(workOrchestratorStore),
+  list: workOrchestratorCredentialsPresent
+    ? ({ limit }) => listPendingWorkActionsV2({
+        supabaseUrl: CONFIG.supabaseUrl,
+        serviceRoleKey: CONFIG.supabaseServiceRoleKey,
+        limit
+      })
+    : null,
+  apply: workOrchestratorCredentialsPresent
+    ? ({ row, transition }) => applyPendingWorkActionPatchV2({
+        supabaseUrl: CONFIG.supabaseUrl,
+        serviceRoleKey: CONFIG.supabaseServiceRoleKey,
+        row,
+        transition
+      })
+    : null,
+  state: workOrchestratorShadowRuntime.state
+});
+CONFIG.workOrchestratorActionLocalConfigReady = workOrchestratorActionPoller.localConfigReady;
+const workOrchestratorImmediateNoticeUpdatePoller = createImmediateNoticeUpdatePoller({
+  config: CONFIG.workOrchestrator,
+  store: workOrchestratorStore,
+  slack: workOrchestratorSlackClient
+});
+const workOrchestratorP0Runtime = createWorkOrchestratorP0Runtime({
+  config: {
+    ...CONFIG.workOrchestrator,
+    digestChannelId: CONFIG.workOrchestrator.digestChannelId || CONFIG.workOrchestrator.inboxChannelId
+  },
+  store: workOrchestratorStore,
+  slack: workOrchestratorSlackClient,
+  mentionUserIds: String(process.env.SLACK_CARD_MENTION_USER_IDS || '')
+    .split(/[\s,]+/)
+    .filter(Boolean)
+});
+CONFIG.workOrchestratorP0LocalConfigReady = workOrchestratorP0Runtime.localConfigReady;
+const workOrchestratorNoticeCleanupRuntime = createWorkOrchestratorNoticeCleanupRuntime({
+  config: CONFIG.workOrchestrator,
+  environment: process.env,
+  store: workOrchestratorStore,
+  slack: workOrchestratorSlackClient,
+  state: workOrchestratorShadowRuntime.state
+});
+CONFIG.workOrchestratorCleanupLocalConfigReady = workOrchestratorNoticeCleanupRuntime.localConfigReady;
+
 const state = {
   startedAt: new Date().toISOString(),
   received: 0,
@@ -448,8 +2044,10 @@ const state = {
   roomVersions: new Map(),
   activeWorkerJobIds: new Set(),
   seenGroupingTexts: new Set(),
-  lastContentScriptStartedAtMs: 0
+  lastContentScriptStartedAtMs: 0,
+  workOrchestrator: workOrchestratorShadowRuntime.state
 };
+state.workOrchestrator.lastP0Readback = null;
 
 const gatewayTransportSelected = ['gateway', 'gateway_no_send'].includes(CONFIG.hermesTransport);
 const gatewayTransportEnabled = gatewayTransportSelected && Boolean(CONFIG.hermesBridgeToken.trim());
@@ -1006,6 +2604,401 @@ export function buildP0SlackEscalationMessage(row = {}, claim = {}, { mentionUse
   };
 }
 
+function finiteV2P0Error(value) {
+  return [
+    'list_failed', 'invalid_list', 'claim_failed', 'claim_conflict', 'post_failed',
+    'reconcile_failed', 'record_failed', 'record_conflict', 'invalid_delivery'
+  ].includes(value) ? value : 'p0_failed';
+}
+
+function v2P0SlackMessage(row, claim, channel, mentionUserIds = []) {
+  const mentions = [...new Set((Array.isArray(mentionUserIds) ? mentionUserIds : [])
+    .map((value) => String(value || '').trim())
+    .filter((value) => /^[UW][A-Z0-9]{1,79}$/.test(value)))]
+    .map((value) => `<@${value}>`)
+    .join(' ');
+  const title = String(row?.title || 'Immediate review required').trim().slice(0, 300);
+  const summary = String(row?.summary || '').trim().slice(0, 1000);
+  const text = `${mentions ? `${mentions} ` : ''}<!channel> 🚨 P0 unacknowledged · ${title}${summary ? ` · ${summary}` : ''}`;
+  const actionValue = encodeWorkActionValue({
+    id: row.id,
+    version: row.version,
+    action: { type: 'ack_p0' }
+  });
+  return {
+    channel,
+    text,
+    clientMsgId: claim.clientMessageId,
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text } },
+      {
+        type: 'actions',
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'P0 확인', emoji: true },
+          action_id: 'village_work_v2_ack_p0',
+          value: actionValue
+        }]
+      }
+    ]
+  };
+}
+
+export async function runP0EscalationPair({
+  readbackEnabled = false,
+  cutoverEnabled = false,
+  legacy = null,
+  v2Readback = null,
+  v2 = null
+} = {}) {
+  const cutover = cutoverEnabled === true;
+  if (cutover) return typeof v2 === 'function' ? v2() : null;
+  if (readbackEnabled) {
+    let readback = null;
+    try {
+      readback = typeof v2Readback === 'function' ? await v2Readback() : null;
+    } catch {
+      readback = { status: 'error', errors: ['readback_failed'] };
+    }
+    const legacyResult = typeof legacy === 'function' ? await legacy() : null;
+    return { legacy: legacyResult, readback, sender: 'legacy' };
+  }
+  return typeof legacy === 'function' ? legacy() : null;
+}
+
+export function createWorkOrchestratorP0Runtime({
+  config = {}, store = null, slack = null, now = () => new Date(), mentionUserIds = [],
+  reconciliationOwner = crypto.randomUUID(),
+  catchUpDelayMs = 60_000,
+  scheduleCatchUp = (callback, delayMs) => setTimeout(callback, delayMs)
+} = {}) {
+  const readbackEnabled = config.workItemsEnabled === true && config.p0ReadbackEnabled === true;
+  const cutoverEnabled = readbackEnabled && config.p0CutoverEnabled === true;
+  const enabled = readbackEnabled;
+  const channel = String(config.digestChannelId || '').trim();
+  const listReady = store && typeof store.listDueP0Work === 'function';
+  const deliveryReady = listReady
+    && typeof store.claimP0Delivery === 'function'
+    && typeof store.claimP0Reconciliation === 'function'
+    && typeof store.settleP0Delivery === 'function'
+    && typeof store.readP0Delivery === 'function'
+    && slack && typeof slack.postMessage === 'function'
+    && typeof slack.findMessageByClientId === 'function';
+  const owner = String(reconciliationOwner || '').trim();
+  const boundedCatchUpDelayMs = Number(catchUpDelayMs);
+  const catchUpReady = typeof scheduleCatchUp === 'function'
+    && Number.isSafeInteger(boundedCatchUpDelayMs)
+    && boundedCatchUpDelayMs >= 60_000
+    && boundedCatchUpDelayMs <= 300_000;
+  const localConfigReady = !enabled || Boolean(listReady && (!cutoverEnabled
+    || channel && deliveryReady && WORK_ACTION_UUID.test(owner) && catchUpReady));
+  if (!localConfigReady) throw new Error('Work Orchestrator P0 local configuration is missing');
+
+  const settleKnownCoordinates = async ({ row, delivery, expectedStatus, posted }) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let input;
+      try {
+        input = {
+          id: row.id,
+          expectedStatus,
+          expectedGeneration: delivery.generation,
+          clientMessageId: delivery.clientMessageId,
+          status: 'delivered',
+          recordedAt: now().toISOString(),
+          channelId: posted.channel || channel,
+          messageTs: posted.ts,
+          ...(expectedStatus === 'reconciling' ? {
+            reconcileOwner: delivery.reconcileOwner,
+            reconcileToken: delivery.reconcileToken
+          } : {})
+        };
+        const settled = await store.settleP0Delivery(input);
+        if (settled?.applied === true) return true;
+      } catch {
+        // A lost response may mean the exact terminal CAS committed. Read it back before retrying.
+      }
+      if (!input) continue;
+      let readback;
+      try {
+        readback = await store.readP0Delivery({
+          id: row.id,
+          expectedGeneration: delivery.generation,
+          clientMessageId: delivery.clientMessageId
+        });
+      } catch {
+        continue;
+      }
+      const current = readback?.row?.payload?.p0_delivery;
+      if (readback?.matched === true && current?.status === 'delivered'
+        && current.readback?.channel_id === input.channelId
+        && current.readback?.message_ts === input.messageTs) return true;
+      if (readback?.matched !== true || current?.status !== expectedStatus) return false;
+    }
+    return false;
+  };
+
+  let sweep;
+  let activeSweep = null;
+  let catchUpPending = false;
+  const runSweep = async (reason = 'manual') => {
+    if (!enabled) return { status: 'disabled', mode: 'disabled' };
+    const result = {
+      status: 'ok', scanned: 0, claimed: 0, delivered: 0, reconciled: 0,
+      skipped: 0, errors: [], omissions: 0,
+      eligibleCount: 0, selectedCount: 0, omittedCount: 0,
+      mode: cutoverEnabled ? 'cutover' : 'readback', ready: false
+    };
+    const cutoff = now().toISOString();
+    let listed;
+    try {
+      listed = await store.listDueP0Work({ now: cutoff, limit: 50 });
+    } catch {
+      return { ...result, status: 'error', errors: ['list_failed'], ready: false };
+    }
+    if (!listed || !Array.isArray(listed.rows)
+      || !Number.isSafeInteger(listed.eligibleCount) || listed.eligibleCount < 0
+      || !Number.isSafeInteger(listed.selectedCount) || listed.selectedCount < 0
+      || !Number.isSafeInteger(listed.omittedCount) || listed.omittedCount < 0
+      || listed.selectedCount !== listed.rows.length
+      || listed.omittedCount !== listed.eligibleCount - listed.selectedCount
+      || listed.rows.length > 50) {
+      return { ...result, status: 'error', errors: ['invalid_list'], ready: false };
+    }
+    result.scanned = listed.rows.length;
+    result.eligibleCount = listed.eligibleCount;
+    result.selectedCount = listed.selectedCount;
+    result.omittedCount = listed.omittedCount;
+    result.omissions = listed.omittedCount;
+    const decisions = [];
+    for (const row of listed.rows) {
+      let decision;
+      try {
+        decision = v2P0ReminderDecision(row, { now: cutoff });
+      } catch {
+        decision = { due: false, reason: 'invalid_delivery' };
+      }
+      let processable = decision.due === true || decision.reconcile === true;
+      if (processable && decision.due === true) {
+        try {
+          buildV2P0DeliveryClaim(row, { now: cutoff, claimTtlMs: 120_000 });
+        } catch {
+          processable = false;
+        }
+      }
+      if (processable && decision.reconcile === true
+        && (!WORK_ACTION_UUID.test(String(row?.id || ''))
+          || !Number.isSafeInteger(row?.version) || row.version < 1)) processable = false;
+      if (decision.reason === 'invalid_delivery' || !processable) {
+        if (!result.errors.includes('invalid_delivery')) result.errors.push('invalid_delivery');
+      }
+      decisions.push(decision);
+    }
+    if (!cutoverEnabled) {
+      result.ready = listed.omittedCount === 0 && result.errors.length === 0;
+      if (listed.omittedCount > 0) {
+        result.status = 'not_ready';
+        result.errors.push('p0_eligible_overflow');
+      }
+      if (result.errors.length > 0) result.status = 'not_ready';
+      return {
+        status: result.status,
+        mode: result.mode,
+        eligibleCount: result.eligibleCount,
+        selectedCount: result.selectedCount,
+        omittedCount: result.omittedCount,
+        scanned: result.scanned,
+        ready: result.ready,
+        errors: result.errors
+      };
+    }
+    result.ready = listed.omittedCount === 0 && result.errors.length === 0;
+    if (listed.omittedCount > 0) result.errors.push('p0_eligible_overflow');
+    if (!result.ready) result.status = 'error';
+
+    for (const [index, row] of listed.rows.entries()) {
+      const decision = decisions[index];
+      const existingDelivery = row?.payload?.p0_delivery;
+      if (decision.reconcile === true) {
+        let reconciliation;
+        try {
+          reconciliation = await store.claimP0Reconciliation({
+            id: row.id,
+            expectedVersion: row.version,
+            expectedStatus: existingDelivery.status,
+            expectedGeneration: existingDelivery.generation,
+            clientMessageId: existingDelivery.client_message_id,
+            reconcileOwner: owner,
+            leaseSeconds: 120,
+            now: cutoff
+          });
+        } catch {
+          result.errors.push('claim_failed');
+          continue;
+        }
+        if (reconciliation?.claimed !== true || !reconciliation.row) {
+          result.skipped += 1;
+          continue;
+        }
+        result.reconciled += 1;
+        const reconciliationRow = reconciliation.row;
+        const leasedDelivery = reconciliationRow?.payload?.p0_delivery;
+        const settleReconciliationFailure = async (status) => {
+          try {
+            const recorded = await store.settleP0Delivery({
+              id: reconciliationRow.id,
+              expectedStatus: 'reconciling',
+              expectedGeneration: leasedDelivery.generation,
+              clientMessageId: leasedDelivery.client_message_id,
+              status,
+              recordedAt: now().toISOString(),
+              channelId: null,
+              messageTs: null,
+              reconcileOwner: leasedDelivery.reconcile_owner,
+              reconcileToken: leasedDelivery.reconcile_token
+            });
+            if (recorded?.applied !== true) result.errors.push('record_conflict');
+          } catch {
+            result.errors.push('record_failed');
+          }
+        };
+        let found;
+        try {
+          const oldest = Math.max(1, Date.parse(leasedDelivery.claimed_at) / 1000 - 60);
+          const latest = Math.max(oldest + 1, Date.parse(cutoff) / 1000 + 60);
+          found = await slack.findMessageByClientId({
+            channel, clientMsgId: leasedDelivery.client_message_id, oldest, latest
+          });
+        } catch {
+          await settleReconciliationFailure('reconcile_pending');
+          result.errors.push('reconcile_failed');
+          continue;
+        }
+        let posted = found;
+        if (!posted) {
+          try {
+            posted = await slack.postMessage(v2P0SlackMessage(reconciliationRow, {
+              clientMessageId: leasedDelivery.client_message_id,
+              attempt: leasedDelivery.attempt
+            }, channel, mentionUserIds));
+          } catch (error) {
+            await settleReconciliationFailure(error?.ambiguous === true
+              ? 'reconcile_pending' : 'retry_pending');
+            result.errors.push('post_failed');
+            continue;
+          }
+        }
+        const settled = await settleKnownCoordinates({
+          row: reconciliationRow,
+          delivery: {
+            generation: leasedDelivery.generation,
+            clientMessageId: leasedDelivery.client_message_id,
+            reconcileOwner: leasedDelivery.reconcile_owner,
+            reconcileToken: leasedDelivery.reconcile_token
+          },
+          expectedStatus: 'reconciling',
+          posted
+        });
+        if (settled) {
+          result.delivered += 1;
+        } else {
+          result.errors.push('record_failed');
+        }
+        continue;
+      }
+      if (!decision.due) {
+        result.skipped += 1;
+        continue;
+      }
+      let claim;
+      let claimedRow;
+      try {
+        claim = buildV2P0DeliveryClaim(row, { now: cutoff, claimTtlMs: 120_000 });
+        const claimed = await store.claimP0Delivery({ id: row.id, ...claim });
+        if (claimed?.applied !== true || !claimed.row) {
+          result.skipped += 1;
+          continue;
+        }
+        claimedRow = claimed.row;
+        result.claimed += 1;
+      } catch {
+        result.errors.push('claim_failed');
+        continue;
+      }
+      let posted;
+      try {
+        posted = await slack.postMessage(v2P0SlackMessage(row, claim, channel, mentionUserIds));
+      } catch (error) {
+        try {
+          const recorded = await store.settleP0Delivery({
+            id: row.id,
+            expectedStatus: 'claimed',
+            expectedGeneration: claim.generation,
+            clientMessageId: claim.clientMessageId,
+            status: error?.ambiguous === true ? 'reconcile_pending' : 'retry_pending',
+            recordedAt: now().toISOString(),
+            channelId: null,
+            messageTs: null
+          });
+          if (recorded?.applied !== true) result.errors.push('record_conflict');
+        } catch {
+          result.errors.push('record_failed');
+        }
+        result.errors.push(finiteV2P0Error('post_failed'));
+        continue;
+      }
+      const settled = await settleKnownCoordinates({
+        row: claimedRow,
+        delivery: { generation: claim.generation, clientMessageId: claim.clientMessageId },
+        expectedStatus: 'claimed',
+        posted
+      });
+      if (settled) {
+        result.delivered += 1;
+      } else {
+        result.errors.push('record_failed');
+      }
+    }
+    if (result.errors.length || result.omissions > 0) result.status = 'error';
+    if (result.omittedCount > 0 && reason !== 'catch_up' && !catchUpPending) {
+      catchUpPending = true;
+      try {
+        const timer = scheduleCatchUp(async () => {
+          catchUpPending = false;
+          try {
+            return await sweep('catch_up');
+          } catch {
+            return null;
+          }
+        }, boundedCatchUpDelayMs);
+        timer?.unref?.();
+      } catch {
+        catchUpPending = false;
+      }
+    }
+    if (result.omittedCount > 0) result.catchUpScheduled = catchUpPending;
+    return result;
+  };
+
+  sweep = async (reason = 'manual') => {
+    if (activeSweep) {
+      return {
+        status: 'not_ready', mode: cutoverEnabled ? 'cutover' : 'readback',
+        eligibleCount: 0, selectedCount: 0, omittedCount: 0,
+        scanned: 0, ready: false, errors: []
+      };
+    }
+    const pending = runSweep(reason);
+    activeSweep = pending;
+    try {
+      return await pending;
+    } finally {
+      if (activeSweep === pending) activeSweep = null;
+    }
+  };
+
+  return { enabled, readbackEnabled, cutoverEnabled, localConfigReady, sweep };
+}
+
 export function buildCorsHeaders() {
   return {
     'content-type': 'application/json; charset=utf-8',
@@ -1405,41 +3398,58 @@ export function compactQueueAuditRecord(filename, object = {}) {
     };
   }
   if (filename === 'errors.ndjson') {
+    const correlation = typeof object.eventCorrelationSha256 === 'string'
+      && /^[0-9a-f]{64}$/.test(object.eventCorrelationSha256)
+      ? { eventCorrelationSha256: object.eventCorrelationSha256 }
+      : {};
+    if (object.type === 'immediate_notification') {
+      return {
+        at: object.at || '',
+        type: 'immediate_notification',
+        ...correlation
+      };
+    }
     return {
       ...base,
       type: object.type || '',
-      message: compactQueueAuditText(object.message || object.error || '', 1600)
+      message: compactQueueAuditText(object.message || object.error || '', 1600),
+      ...correlation
     };
   }
   return base;
 }
 
-function rotateQueueLogIfNeeded(filename, incomingBytes) {
-  const filePath = path.join(CONFIG.queueDir, filename);
+function rotateQueueLogIfNeeded(filename, incomingBytes, queueDir = CONFIG.queueDir) {
+  const filePath = path.join(queueDir, filename);
   try {
     const stat = fs.statSync(filePath);
     if (stat.size + incomingBytes <= CONFIG.queueLogMaxBytes) return;
     const archivePath = `${filePath}.${Date.now()}.${process.pid}`;
     fs.renameSync(filePath, archivePath);
     const prefix = `${filename}.`;
-    const archives = fs.readdirSync(CONFIG.queueDir)
+    const archives = fs.readdirSync(queueDir)
       .filter((entry) => entry.startsWith(prefix))
-      .map((entry) => ({ entry, mtimeMs: fs.statSync(path.join(CONFIG.queueDir, entry)).mtimeMs }))
+      .map((entry) => ({ entry, mtimeMs: fs.statSync(path.join(queueDir, entry)).mtimeMs }))
       .sort((a, b) => b.mtimeMs - a.mtimeMs);
     archives.slice(CONFIG.queueLogArchiveCount).forEach(({ entry }) => {
-      try { fs.unlinkSync(path.join(CONFIG.queueDir, entry)); } catch (_) {}
+      try { fs.unlinkSync(path.join(queueDir, entry)); } catch (_) {}
     });
   } catch (error) {
     if (error?.code !== 'ENOENT') console.warn(`[kakao-dom-bridge] queue log rotation failed for ${filename}: ${error.message}`);
   }
 }
 
-function appendNdjson(filename, object) {
-  ensureQueueDir();
+function appendNdjson(filename, object, queueDir = CONFIG.queueDir) {
+  fs.mkdirSync(queueDir, { recursive: true });
   const record = compactQueueAuditRecord(filename, object);
   const line = `${JSON.stringify(record)}\n`;
-  rotateQueueLogIfNeeded(filename, Buffer.byteLength(line));
-  fs.appendFileSync(path.join(CONFIG.queueDir, filename), line, 'utf8');
+  rotateQueueLogIfNeeded(filename, Buffer.byteLength(line), queueDir);
+  fs.appendFileSync(path.join(queueDir, filename), line, 'utf8');
+}
+
+export function createErrorsAuditAppender({ queueDir = CONFIG.queueDir } = {}) {
+  const resolvedQueueDir = path.resolve(queueDir);
+  return (object) => appendNdjson('errors.ndjson', object, resolvedQueueDir);
 }
 
 // Node 22+는 unhandledRejection 기본 동작이 프로세스 즉시 종료다. 이 브리지는 Supabase/Slack/
@@ -2008,8 +4018,7 @@ function followUpConfig() {
   };
 }
 
-async function createWorkerFailureFollowUp(job = {}, error = new Error('worker failed'), context = {}) {
-  if (!supabaseConfigured()) return { skipped: true, reason: 'supabase_not_configured' };
+function buildWorkerFailureFollowUpRow(job = {}, error = new Error('worker failed'), context = {}) {
   const preview = previewForJob(job);
   const customerName = customerNameForJob(job);
   const jobId = String(job.jobId || job.eventHash || job.id || 'unknown-job');
@@ -2048,22 +4057,127 @@ async function createWorkerFailureFollowUp(job = {}, error = new Error('worker f
       recovery_context: context
     }
   };
-  const upsertResult = await upsertFollowUpRows(followUpConfig(), [row]);
-  if (CONFIG.slackCardDeliveryEnabled && upsertResult?.rows?.length) {
+  return row;
+}
+
+function buildWorkerFailureWorkRow(row = {}) {
+  const timeout = row.payload?.failure_kind === 'worker_timeout';
+  const recommendedAction = String(row.recommended_action || '').slice(0, 1200);
+  return {
+    work_key: row.follow_up_key,
+    room_key: row.room_key,
+    work_type: row.decision_classification,
+    priority: row.priority,
+    status: 'open',
+    title: row.title,
+    summary: timeout
+      ? '자동 처리 제한 시간을 넘겨 사람 확인으로 전환됐습니다.'
+      : '자동 처리 오류로 사람 확인이 필요합니다.',
+    automation_state: 'needs_human',
+    blocking_reason: timeout
+      ? '자동 처리 제한 시간 초과로 사람 확인 전환'
+      : '자동 처리 오류로 사람 확인 전환',
+    recommended_action: recommendedAction,
+    payload: {
+      requires_human_action: true,
+      action_family: 'worker_failure_review',
+      business_key: row.follow_up_key,
+      alert_reason: timeout ? 'worker_timeout' : 'worker_error',
+      recommended_action: recommendedAction
+    }
+  };
+}
+
+export async function routeWorkerFailureFollowUp({
+  job = {},
+  error = new Error('worker failed'),
+  context = {},
+  legacyEnabled = false,
+  workItemsEnabled = false,
+  slackEnabled = false,
+  legacyUpsert = null,
+  legacyDeliver = null,
+  workStore = null,
+  now = new Date()
+} = {}) {
+  const disabled = Object.freeze({ skipped: true, reason: 'disabled' });
+  if (!legacyEnabled && !workItemsEnabled) {
+    return {
+      skipped: true,
+      reason: 'disabled',
+      inserted: 0,
+      rows: [],
+      legacy: disabled,
+      workOrchestratorV2: disabled
+    };
+  }
+
+  const row = buildWorkerFailureFollowUpRow(job, error, context);
+  let legacy = disabled;
+  if (legacyEnabled) {
+    if (typeof legacyUpsert !== 'function') throw new Error('legacy worker failure store is required');
+    legacy = await legacyUpsert([row]);
+    if (slackEnabled && legacy?.rows?.length) {
+      if (typeof legacyDeliver !== 'function') throw new Error('legacy worker failure Slack delivery is required');
+      try {
+        legacy = { ...legacy, slackDeliveryResult: await legacyDeliver(legacy.rows) };
+      } catch (deliveryError) {
+        legacy = { ...legacy, slackDeliveryError: String(deliveryError?.message || deliveryError).slice(0, 1000) };
+      }
+    }
+  }
+
+  let workOrchestratorV2 = disabled;
+  if (workItemsEnabled) {
+    if (!workStore || typeof workStore.upsertWorkItem !== 'function') {
+      throw new Error('v2 worker failure store is required');
+    }
+    const candidates = buildHumanWorkCandidates({
+      job,
+      followUpRows: [buildWorkerFailureWorkRow(row)],
+      now
+    });
+    if (candidates.length !== 1) throw new Error('v2 worker failure candidate is required');
+    workOrchestratorV2 = await workStore.upsertWorkItem(candidates[0]);
+    if (workOrchestratorV2?.applied !== true || !workOrchestratorV2?.row) {
+      throw new Error('v2 worker failure upsert was not applied');
+    }
+  }
+
+  const legacyResult = legacyEnabled ? legacy : { inserted: 0, rows: [] };
+  return {
+    ...legacyResult,
+    skipped: false,
+    legacy,
+    workOrchestratorV2
+  };
+}
+
+async function createWorkerFailureFollowUp(job = {}, error = new Error('worker failed'), context = {}) {
+  const followUp = followUpConfig();
+  const result = await routeWorkerFailureFollowUp({
+    job,
+    error,
+    context,
+    legacyEnabled: CONFIG.followUpRowsEnabled,
+    workItemsEnabled: CONFIG.workOrchestrator.workItemsEnabled,
+    slackEnabled: CONFIG.slackCardDeliveryEnabled,
+    legacyUpsert: (rows) => upsertFollowUpRows(followUp, rows),
+    legacyDeliver: (rows) => deliverSlackFollowUpRows(followUp, rows),
+    workStore: workOrchestratorStore,
+    now: nowIso()
+  });
+  if (result?.slackDeliveryError) {
     try {
-      const slackDeliveryResult = await deliverSlackFollowUpRows(followUpConfig(), upsertResult.rows);
-      return { ...upsertResult, slackDeliveryResult };
-    } catch (deliveryError) {
       appendNdjson('errors.ndjson', {
         at: nowIso(),
         type: 'worker_failure_followup_slack_delivery',
-        message: deliveryError.message,
-        jobId
+        message: result.slackDeliveryError,
+        jobId: String(job.jobId || job.eventHash || job.id || 'unknown-job')
       });
-      return { ...upsertResult, slackDeliveryError: deliveryError.message };
-    }
+    } catch {}
   }
-  return upsertResult;
+  return result;
 }
 
 export function shouldDetachWorkerProcess(platform = process.platform) {
@@ -2720,7 +4834,7 @@ async function deliverDueP0SlackEscalation(row, nowMs = Date.now()) {
   }
 }
 
-async function runP0SlackEscalationSweep(reason = 'interval') {
+async function runLegacyP0SlackEscalationSweep(reason = 'interval') {
   if (!CONFIG.p0SlackEscalationEnabled || !supabaseConfigured() || !CONFIG.slackBotToken) {
     return { skipped: true, reason: 'disabled_or_unconfigured' };
   }
@@ -2748,6 +4862,31 @@ async function runP0SlackEscalationSweep(reason = 'interval') {
     state.p0SlackEscalationRunning = false;
   }
   return result;
+}
+
+async function runP0SlackEscalationSweep(reason = 'interval') {
+  return runP0EscalationPair({
+    readbackEnabled: workOrchestratorP0Runtime.readbackEnabled,
+    cutoverEnabled: workOrchestratorP0Runtime.cutoverEnabled,
+    legacy: () => runLegacyP0SlackEscalationSweep(reason),
+    v2Readback: async () => {
+      const result = await workOrchestratorP0Runtime.sweep(reason);
+      state.workOrchestrator.lastP0Readback = result;
+      return result;
+    },
+    v2: async () => {
+      if (state.p0SlackEscalationRunning) return { skipped: true, reason: 'already_running' };
+      state.p0SlackEscalationRunning = true;
+      try {
+        const result = await workOrchestratorP0Runtime.sweep(reason);
+        state.lastP0SlackEscalation = result;
+        state.workOrchestrator.lastP0Readback = result;
+        return result;
+      } finally {
+        state.p0SlackEscalationRunning = false;
+      }
+    }
+  });
 }
 
 async function patchFollowUpCaseRowByStateVersion(row, expectedStateVersion, payloadPatch = {}, extraPatch = {}) {
@@ -3271,27 +5410,37 @@ async function handlePendingSlackActionRow(row) {
 }
 
 async function runSlackActionPoll(reason = 'interval') {
-  if (!CONFIG.slackActionPollEnabled || !supabaseConfigured()) return { skipped: true };
+  const legacyEnabled = CONFIG.slackActionPollEnabled && supabaseConfigured();
+  if (!legacyEnabled && !workOrchestratorActionPoller.enabled) return { skipped: true };
   if (state.slackActionPollRunning) return { skipped: true, reason: 'already_running' };
   state.slackActionPollRunning = true;
   const startedAt = nowIso();
   const result = { startedAt, reason, scanned: 0, handled: 0, errors: [] };
-  try {
-    const rows = await fetchPendingSlackActionRows(3);
-    result.scanned = rows.length;
-    for (const row of rows) {
-      const handled = await handlePendingSlackActionRow(row);
-      if (handled.ok) result.handled += 1;
-      if (handled.error) result.errors.push({ id: row.id, error: handled.error });
+  if (legacyEnabled) {
+    try {
+      const rows = await fetchPendingSlackActionRows(3);
+      result.scanned = rows.length;
+      for (const row of rows) {
+        const handled = await handlePendingSlackActionRow(row);
+        if (handled.ok) result.handled += 1;
+        if (handled.error) result.errors.push({ id: row.id, error: handled.error });
+      }
+    } catch (error) {
+      result.errors.push({ error: error.message });
+      appendNdjson('errors.ndjson', { at: nowIso(), type: 'slack_action_poll', message: error.message });
     }
-  } catch (error) {
-    result.errors.push({ error: error.message });
-    appendNdjson('errors.ndjson', { at: nowIso(), type: 'slack_action_poll', message: error.message });
-  } finally {
-    result.finishedAt = nowIso();
-    state.lastSlackActionPoll = result;
-    state.slackActionPollRunning = false;
   }
+  try {
+    result.workOrchestratorV2 = safeWorkActionPollResult(
+      await workOrchestratorActionPoller.poll(reason),
+      safeWorkActionTrigger(reason)
+    );
+  } catch {
+    result.workOrchestratorV2 = safeWorkActionPollResult(null, safeWorkActionTrigger(reason));
+  }
+  result.finishedAt = nowIso();
+  state.lastSlackActionPoll = result;
+  state.slackActionPollRunning = false;
   return result;
 }
 
@@ -3837,7 +5986,7 @@ function kakaoDevtoolsBaseUrl() {
 }
 
 function isMainKakaoChatListUrl(url = '') {
-  return /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats(?:[?#]|$)/.test(String(url || ''));
+  return /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats(?:[?#]|$)/.test(String(url || ''));
 }
 
 function isKakaoConversationUrl(url = '') {
@@ -3900,34 +6049,39 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
   }
 }
 
-async function handleEvent(req, res) {
+export async function handleEvent(req, res, dependencies = {}) {
+  const appendEvent = dependencies.appendNdjson || appendNdjson;
+  const writeEvent = dependencies.writeSupabaseEvent || writeSupabaseEvent;
+  const scheduleEvent = dependencies.scheduleDebouncedJob || scheduleDebouncedJob;
+  const shadowRuntime = dependencies.shadowRuntime || workOrchestratorShadowRuntime;
+  const immediateRuntime = dependencies.immediateRuntime || workOrchestratorImmediateRuntime;
   const body = await readRequestBody(req);
   const raw = JSON.parse(body || '{}');
   let event = normalizeEvent(raw);
 
   state.received += 1;
-  appendNdjson('events.ndjson', event);
+  appendEvent('events.ndjson', event);
 
   if (event.status === 'watcher_heartbeat' || event.reason === 'heartbeat' || event.reason === 'content_script_started') {
     if (event.reason === 'content_script_started') {
       state.lastContentScriptStartedAtMs = Date.now();
     }
-    appendNdjson('heartbeats.ndjson', event);
+    appendEvent('heartbeats.ndjson', event);
     return json(res, 202, { ok: true, heartbeat: true });
   }
 
   if (event.status === 'popup_bridge_test' || event.reason === 'popup_bridge_test') {
-    appendNdjson('diagnostics.ndjson', event);
+    appendEvent('diagnostics.ndjson', event);
     return json(res, 202, { ok: true, diagnostic: true });
   }
 
   if (event.status === 'dom_diagnostic' || event.reason === 'top_rows_snapshot') {
-    appendNdjson('diagnostics.ndjson', event);
+    appendEvent('diagnostics.ndjson', event);
     return json(res, 202, { ok: true, diagnostic: true, queuedForAi: false });
   }
 
   if ((event.reason === 'top_rows_backstop' || event.reason === 'top_row_changed') && !shouldQueueTopRowEvent(event)) {
-    appendNdjson('backstop-events.ndjson', {
+    appendEvent('backstop-events.ndjson', {
       ...event,
       backstopReason: event.reason === 'top_rows_backstop' ? 'read_backstop_row' : 'non_live_top_row_change'
     });
@@ -3940,7 +6094,7 @@ async function handleEvent(req, res) {
   }
 
   if (isStaleDatedMutation(event)) {
-    appendNdjson('ignored-stale-dated-mutation-events.ndjson', event);
+    appendEvent('ignored-stale-dated-mutation-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'stale_dated_mutation', queuedForAi: false });
   }
 
@@ -3949,13 +6103,13 @@ async function handleEvent(req, res) {
     && state.lastContentScriptStartedAtMs
     && Date.now() - state.lastContentScriptStartedAtMs < CONFIG.startupMutationIgnoreMs
   ) {
-    appendNdjson('ignored-startup-mutation-events.ndjson', event);
+    appendEvent('ignored-startup-mutation-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'startup_mutation', queuedForAi: false });
   }
 
   const initialScanIngress = classifyInitialScanIngress(event, CONFIG);
   if (initialScanIngress.action === 'ignore') {
-    appendNdjson('initial-scans.ndjson', { ...event, ignored: initialScanIngress.reason });
+    appendEvent('initial-scans.ndjson', { ...event, ignored: initialScanIngress.reason });
     return json(res, 202, {
       ok: true,
       initialScan: true,
@@ -3964,28 +6118,28 @@ async function handleEvent(req, res) {
     });
   }
   if (initialScanIngress.action === 'queue') {
-    appendNdjson('initial-scans.ndjson', initialScanIngress.event);
+    appendEvent('initial-scans.ndjson', initialScanIngress.event);
     event = initialScanIngress.event;
   }
 
   if (isPageContainerPreview(event.previewText, event.roomKey)) {
-    appendNdjson('ignored-container-events.ndjson', event);
+    appendEvent('ignored-container-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'page_container', queuedForAi: false });
   }
 
   if (isActionChromePreview(event.previewText)) {
-    appendNdjson('ignored-chrome-events.ndjson', event);
+    appendEvent('ignored-chrome-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'action_chrome', queuedForAi: false });
   }
 
   const skipWorkerReason = shouldSkipWorkerForPreview(event);
   if (skipWorkerReason) {
-    appendNdjson('ignored-low-value-events.ndjson', { ...event, ignored: skipWorkerReason });
+    appendEvent('ignored-low-value-events.ndjson', { ...event, ignored: skipWorkerReason });
     return json(res, 202, { ok: true, ignored: skipWorkerReason, queuedForAi: false });
   }
 
   if (isLikelyShiftedExistingRow(event)) {
-    appendNdjson('ignored-shifted-row-events.ndjson', event);
+    appendEvent('ignored-shifted-row-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'shifted_existing_row', queuedForAi: false });
   }
 
@@ -4003,17 +6157,60 @@ async function handleEvent(req, res) {
     durableRoomRevision
   );
   event.roomRevision = roomVersion.revision;
+  dependencies.onRoomRevisionAccepted?.(event, roomVersion);
+
+  if (roomVersion.changed) {
+    try {
+      const shadowObservation = shadowRuntime?.recordAccepted?.(event, roomVersion);
+      if (shadowObservation && typeof shadowObservation.catch === 'function') {
+        shadowObservation.catch(() => {});
+      }
+    } catch {
+      // Shadow observation is never allowed to suppress the legacy event path.
+    }
+  }
+
+  let immediateNotification = null;
+  if (immediateRuntime?.enabled === true) {
+    try {
+      immediateNotification = await immediateRuntime.deliverAccepted(event, roomVersion);
+      if (immediateNotification?.status !== 'delivered') {
+        const unconfirmedResult = new Error('Immediate notification result is unconfirmed');
+        unconfirmedResult.code = 'delivery_persistence_failed';
+        throw unconfirmedResult;
+      }
+    } catch (error) {
+      appendEvent('errors.ndjson', {
+        at: nowIso(),
+        type: 'immediate_notification',
+        code: genericImmediateFailureCode(error?.code),
+        eventCorrelationSha256: sha256(String(event.eventHash || '').slice(0, 500))
+      });
+      return json(res, 503, {
+        ok: false,
+        error: 'immediate_notification_unconfirmed',
+        eventHash: event.eventHash
+      });
+    }
+  }
 
   try {
-    await writeSupabaseEvent(event, 'event');
+    await writeEvent(event, 'event');
   } catch (error) {
     state.failedSupabaseWrites += 1;
-    appendNdjson('errors.ndjson', { at: nowIso(), type: 'supabase_event', message: error.message, event });
+    appendEvent('errors.ndjson', { at: nowIso(), type: 'supabase_event', message: error.message, event });
     console.warn('[dom-bridge] supabase event insert failed:', error.message);
   }
 
-  scheduleDebouncedJob(event);
-  return json(res, 202, { ok: true, roomKey: event.roomKey, eventHash: event.eventHash });
+  scheduleEvent(event);
+  return json(res, 202, {
+    ok: true,
+    roomKey: event.roomKey,
+    eventHash: event.eventHash,
+    ...(immediateNotification?.status === 'delivered'
+      ? { immediateNotification }
+      : {})
+  });
 }
 
 const server = http.createServer(async (req, res) => {
@@ -4027,6 +6224,10 @@ const server = http.createServer(async (req, res) => {
     if (await gatewayHttpHandler(req, res, url)) return;
 
     if (req.method === 'GET' && url.pathname === '/health') {
+      await workOrchestratorImmediateRuntime.refreshBacklogHealth();
+      const workOrchestratorInvariantHealth = await readBridgeWorkOrchestratorHealth({
+        store: workOrchestratorStore
+      });
       const gatewayStatus = gatewayChannel ? await gatewayChannel.status() : {};
       const documentExecutionConfig = gatewayTransportEnabled
         ? resolveGatewayDocumentConfig(CONFIG, getKakaoWorkerRuntimeConfigForTransport())
@@ -4038,7 +6239,7 @@ const server = http.createServer(async (req, res) => {
         nowMs: Date.now(),
         consumerFreshnessMs: Math.max(60_000, CONFIG.hermesLeaseMs * 2)
       });
-      return json(res, 200, {
+      return json(res, 200, attachWorkOrchestratorInvariantHealth({
         ok: true,
         gateway: gatewayReadback,
         config: {
@@ -4108,9 +6309,10 @@ const server = http.createServer(async (req, res) => {
           tabCleanupRunning: state.tabCleanupRunning,
           lastTabCleanup: state.lastTabCleanup,
           openRooms: state.rooms.size,
-          phaseScheduler: kakaoPhaseScheduler?.status?.() || null
+          phaseScheduler: kakaoPhaseScheduler?.status?.() || null,
+          workOrchestrator: buildWorkOrchestratorHealthState(state.workOrchestrator)
         }
-      });
+      }, workOrchestratorInvariantHealth));
     }
 
     if (req.method === 'GET' && url.pathname === '/worker/freshness') {
@@ -4169,12 +6371,17 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/maintenance/slack-actions') {
       const result = await runSlackActionPoll('manual');
-      return json(res, 200, { ok: !result.errors?.length, result });
+      return json(res, 200, { ok: slackActionMaintenanceSucceeded(result), result });
     }
 
     if (req.method === 'POST' && url.pathname === '/maintenance/p0-slack-escalation') {
       const result = await runP0SlackEscalationSweep('manual');
       return json(res, 200, { ok: !result.errors?.length, result });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/maintenance/work-orchestrator-digest') {
+      const result = await handleWorkOrchestratorDigestMaintenance(workOrchestratorDigestRuntime);
+      return json(res, result.statusCode, result.body);
     }
 
     if (req.method === 'POST' && url.pathname === '/maintenance/slack-case-update') {
@@ -4223,11 +6430,18 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
       setTimeout(() => runSupabaseRecoverySweep('startup'), 5000).unref?.();
       setInterval(() => runSupabaseRecoverySweep('interval'), CONFIG.supabaseRecoveryIntervalMs).unref?.();
     }
-    if (CONFIG.slackActionPollEnabled) {
+    if (CONFIG.slackActionPollEnabled || workOrchestratorActionPoller.enabled) {
       setTimeout(() => runSlackActionPoll('startup'), 7000).unref?.();
       setInterval(() => runSlackActionPoll('interval'), CONFIG.slackActionPollIntervalMs).unref?.();
     }
-    if (CONFIG.p0SlackEscalationEnabled) {
+    if (workOrchestratorImmediateNoticeUpdatePoller.enabled) {
+      setTimeout(() => workOrchestratorImmediateNoticeUpdatePoller.poll('startup'), 8000).unref?.();
+      setInterval(
+        () => workOrchestratorImmediateNoticeUpdatePoller.poll('interval'),
+        CONFIG.slackActionPollIntervalMs
+      ).unref?.();
+    }
+    if (CONFIG.p0SlackEscalationEnabled || workOrchestratorP0Runtime.enabled) {
       setTimeout(() => runP0SlackEscalationSweep('startup'), 9000).unref?.();
       setInterval(() => runP0SlackEscalationSweep('interval'), CONFIG.p0SlackEscalationIntervalMs).unref?.();
     }
@@ -4235,5 +6449,9 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
       setTimeout(() => cleanupIdleKakaoConversationTabs('startup'), 10_000).unref?.();
       setInterval(() => cleanupIdleKakaoConversationTabs('interval'), CONFIG.kakaoTabCleanupIntervalMs).unref?.();
     }
+    if (CONFIG.workOrchestrator.digestEnabled) {
+      workOrchestratorDigestRuntime.start().catch(() => {});
+    }
+    workOrchestratorNoticeCleanupRuntime.start().catch(() => {});
   });
 }

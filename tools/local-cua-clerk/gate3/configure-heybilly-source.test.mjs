@@ -53,4 +53,3 @@ test('the private MacAgent env gains only the fixed HeyBilly identity and is ide
   assert.deepEqual(await configurator.configureHeyBillySource(input), { status: 'UNCHANGED' });
   assert.equal(await readFile(envFile, 'utf8'), raw);
 });
-

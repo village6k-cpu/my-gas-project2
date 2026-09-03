@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const registerProduction = read('scripts/windows/register-kakao-production-tasks.ps1');
 const watchdog = read('scripts/windows/watch-kakao-production.ps1');
+const stagingStart = read('scripts/windows/start-kakao-staging.ps1');
 const runbook = read('docs/windows-kakao-hermes-migration-runbook.md');
 const routingConfig = read('scripts/windows/configure-hermes-village-routing.py');
 const overlaySync = read('scripts/windows/sync-hermes-profile-overlay.ps1');
@@ -14,6 +15,97 @@ const contractRaw = read('scripts/windows/hermes-model-contract.json');
 const bridgeRestart = read('scripts/windows/Restart-KakaoBridgeLive.ps1');
 const bridgeRecover = read('scripts/windows/recover-kakao-bridge-only.ps1');
 const registerLive = read('scripts/windows/register-kakao-live-task.ps1');
+const liveCommon = read('scripts/windows/KakaoLive.Common.psm1');
+const liveStart = read('scripts/windows/start-kakao-live.ps1');
+const gatewayTaskRegistration = read('scripts/windows/register-hermes-gateway-tasks.ps1');
+const benchmarkReport = JSON.parse(read('docs/kakao-hermes-gateway-benchmark-report.json'));
+
+test('native Gateway cutover is explicit, benchmark-gated, plan-only, and rollback-first', () => {
+  assert.match(liveStart, /\[switch\]\$ConfirmKakaoGatewayCutover/);
+  assert.match(liveStart, /\[string\]\$BenchmarkReportPath/);
+  assert.match(liveStart, /\[switch\]\$RollbackToCli/);
+  assert.match(liveStart, /\[switch\]\$GatewayMaintenance/);
+  assert.match(liveStart, /GatewayMaintenance\.IsPresent[\s\S]{0,220}-not \$ConfirmKakaoGatewayCutover\.IsPresent[\s\S]{0,220}throw/i);
+  assert.match(liveStart, /if \(-not \$ConfirmKakaoGatewayCutover\.IsPresent\)[\s\S]{0,240}throw/i);
+  assert.match(liveStart, /BenchmarkReport[\s\S]{0,500}accepted[\s\S]{0,200}latency_status/i);
+  assert.match(liveStart, /HermesTransport\s+['"]gateway['"]/i);
+  assert.match(liveStart, /HermesTransport\s+['"]cli['"]/i);
+  assert.match(liveStart, /function\s+Test-KakaoworkerGatewayTaskDefinition/i);
+  const taskDefinitionCheck = liveStart.indexOf('Test-KakaoworkerGatewayTaskDefinition');
+  const cutoverMutation = liveStart.indexOf("ShouldProcess('owned Kakao bridge and kakaoworker Gateway', 'Cut over transport");
+  assert.ok(taskDefinitionCheck >= 0 && cutoverMutation > taskDefinitionCheck);
+  const rollbackStart = liveStart.indexOf('function Invoke-KakaoGatewayRollback');
+  const rollbackEnd = liveStart.indexOf('if ($RollbackToCli.IsPresent)', rollbackStart);
+  const rollback = liveStart.slice(rollbackStart, rollbackEnd);
+  assert.match(rollback, /Hermes_Gateway_Kakaoworker_Native/i);
+  assert.match(rollback, /leaveHealthyChromeUntouched/i);
+  assert.doesNotMatch(rollback, /--profile['"]?\s*,?\s*['"]root|TaskName\s+['"]Hermes_Gateway['"]/i);
+
+  const planIndex = liveStart.indexOf('if ($PlanOnly.IsPresent)');
+  const confirmationIndex = liveStart.indexOf('if (-not $ConfirmKakaoGatewayCutover.IsPresent)');
+  const firstHealthCall = liveStart.indexOf('Invoke-RestMethod');
+  assert.ok(planIndex >= 0 && confirmationIndex > planIndex);
+  assert.ok(firstHealthCall > confirmationIndex, 'no live probe or transition may occur before explicit cutover confirmation');
+  assert.equal(benchmarkReport.accepted, true);
+  assert.equal(benchmarkReport.latency_status, 'pass');
+});
+
+test('Gateway cutover treats an absent legacy health gateway section as an empty queue', () => {
+  assert.match(
+    liveStart,
+    /\$preHealth\.PSObject\.Properties\.Name\s+-contains\s+['"]gateway['"][\s\S]{0,220}\$preHealth\.gateway/,
+  );
+});
+
+test('Gateway production health requires direct plugin, consumer, queue, Kakao, and safety readback', () => {
+  assert.match(liveCommon, /function\s+Test-KakaoGatewayCutoverHealth/i);
+  assert.match(liveCommon, /function\s+Test-KakaoPluginInstallReceipt/i);
+  for (const marker of [
+    'hermesTransport',
+    'gatewayReady',
+    'consumer',
+    'fresh',
+    'pluginPath',
+    'manifestSha256',
+    'profile',
+    'pid',
+    'queue',
+    'failed',
+    'authenticated',
+    'watcherReady',
+    'scheduleOwnerReviewRequired',
+    'killSwitchObserved'
+  ]) {
+    assert.match(liveCommon, new RegExp(marker, 'i'), `missing cutover health marker ${marker}`);
+  }
+  assert.match(liveCommon, /queue\.ready[^\r\n]+-eq 0/i);
+  assert.match(liveCommon, /queue\.claimed[^\r\n]+-eq 0/i);
+  assert.match(liveCommon, /queue\.retry[^\r\n]+-eq 0/i);
+  assert.match(liveCommon, /queue\.failed[^\r\n]+-eq 0/i);
+});
+
+test('production tasks carry recorded Gateway approval while preserving root Slack ownership', () => {
+  assert.match(registerProduction, /\[switch\]\$ConfirmKakaoGatewayCutover/);
+  assert.match(registerProduction, /\[switch\]\$PlanOnly/);
+  assert.match(registerProduction, /['"]-ConfirmKakaoGatewayCutover['"]/);
+  assert.match(registerProduction, /['"]-BenchmarkReportPath['"]/);
+  assert.match(registerProduction, /startArguments[\s\S]{0,220}-GatewayMaintenance/i);
+  assert.match(registerProduction, /PlanOnly[\s\S]{0,1600}ConvertTo-Json/i);
+  assert.match(watchdog, /\[switch\]\$ConfirmKakaoGatewayCutover/);
+  assert.match(watchdog, /GatewayMaintenance/);
+  assert.match(watchdog, /Hermes_Gateway_Kakaoworker_Native/);
+  assert.doesNotMatch(watchdog, /restart-hermes-gateway\.ps1[^\r\n]+-Target\s+root/i);
+  assert.match(gatewayTaskRegistration, /root[\s\S]{0,160}mutated\s*=\s*\$false/i);
+  assert.match(registerProduction, /-WindowStyle['"],?\s*['"]Hidden/i);
+  assert.match(registerProduction, /C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe/i);
+  assert.doesNotMatch(registerProduction, /Join-Path\s+\$PSHOME/i);
+  assert.match(registerProduction, /RepetitionDuration\s+\(New-TimeSpan\s+-Days\s+3650\)/i);
+  assert.doesNotMatch(registerProduction, /\[TimeSpan\]::MaxValue/i);
+  assert.match(registerProduction, /function\s+Set-ExistingHiddenTaskWrapper/i);
+  assert.match(registerProduction, /wscript\.exe[\s\S]{0,1200}hidden-tasks/i);
+  assert.match(registerProduction, /\[IO\.File\]::Replace\(/i);
+  assert.doesNotMatch(registerProduction, /Unregister-ScheduledTask|Remove-ScheduledTask/i);
+});
 
 test('production task registration is an explicit post-cutover approval, not a staging default', () => {
   assert.match(registerProduction, /\[switch\]\$ConfirmProductionOwnership/);
@@ -82,6 +174,15 @@ test('the watchdog observes first and only restarts through the ownership-valida
     /catch\s*\{[\s\S]*?manual intervention required[\s\S]*?throw/,
     'an ownership mismatch must abort the automatic restart'
   );
+});
+
+test('the owned Chrome launcher preserves one bounded generation of startup diagnostics', () => {
+  assert.match(stagingStart, /chrome\.out\.log/);
+  assert.match(stagingStart, /chrome\.err\.log/);
+  assert.match(stagingStart, /foreach \(\$stream in @\('out', 'err'\)\)/);
+  assert.match(stagingStart, /chrome\.\{0\}\.prev\.log/);
+  assert.match(stagingStart, /-RedirectStandardOutput/);
+  assert.match(stagingStart, /-RedirectStandardError/);
 });
 
 test('busy bridge handoff requires a current per-job phase proof for stdin Hermes', () => {

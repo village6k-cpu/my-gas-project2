@@ -10,6 +10,11 @@
     "model": "grok-4.5",
     "reasoning_effort": "xhigh",
     "max_turns": 90,
-    "disabled_toolsets": ["computer_use"]
+    "disabled_toolsets": ["computer_use"],
+    "platform_plugin": {
+      "name": "kakao_village",
+      "source_repository": "village-ai",
+      "source_relative_path": "migration/hermes/plugins/kakao_village"
+    }
   }
 }

@@ -21,7 +21,15 @@ param(
 
     [string]$HermesPath,
 
-    [switch]$IncludeGateway
+    [switch]$IncludeGateway,
+
+    [string]$BenchmarkReportPath = '',
+
+    [string]$PluginReceiptPath = '',
+
+    [string]$SmokeEvidencePath = '',
+
+    [switch]$ConfirmKakaoGatewayCutover
 )
 
 Set-StrictMode -Version Latest
@@ -33,8 +41,11 @@ Import-Module (Join-Path $PSScriptRoot 'KakaoLive.Common.psm1') -Force
 $stopScriptPath = Join-Path $PSScriptRoot 'stop-kakao-staging.ps1'
 $startScriptPath = Join-Path $PSScriptRoot 'start-kakao-staging.ps1'
 $liveStartScriptPath = Join-Path $PSScriptRoot 'start-kakao-live.ps1'
+$resolvedEnvFile = (Resolve-Path -LiteralPath $EnvFile -ErrorAction Stop).Path
 $resolvedHermesPythonPath = (Resolve-Path -LiteralPath $HermesPythonPath -ErrorAction Stop).Path
 $watcherInjector = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\tools\kakao-dom-bridge\inject-watcher-cdp.py') -ErrorAction Stop).Path
+Import-DotEnvFile -Path $resolvedEnvFile
+Set-KakaoLiveRuntimeEnvironment
 
 function Write-WatchdogLog {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -92,8 +103,60 @@ function Get-KakaoDirectProbe {
 }
 
 function Invoke-KakaoLiveEvaluator {
-    & $liveStartScriptPath -EnvFile $EnvFile -ChromePath $ChromePath -NodePath $NodePath `
-        -HermesPythonPath $resolvedHermesPythonPath -Confirm:$false | Out-Null
+    $parameters = @{
+        EnvFile = $EnvFile
+        ChromePath = $ChromePath
+        NodePath = $NodePath
+        HermesPythonPath = $resolvedHermesPythonPath
+        Confirm = $false
+    }
+    if ($ConfirmKakaoGatewayCutover.IsPresent) {
+        $parameters['ConfirmKakaoGatewayCutover'] = $true
+        $parameters['GatewayMaintenance'] = $true
+        $parameters['BenchmarkReportPath'] = $BenchmarkReportPath
+        $parameters['PluginReceiptPath'] = $PluginReceiptPath
+        $parameters['SmokeEvidencePath'] = $SmokeEvidencePath
+    }
+    & $liveStartScriptPath @parameters | Out-Null
+}
+
+function Test-KakaoworkerGatewayHealthy {
+    $task = Get-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker_Native' -ErrorAction SilentlyContinue
+    $pidPath = Join-Path $env:LOCALAPPDATA 'hermes\profiles\kakaoworker\gateway.pid'
+    if ($null -eq $task -or $task.State -eq 'Disabled' -or -not (Test-Path -LiteralPath $pidPath -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $gatewayPid = [int](([IO.File]::ReadAllText($pidPath, [Text.Encoding]::UTF8) | ConvertFrom-Json).pid)
+        return $gatewayPid -gt 0 -and $null -ne (Get-Process -Id $gatewayPid -ErrorAction SilentlyContinue)
+    }
+    catch { return $false }
+}
+
+$pluginReceipt = $null
+$smokeEvidence = $null
+if ($ConfirmKakaoGatewayCutover.IsPresent) {
+    if ([string]::IsNullOrWhiteSpace($BenchmarkReportPath)) { throw 'Gateway watchdog requires BenchmarkReportPath.' }
+    $resolvedBenchmarkReportPath = (Resolve-Path -LiteralPath $BenchmarkReportPath -ErrorAction Stop).Path
+    $benchmarkReport = [IO.File]::ReadAllText($resolvedBenchmarkReportPath, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
+    if ($benchmarkReport.accepted -ne $true -or $benchmarkReport.latency_status -ne 'pass') {
+        throw 'Gateway watchdog refuses a blocked or failed benchmark.'
+    }
+    if ([string]::IsNullOrWhiteSpace($PluginReceiptPath) -or [string]::IsNullOrWhiteSpace($SmokeEvidencePath)) {
+        throw 'Gateway watchdog requires plugin receipt and native smoke evidence paths.'
+    }
+    $pluginReceipt = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $PluginReceiptPath -ErrorAction Stop).Path, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
+    $smokeEvidence = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $SmokeEvidencePath -ErrorAction Stop).Path, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
+    if (-not (Test-KakaoPluginInstallReceipt -Receipt $pluginReceipt)) {
+        throw 'Gateway watchdog refuses installed plugin hash drift.'
+    }
+    if (-not (Test-KakaoworkerGatewayHealthy)) {
+        if (-not $PSCmdlet.ShouldProcess('Hermes_Gateway_Kakaoworker_Native', 'Heal only the kakaoworker Gateway')) { return }
+        $gatewayRestart = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'restart-hermes-gateway.ps1')).Path
+        & $gatewayRestart -Target kakaoworker -HealOnly | Out-Null
+        if (-not (Test-KakaoworkerGatewayHealthy)) { throw 'kakaoworker Gateway recovery failed.' }
+        Write-WatchdogLog 'kakaoworker Gateway healed independently; root Slack Gateway untouched'
+    }
 }
 
 $componentNames = @('chrome', 'bridge')
@@ -108,7 +171,28 @@ if ($IncludeGateway.IsPresent) {
 $unhealthy = @(Get-UnhealthyComponents -Names $componentNames | Where-Object { $_ })
 if ($unhealthy.Count -eq 0) {
     $runtimeProbe = Get-KakaoDirectProbe
-    if (Test-KakaoLiveRuntimeProbe -Probe $runtimeProbe) { return }
+    if ($ConfirmKakaoGatewayCutover.IsPresent) {
+        $gatewayHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:8787/health' -TimeoutSec 5
+        $pidPath = Join-Path $env:LOCALAPPDATA 'hermes\profiles\kakaoworker\gateway.pid'
+        $gatewayPid = if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
+            try { [int](([IO.File]::ReadAllText($pidPath, [Text.Encoding]::UTF8) | ConvertFrom-Json).pid) } catch { 0 }
+        } else { 0 }
+        $gatewayRuntime = [pscustomobject]@{
+            profile = 'kakaoworker'
+            pid = $gatewayPid
+            pluginPath = [string]$pluginReceipt.targetPluginPath
+            manifestSha256 = [string]$pluginReceipt.manifestSha256
+            pluginReceiptVerified = Test-KakaoPluginInstallReceipt -Receipt $pluginReceipt
+        }
+        $gatewayOnlyProbe = [pscustomobject]@{ state = 'healthy'; cdpReady = $true; authenticated = $true; watcherReady = $true }
+        if (-not (Test-KakaoGatewayWatchdogHealth -Health $gatewayHealth -RuntimeProbe $gatewayOnlyProbe `
+            -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence)) {
+            throw 'Gateway watchdog direct plugin/consumer/queue/safety readback failed; refusing broad recovery.'
+        }
+        if (Test-KakaoGatewayWatchdogHealth -Health $gatewayHealth -RuntimeProbe $runtimeProbe `
+            -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence) { return }
+    }
+    elseif (Test-KakaoLiveRuntimeProbe -Probe $runtimeProbe) { return }
     if (-not $PSCmdlet.ShouldProcess('Windows Kakao production authentication/watcher', 'Recover only the failed live layer')) {
         return
     }
@@ -136,10 +220,11 @@ catch {
 
 try {
     $startParameters = @{
-        EnvFile      = $EnvFile
+        EnvFile      = $resolvedEnvFile
         ChromePath   = $ChromePath
         NodePath     = $NodePath
         HermesPythonPath = $resolvedHermesPythonPath
+        HermesTransport = if ($ConfirmKakaoGatewayCutover.IsPresent) { 'gateway' } else { 'cli' }
         EnableWrites = $true
         Confirm      = $false
     }

@@ -1,7 +1,7 @@
 # Work Orchestrator v2 Design
 
-**Date:** 2026-08-29  
-**Status:** Design approved; implementation planning awaits owner review of this document  
+**Date:** 2026-08-29
+**Status:** Design approved; implementation planning awaits owner review of this document
 **Primary objective:** Preserve one immediate notification for every inbound message while replacing persistent per-message Slack cards with a durable human-work queue, periodic focus digests, verified automation, and reminders that cannot silently disappear.
 
 ## 1. Non-negotiable principles
@@ -451,4 +451,3 @@ Work Orchestrator v2 is ready for production cutover only when all of the follow
 - Expanding customer-send, schedule-write, invoice, or approval authority.
 - Deleting human messages, other applications' messages, or source thread roots.
 - Treating one digest appearance, one tool call, `/health 200`, or an enabled flag as proof of completion.
-

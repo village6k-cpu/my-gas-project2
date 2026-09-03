@@ -19,6 +19,15 @@ import {
   mergeFollowUpCaseLifecycle
 } from './follow-up-case-lifecycle.mjs';
 import { validateStaffConfirmedMutation } from './staff-confirmed-mutation.mjs';
+import { buildHumanWorkCandidates } from '../work-orchestrator-v2/work-items.mjs';
+import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
+import { deriveAutomationResolution } from '../work-orchestrator-v2/automation-resolution.mjs';
+import {
+  canonicalSourceEventKey,
+  validateWorkOrchestratorV2CutoverConfig
+} from '../work-orchestrator-v2/contracts.mjs';
+
+export { validateWorkOrchestratorV2CutoverConfig } from '../work-orchestrator-v2/contracts.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -4436,8 +4445,9 @@ async function mergeFollowUpRowsWithActiveHistory(config, rows) {
   return { rowsToInsert, updatedRows };
 }
 
-export function filterFollowUpRowsAfterAutoReply(rows = [], autoReplyResult = {}) {
-  if (!autoReplyResult?.sent) return rows;
+export function filterFollowUpRowsAfterAutoReply(rows = [], automationResolution = {}) {
+  if (automationResolution?.state !== 'succeeded'
+    || automationResolution?.resolutionKind !== 'auto_reply_readback') return rows;
   return rows.filter((row) => row.type !== 'reply_needed');
 }
 
@@ -4490,6 +4500,7 @@ export function requireConfig() {
   if (!supabaseUrl || !serviceRoleKey) {
     throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Load tools/kakao-dom-bridge/.env first.');
   }
+  const cutoverConfig = validateWorkOrchestratorV2CutoverConfig(process.env);
   const config = {
     ...buildSlackRoutingConfig(process.env),
     supabaseUrl,
@@ -4523,7 +4534,12 @@ export function requireConfig() {
     brainContextPath: process.env.VILLAGE_BRAIN_CONTEXT_PATH || 'C:\\Village\\VILLAGE_Brain\\Ops\\brain-context-latest.md',
     brainCustomerProfilesPath: process.env.VILLAGE_BRAIN_CUSTOMER_PROFILES_PATH || 'C:\\Village\\VILLAGE_Brain\\Ops\\customer-profiles.jsonl',
     followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items',
-    followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
+    followUpRowsEnabled: cutoverConfig.legacyWorkRowsEnabled,
+    workOrchestratorV2WorkItemsEnabled: cutoverConfig.workItemsEnabled,
+    workOrchestratorV2AutoNoticeTtlMinutes: (() => {
+      const value = Number(process.env.WORK_ORCHESTRATOR_V2_AUTO_NOTICE_TTL_MINUTES || 180);
+      return Number.isFinite(value) ? Math.min(1440, Math.max(30, value)) : 180;
+    })(),
     autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
     autoSendLogPath: process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
     // 응대 교정 원장 — 야간 채굴기(mine-kakao-corrections.mjs)가 사장 수동응대 사례를 적재하고
@@ -4535,7 +4551,7 @@ export function requireConfig() {
     customerDocumentAssetPaths: normalizeKakaoAttachmentPaths(process.env.VILLAGE_CUSTOMER_DOCUMENT_ATTACHMENT_PATHS).length
       ? normalizeKakaoAttachmentPaths(process.env.VILLAGE_CUSTOMER_DOCUMENT_ATTACHMENT_PATHS)
       : defaultCustomerDocumentAssetPaths(),
-    slackFollowUpEnabled: process.env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1',
+    slackFollowUpEnabled: cutoverConfig.legacyCardsEnabled,
     slackThreadFollowUpsEnabled: process.env.SLACK_FOLLOW_UP_THREAD_REPLIES !== '0',
     slackBotToken: process.env.SLACK_BOT_TOKEN || '',
     slackMentionUserIds: String(process.env.SLACK_CARD_MENTION_USER_IDS || '').split(/[\s,]+/).filter(Boolean),
@@ -5557,7 +5573,7 @@ end run
 function isKakaoMainListTarget(target = {}) {
   const targetUrl = String(target.url || '');
   const targetTitle = String(target.title || '');
-  const isChatListUrl = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats\/?(?:[?#]|$)/.test(targetUrl);
+  const isChatListUrl = /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats\/?(?:[?#]|$)/.test(targetUrl);
   const isMainTitle = targetTitle === '카카오비즈니스 파트너센터';
   const isConversationPopup = targetTitle.includes(' - 빌리지 - 카카오비즈니스');
   return target.type === 'page' && !isConversationPopup && (isChatListUrl || isMainTitle);
@@ -6453,7 +6469,7 @@ export function pickKakaoConversationTarget(targets = [], hints = [], roomIds = 
     const roomId = url.match(/\/chats\/(\d+)(?:[/?#]|$)/)?.[1] || '';
     const roomExact = safeRoomIds.includes(roomId);
     return target?.type === 'page' &&
-      /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats\/\d+/.test(url) &&
+      /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats\/\d+/.test(url) &&
       (roomExact || (
         title.includes(' - 빌리지 - 카카오비즈니스') &&
         ((!safeRoomIds.length && !safeHints.length) || safeHints.some((hint) => title.includes(hint)))
@@ -7252,6 +7268,31 @@ function normalizeVerificationText(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+export function autoReplyTextHash(value = '') {
+  const normalized = normalizeVerificationText(value);
+  if (!normalized) return null;
+  return createHash('sha256').update(normalized).digest('hex');
+}
+
+export function buildAutoReplyReadbackReceipt({
+  sourceEventKey,
+  replyText,
+  observedReplyHash,
+  confirmedAt
+} = {}) {
+  const source = canonicalSourceEventKey(sourceEventKey);
+  const expectedReplyHash = autoReplyTextHash(replyText);
+  if (!expectedReplyHash || observedReplyHash !== expectedReplyHash) return null;
+  const confirmation = new Date(confirmedAt);
+  if (Number.isNaN(confirmation.getTime())) return null;
+  return {
+    id: `reply-readback-${createHash('sha256')
+      .update(`village-auto-reply-readback:${source}:${expectedReplyHash}`)
+      .digest('hex')}`,
+    confirmedAt: confirmation.toISOString()
+  };
+}
+
 export function kakaoConversationContainsMessage(treeMarkdown = '', message = '') {
   const expected = normalizeVerificationText(message);
   if (!expected) return false;
@@ -7364,6 +7405,10 @@ export async function sendKakaoMessageViaDevtools(textToSend, navigationContext 
       : (attachmentResult?.reason || result?.reason || 'devtools_send_unknown'),
     window_title: result?.window_title || target.title || '',
     via_devtools: true,
+    ...(sent && textValue ? {
+      readback_confirmed: true,
+      observed_reply_hash: autoReplyTextHash(textValue)
+    } : {}),
     ...(files.length ? { attachments: attachmentResult } : {})
   };
 }
@@ -7655,6 +7700,8 @@ export async function sendKakaoMessageViaChrome(textToSend, navigationContext = 
     element_index: elementIndex,
     send_button_index: clickResult?.sendButtonIndex || sendButtonIndex || null,
     retried_after_frontmost_activation: Boolean(clickResult?.retriedAfterFrontmostActivation),
+    readback_confirmed: true,
+    observed_reply_hash: autoReplyTextHash(textToSend),
     ...(files.length ? { attachments: attachmentResult } : {})
   };
 }
@@ -7912,7 +7959,7 @@ export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWind
   return { eligible: false, reason: 'preview_not_live_time_format' };
 }
 
-export async function maybeAutoSendReply({ config, decision, job, navigationContext }) {
+export async function maybeAutoSendReply({ config, decision, job, navigationContext, dependencies = {} }) {
   const liveGate = isAutoSendEligibleLiveJob(job);
   if (!liveGate.eligible) {
     const result = { attempted: false, sent: false, gate: { allowed: false, reason: liveGate.reason } };
@@ -7971,7 +8018,8 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   }
   let sendResult;
   try {
-    sendResult = await sendKakaoMessageViaChrome(gate.text, navigationContext, {
+    const sendMessage = dependencies.sendKakaoMessage || sendKakaoMessageViaChrome;
+    sendResult = await sendMessage(gate.text, navigationContext, {
       timeoutMs: config.autoSendTimeoutMs,
       cuaDriverCommand: config.cuaDriverCommand,
       attachmentPaths: gate.attachmentPaths || [],
@@ -7982,7 +8030,30 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   } catch (error) {
     sendResult = { sent: false, reason: 'send_error', error: error.message.slice(0, 500) };
   }
-  const result = { attempted: true, sent: Boolean(sendResult.sent), gate, sendResult, text: gate.text, ragSupport, ...(priceVerification ? { priceVerification } : {}) };
+  let readbackReceipt = null;
+  if (sendResult.sent === true && sendResult.readback_confirmed === true) {
+    try {
+      const clock = typeof dependencies.now === 'function' ? dependencies.now() : new Date();
+      readbackReceipt = buildAutoReplyReadbackReceipt({
+        sourceEventKey: job.sourceEventKey || job.eventHash || job.jobId || job.id,
+        replyText: gate.text,
+        observedReplyHash: sendResult.observed_reply_hash,
+        confirmedAt: clock
+      });
+    } catch {
+      readbackReceipt = null;
+    }
+  }
+  const result = {
+    attempted: true,
+    sent: Boolean(sendResult.sent),
+    gate,
+    sendResult,
+    ...(readbackReceipt ? { readbackReceipt } : {}),
+    text: gate.text,
+    ragSupport,
+    ...(priceVerification ? { priceVerification } : {})
+  };
   logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey, roomReplyKey, ragSupport });
   return result;
 }
@@ -10431,10 +10502,159 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
   }
 }
 
-export async function finalizePreparedKakaoDecision({ config, job, applied } = {}) {
+function emptyWorkOrchestratorResult(skipped) {
+  return { skipped, inserted: 0, merged: 0, rows: [], error: null };
+}
+
+function workOrchestratorV2Store({ config, dependencies }) {
+  return dependencies.workOrchestratorStore || createWorkOrchestratorStore({
+    supabaseUrl: config.supabaseUrl,
+    serviceRoleKey: config.serviceRoleKey,
+    fetchImpl: config.fetchImpl || fetch
+  });
+}
+
+async function upsertWorkOrchestratorV2Items({ config, job, prepared, followUpRows, dependencies, store = null }) {
+  if (config.workOrchestratorV2WorkItemsEnabled !== true) return emptyWorkOrchestratorResult(true);
+  const result = emptyWorkOrchestratorResult(false);
+  let candidates;
+  try {
+    candidates = buildHumanWorkCandidates({
+      decision: prepared.decision,
+      job,
+      followUpRows,
+      sheetResult: prepared.sheetResult,
+      postActionResult: prepared.postActionResult
+    });
+  } catch {
+    return { ...result, error: 'work_orchestrator_v2_validation_failed' };
+  }
+
+  let activeStore = store;
+  try {
+    activeStore ||= workOrchestratorV2Store({ config, dependencies });
+  } catch {
+    return { ...result, error: 'work_orchestrator_v2_store_failed' };
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const stored = await activeStore.upsertWorkItem(candidate);
+      if (!stored || typeof stored.applied !== 'boolean' || typeof stored.created !== 'boolean'
+        || (stored.created && !stored.applied) || !stored.row || typeof stored.row !== 'object') {
+        throw new Error('invalid v2 store response');
+      }
+      if (stored.applied && stored.created) result.inserted += 1;
+      if (stored.applied && !stored.created) result.merged += 1;
+      result.rows.push(stored.row);
+    } catch {
+      result.error = 'work_orchestrator_v2_store_failed';
+      break;
+    }
+  }
+  return result;
+}
+
+function automationWorkReference(job = {}) {
+  const workItem = job.workItem;
+  if (!workItem || typeof workItem !== 'object' || Array.isArray(workItem)) return null;
+  if (typeof workItem.id !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workItem.id)
+    || !Number.isSafeInteger(workItem.version) || workItem.version < 1) return null;
+  return { id: workItem.id, version: workItem.version };
+}
+
+function automationResultEnvelope(resolution) {
+  return {
+    ...resolution,
+    work: { status: 'not_applicable' },
+    noticeUpdate: { status: 'not_requested' }
+  };
+}
+
+async function applyAutomationResolution({ config, job, resolution, dependencies }) {
+  const result = automationResultEnvelope(resolution);
+  if (config.workOrchestratorV2WorkItemsEnabled !== true) return { result, store: null };
+
+  let store;
+  try {
+    store = workOrchestratorV2Store({ config, dependencies });
+  } catch {
+    result.work = { status: 'error', code: 'work_orchestrator_v2_store_failed' };
+    result.noticeUpdate = { status: 'error', code: 'notice_update_request_failed' };
+    return { result, store: null };
+  }
+
+  const workReference = automationWorkReference(job);
+  if (resolution.state === 'succeeded') {
+    if (workReference) {
+      try {
+        const resolved = await store.resolveWorkItem({
+          id: workReference.id, expectedVersion: workReference.version, resolution
+        });
+        result.work = resolved?.applied
+          ? { status: 'resolved' }
+          : { status: 'conflict', code: 'stale_work_version' };
+      } catch {
+        result.work = { status: 'error', code: 'work_resolution_failed' };
+      }
+    }
+
+    try {
+      const sourceEventKey = canonicalSourceEventKey(job.sourceEventKey || job.eventHash || job.jobId || job.id);
+      const clock = typeof dependencies.now === 'function' ? dependencies.now() : new Date();
+      const now = clock instanceof Date ? new Date(clock) : new Date(clock);
+      if (Number.isNaN(now.getTime())) throw new Error('invalid clock');
+      const configuredTtl = Number(config.workOrchestratorV2AutoNoticeTtlMinutes ?? 180);
+      const ttlMinutes = Number.isFinite(configuredTtl)
+        ? Math.min(1440, Math.max(30, configuredTtl))
+        : 180;
+      const cleanupAfter = new Date(now.getTime() + ttlMinutes * 60_000).toISOString();
+      const requested = await store.requestImmediateNoticeUpdate({ sourceEventKey, resolution, cleanupAfter });
+      result.noticeUpdate = requested?.applied
+        ? { status: 'requested', sourceEventKey, cleanupAfter }
+        : { status: 'conflict', code: 'notice_update_request_conflict' };
+    } catch {
+      result.noticeUpdate = { status: 'error', code: 'notice_update_request_failed' };
+    }
+  } else if (workReference) {
+    try {
+      const marked = await store.markAutomationState({
+        id: workReference.id, expectedVersion: workReference.version, resolution
+      });
+      result.work = marked?.applied
+        ? { status: 'open' }
+        : { status: 'conflict', code: 'stale_work_version' };
+    } catch {
+      result.work = { status: 'error', code: 'work_state_record_failed' };
+    }
+  }
+  return { result, store };
+}
+
+async function persistHumanAutomationState({ workOrchestratorResult, resolution, store }) {
+  if (!store || resolution.state === 'succeeded' || workOrchestratorResult.error) return workOrchestratorResult;
+  const rows = [];
+  for (const row of workOrchestratorResult.rows) {
+    try {
+      const marked = await store.markAutomationState({
+        id: row.id, expectedVersion: row.version, resolution
+      });
+      if (!marked?.applied || !marked.row) throw new Error('automation state conflict');
+      rows.push(marked.row);
+    } catch {
+      return { ...workOrchestratorResult, rows, error: 'work_orchestrator_v2_store_failed' };
+    }
+  }
+  return { ...workOrchestratorResult, rows };
+}
+
+export async function finalizePreparedKakaoDecision({ config, job, applied, dependencies = {} } = {}) {
   const prepared = applied?.prepared;
   if (!prepared) throw new Error('applied Kakao decision is required');
-  if (prepared.status !== 'ai_prepared') return prepared;
+  if (prepared.status !== 'ai_prepared') {
+    return { ...prepared, workOrchestratorResult: emptyWorkOrchestratorResult(true) };
+  }
   const autoReplyResult = applied.autoReplyResult || { attempted: false, sent: false, reason: 'missing_apply_result' };
   if (applied.superseded === true) {
     return {
@@ -10443,35 +10663,83 @@ export async function finalizePreparedKakaoDecision({ config, job, applied } = {
       superseded: true,
       followUpResult: { inserted: 0, skipped: true, reason: 'superseded_by_newer_room_event', rows: [] },
       slackDeliveryResult: { skipped: true, reason: 'superseded_by_newer_room_event', results: [] },
+      workOrchestratorResult: emptyWorkOrchestratorResult(true),
       autoReplyResult
     };
   }
-  const followUpRows = filterFollowUpRowsAfterAutoReply(prepared.availabilityAwareRows || [], autoReplyResult);
-  const caseRows = buildCanonicalFollowUpCases(prepared.decision, job, followUpRows, { autoReplySent: autoReplyResult?.sent === true });
+  const automationResolution = deriveAutomationResolution({
+    decision: prepared.decision,
+    sheetResult: prepared.sheetResult,
+    postActionResult: prepared.postActionResult,
+    autoReplyResult,
+    operationReceipt: prepared.operationReceipt
+  });
+  const followUpRows = filterFollowUpRowsAfterAutoReply(prepared.availabilityAwareRows || [], automationResolution);
+  const caseRows = buildCanonicalFollowUpCases(prepared.decision, job, followUpRows, {
+    autoReplySent: automationResolution.state === 'succeeded'
+      && automationResolution.resolutionKind === 'auto_reply_readback'
+  });
   let followUpResult;
   if (config.followUpRowsEnabled === false) {
     followUpResult = { inserted: 0, skipped: true, reason: 'kakao_follow_up_rows_disabled', rows: caseRows };
   } else if (config.twoChannelRoutingEnabled === true) {
     try {
-      const caseResult = await upsertFollowUpCaseRows(config, caseRows);
+      const upsertCases = dependencies.upsertFollowUpCaseRows || upsertFollowUpCaseRows;
+      const caseResult = await upsertCases(config, caseRows);
       followUpResult = { ...caseResult, rows: caseResult.rows };
     } catch (error) {
       followUpResult = { inserted: 0, error: error.message, rows: [] };
     }
   } else {
     try {
-      followUpResult = await upsertFollowUpRows(config, followUpRows);
+      const upsertLegacyRows = dependencies.upsertFollowUpRows || upsertFollowUpRows;
+      followUpResult = await upsertLegacyRows(config, followUpRows);
     } catch (error) {
       followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
     }
   }
-  const slackDeliveryResult = config.followUpRowsEnabled === false
-    ? { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] }
-    : await deliverSlackFollowUpRows(config, followUpResult.rows || []);
+  const automationApplied = await applyAutomationResolution({
+    config, job, resolution: automationResolution, dependencies
+  });
+  let workOrchestratorResult;
+  if (automationApplied.result.state === 'succeeded') {
+    workOrchestratorResult = emptyWorkOrchestratorResult(config.workOrchestratorV2WorkItemsEnabled !== true);
+  } else {
+    workOrchestratorResult = await upsertWorkOrchestratorV2Items({
+      config, job, prepared, followUpRows, dependencies, store: automationApplied.store
+    });
+    workOrchestratorResult = await persistHumanAutomationState({
+      workOrchestratorResult,
+      resolution: automationApplied.result,
+      store: automationApplied.store
+    });
+    if (workOrchestratorResult.rows.length && !workOrchestratorResult.error
+      && automationApplied.result.work.status === 'not_applicable') {
+      automationApplied.result.work = { status: 'open' };
+    } else if (workOrchestratorResult.error
+      && automationApplied.result.work.status === 'not_applicable') {
+      automationApplied.result.work = {
+        status: 'error', code: 'work_orchestrator_v2_store_failed'
+      };
+    }
+  }
+  const deliverLegacyRows = dependencies.deliverSlackFollowUpRows || deliverSlackFollowUpRows;
+  let slackDeliveryResult;
+  if (config.followUpRowsEnabled === false) {
+    slackDeliveryResult = { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] };
+  } else {
+    try {
+      slackDeliveryResult = await deliverLegacyRows(config, followUpResult.rows || []);
+    } catch {
+      slackDeliveryResult = { skipped: false, error: 'legacy_slack_delivery_failed', results: [] };
+    }
+  }
   return {
     ...prepared,
     status: applied.superseded ? 'superseded_by_newer_room_event' : 'ai_completed',
     followUpResult,
+    workOrchestratorResult,
+    automationResolutionResult: automationApplied.result,
     inquiryResult: null,
     manualTaskResult: null,
     slackDeliveryResult,
@@ -10482,10 +10750,14 @@ export async function finalizePreparedKakaoDecision({ config, job, applied } = {
   };
 }
 
-export function loadKakaoWorkerRuntimeConfig() {
+export function loadKakaoWorkerEnvironment() {
   loadEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'));
   loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
   loadEnvFile(path.resolve(__dirname, '.env'));
+}
+
+export function loadKakaoWorkerRuntimeConfig() {
+  loadKakaoWorkerEnvironment();
   return requireConfig();
 }
 
@@ -10734,6 +11006,8 @@ function parseArgs(argv) {
 }
 
 async function main() {
+  loadKakaoWorkerEnvironment();
+  validateWorkOrchestratorV2CutoverConfig(process.env);
   const args = parseArgs(process.argv.slice(2));
   const result = args.ragLookup
     ? await processRagLookup(await readStdinJson())

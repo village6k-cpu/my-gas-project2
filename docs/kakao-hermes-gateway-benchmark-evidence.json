@@ -1,0 +1,507 @@
+{
+  "schema": "village-kakao-hermes-benchmark-evidence/v1",
+  "measurement_kind": "provider_backed",
+  "baseline": {
+    "sample_count": 20,
+    "total_median_ms": 26219.165500000003,
+    "total_p95_ms": 47841.383,
+    "config": {
+      "provider": "xai-oauth",
+      "model": "grok-4.5",
+      "reasoning_effort": "xhigh",
+      "max_turns": 90,
+      "disabled_toolsets": [
+        "computer_use"
+      ],
+      "tools_signature": "f48e303b9e9893df27ddcd4bd3f8ffb295328a512f809c4269d55e8afe5d77a7",
+      "skills_signature": "e531a27a28c850e3bda115cd0bf76f3fb6ab6a68ab1c4b5a7866af5f9fcac7bd",
+      "plugin_signature": "60e6b6199a163f7a7382db440451108ef3f633e7d521a80467c7432e579cc959"
+    },
+    "samples": [
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 47841.383,
+        "provider_calls": 5,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 26887.343,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 24911.706,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 47517.765,
+        "provider_calls": 5,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 24791.095,
+        "provider_calls": 5,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 22475.145,
+        "provider_calls": 3,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 41166.517,
+        "provider_calls": 5,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 24083.476,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 23536.175,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 41663.083,
+        "provider_calls": 5,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 25461.597,
+        "provider_calls": 5,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 32974.023,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 39906.461,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 29677.546,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 23669.601,
+        "provider_calls": 3,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 49592.252,
+        "provider_calls": 7,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 22491.761,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 25065.28,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 34224.615,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 25550.988,
+        "provider_calls": 4,
+        "process_starts": 1,
+        "exit_code": 0,
+        "failed": false
+      }
+    ]
+  },
+  "gateway": {
+    "config": {
+      "provider": "xai-oauth",
+      "model": "grok-4.5",
+      "reasoning_effort": "xhigh",
+      "max_turns": 90,
+      "disabled_toolsets": [
+        "computer_use"
+      ],
+      "tools_signature": "f48e303b9e9893df27ddcd4bd3f8ffb295328a512f809c4269d55e8afe5d77a7",
+      "skills_signature": "e531a27a28c850e3bda115cd0bf76f3fb6ab6a68ab1c4b5a7866af5f9fcac7bd",
+      "plugin_signature": "60e6b6199a163f7a7382db440451108ef3f633e7d521a80467c7432e579cc959"
+    },
+    "samples": [
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 32569.532,
+        "agent_ms": 32569.532,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "402916f326b9ef770fc61340b22ed7d173132dc655d9d9302134b7df020566f5"
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 11895.724,
+        "agent_ms": 11895.724,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": true,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "64c01de6fba213711209eb4a38891d19f6b85d7844fb868d7a36d73f1bcf068b"
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 3588.699,
+        "agent_ms": 3588.699,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "e72ac18ca0bf17b6bc75ac14fb77c351f1a39139d64e6eee1735deaec5356165"
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 3947.722,
+        "agent_ms": 3947.722,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "f6bd872ebd037802609a39f6d833f2579d244e5e27622fd6034c4e8595ca7917"
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 11893.694,
+        "agent_ms": 11893.694,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": true,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "c8df32f89c5f1fd5ac263fb154541c4ef4468b582f61b632c4ad927d6817aa0a"
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 2572.168,
+        "agent_ms": 2572.168,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "e72ac18ca0bf17b6bc75ac14fb77c351f1a39139d64e6eee1735deaec5356165"
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 2438.169,
+        "agent_ms": 2438.169,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "f6bd872ebd037802609a39f6d833f2579d244e5e27622fd6034c4e8595ca7917"
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 6289.427,
+        "agent_ms": 6289.427,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": true,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "158727e5050564d618c621606ba28b01f9e6a144194e1a264835a848d42f117b"
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 2146.252,
+        "agent_ms": 2146.252,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "e72ac18ca0bf17b6bc75ac14fb77c351f1a39139d64e6eee1735deaec5356165"
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 2402.883,
+        "agent_ms": 2402.883,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "f6bd872ebd037802609a39f6d833f2579d244e5e27622fd6034c4e8595ca7917"
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 6066.172,
+        "agent_ms": 6066.172,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": true,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "95ab5ad8ba09650d6c2b77e5015e9f2c82b77a344afe59a1d2dae0bb231e0f59"
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 2888.207,
+        "agent_ms": 2888.207,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "e72ac18ca0bf17b6bc75ac14fb77c351f1a39139d64e6eee1735deaec5356165"
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 2257.839,
+        "agent_ms": 2257.839,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "f6bd872ebd037802609a39f6d833f2579d244e5e27622fd6034c4e8595ca7917"
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 5907.175,
+        "agent_ms": 5907.175,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": true,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "1a523ec5fa375b5374eb6ac863bc9dfa32897c9e991d800a085a21984bb0a01d"
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 1885.523,
+        "agent_ms": 1885.523,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "e72ac18ca0bf17b6bc75ac14fb77c351f1a39139d64e6eee1735deaec5356165"
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 2555.374,
+        "agent_ms": 2555.374,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "f6bd872ebd037802609a39f6d833f2579d244e5e27622fd6034c4e8595ca7917"
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 6764.203,
+        "agent_ms": 6764.203,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": true,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "64721ffef0e50a12f8c437f31c79b5f8b4a27eb705506b711abac315b3b0a0c9"
+      },
+      {
+        "case_id": "offline-faq-a1",
+        "total_ms": 2352.382,
+        "agent_ms": 2352.382,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "e72ac18ca0bf17b6bc75ac14fb77c351f1a39139d64e6eee1735deaec5356165"
+      },
+      {
+        "case_id": "offline-faq-a2",
+        "total_ms": 2223.529,
+        "agent_ms": 2223.529,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": false,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "f6bd872ebd037802609a39f6d833f2579d244e5e27622fd6034c4e8595ca7917"
+      },
+      {
+        "case_id": "offline-schedule-1",
+        "total_ms": 6243.273,
+        "agent_ms": 6243.273,
+        "process_starts": 0,
+        "post_action_agent_runs": 0,
+        "session_reused": true,
+        "schedule": true,
+        "owner_review_required": true,
+        "send_count": 0,
+        "write_count": 0,
+        "provider_calls": 1,
+        "terminal": "result",
+        "response_sha256": "38b2cf7687942426605b80030e7fef19f82d761ce2515196d231c6aa508aee54"
+      }
+    ]
+  },
+  "run_id": "20260822-122749-c7e628",
+  "safety": {
+    "loopback_bridge_only": true,
+    "kakao_send_count": 0,
+    "slack_send_count": 0,
+    "gas_write_count": 0,
+    "profiles_isolated": true
+  }
+}

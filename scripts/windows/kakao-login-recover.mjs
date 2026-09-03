@@ -153,7 +153,7 @@ export function isAuthenticatedKakaoChatUrl(value) {
   try {
     const parsed = new URL(String(value || ''));
     return ['business.kakao.com', 'center-pf.kakao.com'].includes(parsed.hostname)
-      && (/^\/_[^/]+\/chats(?:\/[^/]+)?\/?$/.test(parsed.pathname) || /^\/_chats\/?$/.test(parsed.pathname));
+      && (/^(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats(?:\/[^/]+)?\/?$/.test(parsed.pathname) || /^\/_chats\/?$/.test(parsed.pathname));
   } catch {
     return false;
   }

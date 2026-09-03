@@ -1,0 +1,105 @@
+{
+  "schema": "village-kakao-hermes-replay/v1",
+  "events": [
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-faq-a1",
+      "room_key": "offline-room-a",
+      "room_revision": 1,
+      "prompt": "합성 고객 A: 매장 운영시간을 알려주세요.",
+      "detected_at": "2099-01-01T00:00:00Z",
+      "raw": { "scenario": "faq", "attempt": 1, "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000001"
+    },
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-faq-a2",
+      "room_key": "offline-room-a",
+      "room_revision": 2,
+      "prompt": "합성 고객 A: 반납 위치도 알려주세요.",
+      "detected_at": "2099-01-01T00:00:01Z",
+      "raw": { "scenario": "faq", "attempt": 1, "parallel_group": "faq-1", "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000002"
+    },
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-faq-b1",
+      "room_key": "offline-room-b",
+      "room_revision": 1,
+      "prompt": "합성 고객 B: 다른 방 동시 FAQ입니다.",
+      "detected_at": "2099-01-01T00:00:01Z",
+      "raw": { "scenario": "faq_parallel_room", "attempt": 1, "parallel_group": "faq-1", "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000003"
+    },
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-schedule-1",
+      "room_key": "offline-room-schedule",
+      "room_revision": 1,
+      "prompt": "합성 고객 C: 2099-01-03 합성카메라 세트 일정을 확인해주세요.",
+      "detected_at": "2099-01-01T00:00:02Z",
+      "raw": { "scenario": "schedule_mixed_availability", "attempt": 1, "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000004"
+    },
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-malformed-1",
+      "room_key": "offline-room-malformed",
+      "room_revision": 1,
+      "prompt": "합성 고객 D: malformed final 검증입니다.",
+      "detected_at": "2099-01-01T00:00:03Z",
+      "raw": { "scenario": "malformed_final", "attempt": 1, "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000005"
+    },
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-stale-1",
+      "room_key": "offline-room-stale",
+      "room_revision": 3,
+      "prompt": "합성 고객 E: stale revision 검증입니다.",
+      "detected_at": "2099-01-01T00:00:04Z",
+      "raw": { "scenario": "stale_revision", "attempt": 1, "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000006"
+    },
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-retry-1",
+      "room_key": "offline-room-retry",
+      "room_revision": 1,
+      "prompt": "합성 고객 F: 첫 시도 timeout 뒤 재시도합니다.",
+      "detected_at": "2099-01-01T00:00:05Z",
+      "raw": { "scenario": "timeout_then_success", "attempt": 1, "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000007"
+    },
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-retry-1",
+      "room_key": "offline-room-retry",
+      "room_revision": 1,
+      "prompt": "합성 고객 F: 첫 시도 timeout 뒤 재시도합니다.",
+      "detected_at": "2099-01-01T00:00:06Z",
+      "raw": { "scenario": "timeout_then_success", "attempt": 2, "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000008"
+    },
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-timeout-terminal",
+      "room_key": "offline-room-timeout-terminal",
+      "room_revision": 1,
+      "prompt": "합성 고객 G: 두 번 timeout 후 사람 검토로 종료합니다.",
+      "detected_at": "2099-01-01T00:00:07Z",
+      "raw": { "scenario": "timeout_terminal", "attempt": 1, "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000009"
+    },
+    {
+      "schema": "village-kakao-gateway-event/v1",
+      "job_id": "offline-timeout-terminal",
+      "room_key": "offline-room-timeout-terminal",
+      "room_revision": 1,
+      "prompt": "합성 고객 G: 두 번 timeout 후 사람 검토로 종료합니다.",
+      "detected_at": "2099-01-01T00:00:08Z",
+      "raw": { "scenario": "timeout_terminal", "attempt": 2, "synthetic": true },
+      "lease_id": "10000000-0000-4000-8000-000000000010"
+    }
+  ]
+}

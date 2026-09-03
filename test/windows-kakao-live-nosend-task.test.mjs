@@ -32,24 +32,28 @@ test('live/no-send health contract rejects every customer-send or approval-polle
     Import-Module ${psLiteral(modulePath)} -Force
     $base = [pscustomobject]@{
       ok = $true
+      gateway = [pscustomobject]@{ gatewayReady = $true; consumer = [pscustomobject]@{ fresh = $true } }
       config = [pscustomobject]@{
         workerLive = $true
+        workerDryRun = $true
+        windowsWritesEnabled = $false
         autoSendEnabled = $false
-        slackCardDeliveryEnabled = $true
+        slackCardDeliveryEnabled = $false
         slackActionPollEnabled = $false
+        hermesTransport = 'gateway_no_send'
       }
     }
     $autoSend = $base | ConvertTo-Json -Depth 4 | ConvertFrom-Json
     $autoSend.config.autoSendEnabled = $true
     $poller = $base | ConvertTo-Json -Depth 4 | ConvertFrom-Json
     $poller.config.slackActionPollEnabled = $true
-    $noCards = $base | ConvertTo-Json -Depth 4 | ConvertFrom-Json
-    $noCards.config.slackCardDeliveryEnabled = $false
+    $cards = $base | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    $cards.config.slackCardDeliveryEnabled = $true
     [pscustomobject]@{
       safe = Test-KakaoLiveNoSendHealth -Health $base
       autoSend = Test-KakaoLiveNoSendHealth -Health $autoSend
       poller = Test-KakaoLiveNoSendHealth -Health $poller
-      noCards = Test-KakaoLiveNoSendHealth -Health $noCards
+      cards = Test-KakaoLiveNoSendHealth -Health $cards
     } | ConvertTo-Json -Compress
   `);
 
@@ -57,7 +61,7 @@ test('live/no-send health contract rejects every customer-send or approval-polle
     safe: true,
     autoSend: false,
     poller: false,
-    noCards: false
+    cards: false
   });
 });
 
@@ -95,6 +99,7 @@ test('no-send transition forcibly disables customer send and approval polling', 
     $env:SLACK_ACTION_POLL_ENABLED = '1'
     $env:SLACK_AGENT_CARD_DELIVERY_ENABLED = '0'
     $env:VILLAGE_WINDOWS_WRITES_ENABLED = '0'
+    $env:KAKAO_HERMES_TRANSPORT = 'cli'
     Set-KakaoLiveNoSendEnvironment
     [pscustomobject]@{
       workerLive = $env:AI_WORKER_LIVE
@@ -103,16 +108,18 @@ test('no-send transition forcibly disables customer send and approval polling', 
       actionPoll = $env:SLACK_ACTION_POLL_ENABLED
       slackCards = $env:SLACK_AGENT_CARD_DELIVERY_ENABLED
       windowsWrites = $env:VILLAGE_WINDOWS_WRITES_ENABLED
+      hermesTransport = $env:KAKAO_HERMES_TRANSPORT
     } | ConvertTo-Json -Compress
   `);
 
   assert.deepEqual(parseJson(result), {
     workerLive: '1',
     autoSend: '0',
-    dryRun: '0',
+    dryRun: '1',
     actionPoll: '0',
-    slackCards: '1',
-    windowsWrites: '1'
+    slackCards: '0',
+    windowsWrites: '0',
+    hermesTransport: 'gateway_no_send'
   });
 });
 
@@ -175,17 +182,20 @@ test('live/no-send startup plan promotes staging ownership without enabling cust
     assert.deepEqual(plan.runtime, {
       AI_WORKER_LIVE: '1',
       AI_WORKER_AUTO_SEND: '0',
-      AI_WORKER_DRY_RUN: '0',
+      AI_WORKER_DRY_RUN: '1',
       SLACK_ACTION_POLL_ENABLED: '0',
-      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
-      VILLAGE_WINDOWS_WRITES_ENABLED: '1',
-      HERMES_WORKER_COMMAND_MODE: 'python_module'
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+      VILLAGE_WINDOWS_WRITES_ENABLED: '0',
+      HERMES_WORKER_COMMAND_MODE: 'python_module',
+      KAKAO_HERMES_TRANSPORT: 'gateway_no_send'
     });
     assert.deepEqual(plan.steps, [
       'accept-already-healthy-live-nosend',
       'stop-owned-remnants-if-unhealthy',
       'start-owned-staging-with-writes',
       'promote-bridge-to-live-nosend',
+      'verify-kakaoworker-plugin-hash',
+      'verify-gateway-consumer-heartbeat',
       'verify-live-nosend-health'
     ]);
   } finally {
@@ -193,14 +203,14 @@ test('live/no-send startup plan promotes staging ownership without enabling cust
   }
 });
 
-test('full-live startup contract enables customer replies, Slack cards, and approval polling', () => {
+test('full-live startup contract keeps customer replies and approval polling while cutting legacy cards to v2', () => {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'village-full-live-task-'));
   try {
     const envFile = path.join(temp, 'runtime.env');
     const chromePath = path.join(temp, 'chrome.exe');
     const nodePath = path.join(temp, 'node.exe');
     const hermesPythonPath = path.join(temp, 'python.exe');
-    writeFileSync(envFile, 'AI_WORKER_AUTO_SEND=1\n');
+    writeFileSync(envFile, 'AI_WORKER_AUTO_SEND=1\nWORK_ORCHESTRATOR_V2_RUNTIME_MODE=v2\n');
     writeFileSync(chromePath, 'fixture');
     writeFileSync(nodePath, 'fixture');
     writeFileSync(hermesPythonPath, 'fixture');
@@ -208,21 +218,25 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
     const modulePath = path.join(scripts, 'KakaoLive.Common.psm1');
     const health = parseJson(runPowerShell(`
       Import-Module ${psLiteral(modulePath)} -Force
+      $env:WORK_ORCHESTRATOR_V2_RUNTIME_MODE = 'v2'
       $env:SLACK_ACTION_POLL_ENABLED = '0'
       $env:WORKER_CATCHUP_TIMEOUT_MS = '75000'
       $env:HERMES_HOME = 'C:\\Village\\MacMiniMirror\\restored\\.hermes'
       Set-KakaoLiveRuntimeEnvironment
-      $value = [pscustomobject]@{ ok = $true; runtime = [pscustomobject]@{
+      $value = [pscustomobject]@{ ok = $true; workOrchestrator = [pscustomobject]@{ ok = $true }; runtime = [pscustomobject]@{
         state = 'healthy'; cdpReady = $true; authenticated = $true; watcherReady = $true
       }; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
-        autoSendEnabled = $true; slackCardDeliveryEnabled = $true; slackActionPollEnabled = $true
+        autoSendEnabled = $true; slackCardDeliveryEnabled = $false; followUpRowsEnabled = $false
+        slackActionPollEnabled = $false; p0SlackEscalationEnabled = $false; slackBotTokenPresent = $true
         supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true; startupCatchupSupported = $true
         aiDomSplitEnabled = $true; aiDecisionConcurrency = 2
+        workOrchestrator = [pscustomobject]@{ runtimeMode = 'v2'; shadowWrites = $true; immediateEnabled = $true; workItemsEnabled = $true; digestEnabled = $true; cleanupEnabled = $true; p0ReadbackEnabled = $true; p0CutoverEnabled = $true; storeConfigured = $true; immediateLocalConfigReady = $true; p0LocalConfigReady = $true; digestLocalConfigReady = $true; actionLocalConfigReady = $true; cleanupLocalConfigReady = $true }
       }}
       $legacy = [pscustomobject]@{ ok = $true; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
-        autoSendEnabled = $true; slackCardDeliveryEnabled = $true; slackActionPollEnabled = $true
+        autoSendEnabled = $true; slackCardDeliveryEnabled = $false; followUpRowsEnabled = $false
+        slackActionPollEnabled = $true; p0SlackEscalationEnabled = $false
         supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true
       }}
       [pscustomobject]@{
@@ -231,6 +245,7 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
           actionPoll = $env:SLACK_ACTION_POLL_ENABLED
           catchupTimeout = $env:WORKER_CATCHUP_TIMEOUT_MS
           hermesHome = $env:HERMES_HOME
+          hermesTransport = $env:KAKAO_HERMES_TRANSPORT
         }
         healthy = Test-KakaoLiveHealth -Health $value
         legacyHealthy = Test-KakaoLiveHealth -Health $legacy
@@ -248,16 +263,28 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
     assert.equal(health.watcherDown, false);
     const canonicalHermesHome = path.join(process.env.LOCALAPPDATA, 'hermes');
     assert.deepEqual(health.applied, {
-      actionPoll: '1',
+      actionPoll: '0',
       catchupTimeout: '300000',
-      hermesHome: canonicalHermesHome
+      hermesHome: canonicalHermesHome,
+      hermesTransport: 'cli'
     });
     assert.deepEqual(health.contract, {
       AI_WORKER_LIVE: '1',
       AI_WORKER_AUTO_SEND: '1',
       AI_WORKER_DRY_RUN: '0',
-      SLACK_ACTION_POLL_ENABLED: '1',
-      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+      SLACK_ACTION_POLL_ENABLED: '0',
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+      AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
+      KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
+      P0_SLACK_ESCALATION_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
+      WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
       VILLAGE_WINDOWS_WRITES_ENABLED: '1',
       SUPABASE_RECOVERY_ENABLED: '1',
       KAKAO_TAB_CLEANUP_ENABLED: '1',
@@ -282,7 +309,7 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
       `-EnvFile ${psLiteral(envFile)} -ChromePath ${psLiteral(chromePath)} ` +
       `-NodePath ${psLiteral(nodePath)} -HermesPythonPath ${psLiteral(hermesPythonPath)} -PlanOnly`));
     assert.equal(plan.runtime.AI_WORKER_AUTO_SEND, '1');
-    assert.equal(plan.runtime.SLACK_ACTION_POLL_ENABLED, '1');
+    assert.equal(plan.runtime.SLACK_ACTION_POLL_ENABLED, '0');
     assert.deepEqual(plan.steps, [
       'accept-already-healthy-live',
       'classify-kakao-runtime-state',

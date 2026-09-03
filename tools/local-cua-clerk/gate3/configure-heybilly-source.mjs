@@ -124,4 +124,3 @@ async function main() {
 const isMain = Boolean(process.argv[1])
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (isMain) await main();
-

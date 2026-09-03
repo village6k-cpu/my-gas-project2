@@ -28,8 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTENT_JS = ROOT / "kakao-dom-watcher-extension" / "content.js"
 DEFAULT_SHIM_JS = ROOT / "kakao-dom-bridge" / "watcher-cdp-shim.js"
 WATCHER_VERSION_RE = re.compile(r"const\s+WATCHER_VERSION\s*=\s*['\"]([^'\"]+)['\"]")
-CHAT_LIST_PATH_RE = re.compile(r"/(?:_[^/]+/chats|_chats)/?")
-CHAT_DETAIL_PATH_RE = re.compile(r"/_[^/]+/chats/[^/]+/?")
+CHAT_LIST_PATH_RE = re.compile(r"/(?:(?:space/[^/]+/channel/)?_[^/]+/chats|_chats)/?")
+CHAT_DETAIL_PATH_RE = re.compile(r"/(?:space/[^/]+/channel/)?_[^/]+/chats/[^/]+/?")
 
 
 class CDPWebSocket:
@@ -157,7 +157,7 @@ def chat_list_url(value: str) -> str:
     host = (parsed.hostname or "").lower()
     if host not in {"business.kakao.com", "center-pf.kakao.com"}:
         raise RuntimeError("Kakao chat target host changed")
-    match = re.fullmatch(r"(/_[^/]+/chats)(?:/[^/]+)?/?", parsed.path)
+    match = re.fullmatch(r"((?:/space/[^/]+/channel)?/_[^/]+/chats)(?:/[^/]+)?/?", parsed.path)
     if not match:
         if re.fullmatch(r"/_chats/?", parsed.path):
             return f"{parsed.scheme}://{parsed.netloc}/_chats"
@@ -214,10 +214,7 @@ def choose_kakao_page(pages: list[dict[str, Any]]) -> dict[str, Any]:
             continue
         parsed = urlparse(page.get("url", ""))
         is_kakao_host = parsed.hostname in {"business.kakao.com", "center-pf.kakao.com"}
-        is_main_list = bool(
-            re.fullmatch(r"/_[^/]+/chats/?", parsed.path)
-            or re.fullmatch(r"/_chats/?", parsed.path)
-        )
+        is_main_list = bool(CHAT_LIST_PATH_RE.fullmatch(parsed.path))
         if is_kakao_host and is_main_list:
             return page
         if is_kakao_host and CHAT_DETAIL_PATH_RE.fullmatch(parsed.path) and detail_page is None:
@@ -239,12 +236,44 @@ def extract_watcher_version(content_js: str) -> str:
     return match.group(1)
 
 
+def runtime_location_path(cdp: CDPWebSocket) -> str | None:
+    location = cdp.call("Runtime.evaluate", {
+        "expression": "location.pathname",
+        "returnByValue": True,
+    })
+    value = location.get("result", {}).get("result", {}).get("value")
+    return value if isinstance(value, str) else None
+
+
+def ensure_chat_list_runtime(
+    cdp: CDPWebSocket,
+    destination: str,
+    wait_seconds: float,
+    allow_navigation: bool = True,
+) -> bool:
+    destination_path = urlparse(destination).path.rstrip("/")
+    if (runtime_location_path(cdp) or "").rstrip("/") == destination_path:
+        return True
+    if not allow_navigation:
+        return False
+
+    navigation = cdp.call("Page.navigate", {"url": destination})
+    if navigation.get("error"):
+        raise RuntimeError("Kakao chat-list navigation failed")
+    navigation_deadline = time.time() + wait_seconds
+    while time.time() < navigation_deadline:
+        if (runtime_location_path(cdp) or "").rstrip("/") == destination_path:
+            return True
+        time.sleep(0.25)
+    raise RuntimeError("Kakao chat-list navigation timed out")
+
+
 def probe_watcher(cdp: CDPWebSocket) -> dict[str, Any] | None:
     verify = cdp.call("Runtime.evaluate", {
         "expression": r"""(async () => {
             const w = window.__villageKakaoWatcherInstance;
             const s = w?.state;
-            const eligible = /^(?:\/_?[^/]+)?\/chats\/?$/.test(location.pathname);
+            const eligible = /^(?:(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats|\/_chats)\/?$/.test(location.pathname);
             const scanAt = Number(s?.lastTopRowsScanAt || 0);
             let liveListProbeOk = false;
             let liveListItemCount = null;
@@ -253,7 +282,7 @@ def probe_watcher(cdp: CDPWebSocket) -> dict[str, Any] | None:
             let liveListHeadMatchCount = null;
             let liveListError = null;
             try {
-                const profileMatch = /^\/([^/]+)\/chats\/?$/.exec(location.pathname);
+                const profileMatch = /^(?:\/space\/[^/]+\/channel)?\/([^/]+)\/chats\/?$/.exec(location.pathname);
                 if (!profileMatch) throw new Error('profile_path_unavailable');
                 const response = await fetch(
                     `/api/profiles/${encodeURIComponent(profileMatch[1])}/chats/search?size=100`,
@@ -416,26 +445,15 @@ def main() -> int:
         cdp.call("Runtime.enable")
         cdp.call("Page.enable")
         destination = chat_list_url(str(page.get("url") or ""))
-        current = urlparse(str(page.get("url") or ""))
-        if current.path.rstrip("/") != urlparse(destination).path.rstrip("/"):
-            if args.probe_only:
-                print(json.dumps({"ok": False, **classification, "state": "watcher_repair_required", "watcherReady": False}, ensure_ascii=False))
-                return 2
-            navigation = cdp.call("Page.navigate", {"url": destination})
-            if navigation.get("error"):
-                raise RuntimeError("Kakao chat-list navigation failed")
-            navigation_deadline = time.time() + args.wait
-            while time.time() < navigation_deadline:
-                location = cdp.call("Runtime.evaluate", {
-                    "expression": "location.pathname",
-                    "returnByValue": True,
-                })
-                path = location.get("result", {}).get("result", {}).get("value")
-                if isinstance(path, str) and CHAT_LIST_PATH_RE.fullmatch(path):
-                    break
-                time.sleep(0.25)
-            else:
-                raise RuntimeError("Kakao chat-list navigation timed out")
+        runtime_ready = ensure_chat_list_runtime(
+            cdp,
+            destination,
+            wait_seconds=args.wait,
+            allow_navigation=not args.probe_only,
+        )
+        if not runtime_ready:
+            print(json.dumps({"ok": False, **classification, "state": "watcher_repair_required", "watcherReady": False}, ensure_ascii=False))
+            return 2
         if args.probe_only:
             value = probe_watcher(cdp)
             healthy = watcher_is_healthy(value, expected_extension_version)

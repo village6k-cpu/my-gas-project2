@@ -55,11 +55,59 @@ scripts/kakao-automation start
 scripts/kakao-automation status
 ```
 
-운영 기본값은 `AI_WORKER_LIVE=1`, `AI_WORKER_AUTO_SEND=1`, `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0`이다. 즉 AI worker가 실제 카카오 화면을 열어 읽고, 확인요청/안전한 자동답장 후보를 처리하지만, 카카오 DOM 이벤트를 사람용 후속조치판에 직접 중복 적재하지 않는다. 후속조치판은 Slack backstop이 Slack의 미해결 태스크를 선별해 채운다. 임시 점검 때만 `AI_WORKER_LIVE=0` 또는 `AI_WORKER_AUTO_SEND=0`으로 낮춘다.
+v2 cutover 전의 안전한 기본값은 `AI_WORKER_LIVE=1`, `AI_WORKER_AUTO_SEND=1`과 legacy work/card/P0 경로 ON이다. `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0` 같은 legacy-off 값은 아래 Work Orchestrator v2 target의 immediate/work/P0 flags와 함께만 적용할 수 있다. 즉 AI worker의 카카오 읽기·확인요청·안전한 자동답장 정책은 유지하면서, 승인된 cutover 뒤에만 중복 durable output을 v2로 넘긴다. 임시 점검 때만 `AI_WORKER_LIVE=0` 또는 `AI_WORKER_AUTO_SEND=0`으로 낮춘다.
 
 `scripts/kakao-automation status`에서 `Automation Chrome profile > DevTools status: reachable`가 떠야 worker가 일반 Chrome이 아니라 자동화 profile의 탭을 제어한다. 기존에 포트 없이 떠 있던 자동화 Chrome은 `scripts/kakao-automation start` 또는 `restart` 때 자동으로 닫고 다시 연다.
 
 launchctl은 터미널보다 PATH가 짧다. 그래서 런처가 `node`, `hermes`, `cua-driver` 절대 경로를 찾아 runner에 주입한다. `status`에서 `Hermes worker > status: executable`과 `CUA driver > status: executable`이 떠야 live worker가 Hermes subprocess와 Mac 화면 제어까지 실행할 수 있다.
+
+## Work Orchestrator v2 cutover and rollback
+
+The following is an offline-reviewed, reversible configuration target. It does
+not authorize a runtime change and static configuration is not proof that the
+watcher, bridge, Hermes, Slack delivery, work items, digest, cleanup, or P0
+readback is healthy. Apply it only during the separately authorized cutover
+task after each runtime-specific readback is available.
+
+```dotenv
+WORK_ORCHESTRATOR_V2_RUNTIME_MODE=v2
+WORK_ORCHESTRATOR_V2_SHADOW_WRITES=1
+WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED=1
+WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED=1
+WORK_ORCHESTRATOR_V2_DIGEST_ENABLED=1
+WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED=1
+WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED=1
+WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED=1
+AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0
+KAKAO_FOLLOW_UP_ITEMS_ENABLED=0
+SLACK_AGENT_CARD_DELIVERY_ENABLED=0
+P0_SLACK_ESCALATION_ENABLED=0
+SLACK_ACTION_POLL_ENABLED=0
+WORK_ORCHESTRATOR_V2_SLACK_BOT_USER_ID=U_FROM_AUTH_TEST
+WORK_ORCHESTRATOR_V2_SLACK_BOT_ID=B_FROM_AUTH_TEST
+WORK_ORCHESTRATOR_V2_SLACK_TEAM_ID=T_FROM_AUTH_TEST
+WORK_ORCHESTRATOR_V2_CLEANUP_OWNER=bridge:notice-cleanup
+WORK_ORCHESTRATOR_V2_CLEANUP_LEASE_SECONDS=120
+WORK_ORCHESTRATOR_V2_CLEANUP_INTERVAL_MS=300000
+```
+
+The startup guard refuses an incomplete relationship: legacy cards require v2
+immediate notifications; disabled legacy work rows require v2 work items;
+disabled legacy P0 requires v2 work items, v2 P0 readback, and v2 P0 cutover; and v2
+cleanup requires v2 immediate notifications. It leaves the Slack bot token,
+watcher, bridge, Hermes, auto-send policy, and bounded Village tools unchanged.
+The three cleanup identity values must be copied from the same bot token's exact
+`auth.test` readback before cutover. Cleanup claims at most 25 durable rows per
+sweep and deletes only their stored channel/timestamp coordinates; it never
+searches Slack. Missing or mismatched identity keeps readiness false and starts
+no cleanup timer.
+
+For rollback, first persist `WORK_ORCHESTRATOR_V2_RUNTIME_MODE=legacy`, restore
+`AI_WORKER_FOLLOW_UP_ITEMS_ENABLED`, `KAKAO_FOLLOW_UP_ITEMS_ENABLED`,
+`SLACK_AGENT_CARD_DELIVERY_ENABLED`, `P0_SLACK_ESCALATION_ENABLED`, and
+`SLACK_ACTION_POLL_ENABLED` to `1`, and turn every v2 flag back to `0`. Then
+restart only through the authorized runbook and capture fresh readback; do not
+infer a healthy rollback from a port, `/health` response, or static env file.
 
 ## 어떻게 끄는가?
 

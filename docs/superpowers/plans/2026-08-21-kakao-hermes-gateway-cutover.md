@@ -76,7 +76,7 @@ git commit -m "feat: package Kakao Hermes plugin reproducibly"
 
 - [ ] **Step 1: Replace the legacy expectation with failing native-Gateway tests**
 
-The current test asserts Kakao stays on the bridge worker and `Hermes_Gateway_Kakaoworker` is disabled. Replace it with tests requiring a separate, profile-scoped, disabled-by-default task plan that launches stock:
+The current test asserts Kakao stays on the bridge worker and `Hermes_Gateway_Kakaoworker_Native` is disabled. Replace it with tests requiring a separate, profile-scoped, disabled-by-default task plan that launches stock. The legacy `Hermes_Gateway_Kakaoworker` remains a retired compatibility task when its existing Windows ACL cannot be updated without elevation:
 
 ```text
 python -m hermes_cli.main --profile kakaoworker gateway run

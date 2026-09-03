@@ -3,14 +3,35 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
+import { notificationReceiptInput } from '../work-orchestrator-v2/contracts.mjs';
 
-process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
+const SAFE_PRE_CUTOVER_ENV = Object.freeze({
+  WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'legacy',
+  WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '0',
+  WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
+  WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0',
+  AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
+  KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
+  SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+  P0_SLACK_ESCALATION_ENABLED: '1',
+  SLACK_ACTION_POLL_ENABLED: '1'
+});
+Object.assign(process.env, SAFE_PRE_CUTOVER_ENV, { KAKAO_DOM_BRIDGE_NO_LISTEN: '1' });
 const {
   buildCorsHeaders,
   buildHealthConfig,
+  buildWorkOrchestratorHealthState,
+  attachWorkOrchestratorInvariantHealth,
+  readBridgeWorkOrchestratorHealth,
   buildGatewayHealthReadback,
   assertGatewayFailureNotificationDelivered,
   buildWorkerResultAudit,
@@ -18,8 +39,12 @@ const {
   compactQueueAuditRecord,
   buildP0SlackEscalationClaim,
   buildP0SlackEscalationMessage,
+  createWorkOrchestratorP0Runtime,
   p0SlackEscalationBackoffMs,
   p0SlackEscalationDue,
+  resolveWorkOrchestratorP0Config,
+  validateWorkOrchestratorV2CutoverConfig,
+  runP0EscalationPair,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
   createGatewayRegisteredReservationChangeExecutor,
@@ -30,6 +55,15 @@ const {
   createGatewayFailureNotificationCoordinator,
   createGatewayResultApplicationCoordinator,
   createAiJobDispatcher,
+  createErrorsAuditAppender,
+  createImmediateNotificationAttemptGuard,
+  createWorkOrchestratorDigestRuntime,
+  createWorkOrchestratorImmediateRuntime,
+  createWorkOrchestratorActionPoller,
+  createImmediateNoticeUpdatePoller,
+  createWorkOrchestratorNoticeCleanupRuntime,
+  resolveWorkOrchestratorNoticeCleanupConfig,
+  createWorkOrchestratorShadowRuntime,
   configForHermesTransport,
   classifyInitialScanIngress,
   gatewayDispatchFailurePolicy,
@@ -37,6 +71,14 @@ const {
   registerAcceptedRoomEvent,
   semanticRoomEventIdentity,
   hasUnreadCount,
+  handleEvent,
+  handleWorkOrchestratorDigestMaintenance,
+  listPendingWorkActionsV2,
+  resolveSlackActionPollIntervalMs,
+  applyPendingWorkActionPatchV2,
+  runSlackActionPollPair,
+  routeWorkerFailureFollowUp,
+  slackActionMaintenanceSucceeded,
   mergeQueuedRoomJobs,
   kakaoSendAllowedForTransport,
   mapWorkerPayloadToSupabaseStatus,
@@ -50,6 +92,192 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+test('authoritative automation resolution bridge updates exact coordinates and records exact readback', async () => {
+  const updates = [];
+  const readbacks = [];
+  const receipt = {
+    id: '99999999-9999-4999-8999-999999999999',
+    source_event_key: 'event-authoritative-bridge-1',
+    slack_channel_id: 'CINBOX', slack_message_ts: '123.45',
+    updated_at: '2026-08-31T01:00:00.000Z',
+    payload: {
+      automation_notice_update: {
+        status: 'pending', resolution_kind: 'auto_reply_readback',
+        notice_text: 'The automated reply was confirmed by authoritative readback.'
+      }
+    }
+  };
+  const runtime = createImmediateNoticeUpdatePoller({
+    config: { immediateEnabled: true, workItemsEnabled: true },
+    store: {
+      listImmediateNoticeUpdateRequests: async () => [receipt],
+      markImmediateNoticeUpdated: async (input) => {
+        readbacks.push(input);
+        return { applied: true, row: { ...receipt, updated_at: input.updatedAt } };
+      }
+    },
+    slack: {
+      updateMessage: async (input) => {
+        updates.push(input);
+        return {
+          ok: true, channel: input.channel, ts: input.ts,
+          message: { text: input.text, blocks: input.blocks }
+        };
+      }
+    },
+    now: () => new Date('2026-08-31T01:00:01.000Z')
+  });
+
+  const result = await runtime.poll('manual');
+
+  assert.deepEqual(result, { status: 'ok', trigger: 'manual', scanned: 1, updated: 1, failed: 0, conflicts: 0 });
+  assert.equal(updates[0].channel, 'CINBOX');
+  assert.equal(updates[0].ts, '123.45');
+  assert.equal(readbacks[0].sourceEventKey, 'event-authoritative-bridge-1');
+  assert.equal(readbacks[0].channelId, 'CINBOX');
+  assert.equal(readbacks[0].messageTs, '123.45');
+  assert.equal(readbacks[0].contentHash, 'b05d0e2c5e96484a6fe9c03d6405ceccdf79ae05bfeab5ded4c952e93aa32221');
+});
+
+test('authoritative automation resolution bridge rejects matching coordinates with mismatched updated content', async () => {
+  const secret = 'customer-private response';
+  let readbacks = 0;
+  const receipt = {
+    id: '99999999-9999-4999-8999-999999999994', source_event_key: 'event-authoritative-bridge-3',
+    slack_channel_id: 'CINBOX', slack_message_ts: '124.46', updated_at: '2026-08-31T01:00:00.000Z',
+    payload: { automation_notice_update: { status: 'pending', resolution_kind: 'auto_reply_readback' } }
+  };
+  const runtime = createImmediateNoticeUpdatePoller({
+    config: { immediateEnabled: true, workItemsEnabled: true },
+    store: {
+      listImmediateNoticeUpdateRequests: async () => [receipt],
+      markImmediateNoticeUpdated: async () => { readbacks += 1; return { applied: true, row: receipt }; }
+    },
+    slack: { updateMessage: async (input) => ({
+      ok: true, channel: input.channel, ts: input.ts,
+      message: { text: `${input.text} ${secret}`, blocks: input.blocks }
+    }) }
+  });
+
+  const result = await runtime.poll('manual');
+
+  assert.deepEqual(result, { status: 'ok', trigger: 'manual', scanned: 1, updated: 0, failed: 1, conflicts: 0 });
+  assert.equal(readbacks, 0);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+});
+
+test('authoritative automation resolution bridge rejects missing or unsafe update readback without leaking content', async (t) => {
+  const secret = 'customer-private unsafe-response';
+  const responses = [
+    ['missing', {}],
+    ['unsafe', { text: secret, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: secret } }] }]
+  ];
+  for (const [name, message] of responses) {
+    await t.test(name, async () => {
+      let readbacks = 0;
+      const receipt = {
+        id: '99999999-9999-4999-8999-999999999993',
+        source_event_key: `event-authoritative-bridge-${name}`,
+        slack_channel_id: 'CINBOX', slack_message_ts: '125.47',
+        updated_at: '2026-08-31T01:00:00.000Z',
+        payload: { automation_notice_update: { status: 'pending', resolution_kind: 'operation_readback' } }
+      };
+      const runtime = createImmediateNoticeUpdatePoller({
+        config: { immediateEnabled: true, workItemsEnabled: true },
+        store: {
+          listImmediateNoticeUpdateRequests: async () => [receipt],
+          markImmediateNoticeUpdated: async () => { readbacks += 1; return { applied: true, row: receipt }; }
+        },
+        slack: { updateMessage: async (input) => ({
+          ok: true, channel: input.channel, ts: input.ts, message
+        }) }
+      });
+
+      const result = await runtime.poll('interval');
+
+      assert.equal(result.failed, 1);
+      assert.equal(result.updated, 0);
+      assert.equal(readbacks, 0);
+      assert.equal(JSON.stringify(result).includes(secret), false);
+    });
+  }
+});
+
+test('authoritative automation resolution bridge leaves failed update pending for bounded retry without touching work', async () => {
+  let attempts = 0;
+  let readbacks = 0;
+  const receipt = {
+    id: '99999999-9999-4999-8999-999999999998',
+    source_event_key: 'event-authoritative-bridge-2',
+    slack_channel_id: 'CINBOX', slack_message_ts: '999.1',
+    updated_at: '2026-08-31T01:00:00.000Z',
+    payload: {
+      automation_notice_update: {
+        status: 'pending', resolution_kind: 'operation_readback',
+        notice_text: 'The automated operation was confirmed by authoritative readback.'
+      }
+    }
+  };
+  const runtime = createImmediateNoticeUpdatePoller({
+    config: { immediateEnabled: true, workItemsEnabled: true },
+    store: {
+      listImmediateNoticeUpdateRequests: async () => [receipt],
+      markImmediateNoticeUpdated: async () => { readbacks += 1; return { applied: true, row: receipt }; }
+    },
+    slack: {
+      updateMessage: async (input) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('customer-private transport failure');
+        return {
+          ok: true, channel: input.channel, ts: input.ts,
+          message: { text: input.text, blocks: input.blocks }
+        };
+      }
+    }
+  });
+
+  const failed = await runtime.poll('interval');
+  const retried = await runtime.poll('interval');
+
+  assert.equal(failed.failed, 1);
+  assert.equal(readbacks, 1);
+  assert.equal(retried.updated, 1);
+  assert.equal(JSON.stringify(failed).includes('customer-private'), false);
+});
+
+function shadowEventRequest(event) {
+  const req = Readable.from([JSON.stringify(event)]);
+  req.method = 'POST';
+  req.url = '/events';
+  req.headers = { host: '127.0.0.1' };
+  return req;
+}
+
+function shadowEventResponse() {
+  let resolve;
+  const completed = new Promise((done) => { resolve = done; });
+  return {
+    completed,
+    response: {
+      writeHead(status, headers) {
+        this.status = status;
+        this.headers = headers;
+      },
+      end(body) {
+        this.body = JSON.parse(body);
+        resolve(this);
+      }
+    }
+  };
+}
+
+async function postShadowEvent(event, dependencies) {
+  const { response, completed } = shadowEventResponse();
+  await handleEvent(shadowEventRequest(event), response, dependencies);
+  await completed;
+  return response;
+}
 
 const TASK7_NEUTRAL_INCIDENT_URL = new URL(
   '../../test/fixtures/kakao-staff-confirmed-mutations/incident-registered-replacement-001.json',
@@ -68,6 +296,274 @@ test('Task 7 loads the sanitized replay fixture through a neutral incident ident
     name: '소니 FE 28-135mm',
     quantity: 1
   }]);
+});
+
+const WORK_ACTION_ID = '11111111-1111-4111-8111-111111111111';
+const WORK_ACTION_NOW = '2026-08-30T06:00:00.000Z';
+
+function pendingWorkActionRow(overrides = {}) {
+  const action = overrides.action ?? { type: 'progress' };
+  return {
+    id: WORK_ACTION_ID,
+    state: 'open',
+    priority: 'normal',
+    actionable_at: '2026-08-30T03:00:00.000Z',
+    snoozed_until: null,
+    resolution_kind: null,
+    resolution_evidence: {},
+    resolved_at: null,
+    resolved_by: null,
+    pending_action: {
+      type: action.type,
+      action,
+      status: 'pending',
+      requested_at: '2026-08-30T05:59:00.000Z',
+      requested_by: 'UOWNER1',
+      expected_version: 4
+    },
+    version: 5,
+    payload: { requires_human_action: true },
+    updated_at: '2026-08-30T05:59:00.000Z',
+    ...overrides,
+    pending_action: overrides.pending_action ?? {
+      type: action.type,
+      action,
+      status: 'pending',
+      requested_at: '2026-08-30T05:59:00.000Z',
+      requested_by: 'UOWNER1',
+      expected_version: 4
+    }
+  };
+}
+
+test('Work Orchestrator action list uses the service-only filtered RPC with an exact bounded request', async () => {
+  const requests = [];
+  const row = pendingWorkActionRow();
+  const rows = await listPendingWorkActionsV2({
+    supabaseUrl: 'https://supabase.example/', serviceRoleKey: 'service-secret', limit: 3,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return { ok: true, status: 200, text: async () => JSON.stringify([row]) };
+    }
+  });
+  assert.deepEqual(rows, [row]);
+  assert.equal(requests[0].url, 'https://supabase.example/rest/v1/rpc/list_pending_work_actions_v2');
+  assert.equal(requests[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(requests[0].init.body), { p_limit: 3 });
+  assert.equal(requests[0].init.headers.apikey, 'service-secret');
+  assert.equal(requests[0].init.headers.authorization, 'Bearer service-secret');
+});
+
+test('Work Orchestrator pending-action RPC bounds requests to 1..50 and rejects non-exact rows', async () => {
+  for (const limit of [0, 51, -1, 1.5, Number.NaN]) {
+    await assert.rejects(listPendingWorkActionsV2({
+      supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-secret', limit,
+      fetchImpl: async () => assert.fail('invalid limits must fail before fetch')
+    }), { message: 'Work Orchestrator action request failed' });
+  }
+  const row = pendingWorkActionRow();
+  await assert.rejects(listPendingWorkActionsV2({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-secret', limit: 50,
+    fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify([{ ...row, extra: true }]) })
+  }), { message: 'Work Orchestrator action request failed' });
+});
+
+test('Slack action poll interval is a strict bounded integer with a safe fallback', () => {
+  for (const value of [undefined, null, '', '0', '999', '-1', '1.5', 'NaN', 'Infinity', '300001', 0, -1, Number.NaN]) {
+    assert.equal(resolveSlackActionPollIntervalMs(value), 10_000, String(value));
+  }
+  assert.equal(resolveSlackActionPollIntervalMs('1000'), 1000);
+  assert.equal(resolveSlackActionPollIntervalMs(45_000), 45_000);
+  assert.equal(resolveSlackActionPollIntervalMs('300000'), 300_000);
+});
+
+test('Work Orchestrator action apply PATCH is fenced by id, current version, active state, and pending status', async () => {
+  const requests = [];
+  const row = pendingWorkActionRow();
+  const transition = {
+    status: 'ready', expectedVersion: 5, expectedPendingStatus: 'pending',
+    patch: {
+      state: 'in_progress', snoozed_until: null, actionable_at: WORK_ACTION_NOW,
+      pending_action: {}, version: 6, updated_at: WORK_ACTION_NOW
+    }
+  };
+  const returned = { ...row, ...transition.patch };
+  const result = await applyPendingWorkActionPatchV2({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-secret', row, transition,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return { ok: true, status: 200, text: async () => JSON.stringify([returned]) };
+    }
+  });
+  assert.deepEqual(result, { applied: true });
+  const url = new URL(requests[0].url);
+  assert.equal(url.searchParams.get('id'), `eq.${WORK_ACTION_ID}`);
+  assert.equal(url.searchParams.get('version'), 'eq.5');
+  assert.equal(url.searchParams.get('state'), 'in.(open,in_progress,snoozed)');
+  assert.equal(url.searchParams.get('pending_action->>status'), 'eq.pending');
+  assert.equal(requests[0].init.method, 'PATCH');
+  assert.equal(requests[0].init.headers.prefer, 'return=representation');
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    state: 'in_progress', snoozed_until: null, actionable_at: WORK_ACTION_NOW,
+    pending_action: {}, version: 6
+  });
+});
+
+test('Work Orchestrator action apply accepts equivalent PostgreSQL timestamps and trigger-owned updated_at', async () => {
+  const row = pendingWorkActionRow();
+  const transition = {
+    status: 'ready', expectedVersion: 5, expectedPendingStatus: 'pending',
+    patch: {
+      state: 'snoozed', snoozed_until: '2026-08-30T09:00:00.000Z',
+      actionable_at: '2026-08-30T09:00:00.000Z', pending_action: {},
+      version: 6, updated_at: WORK_ACTION_NOW
+    }
+  };
+  const returned = {
+    ...row,
+    ...transition.patch,
+    snoozed_until: '2026-08-30T18:00:00+09:00',
+    actionable_at: '2026-08-30T18:00:00+09:00',
+    updated_at: '2026-08-30T15:00:00.123+09:00'
+  };
+  const result = await applyPendingWorkActionPatchV2({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-secret', row, transition,
+    fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify([returned]) })
+  });
+  assert.deepEqual(result, { applied: true });
+});
+
+test('Work Orchestrator action poller uses terminal CAS so two pollers have one winner', async () => {
+  let current = pendingWorkActionRow();
+  const list = async () => current.pending_action?.status === 'pending' ? [structuredClone(current)] : [];
+  const apply = async ({ row, transition }) => {
+    await Promise.resolve();
+    if (current.version !== row.version || current.pending_action?.status !== 'pending') return { applied: false };
+    current = { ...current, ...structuredClone(transition.patch) };
+    return { applied: true };
+  };
+  const config = { workItemsEnabled: true };
+  const first = createWorkOrchestratorActionPoller({ config, storeReady: true, list, apply, now: () => WORK_ACTION_NOW });
+  const second = createWorkOrchestratorActionPoller({ config, storeReady: true, list, apply, now: () => WORK_ACTION_NOW });
+  const results = await Promise.all([first.poll('manual'), second.poll('manual')]);
+  assert.equal(results.reduce((sum, result) => sum + result.applied, 0), 1);
+  assert.equal(results.reduce((sum, result) => sum + result.conflicts, 0), 1);
+  assert.equal(current.state, 'in_progress');
+  assert.equal(current.version, 6);
+  assert.deepEqual(current.pending_action, {});
+});
+
+test('Work Orchestrator action poller preserves request_resolve, fails invalid rows closed, and has no stuck pre-claim state', async () => {
+  const resolveRow = pendingWorkActionRow({ action: { type: 'request_resolve' } });
+  const invalidRow = pendingWorkActionRow({ pending_action: { status: 'pending', customer: 'private-content' } });
+  const applied = [];
+  const runtime = createWorkOrchestratorActionPoller({
+    config: { workItemsEnabled: true }, storeReady: true,
+    list: async () => [resolveRow, invalidRow],
+    apply: async (value) => { applied.push(value); return { applied: true }; },
+    now: () => WORK_ACTION_NOW
+  });
+  assert.deepEqual(await runtime.poll('manual'), {
+    status: 'ok', trigger: 'manual', scanned: 2, applied: 0,
+    awaitingResolution: 1, conflicts: 0, invalid: 1
+  });
+  assert.deepEqual(applied, []);
+  assert.equal(resolveRow.pending_action.status, 'pending');
+  assert.equal(JSON.stringify(runtime.state).includes('private-content'), false);
+
+  let firstAttempt = true;
+  let durable = pendingWorkActionRow();
+  const list = async () => [structuredClone(durable)];
+  const flakyApply = async ({ transition }) => {
+    if (firstAttempt) { firstAttempt = false; throw new Error('private transport detail'); }
+    durable = { ...durable, ...transition.patch };
+    return { applied: true };
+  };
+  const failed = createWorkOrchestratorActionPoller({
+    config: { workItemsEnabled: true }, storeReady: true, list, apply: flakyApply, now: () => WORK_ACTION_NOW
+  });
+  assert.equal((await failed.poll('interval')).status, 'error');
+  assert.equal(durable.pending_action.status, 'pending');
+  const restarted = createWorkOrchestratorActionPoller({
+    config: { workItemsEnabled: true }, storeReady: true, list, apply: flakyApply, now: () => WORK_ACTION_NOW
+  });
+  assert.equal((await restarted.poll('startup')).applied, 1);
+  assert.deepEqual(durable.pending_action, {});
+});
+
+test('Work Orchestrator action poller is active only with enabled work-items and ready store/seams', async () => {
+  const list = async () => [];
+  const apply = async () => ({ applied: true });
+  const off = createWorkOrchestratorActionPoller({ config: { workItemsEnabled: false }, storeReady: true, list, apply });
+  const noStore = createWorkOrchestratorActionPoller({ config: { workItemsEnabled: true }, storeReady: false, list, apply });
+  const ready = createWorkOrchestratorActionPoller({ config: { workItemsEnabled: true }, storeReady: true, list, apply });
+  assert.equal(off.enabled, false);
+  assert.equal(noStore.enabled, false);
+  assert.equal(ready.enabled, true);
+  assert.deepEqual(await off.poll('manual'), {
+    status: 'disabled', trigger: 'manual', scanned: 0, applied: 0,
+    awaitingResolution: 0, conflicts: 0, invalid: 0
+  });
+});
+
+test('Work Orchestrator action health exposes only bounded status and counts', async () => {
+  const shared = {};
+  const runtime = createWorkOrchestratorActionPoller({
+    config: { workItemsEnabled: true }, storeReady: true,
+    list: async () => [pendingWorkActionRow({
+      pending_action: { status: 'pending', id: WORK_ACTION_ID, customer: 'private-customer-content' }
+    })],
+    apply: async () => ({ applied: true }),
+    now: () => WORK_ACTION_NOW,
+    state: shared
+  });
+  await runtime.poll('manual');
+  const health = buildWorkOrchestratorHealthState(shared);
+  assert.deepEqual(health.lastWorkActionPoll, {
+    status: 'ok', trigger: 'manual', scanned: 1, applied: 0,
+    awaitingResolution: 0, conflicts: 0, invalid: 1
+  });
+  assert.equal(health.workActionPollRunning, false);
+  assert.equal(JSON.stringify(health).includes(WORK_ACTION_ID), false);
+  assert.equal(JSON.stringify(health).includes('private-customer-content'), false);
+});
+
+test('combined Slack action maintenance keeps legacy and v2 independent and v2 output content-free', async () => {
+  let legacyCalls = 0;
+  const result = await runSlackActionPollPair({
+    reason: 'manual',
+    legacy: async () => { legacyCalls += 1; return { scanned: 1, handled: 1, errors: [] }; },
+    workActions: { poll: async () => { throw new Error(`private ${WORK_ACTION_ID}`); } }
+  });
+  assert.equal(legacyCalls, 1);
+  assert.deepEqual(result.legacy, { scanned: 1, handled: 1, errors: [] });
+  assert.deepEqual(result.workOrchestratorV2, {
+    status: 'error', trigger: 'manual', scanned: 0, applied: 0,
+    awaitingResolution: 0, conflicts: 0, invalid: 0
+  });
+  assert.equal(JSON.stringify(result).includes(WORK_ACTION_ID), false);
+  assert.equal(slackActionMaintenanceSucceeded(result), false);
+
+  let v2Calls = 0;
+  const second = await runSlackActionPollPair({
+    reason: 'interval',
+    legacy: async () => { throw new Error('legacy failure'); },
+    workActions: { poll: async () => { v2Calls += 1; return {
+      status: 'ok', trigger: 'interval', scanned: 0, applied: 0,
+      awaitingResolution: 0, conflicts: 0, invalid: 0
+    }; } }
+  });
+  assert.equal(v2Calls, 1);
+  assert.equal(second.legacyError, true);
+  assert.equal(second.workOrchestratorV2.status, 'ok');
+  assert.equal(slackActionMaintenanceSucceeded(second), false);
+  assert.equal(slackActionMaintenanceSucceeded({
+    legacy: { errors: [] },
+    workOrchestratorV2: {
+      status: 'ok', trigger: 'manual', scanned: 0, applied: 0,
+      awaitingResolution: 0, conflicts: 0, invalid: 0
+    }
+  }), true);
 });
 
 function task7Mutation(overrides = {}) {
@@ -629,6 +1125,83 @@ test('Gateway failure notification keeps pending when enabled Slack returns a ne
   assert.equal(result[0].notified, false);
   assert.match(result[0].error, /gateway_failure_notification_slack_failed/);
   assert.equal(marks, 0);
+});
+
+test('worker failure routing writes stable v2 human work and legacy rows only in enabled modes', async () => {
+  const job = {
+    id: 'aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaa1',
+    jobId: 'worker-job-1',
+    roomKey: 'room:worker-failure',
+    eventHash: 'event:worker-failure',
+    previewText: 'private customer conversation'
+  };
+  const error = new Error('private technical failure detail');
+  const runMode = async ({ legacyEnabled, workItemsEnabled }) => {
+    const legacyRows = [];
+    const workCandidates = [];
+    const result = await routeWorkerFailureFollowUp({
+      job,
+      error,
+      context: { origin: 'worker' },
+      legacyEnabled,
+      workItemsEnabled,
+      slackEnabled: false,
+      now: '2026-09-02T00:00:00.000Z',
+      legacyUpsert: async (rows) => {
+        legacyRows.push(...rows);
+        return { inserted: rows.length, rows: rows.map((row, index) => ({ ...row, id: `legacy-${index + 1}` })) };
+      },
+      workStore: {
+        async upsertWorkItem(candidate) {
+          workCandidates.push(candidate);
+          return { applied: true, created: workCandidates.length === 1, row: { id: 'work-1', ...candidate } };
+        }
+      }
+    });
+    return { result, legacyRows, workCandidates };
+  };
+
+  const legacy = await runMode({ legacyEnabled: true, workItemsEnabled: false });
+  assert.equal(legacy.legacyRows.length, 1);
+  assert.equal(legacy.workCandidates.length, 0);
+  assert.equal(legacy.result.workOrchestratorV2.skipped, true);
+
+  const overlap = await runMode({ legacyEnabled: true, workItemsEnabled: true });
+  assert.equal(overlap.legacyRows.length, 1);
+  assert.equal(overlap.workCandidates.length, 1);
+  assert.equal(overlap.result.workOrchestratorV2.applied, true);
+
+  const cutover = await runMode({ legacyEnabled: false, workItemsEnabled: true });
+  assert.equal(cutover.legacyRows.length, 0);
+  assert.equal(cutover.workCandidates.length, 1);
+  assert.equal(cutover.result.legacy.skipped, true);
+  assert.equal(cutover.workCandidates[0].work_key, overlap.workCandidates[0].work_key);
+  assert.match(cutover.workCandidates[0].work_key, /^bridge-failure:room:worker-failure:[0-9a-f]{16}$/);
+  assert.equal(cutover.workCandidates[0].automation_state, 'needs_human');
+  assert.equal(cutover.workCandidates[0].payload.requires_human_action, true);
+  assert.equal(JSON.stringify(cutover.workCandidates[0]).includes('private customer conversation'), false);
+  assert.equal(JSON.stringify(cutover.workCandidates[0]).includes('private technical failure detail'), false);
+});
+
+test('v2 bridge action maintenance leaves the legacy poller idle while the v2 poller remains active', async () => {
+  let v2Calls = 0;
+  const result = await runSlackActionPollPair({
+    reason: 'interval',
+    legacy: null,
+    workActions: {
+      async poll(trigger) {
+        v2Calls += 1;
+        return {
+          status: 'ok', trigger, scanned: 1, applied: 1,
+          awaitingResolution: 0, conflicts: 0, invalid: 0
+        };
+      }
+    }
+  });
+  assert.equal(result.legacy, null);
+  assert.equal(v2Calls, 1);
+  assert.equal(result.workOrchestratorV2.status, 'ok');
+  assert.equal(result.workOrchestratorV2.applied, 1);
 });
 
 test('Gateway health readback requires a fresh consumer and exposes only safe aggregate fields', () => {
@@ -1956,6 +2529,1201 @@ test('P0 escalation without an initial Slack card falls back to a standalone cha
   assert.equal(message.reply_broadcast, false);
 });
 
+test('v2 P0 review round 1 cutover controls are distinct, default OFF, and readback precedes cutover', async () => {
+  assert.deepEqual(resolveWorkOrchestratorP0Config({}), {
+    readbackEnabled: false, cutoverEnabled: false
+  });
+  assert.deepEqual(resolveWorkOrchestratorP0Config({
+    WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1'
+  }), { readbackEnabled: true, cutoverEnabled: false });
+  assert.throws(() => resolveWorkOrchestratorP0Config({
+    WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1'
+  }), /readback/i);
+
+  const calls = [];
+  const legacyResult = { marker: 'legacy' };
+  const dryResult = { status: 'ok', eligibleCount: 0, selectedCount: 0, omittedCount: 0 };
+  const staged = await runP0EscalationPair({
+    readbackEnabled: true,
+    cutoverEnabled: false,
+    legacy: async () => { calls.push('legacy'); return legacyResult; },
+    v2Readback: async () => { calls.push('readback'); return dryResult; },
+    v2: async () => { calls.push('v2'); }
+  });
+  assert.deepEqual(calls, ['readback', 'legacy']);
+  assert.deepEqual(staged, { legacy: legacyResult, readback: dryResult, sender: 'legacy' });
+
+  calls.length = 0;
+  const failedReadback = await runP0EscalationPair({
+    readbackEnabled: true,
+    legacy: async () => { calls.push('legacy'); return legacyResult; },
+    v2Readback: async () => { calls.push('readback'); throw new Error('private readback failure'); }
+  });
+  assert.deepEqual(calls, ['readback', 'legacy']);
+  assert.deepEqual(failedReadback, {
+    legacy: legacyResult,
+    readback: { status: 'error', errors: ['readback_failed'] },
+    sender: 'legacy'
+  });
+
+  calls.length = 0;
+  await runP0EscalationPair({
+    readbackEnabled: true,
+    cutoverEnabled: true,
+    legacy: async () => calls.push('legacy'),
+    v2Readback: async () => calls.push('readback'),
+    v2: async () => { calls.push('v2'); return { status: 'ok' }; }
+  });
+  assert.deepEqual(calls, ['v2']);
+});
+
+test('v2 cutover guard validates the bridge startup target independently', () => {
+  const validTarget = {
+    WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
+    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
+    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
+    AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
+    KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
+    SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+    P0_SLACK_ESCALATION_ENABLED: '0',
+    SLACK_ACTION_POLL_ENABLED: '0'
+  };
+
+  assert.doesNotThrow(() => validateWorkOrchestratorV2CutoverConfig(validTarget));
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0'
+    }),
+    /legacy cards.*immediate/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '0'
+    }),
+    /legacy work rows.*work items/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
+      WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0'
+    }),
+    /legacy P0.*work items.*readback.*cutover/i
+  );
+  assert.throws(
+    () => validateWorkOrchestratorV2CutoverConfig({
+      ...validTarget,
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+      AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
+      KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
+      P0_SLACK_ESCALATION_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0'
+    }),
+    /cleanup.*immediate/i
+  );
+});
+
+test('v2 cutover guard blocks invalid bridge module startup', () => {
+  const bridgeDirectory = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1'));
+  for (const [name, overrides, omitted] of [
+    ['false legacy card flag', { SLACK_AGENT_CARD_DELIVERY_ENABLED: 'false' }, []],
+    ['mixed legacy work flags', { KAKAO_FOLLOW_UP_ITEMS_ENABLED: 'false' }, []],
+    ['legacy P0 false', { P0_SLACK_ESCALATION_ENABLED: 'false' }, []],
+    ['cleanup without immediate', { WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1' }, []]
+  ]) {
+    const env = { ...process.env, ...SAFE_PRE_CUTOVER_ENV, ...overrides, KAKAO_DOM_BRIDGE_NO_LISTEN: '1' };
+    for (const key of omitted) delete env[key];
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', "import './server.mjs'"], {
+      cwd: bridgeDirectory, env, encoding: 'utf8'
+    });
+    assert.equal(result.status, 1, name);
+    assert.match(`${result.stdout}\n${result.stderr}`, /cutover guard/i, name);
+  }
+});
+
+test('v2 P0 review round 1 dry readback is authoritative and never claims, searches, or sends', async () => {
+  const calls = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: false,
+      digestChannelId: 'CP0'
+    },
+    store: {
+      async listDueP0Work(input) {
+        calls.push(['list', input]);
+        return { rows: Array.from({ length: 50 }, () => ({
+          id: '11111111-1111-4111-8111-111111111111', version: 7,
+          priority: 'p0', state: 'open', first_opened_at: '2026-09-01T05:00:00.000Z',
+          title: 'Immediate review', summary: 'Review required',
+          payload: { requires_human_action: true }
+        })), eligibleCount: 61, selectedCount: 50, omittedCount: 11 };
+      },
+      async claimP0Delivery() { calls.push(['claim']); },
+      async settleP0Delivery() { calls.push(['settle']); },
+      async readP0Delivery() { calls.push(['read']); }
+    },
+    slack: {
+      async postMessage() { calls.push(['post']); },
+      async findMessageByClientId() { calls.push(['search']); }
+    },
+    now: () => new Date('2026-09-01T06:00:00.000Z')
+  });
+
+  assert.deepEqual(await runtime.sweep('dry'), {
+    status: 'not_ready', mode: 'readback', eligibleCount: 61, selectedCount: 50,
+    omittedCount: 11, scanned: 50, ready: false, errors: ['p0_eligible_overflow']
+  });
+  assert.deepEqual(calls, [['list', { now: '2026-09-01T06:00:00.000Z', limit: 50 }]]);
+});
+
+test('51 due P0 rows make bounded progress and schedule one rate-safe immediate catch-up', async () => {
+  const rows = Array.from({ length: 51 }, (_, index) => ({
+    id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    version: 1,
+    priority: 'p0',
+    state: 'open',
+    first_opened_at: '2026-09-02T05:30:00.000Z',
+    title: `P0 ${index + 1}`,
+    summary: 'Review required',
+    payload: { requires_human_action: true }
+  }));
+  const due = new Map(rows.map((row) => [row.id, row]));
+  const scheduled = [];
+  const postedIds = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    store: {
+      async listDueP0Work({ limit }) {
+        const eligible = [...due.values()];
+        const selected = eligible.slice(0, limit);
+        return {
+          rows: selected,
+          eligibleCount: eligible.length,
+          selectedCount: selected.length,
+          omittedCount: eligible.length - selected.length
+        };
+      },
+      async claimP0Delivery(input) {
+        const row = due.get(input.id);
+        return { applied: Boolean(row), row: row ? { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } : null };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery(input) {
+        const row = due.get(input.id);
+        due.delete(input.id);
+        return { applied: Boolean(row), row: row || null };
+      },
+      async readP0Delivery() { throw new Error('readback must not run after applied settlement'); }
+    },
+    slack: {
+      async postMessage(message) {
+        postedIds.push(message.clientMsgId);
+        return { channel: 'CP0', ts: `100.${postedIds.length}` };
+      },
+      async findMessageByClientId() { throw new Error('new claims do not search'); }
+    },
+    now: () => new Date('2026-09-02T06:00:00.000Z'),
+    catchUpDelayMs: 60_000,
+    scheduleCatchUp(callback, delayMs) {
+      scheduled.push({ callback, delayMs });
+      return { unref() {} };
+    }
+  });
+
+  const first = await runtime.sweep('interval');
+  assert.equal(first.delivered, 50);
+  assert.equal(first.omittedCount, 1);
+  assert.equal(first.catchUpScheduled, true);
+  assert.ok(first.errors.includes('p0_eligible_overflow'));
+  assert.equal(due.size, 1);
+  assert.equal(scheduled.length, 1);
+  assert.ok(scheduled[0].delayMs >= 60_000);
+
+  await scheduled[0].callback();
+  assert.equal(postedIds.length, 51);
+  assert.equal(due.size, 0);
+  assert.equal(scheduled.length, 1, 'a catch-up pass cannot recursively schedule another catch-up');
+});
+
+test('v2 P0 review round 1 known Slack coordinates survive lost settlement response without repost or retry state', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-01T05:30:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  let posts = 0;
+  const settlements = [];
+  const reads = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    store: {
+      async listDueP0Work() {
+        return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 };
+      },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery(input) {
+        settlements.push(input);
+        throw new Error('response lost after commit');
+      },
+      async readP0Delivery(input) {
+        reads.push(input);
+        return { matched: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'delivered', generation: 1, attempt: 1,
+          client_message_id: input.clientMessageId,
+          claimed_at: '2026-09-01T06:00:00.000Z', claim_expires_at: '2026-09-01T06:02:00.000Z',
+          last_attempt_at: '2026-09-01T06:00:00.000Z', delivered_at: '2026-09-01T06:00:00.000Z',
+          next_at: '2026-09-01T06:20:00.000Z',
+          readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-09-01T06:00:00.000Z' }
+        } } } };
+      }
+    },
+    slack: {
+      async postMessage() { posts += 1; return { channel: 'CP0', ts: '100.1' }; },
+      async findMessageByClientId() { throw new Error('new claim posts directly'); }
+    },
+    now: () => new Date('2026-09-01T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.equal(result.delivered, 1);
+  assert.deepEqual(result.errors, []);
+  assert.equal(posts, 1);
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0].expectedStatus, 'claimed');
+  assert.equal(settlements[0].status, 'delivered');
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].clientMessageId, settlements[0].clientMessageId);
+  assert.doesNotMatch(JSON.stringify(settlements), /retry_pending|post_failed/);
+});
+
+test('P0 bridge records accepted Slack coordinates after concurrent acknowledgement and business version change', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:30:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  let posts = 0;
+  let businessChanged = false;
+  let claimedClientId = '';
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    store: {
+      async listDueP0Work() {
+        return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 };
+      },
+      async claimP0Delivery(input) {
+        claimedClientId = input.clientMessageId;
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery(input) {
+        assert.equal(businessChanged, true);
+        assert.equal(Object.hasOwn(input, 'expectedVersion'), false);
+        throw new Error('response lost after committed immutable transport settlement');
+      },
+      async readP0Delivery(input) {
+        assert.equal(Object.hasOwn(input, 'expectedVersion'), false);
+        return { matched: true, row: {
+          ...row,
+          version: 9,
+          pending_action: {},
+          payload: {
+            ...row.payload,
+            p0_acknowledged_at: '2026-09-02T06:00:00.500Z',
+            p0_delivery: {
+              status: 'delivered', generation: 1, attempt: 1,
+              client_message_id: input.clientMessageId,
+              claimed_at: '2026-09-02T06:00:00.000Z', claim_expires_at: '2026-09-02T06:02:00.000Z',
+              last_attempt_at: '2026-09-02T06:00:01.000Z', next_at: '2026-09-02T06:20:01.000Z',
+              delivered_at: '2026-09-02T06:00:01.000Z',
+              readback: { channel_id: 'CP0', message_ts: '100.9', confirmed_at: '2026-09-02T06:00:01.000Z' }
+            }
+          }
+        } };
+      }
+    },
+    slack: {
+      async postMessage(message) {
+        posts += 1;
+        businessChanged = true;
+        assert.equal(message.clientMsgId, claimedClientId);
+        return { channel: 'CP0', ts: '100.9' };
+      },
+      async findMessageByClientId() { throw new Error('new claim posts directly'); }
+    },
+    now: () => new Date('2026-09-02T06:00:01.000Z')
+  });
+
+  const result = await runtime.sweep('interleaving');
+  assert.equal(result.delivered, 1);
+  assert.deepEqual(result.errors, []);
+  assert.equal(posts, 1);
+});
+
+test('bridge exposes invariant health as a separate top-level subsystem without changing bridge ok', async () => {
+  const now = '2026-09-02T12:00:00.000Z';
+  const aggregate = {
+    measured_at: now,
+    invalid_evidence_count: 0,
+    notifications: {
+      undelivered_count: 1, pending_count: 1, delivering_count: 0, failed_count: 0,
+      oldest_undelivered_at: '2026-09-02T11:54:59.000Z', oldest_undelivered_age_seconds: 301
+    },
+    automation: {
+      not_attempted_count: 0, running_count: 0, succeeded_count: 0,
+      failed_count: 0, needs_human_count: 0
+    },
+    work: {
+      actionable_count: 0, snoozed_count: 0, overdue_count: 0, p0_count: 0,
+      unacknowledged_p0_count: 0, unacknowledged_p0_missing_alert_count: 0
+    },
+    digests: {
+      building_count: 0, delivering_count: 0, delivered_count: 0, failed_count: 0,
+      diverged_count: 0, replaced_count: 0, retired_count: 0,
+      last_success_at: null, last_failure_at: null,
+      latest_delivered_eligible_omitted_count: 0
+    },
+    cleanup: {
+      notice: {
+        idle_count: 0, pending_count: 0, failed_count: 0, blocked_p0_count: 0,
+        deleted_count: 0, backlog_count: 0, oldest_backlog_age_seconds: null
+      },
+      digest: {
+        idle_count: 0, deleting_count: 0, failed_count: 0, deleted_count: 0,
+        already_absent_count: 0, backlog_count: 0, oldest_backlog_age_seconds: null
+      }
+    },
+    actions: { stale_conflict_count: 0 },
+    leases: {
+      digest: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      p0: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      notice_cleanup: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null },
+      digest_cleanup: { active_count: 0, expired_count: 0, oldest_expired_age_seconds: null }
+    }
+  };
+  const subsystem = await readBridgeWorkOrchestratorHealth({
+    store: { readHealthAggregate: async (input) => {
+      assert.deepEqual(input, { now });
+      return aggregate;
+    } },
+    now: () => now
+  });
+  const response = attachWorkOrchestratorInvariantHealth({
+    ok: true, gateway: { authenticated: true }, state: { privatePayload: 'not-inspected' }
+  }, subsystem);
+
+  assert.equal(response.ok, true, 'the bridge process remains independently healthy');
+  assert.equal(response.workOrchestrator.ok, false);
+  assert.deepEqual(response.workOrchestrator.reasons, ['immediate_delivery_sla_breached']);
+  assert.equal(response.gateway.authenticated, true);
+  assert.equal(response.state.privatePayload, 'not-inspected');
+  assert.doesNotMatch(JSON.stringify(response.workOrchestrator), /not-inspected/);
+});
+
+test('v2 P0 review round 1 exposes finite content-free cutover readiness health', () => {
+  const config = buildHealthConfig({
+    workOrchestrator: {
+      shadowWrites: false, immediateEnabled: true, workItemsEnabled: true,
+      digestEnabled: true, cleanupEnabled: true,
+      p0ReadbackEnabled: true, p0CutoverEnabled: false
+    },
+    workOrchestratorStoreConfigured: true,
+    workOrchestratorShadowReady: true,
+    workOrchestratorImmediateLocalConfigReady: true,
+    workOrchestratorP0LocalConfigReady: true
+  });
+  assert.deepEqual({
+    readbackEnabled: config.workOrchestrator.p0ReadbackEnabled,
+    cutoverEnabled: config.workOrchestrator.p0CutoverEnabled,
+    localConfigReady: config.workOrchestrator.p0LocalConfigReady
+  }, { readbackEnabled: true, cutoverEnabled: false, localConfigReady: true });
+  const health = buildWorkOrchestratorHealthState({
+    lastP0Readback: {
+      status: 'not_ready', mode: 'readback', eligibleCount: 61,
+      selectedCount: 50, omittedCount: 11, ready: false,
+      errors: ['p0_eligible_overflow'], privatePayload: 'must-not-leak'
+    }
+  });
+  assert.deepEqual(health.lastP0Readback, {
+    status: 'not_ready', mode: 'readback', eligibleCount: 61,
+    selectedCount: 50, omittedCount: 11, ready: false,
+    errors: ['p0_eligible_overflow']
+  });
+  assert.doesNotMatch(JSON.stringify(health), /must-not-leak/);
+});
+
+test('notice cleanup runtime creates no timer while off or locally unready', async () => {
+  for (const [cleanupEnabled, environment, expectedReady] of [
+    [false, {}, true],
+    [true, {}, false]
+  ]) {
+    let timers = 0;
+    const runtime = createWorkOrchestratorNoticeCleanupRuntime({
+      config: { cleanupEnabled },
+      environment,
+      store: null,
+      slack: null,
+      setIntervalImpl: () => { timers += 1; return {}; }
+    });
+    assert.equal(runtime.localConfigReady, expectedReady);
+    assert.equal(await runtime.start(), false);
+    assert.equal(timers, 0);
+  }
+});
+
+test('notice cleanup runtime pins identity, deletes only claimed coordinates, and exposes safe counts', async () => {
+  const calls = [];
+  const timers = [];
+  const environment = {
+    WORK_ORCHESTRATOR_V2_SLACK_BOT_USER_ID: 'U123',
+    WORK_ORCHESTRATOR_V2_SLACK_BOT_ID: 'B123',
+    WORK_ORCHESTRATOR_V2_SLACK_TEAM_ID: 'T123',
+    WORK_ORCHESTRATOR_V2_CLEANUP_OWNER: 'bridge:notice-cleanup:test',
+    WORK_ORCHESTRATOR_V2_CLEANUP_LEASE_SECONDS: '120',
+    WORK_ORCHESTRATOR_V2_CLEANUP_INTERVAL_MS: '300000'
+  };
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111',
+    cleanup_state: 'pending', cleanup_attempts: 1,
+    cleanup_token: '22222222-2222-4222-8222-222222222222',
+    coordinate_status: 'valid', slack_channel_id: 'CEXACT', slack_message_ts: '100.1'
+  };
+  const runtime = createWorkOrchestratorNoticeCleanupRuntime({
+    config: { cleanupEnabled: true },
+    environment,
+    store: {
+      claimCleanupBatch: async (input) => { calls.push(['claim', input]); return [row]; },
+      markCleanupDeleted: async (input) => { calls.push(['settle', input]); return { applied: true }; },
+      markCleanupFailed: async () => assert.fail('exact delete must not fail')
+    },
+    slack: {
+      authTest: async () => { calls.push(['auth']); return { userId: 'U123', botId: 'B123', teamId: 'T123' }; },
+      deleteMessage: async (input) => { calls.push(['delete', input]); return { status: 'deleted' }; },
+      searchMessages: async () => assert.fail('notice cleanup must never search')
+    },
+    now: () => '2026-09-02T02:00:00.000Z',
+    setIntervalImpl: (callback, intervalMs) => {
+      const timer = { callback, intervalMs, unrefCalled: false, unref() { this.unrefCalled = true; } };
+      timers.push(timer);
+      return timer;
+    }
+  });
+
+  assert.equal(runtime.localConfigReady, true);
+  assert.equal(await runtime.start(), true);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].intervalMs, 300000);
+  assert.equal(timers[0].unrefCalled, true);
+  assert.deepEqual(calls.find(([kind]) => kind === 'delete')[1], { channel: 'CEXACT', ts: '100.1' });
+  assert.equal(calls.some(([kind]) => kind === 'search'), false);
+  assert.deepEqual(buildWorkOrchestratorHealthState(runtime.state).lastNoticeCleanup, {
+    at: '2026-09-02T02:00:00.000Z', trigger: 'startup', status: 'ok',
+    claimed: 1, deleted: 1, alreadyAbsent: 0, failed: 0, blockedP0: 0, excluded: 0
+  });
+  assert.doesNotMatch(JSON.stringify(buildWorkOrchestratorHealthState({
+    ...runtime.state,
+    lastNoticeCleanup: { ...runtime.state.lastNoticeCleanup, token: 'private-cleanup-token', claimed: 999 }
+  })), /private-cleanup-token/);
+});
+
+test('notice cleanup config rejects malformed pinned identity and out-of-bounds timers', () => {
+  const validEnvironment = {
+    WORK_ORCHESTRATOR_V2_SLACK_BOT_USER_ID: 'U123',
+    WORK_ORCHESTRATOR_V2_SLACK_BOT_ID: 'B123',
+    WORK_ORCHESTRATOR_V2_SLACK_TEAM_ID: 'T123',
+    WORK_ORCHESTRATOR_V2_CLEANUP_LEASE_SECONDS: '900',
+    WORK_ORCHESTRATOR_V2_CLEANUP_INTERVAL_MS: '30000'
+  };
+  const valid = resolveWorkOrchestratorNoticeCleanupConfig({
+    environment: validEnvironment,
+    pid: 42
+  });
+  assert.equal(valid.ready, true);
+  assert.equal(valid.cleanupOwner, 'bridge:notice-cleanup:42');
+  for (const environment of [
+    { ...validEnvironment, WORK_ORCHESTRATOR_V2_SLACK_BOT_USER_ID: 'U bad' },
+    { ...validEnvironment, WORK_ORCHESTRATOR_V2_CLEANUP_LEASE_SECONDS: '901' },
+    { ...validEnvironment, WORK_ORCHESTRATOR_V2_CLEANUP_INTERVAL_MS: '29999' }
+  ]) {
+    assert.equal(resolveWorkOrchestratorNoticeCleanupConfig({ environment, pid: 42 }).ready, false);
+  }
+});
+
+test('production bridge wires and starts the notice cleanup runtime', async () => {
+  const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  assert.match(source, /createWorkOrchestratorNoticeCleanupRuntime\(/);
+  assert.match(source, /workOrchestratorNoticeCleanupRuntime\.start\(\)/);
+});
+
+test('v2 P0 review round 2 dry readback validates every selected delivery before readiness', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'unknown', generation: 1, attempt: 1,
+      client_message_id: '11111111-2222-5333-8444-555555555555'
+    } }
+  };
+  const calls = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: false,
+      digestChannelId: 'CP0'
+    },
+    store: {
+      async listDueP0Work() {
+        return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 };
+      },
+      async claimP0Delivery() { calls.push('claim'); },
+      async claimP0Reconciliation() { calls.push('reconcile_claim'); },
+      async settleP0Delivery() { calls.push('settle'); },
+      async readP0Delivery() { calls.push('read'); }
+    },
+    slack: {
+      async postMessage() { calls.push('post'); },
+      async findMessageByClientId() { calls.push('search'); }
+    },
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  assert.deepEqual(await runtime.sweep('dry'), {
+    status: 'not_ready', mode: 'readback', eligibleCount: 1, selectedCount: 1,
+    omittedCount: 0, scanned: 1, ready: false, errors: ['invalid_delivery']
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('v2 P0 review round 2 self-review rejects unprocessable dry rows with one finite error', async () => {
+  const base = {
+    version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required'
+  };
+  const rows = [{
+    ...base,
+    id: '11111111-1111-4111-8111-111111111111',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'delivered', generation: 1, attempt: 1,
+      client_message_id: '11111111-2222-5333-8444-555555555555',
+      delivered_at: '2026-09-02T05:10:00.000Z', next_at: '2026-09-02T05:30:00.000Z',
+      readback: { channel_id: 'CP0', message_ts: '100.1', confirmed_at: '2026-09-02T05:10:00.000Z' },
+      unexpected: 'field'
+    } }
+  }, {
+    ...base,
+    id: 'not-a-work-id',
+    payload: { requires_human_action: true }
+  }];
+  const calls = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: false, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows, eligibleCount: 2, selectedCount: 2, omittedCount: 0 }; },
+      async claimP0Delivery() { calls.push('claim'); },
+      async claimP0Reconciliation() { calls.push('reconcile_claim'); },
+      async settleP0Delivery() { calls.push('settle'); },
+      async readP0Delivery() { calls.push('read'); }
+    },
+    slack: {
+      async postMessage() { calls.push('post'); },
+      async findMessageByClientId() { calls.push('search'); }
+    },
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  assert.deepEqual(await runtime.sweep('dry'), {
+    status: 'not_ready', mode: 'readback', eligibleCount: 2, selectedCount: 2,
+    omittedCount: 0, scanned: 2, ready: false, errors: ['invalid_delivery']
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('v2 P0 review round 2 two runtimes reclaim one expired lease and post exactly once', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const expired = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconciling', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T05:52:00.000Z',
+      reconcile_owner: '99999999-9999-4999-8999-999999999999',
+      reconcile_token: '88888888-8888-4888-8888-888888888888',
+      reconcile_claimed_at: '2026-09-02T05:55:00.000Z', reconcile_expires_at: '2026-09-02T05:57:00.000Z'
+    } }
+  };
+  let winner = null;
+  let posts = 0;
+  let searches = 0;
+  const settlements = [];
+  const store = {
+    async listDueP0Work() {
+      return { rows: [expired], eligibleCount: 1, selectedCount: 1, omittedCount: 0 };
+    },
+    async claimP0Delivery() { throw new Error('must retain the same generation'); },
+    async claimP0Reconciliation(input) {
+      if (winner !== null) return { claimed: false, row: null };
+      winner = input.reconcileOwner;
+      return { claimed: true, row: { ...expired, payload: { ...expired.payload, p0_delivery: {
+        ...expired.payload.p0_delivery,
+        reconcile_owner: input.reconcileOwner,
+        reconcile_token: '77777777-7777-4777-8777-777777777777',
+        reconcile_claimed_at: input.now,
+        reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+      } } } };
+    },
+    async settleP0Delivery(input) { settlements.push(input); return { applied: true, row: expired }; },
+    async readP0Delivery() { throw new Error('read must not run'); }
+  };
+  const slack = {
+    async findMessageByClientId() { searches += 1; return null; },
+    async postMessage() { posts += 1; return { channel: 'CP0', ts: '100.1' }; }
+  };
+  const makeRuntime = (reconciliationOwner) => createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    store, slack, reconciliationOwner,
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  const results = await Promise.all([
+    makeRuntime('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa').sweep('test'),
+    makeRuntime('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb').sweep('test')
+  ]);
+  assert.equal(posts, 1);
+  assert.equal(searches, 1);
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0].expectedStatus, 'reconciling');
+  assert.equal(settlements[0].reconcileOwner, winner);
+  assert.equal(settlements[0].reconcileToken, '77777777-7777-4777-8777-777777777777');
+  assert.equal(results.reduce((sum, result) => sum + result.delivered, 0), 1);
+});
+
+test('v2 P0 review round 2 definite reconciliation rejection becomes durable same-generation retry', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const pending = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T06:00:00.000Z'
+    } }
+  };
+  const records = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    reconciliationOwner: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    store: {
+      async listDueP0Work() { return { rows: [pending], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { throw new Error('must not claim a new generation'); },
+      async claimP0Reconciliation(input) {
+        return { claimed: true, row: { ...pending, payload: { ...pending.payload, p0_delivery: {
+          ...pending.payload.p0_delivery, status: 'reconciling',
+          reconcile_owner: input.reconcileOwner,
+          reconcile_token: '77777777-7777-4777-8777-777777777777',
+          reconcile_claimed_at: input.now, reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+        } } } };
+      },
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: pending }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async findMessageByClientId() { return null; },
+      async postMessage() { throw Object.assign(new Error('private rejection'), { ambiguous: false }); }
+    },
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.deepEqual(result.errors, ['post_failed']);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].expectedStatus, 'reconciling');
+  assert.equal(records[0].status, 'retry_pending');
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.equal(records[0].clientMessageId, clientId);
+  assert.equal(records[0].reconcileToken, '77777777-7777-4777-8777-777777777777');
+});
+
+test('v2 P0 review round 2 ambiguous reconciliation releases to a delayed same-ID reconcile path', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const pending = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T06:00:00.000Z'
+    } }
+  };
+  const records = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      digestChannelId: 'CP0'
+    },
+    reconciliationOwner: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    store: {
+      async listDueP0Work() { return { rows: [pending], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { throw new Error('must not claim a new generation'); },
+      async claimP0Reconciliation(input) {
+        return { claimed: true, row: { ...pending, payload: { ...pending.payload, p0_delivery: {
+          ...pending.payload.p0_delivery, status: 'reconciling',
+          reconcile_owner: input.reconcileOwner,
+          reconcile_token: '77777777-7777-4777-8777-777777777777',
+          reconcile_claimed_at: input.now, reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+        } } } };
+      },
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: pending }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async findMessageByClientId() { return null; },
+      async postMessage() { throw Object.assign(new Error('private ambiguity'), { ambiguous: true }); }
+    },
+    now: () => new Date('2026-09-02T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.deepEqual(result.errors, ['post_failed']);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, 'reconcile_pending');
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.equal(records[0].clientMessageId, clientId);
+});
+
+test('v2 P0 review round 3 settlement reads a fresh clock after Slack post', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  const settlements = [];
+  const clock = [
+    '2026-09-02T06:00:00.000Z',
+    '2026-09-02T06:00:05.000Z'
+  ];
+  let clockIndex = 0;
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery(input) { settlements.push(input); return { applied: true, row }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async postMessage() { return { channel: 'CP0', ts: '100.1' }; },
+      async findMessageByClientId() { throw new Error('history must not run'); }
+    },
+    now: () => new Date(clock[Math.min(clockIndex++, clock.length - 1)])
+  });
+
+  const result = await runtime.sweep('test');
+  assert.equal(result.delivered, 1);
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0].recordedAt, '2026-09-02T06:00:05.000Z');
+  assert.equal(clockIndex, 2);
+});
+
+test('v2 P0 review round 3 a lease expiring during Slack work makes fresh settlement stale', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const token = '77777777-7777-4777-8777-777777777777';
+  const leaseExpiresAt = '2026-09-02T06:02:00.000Z';
+  const pending = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+      last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T06:00:00.000Z'
+    } }
+  };
+  const reconciling = { ...pending, payload: { ...pending.payload, p0_delivery: {
+    ...pending.payload.p0_delivery, status: 'reconciling', reconcile_owner: owner,
+    reconcile_token: token, reconcile_claimed_at: '2026-09-02T06:00:00.000Z',
+    reconcile_expires_at: leaseExpiresAt
+  } } };
+  const settlements = [];
+  const clock = [
+    '2026-09-02T06:00:00.000Z',
+    '2026-09-02T06:03:00.000Z',
+    '2026-09-02T06:03:00.001Z'
+  ];
+  let clockIndex = 0;
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    reconciliationOwner: owner,
+    store: {
+      async listDueP0Work() { return { rows: [pending], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { throw new Error('new generation must not run'); },
+      async claimP0Reconciliation() { return { claimed: true, row: reconciling }; },
+      async settleP0Delivery(input) {
+        settlements.push(input);
+        return Date.parse(input.recordedAt) > Date.parse(leaseExpiresAt)
+          ? { applied: false, row: null }
+          : { applied: true, row: reconciling };
+      },
+      async readP0Delivery() { return { matched: true, row: reconciling }; }
+    },
+    slack: {
+      async findMessageByClientId() { return null; },
+      async postMessage() { return { channel: 'CP0', ts: '100.1' }; }
+    },
+    now: () => new Date(clock[Math.min(clockIndex++, clock.length - 1)])
+  });
+
+  const result = await runtime.sweep('test');
+  assert.equal(result.delivered, 0);
+  assert.deepEqual(result.errors, ['record_failed']);
+  assert.equal(settlements.length, 2);
+  assert.deepEqual(settlements.map((input) => input.recordedAt), [
+    '2026-09-02T06:03:00.000Z',
+    '2026-09-02T06:03:00.001Z'
+  ]);
+});
+
+test('v2 P0 review round 3 record paths read fresh clocks after Slack rejection', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const token = '77777777-7777-4777-8777-777777777777';
+  const base = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-09-02T05:00:00.000Z', title: 'Immediate review', summary: 'Review required'
+  };
+  const initialRow = { ...base, payload: { requires_human_action: true } };
+  const pending = { ...base, payload: { requires_human_action: true, p0_delivery: {
+    status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+    claimed_at: '2026-09-02T05:50:00.000Z', claim_expires_at: '2026-09-02T05:52:00.000Z',
+    last_attempt_at: '2026-09-02T05:51:00.000Z', next_at: '2026-09-02T06:00:00.000Z'
+  } } };
+  const reconciling = { ...pending, payload: { ...pending.payload, p0_delivery: {
+    ...pending.payload.p0_delivery, status: 'reconciling', reconcile_owner: owner,
+    reconcile_token: token, reconcile_claimed_at: '2026-09-02T06:00:00.000Z',
+    reconcile_expires_at: '2026-09-02T06:02:00.000Z'
+  } } };
+  const recordedAt = [];
+  const makeClock = () => {
+    const values = ['2026-09-02T06:00:00.000Z', '2026-09-02T06:00:05.000Z'];
+    let index = 0;
+    return () => new Date(values[Math.min(index++, values.length - 1)]);
+  };
+  const initialRuntime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows: [initialRow], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...initialRow, payload: { ...initialRow.payload, p0_delivery: {
+          status: 'claimed', generation: 1, attempt: 1, client_message_id: input.clientMessageId,
+          claimed_at: input.claimedAt, claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery(input) { recordedAt.push(input.recordedAt); return { applied: true, row: initialRow }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async postMessage() { throw Object.assign(new Error('private rejection'), { ambiguous: false }); },
+      async findMessageByClientId() { throw new Error('history must not run'); }
+    },
+    now: makeClock()
+  });
+  const reconciliationRuntime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    reconciliationOwner: owner,
+    store: {
+      async listDueP0Work() { return { rows: [pending], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { throw new Error('new generation must not run'); },
+      async claimP0Reconciliation() { return { claimed: true, row: reconciling }; },
+      async settleP0Delivery(input) { recordedAt.push(input.recordedAt); return { applied: true, row: pending }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async findMessageByClientId() { return null; },
+      async postMessage() { throw Object.assign(new Error('private rejection'), { ambiguous: false }); }
+    },
+    now: makeClock()
+  });
+
+  await initialRuntime.sweep('test');
+  await reconciliationRuntime.sweep('test');
+  assert.deepEqual(recordedAt, [
+    '2026-09-02T06:00:05.000Z',
+    '2026-09-02T06:00:05.000Z'
+  ]);
+});
+
+test('v2 P0 stale claim CAS never reaches Slack', async () => {
+  let posts = 0;
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { return { applied: false, row: null }; },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery() { throw new Error('settle must not run'); },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async postMessage() { posts += 1; throw new Error('must not post'); },
+      async findMessageByClientId() { throw new Error('must not search'); }
+    },
+    now: () => new Date('2026-08-29T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.equal(result.status, 'ok');
+  assert.equal(result.scanned, 1);
+  assert.equal(result.skipped, 1);
+  assert.deepEqual(result.errors, []);
+  assert.equal(posts, 0);
+});
+
+test('v2 P0 ambiguous retry reconciles the same generation and deterministic client id without blind repost', async () => {
+  const clientId = '11111111-2222-5333-8444-555555555555';
+  const claimed = {
+    id: '11111111-1111-4111-8111-111111111111', version: 8, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'reconcile_pending', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: '2026-08-29T05:59:00.000Z', claim_expires_at: '2026-08-29T05:59:30.000Z',
+      last_attempt_at: '2026-08-29T05:59:01.000Z', next_at: '2026-08-29T06:09:01.000Z'
+    } }
+  };
+  let posts = 0;
+  const searches = [];
+  const records = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows: [claimed], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery() { throw new Error('same generation must reconcile before claiming'); },
+      async claimP0Reconciliation(input) {
+        return { claimed: true, row: { ...claimed, payload: { ...claimed.payload, p0_delivery: {
+          ...claimed.payload.p0_delivery, status: 'reconciling',
+          reconcile_owner: input.reconcileOwner,
+          reconcile_token: '77777777-7777-4777-8777-777777777777',
+          reconcile_claimed_at: input.now,
+          reconcile_expires_at: '2026-08-29T06:11:01.000Z'
+        } } } };
+      },
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async postMessage() { posts += 1; throw new Error('must not repost'); },
+      async findMessageByClientId(input) {
+        searches.push(input);
+        return { channel: 'CP0', ts: '100.1', client_msg_id: clientId };
+      }
+    },
+    now: () => new Date('2026-08-29T06:09:01.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.equal(result.reconciled, 1);
+  assert.equal(result.delivered, 1);
+  assert.equal(posts, 0);
+  assert.equal(searches[0].clientMsgId, clientId);
+  assert.equal(Object.hasOwn(records[0], 'expectedVersion'), false);
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.equal(records[0].clientMessageId, clientId);
+  assert.equal(records[0].status, 'delivered');
+});
+
+test('v2 P0 flag OFF preserves exact legacy sweep parity', async () => {
+  const legacyResult = { scanned: 4, delivered: 1, marker: 'legacy-exact' };
+  let v2Calls = 0;
+  const result = await runP0EscalationPair({
+    readbackEnabled: false,
+    cutoverEnabled: false,
+    legacy: async () => legacyResult,
+    v2: async () => { v2Calls += 1; }
+  });
+  assert.equal(result, legacyResult);
+  assert.equal(v2Calls, 0);
+});
+
+test('v2 P0 cutover lets one source event reach only the v2 escalation path', async () => {
+  const calls = [];
+  const result = await runP0EscalationPair({
+    readbackEnabled: true,
+    cutoverEnabled: true,
+    legacy: async () => calls.push('legacy'),
+    v2: async () => { calls.push('v2'); return { status: 'ok', scanned: 1 }; }
+  });
+  assert.deepEqual(calls, ['v2']);
+  assert.deepEqual(result, { status: 'ok', scanned: 1 });
+});
+
+test('v2 P0 ambiguous Slack result durably records reconciliation before any later retry', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  const records = [];
+  let claimedClientId = '';
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery(input) {
+        claimedClientId = input.clientMessageId;
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async postMessage() { throw Object.assign(new Error('private transport failure'), { ambiguous: true }); },
+      async findMessageByClientId() { throw new Error('reconciliation occurs on the next sweep'); }
+    },
+    now: () => new Date('2026-08-29T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.deepEqual(result.errors, ['post_failed']);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, 'reconcile_pending');
+  assert.equal(Object.hasOwn(records[0], 'expectedVersion'), false);
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.equal(records[0].clientMessageId, claimedClientId);
+  assert.doesNotMatch(JSON.stringify(result), /private transport failure/);
+});
+
+test('v2 P0 definite Slack rejection records a same-generation retry without leaking content', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  const records = [];
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery(input) { records.push(input); return { applied: true, row: { version: 9 } }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async postMessage() { throw Object.assign(new Error('private rejected content'), { ambiguous: false }); },
+      async findMessageByClientId() { throw new Error('must not search a definite rejection'); }
+    },
+    now: () => new Date('2026-08-29T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  assert.deepEqual(result.errors, ['post_failed']);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, 'retry_pending');
+  assert.equal(records[0].expectedGeneration, 1);
+  assert.doesNotMatch(JSON.stringify(result), /private rejected content/);
+});
+
+test('v2 P0 alert carries a current versioned acknowledgement action', async () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
+    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true }
+  };
+  let postedInput = null;
+  const runtime = createWorkOrchestratorP0Runtime({
+    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    store: {
+      async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
+      async claimP0Delivery(input) {
+        return { applied: true, row: { ...row, payload: { ...row.payload, p0_delivery: {
+          status: 'claimed', generation: input.generation, attempt: input.attempt,
+          client_message_id: input.clientMessageId, claimed_at: input.claimedAt,
+          claim_expires_at: input.claimExpiresAt
+        } } } };
+      },
+      async claimP0Reconciliation() { throw new Error('reconciliation must not run'); },
+      async settleP0Delivery() { return { applied: true, row }; },
+      async readP0Delivery() { throw new Error('read must not run'); }
+    },
+    slack: {
+      async postMessage(input) { postedInput = input; return { channel: 'CP0', ts: '100.1' }; },
+      async findMessageByClientId() { throw new Error('must not search'); }
+    },
+    now: () => new Date('2026-08-29T06:00:00.000Z')
+  });
+
+  const result = await runtime.sweep('test');
+  const action = postedInput.blocks[1].elements[0];
+  const decoded = JSON.parse(Buffer.from(action.value, 'base64url').toString('utf8'));
+  assert.equal(result.delivered, 1);
+  assert.equal(action.action_id, 'village_work_v2_ack_p0');
+  assert.deepEqual(decoded, {
+    id: row.id,
+    version: 7,
+    action: { type: 'ack_p0' }
+  });
+});
+
 function deferred() {
   let resolve;
   let reject;
@@ -2043,6 +3811,9 @@ test('phase scheduler propagates a bridge deadline into an active Hermes decisio
 });
 
 test('phase scheduler enforces the configured end-to-end worker timeout', async () => {
+  // The production timeout is intentionally unref'ed; keep this isolated test's
+  // event loop alive long enough to observe that timer without relying on other files.
+  const keepAlive = setTimeout(() => {}, 100);
   const scheduler = createKakaoPhaseScheduler({
     workerTimeoutMs: 20,
     capture: async (job) => ({ job }),
@@ -2060,10 +3831,14 @@ test('phase scheduler enforces the configured end-to-end worker timeout', async 
     manualSend: async (payload) => payload
   });
 
-  await assert.rejects(
-    scheduler.run({ roomKey: 'timed-room' }),
-    /worker timed out after 20ms/
-  );
+  try {
+    await assert.rejects(
+      scheduler.run({ roomKey: 'timed-room' }),
+      /worker timed out after 20ms/
+    );
+  } finally {
+    clearTimeout(keepAlive);
+  }
 });
 
 test('worker result audit keeps phase timings and AI attempt counts without customer payload', () => {
@@ -2086,6 +3861,101 @@ test('worker result audit keeps phase timings and AI attempt counts without cust
   assert.equal(record.result.audit.status, 'ai_completed');
   assert.equal(record.result.audit.phaseTimings.decisionMs, 2600);
   assert.doesNotMatch(JSON.stringify(record.result.audit), /private|customer|chat/);
+});
+
+test('error audit persists only a valid content-free event correlation digest', () => {
+  const validDigest = 'fb6c3ebcef1e697091ac9bd41203f918504979c64268d5ee44060340c8adb4e3';
+  const record = compactQueueAuditRecord('errors.ndjson', {
+    at: '2026-08-30T00:00:00.000Z',
+    type: 'immediate_notification',
+    eventCorrelationSha256: validDigest,
+    eventHash: 'raw-event-hash-message-secret',
+    event: { message: 'private-message', secret: 'xoxb-private-secret' },
+    secret: 'top-level-private-secret'
+  });
+
+  assert.equal(record.eventCorrelationSha256, validDigest);
+  assert.equal(Object.hasOwn(record, 'eventHash'), false);
+  assert.equal(Object.hasOwn(record, 'event'), false);
+  assert.equal(Object.hasOwn(record, 'secret'), false);
+  assert.doesNotMatch(JSON.stringify(record), /raw-event-hash|private-message|xoxb-private-secret|top-level-private-secret/);
+
+  for (const invalidDigest of [
+    validDigest.toUpperCase(),
+    validDigest.slice(1),
+    `${validDigest}0`,
+    'g'.repeat(64),
+    ` ${validDigest}`,
+    'message=private-secret'
+  ]) {
+    const invalidRecord = compactQueueAuditRecord('errors.ndjson', {
+      type: 'immediate_notification',
+      eventCorrelationSha256: invalidDigest
+    });
+    assert.equal(Object.hasOwn(invalidRecord, 'eventCorrelationSha256'), false);
+    assert.doesNotMatch(JSON.stringify(invalidRecord), /private-secret/);
+  }
+});
+
+test('production errors appender persists only content-free immediate correlation metadata', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-immediate-error-audit-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const appendError = createErrorsAuditAppender({ queueDir: directory });
+  const validDigest = 'fb6c3ebcef1e697091ac9bd41203f918504979c64268d5ee44060340c8adb4e3';
+  const privateFields = {
+    eventHash: 'raw-event-hash-private',
+    customer: 'private-customer',
+    customerName: 'private-customer-name',
+    message: 'private-message',
+    secret: 'xoxb-private-secret',
+    payload: { message: 'nested-private-message', token: 'nested-private-token' }
+  };
+
+  appendError({
+    at: '2026-08-30T00:00:00.000Z',
+    type: 'immediate_notification',
+    eventCorrelationSha256: validDigest,
+    ...privateFields
+  });
+  for (const invalidDigest of [
+    validDigest.toUpperCase(),
+    ` ${validDigest}`,
+    'not-a-valid-private-message-secret-digest'
+  ]) {
+    appendError({
+      at: '2026-08-30T00:00:01.000Z',
+      type: 'immediate_notification',
+      eventCorrelationSha256: invalidDigest,
+      ...privateFields
+    });
+  }
+  appendError({
+    at: '2026-08-30T00:00:02.000Z',
+    type: 'worker',
+    message: 'existing generic error audit'
+  });
+
+  const records = (await readFile(path.join(directory, 'errors.ndjson'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.equal(records.length, 5);
+  assert.deepEqual(records[0], {
+    at: '2026-08-30T00:00:00.000Z',
+    type: 'immediate_notification',
+    eventCorrelationSha256: validDigest
+  });
+  for (const record of records.slice(1, 4)) {
+    assert.deepEqual(record, {
+      at: '2026-08-30T00:00:01.000Z',
+      type: 'immediate_notification'
+    });
+  }
+  assert.equal(records[4].message, 'existing generic error audit');
+  assert.doesNotMatch(
+    JSON.stringify(records.slice(0, 4)),
+    /raw-event-hash|private-customer|private-message|xoxb-private-secret|nested-private-message|nested-private-token|eventHash|customer|message|secret|payload/i
+  );
 });
 
 test('room revisions ignore unread-badge duplicates and supersede older semantic turns', () => {
@@ -2128,6 +3998,1423 @@ test('room revisions continue after the durable Gateway revision when the bridge
   assert.equal(newer.revision, 9);
 });
 
+test('immediate notification ignores heartbeat, diagnostic, container, non-message, ignored-room, and stale events', async () => {
+  const calls = [];
+  const shadowRuntime = { recordAccepted: () => calls.push('shadow') };
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime,
+    immediateRuntime: { enabled: true, deliverAccepted: () => calls.push('immediate') },
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  };
+  const ignoredEvents = [
+    { status: 'watcher_heartbeat', reason: 'heartbeat', roomKey: 'watcher', previewText: 'heartbeat' },
+    { status: 'dom_diagnostic', reason: 'top_rows_snapshot', roomKey: 'diagnostic', previewText: 'snapshot' },
+    { status: 'pending_ai_review', reason: 'dom_event', roomKey: 'attr:kakaoWrap', previewText: '전체 채팅목록' },
+    { status: 'pending_ai_review', reason: 'dom_event', roomKey: 'chrome-control', previewText: '저장하기' },
+    { status: 'pending_ai_review', reason: 'initial_scan', roomKey: 'chat:ignored-room', previewText: 'already read room' },
+    { status: 'pending_ai_review', reason: 'mutation', roomKey: 'chat:stale', previewText: 'old room 2025. 1. 1' }
+  ];
+
+  for (const event of ignoredEvents) {
+    const response = await postShadowEvent(event, dependencies);
+    assert.equal(response.status, 202);
+  }
+
+  assert.deepEqual(calls, []);
+});
+
+function immediateNotificationEvent(overrides = {}) {
+  return {
+    reason: 'dom_event',
+    roomKey: 'chat:immediate-notification',
+    previewText: 'new camera question',
+    customerName: '테스트 고객',
+    displayTime: '오후 4:00',
+    eventHash: 'immediate-notification-event-1',
+    detectedAt: '2026-08-29T07:00:00.000Z',
+    ...overrides
+  };
+}
+
+function immediateNotificationRuntime({ ensure, store = {}, slack = {}, now, attemptGuard } = {}) {
+  return createWorkOrchestratorImmediateRuntime({
+    config: { immediateEnabled: true, inboxChannelId: 'CINBOX', mentionUserIds: ['UOWNER'] },
+    store: {
+      getNotificationByEventKey: async () => null,
+      getOldestPendingNotificationCreatedAt: async () => null,
+      ...store
+    },
+    slack: {
+      postMessage: async () => ({ ok: true, channel: 'CINBOX', ts: '100.1', message: {} }),
+      findMessageByClientId: async () => null,
+      ...slack
+    },
+    slackToken: 'test-slack-token',
+    ensure,
+    now,
+    attemptGuard
+  });
+}
+
+test('immediate notification attempt guard is exact, bounded, private, and survives restart readback', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-immediate-attempt-guard-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const privateKey = 'private-source-event-key-A';
+  const first = createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 });
+
+  assert.equal(first.claim(privateKey), true);
+  assert.equal(first.claim(privateKey), false);
+  assert.equal(first.claim('source-event-B'), true);
+
+  const restarted = createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 });
+  assert.equal(restarted.claim(privateKey), false);
+  assert.equal(restarted.claim('source-event-C'), true);
+  assert.equal(restarted.claim('source-event-B'), false);
+  const persisted = await readFile(path.join(directory, 'immediate-notification-attempts.ndjson'), 'utf8');
+  const records = persisted.trim().split('\n').map((line) => JSON.parse(line));
+  assert.doesNotMatch(persisted, /private-source-event-key|source-event-B|source-event-C/);
+  assert.equal(records.length, 2);
+  assert.equal(records.every((record) => (
+    Object.keys(record).length === 1
+    && /^[0-9a-f]{64}$/.test(record.source_event_key_sha256)
+  )), true);
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+});
+
+test('immediate notification attempt guard fails closed on every corrupt non-empty startup record', async (t) => {
+  const privateContent = 'private-corrupt-event-content';
+  const corruptRecords = [
+    `{"source_event_key_sha256":"${privateContent}`,
+    JSON.stringify({ source_event_key_sha256: privateContent }),
+    JSON.stringify({ source_event_key_sha256: 'a'.repeat(64), unexpected: true })
+  ];
+
+  for (const [index, record] of corruptRecords.entries()) {
+    const directory = await mkdtemp(path.join(tmpdir(), `kakao-immediate-attempt-corrupt-${index}-`));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    await writeFile(
+      path.join(directory, 'immediate-notification-attempts.ndjson'),
+      `${record}\n`,
+      'utf8'
+    );
+
+    assert.throws(
+      () => createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 }),
+      (error) => error.message === 'Immediate notification attempt guard is unavailable'
+        && !error.message.includes(privateContent)
+        && error.cause === undefined
+    );
+  }
+});
+
+test('attempt guard compaction atomically preserves the live file and memory when replacement fails', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-immediate-attempt-atomic-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const livePath = path.join(directory, 'immediate-notification-attempts.ndjson');
+  const seeded = createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 });
+  assert.equal(seeded.claim('atomic-A'), true);
+  assert.equal(seeded.claim('atomic-B'), true);
+  const original = await readFile(livePath, 'utf8');
+  let renameAttempts = 0;
+  const failingFs = Object.create((await import('node:fs')).default);
+  failingFs.renameSync = () => {
+    renameAttempts += 1;
+    throw new Error('private atomic replacement failure');
+  };
+  const guard = createImmediateNotificationAttemptGuard({
+    queueDir: directory,
+    maxEntries: 2,
+    fileSystem: failingFs
+  });
+
+  assert.throws(
+    () => guard.claim('atomic-C'),
+    (error) => error.message === 'Immediate notification attempt guard is unavailable'
+      && !error.message.includes('private atomic replacement failure')
+  );
+  assert.equal(await readFile(livePath, 'utf8'), original);
+  assert.equal(guard.claim('atomic-A'), false);
+  assert.equal(guard.claim('atomic-B'), false);
+  assert.throws(() => guard.claim('atomic-C'), /attempt guard is unavailable/i);
+  assert.equal(renameAttempts, 2, 'failed replacement must not admit the new digest into memory');
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+
+  const restarted = createImmediateNotificationAttemptGuard({ queueDir: directory, maxEntries: 2 });
+  assert.equal(restarted.claim('atomic-A'), false);
+  assert.equal(restarted.claim('atomic-B'), false);
+});
+
+test('immediate notification follows acceptance, precedes legacy persistence, and gates HTTP 202', async () => {
+  const callOrder = [];
+  const runtime = immediateNotificationRuntime({
+    ensure: async ({ event }) => {
+      assert.equal(event.roomRevision, 1);
+      callOrder.push('immediate-notice');
+      return {
+        status: 'delivered',
+        receipt: { id: 'receipt-1' },
+        delivery: { channel: 'CINBOX', ts: '100.1' },
+        reconciled: false
+      };
+    }
+  });
+  const event = immediateNotificationEvent({ roomKey: 'chat:immediate-order' });
+  const response = await postShadowEvent(event, {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    onRoomRevisionAccepted: () => {
+      callOrder.push('accept-room-revision');
+    },
+    writeSupabaseEvent: async () => callOrder.push('legacy-supabase-event'),
+    scheduleDebouncedJob: () => callOrder.push('schedule-worker')
+  });
+
+  assert.deepEqual(callOrder, ['accept-room-revision', 'immediate-notice', 'legacy-supabase-event', 'schedule-worker']);
+  assert.equal(response.status, 202);
+  assert.deepEqual(response.body.immediateNotification, {
+    status: 'delivered',
+    duplicate: false,
+    reconciled: false
+  });
+});
+
+test('immediate notification responds after delivery without awaiting a slow Hermes worker promise', async () => {
+  let resolveWorker;
+  let workerResolved = false;
+  const workerPending = new Promise((resolve) => {
+    resolveWorker = () => {
+      workerResolved = true;
+      resolve();
+    };
+  });
+  const runtime = immediateNotificationRuntime({
+    ensure: async () => ({
+      status: 'delivered', receipt: { id: 'receipt-slow' },
+      delivery: { channel: 'CINBOX', ts: '101.1' }, reconciled: false
+    })
+  });
+
+  try {
+    const response = await Promise.race([
+      postShadowEvent(immediateNotificationEvent({
+        roomKey: 'chat:immediate-slow-worker',
+        eventHash: 'immediate-slow-worker-1'
+      }), {
+        appendNdjson: () => {},
+        shadowRuntime: { recordAccepted: () => null },
+        immediateRuntime: runtime,
+        writeSupabaseEvent: async () => ({ ok: true }),
+        scheduleDebouncedJob: () => workerPending
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('HTTP response waited for Hermes')), 200))
+    ]);
+
+    assert.equal(response.status, 202);
+    assert.equal(response.body.immediateNotification.status, 'delivered');
+    assert.equal(workerResolved, false);
+  } finally {
+    resolveWorker();
+    await workerPending;
+  }
+});
+
+test('immediate notification failure returns typed 503 with content-free metadata and no legacy queue', async () => {
+  const calls = [];
+  const privateValue = 'private-customer-room-preview-token-channel';
+  const maliciousEventHash = 'evt|customer=홍길동|preview=secret-message|token=xoxb-super-secret|channel=CSECRET|'
+    + 'Z'.repeat(600);
+  const runtime = immediateNotificationRuntime({
+    ensure: async () => {
+      const error = new Error(privateValue);
+      error.code = privateValue;
+      throw error;
+    }
+  });
+
+  const response = await postShadowEvent(immediateNotificationEvent({
+    roomKey: `chat:${privateValue}`,
+    previewText: privateValue,
+    customerName: privateValue,
+    eventHash: maliciousEventHash
+  }), {
+    appendNdjson: (file, value) => calls.push({ file, value }),
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push({ file: 'legacy-write' }),
+    scheduleDebouncedJob: () => calls.push({ file: 'legacy-queue' })
+  });
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(response.body, {
+    ok: false,
+    error: 'immediate_notification_unconfirmed',
+    eventHash: maliciousEventHash
+  });
+  assert.equal(calls.some(({ file }) => ['legacy-write', 'legacy-queue'].includes(file)), false);
+  const failureLog = calls.find(({ file, value }) => file === 'errors.ndjson' && value.type === 'immediate_notification');
+  assert.ok(failureLog);
+  assert.deepEqual(Object.keys(failureLog.value).sort(), ['at', 'code', 'eventCorrelationSha256', 'type']);
+  assert.equal(failureLog.value.eventCorrelationSha256, 'fb6c3ebcef1e697091ac9bd41203f918504979c64268d5ee44060340c8adb4e3');
+  assert.doesNotMatch(
+    JSON.stringify(failureLog),
+    /private-customer|홍길동|secret-message|xoxb-super-secret|CSECRET|eventHash|roomKey|preview|customer|client|channel|token/i
+  );
+  assert.doesNotMatch(
+    JSON.stringify(buildWorkOrchestratorHealthState(runtime.state)),
+    /private-customer|홍길동|secret-message|xoxb-super-secret|CSECRET|eventHash|roomKey|preview|customer|client|channel|token/i
+  );
+  assert.equal(runtime.state.immediateFailed, 1);
+});
+
+test('immediate notification exact retry resumes an existing receipt, delivers once, then preserves duplicate scheduling', async () => {
+  const calls = [];
+  let receipt = null;
+  let failFirstDeliveryClaim = true;
+  const slackPosts = [];
+  const exactLookups = [];
+  const event = immediateNotificationEvent({
+    roomKey: 'chat:immediate-exact-retry',
+    eventHash: 'immediate-exact-retry-1'
+  });
+  const runtime = immediateNotificationRuntime({
+    store: {
+      claimNotificationReceipt: async (input) => {
+        const created = !receipt;
+        if (!receipt) {
+          receipt = {
+            id: 'receipt-retry',
+            source_event_key: input.sourceEventKey,
+            client_message_id: input.clientMessageId,
+            notification_state: 'pending',
+            delivery_attempts: 0,
+            created_at: input.receivedAt
+          };
+        }
+        return { created, row: { ...receipt } };
+      },
+      getNotificationByEventKey: async (eventKey) => {
+        exactLookups.push(eventKey);
+        return receipt?.source_event_key === eventKey ? { ...receipt } : null;
+      },
+      claimNotificationDelivery: async ({ expectedDeliveryAttempts }) => {
+        if (failFirstDeliveryClaim) {
+          failFirstDeliveryClaim = false;
+          throw new Error('private store outage');
+        }
+        if (!['pending', 'failed'].includes(receipt.notification_state)
+          || receipt.delivery_attempts !== expectedDeliveryAttempts) {
+          return { applied: false, row: null };
+        }
+        receipt = {
+          ...receipt,
+          notification_state: 'delivering',
+          delivery_attempts: receipt.delivery_attempts + 1,
+          last_delivery_error: null
+        };
+        return { applied: true, row: { ...receipt } };
+      },
+      markNotificationDelivered: async ({ channelId, messageTs, deliveredAt }) => {
+        if (receipt.notification_state !== 'delivering') return { applied: false, row: null };
+        receipt = {
+          ...receipt,
+          notification_state: 'delivered',
+          slack_channel_id: channelId,
+          slack_message_ts: messageTs,
+          delivered_at: deliveredAt
+        };
+        return { applied: true, row: { ...receipt } };
+      },
+      markNotificationFailed: async () => {
+        throw new Error('not expected');
+      }
+    },
+    slack: {
+      postMessage: async (input) => {
+        slackPosts.push(input);
+        return { ok: true, channel: 'CINBOX', ts: '102.1', message: {} };
+      },
+      findMessageByClientId: async () => {
+        throw new Error('not expected');
+      }
+    }
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push('legacy-supabase-event'),
+    scheduleDebouncedJob: () => calls.push('schedule-worker')
+  };
+
+  const failed = await postShadowEvent(event, dependencies);
+  const recovered = await postShadowEvent(event, dependencies);
+  const duplicate = await postShadowEvent(event, dependencies);
+
+  assert.equal(failed.status, 503);
+  assert.equal(recovered.status, 202);
+  assert.equal(duplicate.status, 202);
+  assert.equal(slackPosts.length, 1);
+  assert.equal(slackPosts[0].clientMsgId, receipt.client_message_id);
+  assert.deepEqual(exactLookups, ['immediate-exact-retry-1', 'immediate-exact-retry-1']);
+  assert.deepEqual(calls, [
+    'legacy-supabase-event',
+    'schedule-worker',
+    'legacy-supabase-event',
+    'schedule-worker'
+  ]);
+  assert.deepEqual({
+    delivered: runtime.state.immediateDelivered,
+    duplicates: runtime.state.immediateDuplicates,
+    failed: runtime.state.immediateFailed
+  }, { delivered: 1, duplicates: 1, failed: 1 });
+});
+
+test('immediate notification A-B-retry-A never creates a missing stale A receipt', async () => {
+  const ensured = [];
+  const lookups = [];
+  const legacy = [];
+  const receipts = new Map();
+  const runtime = immediateNotificationRuntime({
+    store: {
+      getNotificationByEventKey: async (eventKey) => {
+        lookups.push(eventKey);
+        return receipts.get(eventKey) || null;
+      }
+    },
+    ensure: async ({ event }) => {
+      ensured.push(event.eventHash);
+      if (event.eventHash === 'attempt-A') {
+        const error = new Error('receipt store unavailable before insert');
+        error.code = 'receipt_persistence_failed';
+        throw error;
+      }
+      receipts.set(event.eventHash, { id: `receipt-${event.eventHash}` });
+      return {
+        status: 'delivered', receipt: receipts.get(event.eventHash),
+        delivery: { channel: 'CINBOX', ts: '105.1' }, reconciled: false
+      };
+    }
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async (event) => legacy.push(`write:${event.eventHash}`),
+    scheduleDebouncedJob: (event) => legacy.push(`schedule:${event.eventHash}`)
+  };
+  const base = immediateNotificationEvent({ roomKey: 'chat:attempt-a-b-a' });
+
+  const firstA = await postShadowEvent({ ...base, previewText: 'A', eventHash: 'attempt-A' }, dependencies);
+  const b = await postShadowEvent({ ...base, previewText: 'B', eventHash: 'attempt-B' }, dependencies);
+  const retryA = await postShadowEvent({ ...base, previewText: 'A', eventHash: 'attempt-A' }, dependencies);
+
+  assert.equal(firstA.status, 503);
+  assert.equal(b.status, 202);
+  assert.equal(retryA.status, 503);
+  assert.deepEqual(ensured, ['attempt-A', 'attempt-B']);
+  assert.deepEqual(lookups, ['attempt-A']);
+  assert.deepEqual(legacy, ['write:attempt-B', 'schedule:attempt-B']);
+});
+
+test('handleEvent keeps oversized source identifiers distinct through immediate notice attempts', async () => {
+  const attempts = [];
+  const runtime = immediateNotificationRuntime({
+    ensure: async ({ event }) => {
+      const input = notificationReceiptInput(event);
+      attempts.push({ sourceEventKey: input.sourceEventKey, clientMessageId: input.clientMessageId });
+      return {
+        status: 'delivered', receipt: { id: `receipt-${attempts.length}` },
+        delivery: { channel: 'CINBOX', ts: `106.${attempts.length}` }, reconciled: false
+      };
+    }
+  });
+  const dependencies = {
+    appendNdjson: () => {}, shadowRuntime: { recordAccepted: () => null }, immediateRuntime: runtime,
+    writeSupabaseEvent: async () => {}, scheduleDebouncedJob: () => {}
+  };
+  const sharedPrefix = 'x'.repeat(500);
+  const base = immediateNotificationEvent({ roomKey: 'chat:oversized-source-keys' });
+
+  const first = await postShadowEvent({ ...base, previewText: 'first', eventHash: `${sharedPrefix}A` }, dependencies);
+  const second = await postShadowEvent({ ...base, previewText: 'second', eventHash: `${sharedPrefix}B` }, dependencies);
+
+  assert.equal(first.status, 202);
+  assert.equal(second.status, 202);
+  assert.equal(attempts.length, 2);
+  assert.notEqual(attempts[0].sourceEventKey, attempts[1].sourceEventKey);
+  assert.notEqual(attempts[0].clientMessageId, attempts[1].clientMessageId);
+});
+
+test('immediate notification accepts a genuinely new exact event key even when its semantic preview is unchanged', async () => {
+  const ensuredHashes = [];
+  const lookedUpHashes = [];
+  const legacyCalls = [];
+  const runtime = immediateNotificationRuntime({
+    store: {
+      getNotificationByEventKey: async (eventKey) => {
+        lookedUpHashes.push(eventKey);
+        return null;
+      }
+    },
+    ensure: async ({ event }) => {
+      ensuredHashes.push(event.eventHash);
+      return {
+        status: 'delivered', receipt: { id: 'receipt-first' },
+        delivery: { channel: 'CINBOX', ts: '103.1' }, reconciled: false
+      };
+    }
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => legacyCalls.push('legacy-write'),
+    scheduleDebouncedJob: () => legacyCalls.push('legacy-queue')
+  };
+  const first = immediateNotificationEvent({
+    roomKey: 'chat:immediate-different-hash',
+    eventHash: 'immediate-different-hash-a'
+  });
+  const staleDuplicate = { ...first, eventHash: 'immediate-different-hash-b' };
+
+  await postShadowEvent(first, dependencies);
+  const response = await postShadowEvent(staleDuplicate, dependencies);
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(ensuredHashes, ['immediate-different-hash-a', 'immediate-different-hash-b']);
+  assert.deepEqual(lookedUpHashes, []);
+  assert.deepEqual(legacyCalls, ['legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
+  assert.equal(runtime.state.immediateFailed, 0);
+});
+
+test('immediate notification concurrent duplicate fails closed while the first exact receipt is not visible', async () => {
+  let enterFirst;
+  let releaseFirst;
+  const firstEntered = new Promise((resolve) => { enterFirst = resolve; });
+  const firstDelivery = new Promise((resolve) => { releaseFirst = resolve; });
+  const exactLookups = [];
+  const legacyCalls = [];
+  let ensureCalls = 0;
+  let slackPosts = 0;
+  const runtime = immediateNotificationRuntime({
+    store: {
+      getNotificationByEventKey: async (eventKey) => {
+        exactLookups.push(eventKey);
+        return null;
+      }
+    },
+    ensure: async () => {
+      ensureCalls += 1;
+      enterFirst();
+      await firstDelivery;
+      slackPosts += 1;
+      return {
+        status: 'delivered', receipt: { id: 'receipt-concurrent-first' },
+        delivery: { channel: 'CINBOX', ts: '104.1' }, reconciled: false
+      };
+    }
+  });
+  const event = immediateNotificationEvent({
+    roomKey: 'chat:immediate-concurrent-visibility',
+    eventHash: 'immediate-concurrent-visibility-1'
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: () => null },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => legacyCalls.push('legacy-write'),
+    scheduleDebouncedJob: () => legacyCalls.push('legacy-queue')
+  };
+
+  const firstResponsePromise = postShadowEvent(event, dependencies);
+  await firstEntered;
+  const concurrentResponse = await postShadowEvent(event, dependencies);
+  releaseFirst();
+  const firstResponse = await firstResponsePromise;
+
+  assert.equal(concurrentResponse.status, 503);
+  assert.equal(firstResponse.status, 202);
+  assert.equal(ensureCalls, 1);
+  assert.equal(slackPosts, 1);
+  assert.deepEqual(exactLookups, ['immediate-concurrent-visibility-1']);
+  assert.deepEqual(legacyCalls, ['legacy-write', 'legacy-queue']);
+});
+
+test('immediate notification gate rejects every non-delivered runtime result before legacy work', async () => {
+  const outcomes = [undefined, null, {}, { status: 'skipped' }, { status: 'busy' }, { status: 'unconfirmed' }];
+  for (const [index, outcome] of outcomes.entries()) {
+    const legacyCalls = [];
+    const eventHash = `immediate-unconfirmed-result-${index}`;
+    const response = await postShadowEvent(immediateNotificationEvent({
+      roomKey: `chat:immediate-unconfirmed-result-${index}`,
+      eventHash
+    }), {
+      appendNdjson: () => {},
+      shadowRuntime: { recordAccepted: () => null },
+      immediateRuntime: { enabled: true, deliverAccepted: async () => outcome },
+      writeSupabaseEvent: async () => legacyCalls.push('legacy-write'),
+      scheduleDebouncedJob: () => legacyCalls.push('legacy-queue')
+    });
+
+    assert.equal(response.status, 503);
+    assert.equal(response.body.error, 'immediate_notification_unconfirmed');
+    assert.equal(response.body.eventHash, eventHash);
+    assert.deepEqual(legacyCalls, []);
+  }
+});
+
+test('immediate notification OFF makes zero store or Slack calls and preserves legacy duplicate behavior', async () => {
+  const calls = [];
+  const runtime = createWorkOrchestratorImmediateRuntime({
+    config: { immediateEnabled: false },
+    store: new Proxy({}, { get: () => () => { throw new Error('store must not be called'); } }),
+    slack: new Proxy({}, { get: () => () => { throw new Error('Slack must not be called'); } }),
+    ensure: async () => { throw new Error('immediate ensure must not be called'); }
+  });
+  const event = immediateNotificationEvent({
+    roomKey: 'chat:immediate-off',
+    eventHash: 'immediate-off-1'
+  });
+  const dependencies = {
+    appendNdjson: () => {},
+    shadowRuntime: { recordAccepted: (_, roomVersion) => calls.push(`shadow:${roomVersion.changed}`) },
+    immediateRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  };
+
+  const first = await postShadowEvent(event, dependencies);
+  const duplicate = await postShadowEvent(event, dependencies);
+
+  assert.deepEqual(first.body, { ok: true, roomKey: 'chat:immediate-off', eventHash: 'immediate-off-1' });
+  assert.deepEqual(duplicate.body, first.body);
+  assert.deepEqual(calls, ['shadow:true', 'legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
+});
+
+test('immediate notification startup is locally fail-closed and performs no network at construction', () => {
+  const store = {
+    getNotificationByEventKey: async () => null,
+    getOldestPendingNotificationCreatedAt: async () => null
+  };
+  const slack = {
+    postMessage: async () => { throw new Error('not called'); },
+    findMessageByClientId: async () => { throw new Error('not called'); }
+  };
+  const enabled = { immediateEnabled: true, inboxChannelId: 'CINBOX' };
+
+  assert.throws(() => createWorkOrchestratorImmediateRuntime({ config: enabled, store, slack, slackToken: '' }), /local configuration is missing/i);
+  assert.throws(() => createWorkOrchestratorImmediateRuntime({ config: enabled, store: null, slack, slackToken: 'test' }), /local configuration is missing/i);
+  assert.throws(() => createWorkOrchestratorImmediateRuntime({ config: { ...enabled, inboxChannelId: '' }, store, slack, slackToken: 'test' }), /local configuration is missing/i);
+  assert.throws(() => createWorkOrchestratorImmediateRuntime({ config: enabled, store, slack: null, slackToken: 'test' }), /local configuration is missing/i);
+
+  const runtime = immediateNotificationRuntime({
+    ensure: async () => { throw new Error('not called'); }
+  });
+  assert.equal(runtime.localConfigReady, true);
+  assert.equal(runtime.state.immediateDelivered, 0);
+  assert.equal(runtime.state.immediateBacklogReadback, 'not_checked');
+});
+
+test('immediate notification health uses durable backlog age and fails content-free on query errors', async () => {
+  const privateValue = 'private-backlog-customer-room-token-channel';
+  const runtime = immediateNotificationRuntime({
+    ensure: async () => { throw new Error('not called'); },
+    store: {
+      getOldestPendingNotificationCreatedAt: async () => '2026-08-29T06:59:30.000Z'
+    },
+    now: () => new Date('2026-08-29T07:00:00.000Z')
+  });
+  await runtime.refreshBacklogHealth();
+  assert.deepEqual(buildWorkOrchestratorHealthState(runtime.state), {
+    shadowClaims: 0,
+    shadowDuplicates: 0,
+    shadowErrors: 0,
+    lastShadowReceipt: null,
+    immediateDelivered: 0,
+    immediateDuplicates: 0,
+    immediateFailed: 0,
+    oldestPendingNotificationAgeMs: 30_000,
+    immediateBacklogReadback: 'ok'
+  });
+
+  runtime.store.getOldestPendingNotificationCreatedAt = async () => { throw new Error(privateValue); };
+  await runtime.refreshBacklogHealth();
+  const health = {
+    config: buildHealthConfig({
+      workOrchestrator: { immediateEnabled: true },
+      workOrchestratorImmediateLocalConfigReady: true
+    }).workOrchestrator,
+    state: buildWorkOrchestratorHealthState({
+      ...runtime.state,
+      payload: privateValue,
+      roomKey: privateValue,
+      channelId: privateValue,
+      token: privateValue
+    })
+  };
+  assert.equal(health.config.immediateEnabled, true);
+  assert.equal(health.config.immediateLocalConfigReady, true);
+  assert.equal(health.state.oldestPendingNotificationAgeMs, null);
+  assert.equal(health.state.immediateBacklogReadback, 'error');
+  assert.doesNotMatch(JSON.stringify(health), new RegExp(privateValue));
+});
+
+test('Work Orchestrator shadow starts after revision acceptance and does not block the legacy queue', async () => {
+  const calls = [];
+  let settleShadow;
+  const shadowPending = new Promise((resolve) => { settleShadow = resolve; });
+  const shadowRuntime = {
+    recordAccepted(event, roomVersion) {
+      calls.push(`shadow:${event.roomRevision}:${roomVersion.changed}`);
+      return shadowPending;
+    }
+  };
+
+  const response = await postShadowEvent({
+    reason: 'dom_event',
+    roomKey: 'chat:work-orchestrator-order',
+    previewText: 'new camera question',
+    displayTime: '오후 1:00',
+    eventHash: 'work-orchestrator-order-1',
+    detectedAt: '2026-08-29T04:00:00.000Z'
+  }, {
+    appendNdjson: () => {},
+    shadowRuntime,
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  });
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(calls, ['shadow:1:true', 'legacy-write', 'legacy-queue']);
+  settleShadow({ created: true });
+  await shadowPending;
+});
+
+test('Work Orchestrator shadow failure increments bounded health state and still queues legacy work', async () => {
+  const calls = [];
+  const privateValue = 'private-customer-payload';
+  const runtime = createWorkOrchestratorShadowRuntime({
+    config: { shadowWrites: true },
+    store: { claimNotificationReceipt: async () => { throw new Error(privateValue); } },
+    now: () => '2026-08-29T04:00:01.000Z'
+  });
+
+  const response = await postShadowEvent({
+    reason: 'dom_event',
+    roomKey: 'chat:work-orchestrator-failure',
+    previewText: privateValue,
+    eventHash: 'work-orchestrator-failure-1',
+    detectedAt: '2026-08-29T04:00:00.000Z'
+  }, {
+    appendNdjson: () => {},
+    shadowRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  });
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(calls, ['legacy-write', 'legacy-queue']);
+  await runtime.settled();
+  assert.deepEqual(buildWorkOrchestratorHealthState(runtime.state), {
+    shadowClaims: 0,
+    shadowDuplicates: 0,
+    shadowErrors: 1,
+    lastShadowReceipt: {
+      at: '2026-08-29T04:00:01.000Z',
+      outcome: 'error',
+      error: 'shadow_receipt_store_failed'
+    },
+    immediateDelivered: 0,
+    immediateDuplicates: 0,
+    immediateFailed: 0,
+    oldestPendingNotificationAgeMs: null,
+    immediateBacklogReadback: 'disabled'
+  });
+  assert.doesNotMatch(JSON.stringify(buildWorkOrchestratorHealthState(runtime.state)), /private-customer-payload/);
+});
+
+test('Work Orchestrator shadow skips a rejected duplicate revision without suppressing legacy scheduling', async () => {
+  const calls = [];
+  const runtime = createWorkOrchestratorShadowRuntime({
+    config: { shadowWrites: true },
+    store: {
+      async claimNotificationReceipt() {
+        calls.push('shadow');
+        return { created: false, row: { id: 'private-row-id' } };
+      }
+    },
+    now: () => '2026-08-29T04:02:01.000Z'
+  });
+  const event = {
+    reason: 'dom_event', roomKey: 'chat:work-orchestrator-duplicate',
+    previewText: 'same semantic event', displayTime: '오후 1:02',
+    eventHash: 'work-orchestrator-duplicate-1', detectedAt: '2026-08-29T04:02:00.000Z'
+  };
+  const dependencies = {
+    appendNdjson: () => {}, shadowRuntime: runtime,
+    writeSupabaseEvent: async () => calls.push('legacy-write'),
+    scheduleDebouncedJob: () => calls.push('legacy-queue')
+  };
+
+  await postShadowEvent(event, dependencies);
+  await postShadowEvent(event, dependencies);
+  await runtime.settled();
+
+  assert.deepEqual(calls, ['shadow', 'legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
+  assert.deepEqual(buildWorkOrchestratorHealthState(runtime.state), {
+    shadowClaims: 0,
+    shadowDuplicates: 1,
+    shadowErrors: 0,
+    lastShadowReceipt: {
+      at: '2026-08-29T04:02:01.000Z',
+      outcome: 'duplicate'
+    },
+    immediateDelivered: 0,
+    immediateDuplicates: 0,
+    immediateFailed: 0,
+    oldestPendingNotificationAgeMs: null,
+    immediateBacklogReadback: 'disabled'
+  });
+  assert.doesNotMatch(JSON.stringify(runtime.state.lastShadowReceipt), /private-row-id/);
+});
+
+test('Work Orchestrator shadow health exposes only flags, readiness, counters, timestamps, and generic errors', () => {
+  const configHealth = buildHealthConfig({
+    workOrchestrator: {
+      shadowWrites: true,
+      immediateEnabled: false,
+      workItemsEnabled: false,
+      p0ReadbackEnabled: false,
+      p0CutoverEnabled: false,
+      digestEnabled: false,
+      cleanupEnabled: false
+    },
+    workOrchestratorStoreConfigured: false,
+    workOrchestratorShadowReady: false
+  });
+  const runtime = createWorkOrchestratorShadowRuntime({
+    config: { shadowWrites: true },
+    store: null,
+    now: () => '2026-08-29T04:00:00.000Z'
+  });
+  const health = {
+    config: configHealth.workOrchestrator,
+    state: buildWorkOrchestratorHealthState(runtime.state)
+  };
+
+  assert.deepEqual(health, {
+    config: {
+      shadowWrites: true,
+      immediateEnabled: false,
+      workItemsEnabled: false,
+      p0ReadbackEnabled: false,
+      p0CutoverEnabled: false,
+      digestEnabled: false,
+      cleanupEnabled: false,
+      storeConfigured: false,
+      shadowReady: false,
+      immediateLocalConfigReady: false
+    },
+    state: {
+      shadowClaims: 0,
+      shadowDuplicates: 0,
+      shadowErrors: 1,
+      lastShadowReceipt: {
+        at: '2026-08-29T04:00:00.000Z',
+        outcome: 'configuration_error',
+        error: 'shadow_store_unavailable'
+      },
+      immediateDelivered: 0,
+      immediateDuplicates: 0,
+      immediateFailed: 0,
+      oldestPendingNotificationAgeMs: null,
+      immediateBacklogReadback: 'disabled'
+    }
+  });
+  assert.doesNotMatch(
+    JSON.stringify(health),
+    /sourceEventKey|roomKey|preview|customer|payload|supabase\.co|service-role|private-row-id/i
+  );
+});
+
+test('Work Orchestrator shadow health fails closed on arbitrary internal receipt metadata', () => {
+  const privateValue = 'private-customer-payload';
+
+  const health = buildWorkOrchestratorHealthState({
+    shadowClaims: 1,
+    shadowDuplicates: 2,
+    shadowErrors: 3,
+    lastShadowReceipt: {
+      at: privateValue,
+      outcome: privateValue,
+      error: privateValue,
+      row: { sourceEventKey: privateValue, roomKey: privateValue }
+    }
+  });
+
+  assert.deepEqual(health, {
+    shadowClaims: 1,
+    shadowDuplicates: 2,
+    shadowErrors: 3,
+    lastShadowReceipt: {
+      at: '',
+      outcome: 'error',
+      error: 'shadow_receipt_failed'
+    },
+    immediateDelivered: 0,
+    immediateDuplicates: 0,
+    immediateFailed: 0,
+    oldestPendingNotificationAgeMs: null,
+    immediateBacklogReadback: 'disabled'
+  });
+  assert.doesNotMatch(JSON.stringify(health), /private-customer-payload|sourceEventKey|roomKey/);
+});
+
+function digestStoreStub() {
+  return Object.fromEntries([
+    'claimDivergentDigestRun', 'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
+    'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
+    'markDigestGenerationDiverged',
+    'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
+  ].map((name) => [name, () => {}]));
+}
+
+test('digest runtime is default-off and creates no timer or runner work while disabled', async () => {
+  assert.equal(typeof createWorkOrchestratorDigestRuntime, 'function');
+  let timers = 0;
+  let runs = 0;
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: false },
+    run: async () => { runs += 1; },
+    setIntervalImpl: () => { timers += 1; }
+  });
+  assert.equal(runtime.enabled, false);
+  assert.equal(runtime.localConfigReady, false);
+  assert.deepEqual(await runtime.start(), { status: 'disabled' });
+  assert.deepEqual(await runtime.runNow('manual'), { status: 'disabled' });
+  assert.equal(timers, 0);
+  assert.equal(runs, 0);
+});
+
+test('enabled digest runtime requires local store, Slack client, and one exact channel', () => {
+  const missingRecoveryClaim = digestStoreStub();
+  delete missingRecoveryClaim.claimDivergentDigestRun;
+  for (const input of [
+    { config: { digestEnabled: true, digestChannelId: 'CFOCUS' } },
+    { config: { digestEnabled: true, digestChannelId: 'CFOCUS' }, store: {} },
+    { config: { digestEnabled: true, digestChannelId: '' }, store: {}, slack: {} },
+    {
+      config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
+      store: missingRecoveryClaim,
+      slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} }
+    }
+  ]) {
+    assert.throws(
+      () => createWorkOrchestratorDigestRuntime(input),
+      { message: 'Work Orchestrator digest local configuration is missing' }
+    );
+  }
+});
+
+test('digest startup catches up only the latest boundary and checks once per minute', async () => {
+  let currentNow = '2026-08-29T08:50:00.000Z';
+  const intervals = [];
+  const calls = [];
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: {
+      digestEnabled: true,
+      digestChannelId: 'CFOCUS',
+      digestIntervalMinutes: 180,
+      cleanupEnabled: false
+    },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    now: () => currentNow,
+    leaseOwner: 'bridge:test',
+    run: async (input) => {
+      calls.push(input);
+      return {
+        status: 'delivered', scheduledAt: input.now === '2026-08-29T08:50:00.000Z'
+          ? '2026-08-29T06:00:00.000Z'
+          : '2026-08-29T09:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 2, renderedCount: 2, omittedEligibleCount: 0,
+        partCount: 1, deliveredPartCount: 1,
+        cleanup: { attempted: 0, settled: 0, failed: 0 }
+      };
+    },
+    setIntervalImpl(callback, milliseconds) {
+      intervals.push({ callback, milliseconds });
+      return { timer: true };
+    },
+    clearIntervalImpl() {}
+  });
+
+  assert.deepEqual(await runtime.start(), {
+    status: 'delivered', scheduledAt: '2026-08-29T06:00:00.000Z',
+    runId: '10000000-0000-4000-8000-000000000001',
+    selectedCount: 2, renderedCount: 2, omittedEligibleCount: 0,
+    partCount: 1, deliveredPartCount: 1,
+    cleanup: { attempted: 0, settled: 0, failed: 0 }
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].now, '2026-08-29T08:50:00.000Z');
+  assert.equal(intervals.length, 1);
+  assert.equal(intervals[0].milliseconds, 60_000);
+  assert.equal(runtime.state.nextScheduledAt, '2026-08-29T09:00:00.000Z');
+
+  currentNow = '2026-08-29T08:59:59.000Z';
+  await intervals[0].callback();
+  assert.equal(calls.length, 1);
+  currentNow = '2026-08-29T09:00:00.000Z';
+  await intervals[0].callback();
+  assert.equal(calls.length, 2);
+  assert.equal(runtime.state.nextScheduledAt, '2026-08-29T12:00:00.000Z');
+});
+
+test('minute checks retry failed cleanup on the same delivered boundary', async () => {
+  let currentNow = '2026-08-29T06:01:00.000Z';
+  let callback;
+  let runs = 0;
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS', cleanupEnabled: true },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    now: () => currentNow,
+    run: async () => {
+      runs += 1;
+      return {
+        status: runs === 1 ? 'delivered' : 'not_claimed',
+        scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 1, renderedCount: 1, omittedEligibleCount: 0,
+        partCount: 1, deliveredPartCount: 1,
+        cleanup: runs === 1
+          ? { attempted: 1, settled: 0, failed: 1 }
+          : { attempted: 1, settled: 1, failed: 0 }
+      };
+    },
+    setIntervalImpl(fn) { callback = fn; return {}; }
+  });
+  await runtime.start();
+  assert.equal(runtime.state.lastDigestRun.cleanupFailed, 1);
+  currentNow = '2026-08-29T06:02:00.000Z';
+  await callback();
+  assert.equal(runs, 2);
+  assert.equal(runtime.state.lastDigestRun.cleanupFailed, 0);
+});
+
+test('minute checks retry an unfinished not-claimed run after its database lease can expire', async () => {
+  let callback;
+  let runs = 0;
+  let currentNow = '2026-08-29T06:01:00.000Z';
+  const seenNow = [];
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    now: () => currentNow,
+    run: async (input) => {
+      runs += 1;
+      seenNow.push(input.now);
+      return {
+        status: runs < 3 ? 'not_claimed' : 'delivered',
+        scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+        partCount: 0, deliveredPartCount: 0,
+        cleanup: { attempted: 0, settled: 0, failed: 0 },
+        retryable: runs < 3
+      };
+    },
+    setIntervalImpl(fn) { callback = fn; return {}; }
+  });
+  const first = await runtime.start();
+  assert.equal(first.retryable, true);
+  currentNow = '2026-08-29T06:02:00.000Z';
+  await callback();
+  assert.equal(runs, 2, 'one minute check makes only one fenced attempt before lease expiry');
+  assert.equal(runtime.state.lastDigestRun.retryable, true);
+  currentNow = '2026-08-29T06:03:00.000Z';
+  await callback();
+  assert.equal(runs, 3);
+  assert.equal(runtime.state.lastDigestRun.status, 'delivered');
+  assert.deepEqual(seenNow, [
+    '2026-08-29T06:01:00.000Z',
+    '2026-08-29T06:02:00.000Z',
+    '2026-08-29T06:03:00.000Z'
+  ]);
+});
+
+test('minute checks respect a durable delivery Retry-After without burning an in-cycle attempt', async () => {
+  let callback;
+  let currentNow = '2026-08-29T06:25:00.000Z';
+  let actualAttempts = 0;
+  const clientMessageId = '10000000-0000-4000-8000-000000000011';
+  const observations = [];
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    now: () => currentNow,
+    run: async ({ now }) => {
+      const due = Date.parse(now) >= Date.parse('2026-08-29T06:30:00.000Z');
+      if (now === '2026-08-29T06:25:00.000Z' || due) actualAttempts += 1;
+      observations.push({ now, actualAttempts, clientMessageId });
+      return {
+        status: due ? 'delivered' : 'failed',
+        error: due ? undefined : 'digest_delivery_failed',
+        retryable: !due,
+        scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 1, renderedCount: 1, omittedEligibleCount: 0,
+        partCount: 1, deliveredPartCount: due ? 1 : 0,
+        cleanup: { attempted: 0, settled: 0, failed: 0 }
+      };
+    },
+    setIntervalImpl(fn) { callback = fn; return {}; }
+  });
+
+  await runtime.start();
+  assert.equal(actualAttempts, 1);
+  currentNow = '2026-08-29T06:26:00.000Z';
+  await callback();
+  assert.equal(actualAttempts, 1, 'a pre-due minute check does not represent another transport attempt');
+  currentNow = '2026-08-29T06:30:00.000Z';
+  await callback();
+  assert.equal(actualAttempts, 2);
+  assert.equal(runtime.state.lastDigestRun.status, 'delivered');
+  assert.deepEqual(new Set(observations.map((entry) => entry.clientMessageId)), new Set([clientMessageId]));
+});
+
+test('cleanup-enabled minute checks sweep durable backlog even after a successful same-boundary run', async () => {
+  let callback;
+  let runs = 0;
+  let currentNow = '2026-08-29T06:01:00.000Z';
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS', cleanupEnabled: true },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    now: () => currentNow,
+    run: async () => {
+      runs += 1;
+      return {
+        status: runs === 1 ? 'delivered' : 'not_claimed',
+        scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+        partCount: 0, deliveredPartCount: 0,
+        cleanup: runs === 1
+          ? { attempted: 0, settled: 0, failed: 0 }
+          : { attempted: 1, settled: 1, failed: 0 }
+      };
+    },
+    setIntervalImpl(fn) { callback = fn; return {}; }
+  });
+  await runtime.start();
+  currentNow = '2026-08-29T06:02:00.000Z';
+  const swept = await callback();
+  assert.equal(runs, 2);
+  assert.deepEqual(swept.cleanup, { attempted: 1, settled: 1, failed: 0 });
+  assert.equal(runtime.state.nextScheduledAt, '2026-08-29T09:00:00.000Z');
+});
+
+test('cleanup backlog is picked up when cleanup turns on after a same-boundary restart', async () => {
+  let currentNow = '2026-08-29T06:01:00.000Z';
+  let disabledRuns = 0;
+  const off = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS', cleanupEnabled: false },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    now: () => currentNow,
+    run: async () => {
+      disabledRuns += 1;
+      return {
+        status: 'delivered', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+        partCount: 0, deliveredPartCount: 0,
+        cleanup: { attempted: 0, settled: 0, failed: 0 }
+      };
+    },
+    setIntervalImpl: () => ({})
+  });
+  await off.start();
+  off.stop();
+
+  currentNow = '2026-08-29T06:02:00.000Z';
+  let enabledRuns = 0;
+  const on = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS', cleanupEnabled: true },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    now: () => currentNow,
+    run: async () => {
+      enabledRuns += 1;
+      return {
+        status: 'not_claimed', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+        partCount: 0, deliveredPartCount: 0,
+        cleanup: { attempted: 1, settled: 1, failed: 0 }
+      };
+    },
+    setIntervalImpl: () => ({})
+  });
+  const swept = await on.start();
+  assert.equal(disabledRuns, 1);
+  assert.equal(enabledRuns, 1);
+  assert.deepEqual(swept.cleanup, { attempted: 1, settled: 1, failed: 0 });
+});
+
+test('digest health is content-free, finite, and derives exact omission without guessing beyond 500', async () => {
+  const privateValue = 'private-customer-room-message-token';
+  let fail = false;
+  const sharedState = {};
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS', digestIntervalMinutes: 180 },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    state: sharedState,
+    now: () => fail ? '2026-08-29T09:01:00.000Z' : '2026-08-29T06:01:00.000Z',
+    run: async () => {
+      if (fail) throw new Error(privateValue);
+      return {
+        status: 'delivered', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 500, renderedCount: 500, omittedEligibleCount: 999,
+        partCount: 42, deliveredPartCount: 42,
+        cleanup: { attempted: 2, settled: 2, failed: 0 },
+        payload: privateValue
+      };
+    },
+    setIntervalImpl: () => ({})
+  });
+  await runtime.runNow('manual');
+  let health = buildWorkOrchestratorHealthState({ ...sharedState, payload: privateValue, token: privateValue });
+  assert.equal(health.digestFailureCount, 0);
+  assert.equal(health.omittedEligibleCount, 0);
+  assert.equal(health.lastDigestSuccessAt, '2026-08-29T06:01:00.000Z');
+  assert.equal(health.nextScheduledAt, '2026-08-29T09:00:00.000Z');
+  assert.doesNotMatch(JSON.stringify(health), new RegExp(privateValue));
+
+  fail = true;
+  await runtime.runNow('manual');
+  health = buildWorkOrchestratorHealthState(sharedState);
+  assert.equal(health.digestFailureCount, 1);
+  assert.equal(health.lastDigestFailureAt, '2026-08-29T09:01:00.000Z');
+  assert.equal(health.lastDigestRun.error, 'digest_cycle_failed');
+  assert.doesNotMatch(JSON.stringify(health), new RegExp(privateValue));
+});
+
+test('digest runtime preserves authoritative 501 overflow evidence and its finite typed health error', async () => {
+  const sharedState = {};
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS', digestIntervalMinutes: 180 },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    state: sharedState,
+    now: () => '2026-08-29T06:01:00.000Z',
+    run: async () => ({
+      status: 'failed', error: 'digest_eligible_overflow', retryable: true,
+      scheduledAt: '2026-08-29T06:00:00.000Z',
+      runId: '10000000-0000-4000-8000-000000000001',
+      selectedCount: 501, renderedCount: 0, omittedEligibleCount: 501,
+      partCount: 0, deliveredPartCount: 0,
+      cleanup: { attempted: 0, settled: 0, failed: 0 }
+    }),
+    setIntervalImpl: () => ({})
+  });
+
+  const result = await runtime.runNow('manual');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error, 'digest_eligible_overflow');
+  assert.equal(result.selectedCount, 501);
+  assert.equal(result.omittedEligibleCount, 501);
+  const health = buildWorkOrchestratorHealthState(sharedState);
+  assert.equal(health.lastDigestRun.error, 'digest_eligible_overflow');
+  assert.equal(health.lastDigestRun.selectedCount, 501);
+  assert.equal(health.omittedEligibleCount, 501);
+});
+
+test('digest runtime, maintenance, and health preserve only successor-first generation errors', async () => {
+  const scheduledAt = '2026-08-29T06:00:00.000Z';
+  const failedResult = (error) => ({
+    status: 'failed', error, retryable: true, scheduledAt,
+    runId: '10000000-0000-4000-8000-000000000001',
+    selectedCount: 1, renderedCount: 1, omittedEligibleCount: 0,
+    partCount: 1, deliveredPartCount: 1,
+    cleanup: { attempted: 0, settled: 0, failed: 0 }
+  });
+
+  for (const error of ['digest_generation_diverged', 'digest_generation_handoff_failed']) {
+    const sharedState = {};
+    const runtime = createWorkOrchestratorDigestRuntime({
+      config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
+      store: digestStoreStub(),
+      slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+      state: sharedState,
+      now: () => '2026-08-29T06:01:00.000Z',
+      run: async () => failedResult(error),
+      setIntervalImpl: () => ({})
+    });
+    const result = await runtime.runNow('manual');
+    assert.equal(result.error, error);
+    assert.equal(buildWorkOrchestratorHealthState(sharedState).lastDigestRun.error, error);
+    const maintenance = await handleWorkOrchestratorDigestMaintenance({
+      runNow: async () => failedResult(error)
+    });
+    assert.equal(maintenance.body.result.error, error);
+  }
+
+  for (const retiredError of ['digest_generation_cleanup_failed', 'digest_generation_retired']) {
+    const health = buildWorkOrchestratorHealthState({
+      lastDigestRun: {
+        at: '2026-08-29T06:01:00.000Z', trigger: 'manual', status: 'failed',
+        scheduledAt, error: retiredError
+      }
+    });
+    assert.equal(health.lastDigestRun.error, 'digest_cycle_failed');
+    const maintenance = await handleWorkOrchestratorDigestMaintenance({
+      runNow: async () => failedResult(retiredError)
+    });
+    assert.equal(maintenance.body.result.error, 'digest_cycle_failed');
+  }
+});
+
+test('maintenance digest handler uses the injectable runtime and returns finite status only', async () => {
+  assert.equal(typeof handleWorkOrchestratorDigestMaintenance, 'function');
+  const response = await handleWorkOrchestratorDigestMaintenance({
+    runNow: async (trigger) => ({
+      status: 'not_claimed', scheduledAt: '2026-08-29T06:00:00.000Z',
+      runId: '10000000-0000-4000-8000-000000000001', trigger
+    })
+  });
+  assert.deepEqual(response, {
+    statusCode: 200,
+    body: {
+      ok: true,
+      result: {
+        status: 'not_claimed', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001', trigger: 'manual'
+      }
+    }
+  });
+});
+
+test('digest runtime, maintenance, and health preserve bounded cleanup counts through 500', async () => {
+  for (const cleanupCount of [51, 500]) {
+    const sharedState = {};
+    const runtime = createWorkOrchestratorDigestRuntime({
+      config: { digestEnabled: true, digestChannelId: 'CFOCUS', cleanupEnabled: true },
+      store: digestStoreStub(),
+      slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+      state: sharedState,
+      now: () => '2026-08-29T06:01:00.000Z',
+      run: async () => ({
+        status: 'delivered', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+        partCount: 0, deliveredPartCount: 0,
+        cleanup: { attempted: cleanupCount, settled: cleanupCount, failed: 0 }
+      }),
+      setIntervalImpl: () => ({})
+    });
+    const result = await runtime.runNow('manual');
+    assert.deepEqual(result.cleanup, { attempted: cleanupCount, settled: cleanupCount, failed: 0 });
+
+    const maintenance = await handleWorkOrchestratorDigestMaintenance({
+      runNow: async () => result
+    });
+    assert.equal(maintenance.statusCode, 200);
+    assert.deepEqual(maintenance.body.result.cleanup, result.cleanup);
+
+    sharedState.lastDigestRun.cleanupFailed = cleanupCount;
+    assert.equal(buildWorkOrchestratorHealthState(sharedState).lastDigestRun.cleanupFailed, cleanupCount);
+  }
+});
+
+test('digest cleanup counts above 500 or malformed are rejected without leaking private fields', async () => {
+  const privateValue = 'private-cleanup-token';
+  for (const attempted of [501, '51', Number.NaN]) {
+    const runtime = createWorkOrchestratorDigestRuntime({
+      config: { digestEnabled: true, digestChannelId: 'CFOCUS', cleanupEnabled: true },
+      store: digestStoreStub(),
+      slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+      now: () => '2026-08-29T06:01:00.000Z',
+      run: async () => ({
+        status: 'delivered', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+        partCount: 0, deliveredPartCount: 0,
+        cleanup: { attempted, settled: 0, failed: 0 },
+        token: privateValue
+      }),
+      setIntervalImpl: () => ({})
+    });
+    const result = await runtime.runNow('manual');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error, 'digest_cycle_failed');
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(privateValue));
+
+    const maintenance = await handleWorkOrchestratorDigestMaintenance({
+      runNow: async () => ({
+        status: 'delivered', cleanup: { attempted, settled: 0, failed: 0 }, token: privateValue
+      })
+    });
+    assert.equal(maintenance.statusCode, 502);
+    assert.deepEqual(maintenance.body, {
+      ok: false, result: { status: 'failed', error: 'digest_cycle_failed' }
+    });
+    assert.doesNotMatch(JSON.stringify(maintenance), new RegExp(privateValue));
+  }
+
+  for (const cleanupFailed of [501, '51', Number.NaN]) {
+    const health = buildWorkOrchestratorHealthState({
+      lastDigestRun: {
+        at: '2026-08-29T06:01:00.000Z', trigger: 'manual', status: 'delivered',
+        scheduledAt: '2026-08-29T06:00:00.000Z', cleanupFailed
+      }
+    });
+    assert.equal(health.lastDigestRun.cleanupFailed, 0);
+  }
+});
+
+test('digest runtime work is independent from immediate notification delivery ordering', async () => {
+  let releaseDigest;
+  const pendingDigest = new Promise((resolve) => { releaseDigest = resolve; });
+  const order = [];
+  const digest = createWorkOrchestratorDigestRuntime({
+    config: { digestEnabled: true, digestChannelId: 'CFOCUS' },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    now: () => '2026-08-29T06:01:00.000Z',
+    run: async () => {
+      order.push('digest-start');
+      await pendingDigest;
+      order.push('digest-end');
+      return {
+        status: 'not_claimed', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 0, renderedCount: 0, omittedEligibleCount: 0,
+        partCount: 0, deliveredPartCount: 0,
+        cleanup: { attempted: 0, settled: 0, failed: 0 }
+      };
+    },
+    setIntervalImpl: () => ({})
+  });
+  const digestRun = digest.runNow('manual');
+  await Promise.resolve();
+  order.push('immediate-delivered');
+  assert.deepEqual(order, ['digest-start', 'immediate-delivered']);
+  releaseDigest();
+  await digestRun;
+  assert.deepEqual(order, ['digest-start', 'immediate-delivered', 'digest-end']);
+});
+
 test('identical reply text at a later displayed time is a new room revision', () => {
   const earlier = semanticRoomEventIdentity({ previewText: '홍길동 네', displayTime: '오전 9:10' });
   const unreadMutation = semanticRoomEventIdentity({ previewText: '홍길동 2 네', displayTime: '오전 9:10' });
@@ -2155,9 +5442,11 @@ test('production queue uses the phase scheduler and publishes freshness before d
   assert.match(source, /url\.pathname === '\/worker\/freshness'/);
   const revisionIndex = source.indexOf('const roomVersion = registerAcceptedRoomEvent(');
   const durableRevisionIndex = source.lastIndexOf('gatewayChannel.latestRoomRevision', revisionIndex);
-  const supabaseIndex = source.indexOf("await writeSupabaseEvent(event, 'event')", revisionIndex);
+  const shadowIndex = source.indexOf('shadowRuntime?.recordAccepted?.(event, roomVersion)', revisionIndex);
+  const supabaseIndex = source.indexOf("await writeEvent(event, 'event')", revisionIndex);
   assert.ok(durableRevisionIndex >= 0 && durableRevisionIndex < revisionIndex, 'durable Gateway revision must seed the in-memory revision');
   assert.ok(revisionIndex >= 0 && supabaseIndex > revisionIndex, 'freshness revision must advance before Supabase latency');
+  assert.ok(shadowIndex > revisionIndex && shadowIndex < supabaseIndex, 'shadow starts after accepted revision and before legacy Supabase');
   assert.match(source, /readBooleanEnvironment\(process\.env\.KAKAO_AI_DOM_SPLIT_ENABLED, false\)/);
   assert.match(source, /getKakaoPhaseScheduler\(\)\.runManual\(\{[\s\S]*?cleanupIdleKakaoConversationTabs\('worker_finished'/);
 });
@@ -2174,7 +5463,9 @@ test('health config exposes the live safety contract used by supervised restarts
     autoSendEnabled: true,
     workerDryRun: false,
     windowsWritesEnabled: true,
-    startupCatchupSupported: true
+    startupCatchupSupported: true,
+    scheduleOwnerReviewRequired: true,
+    killSwitchPolicyEnforced: true
   });
 
   const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
@@ -2185,6 +5476,11 @@ test('health config exposes the live safety contract used by supervised restarts
     /startupCatchupSupported:\s*process\.env\.PROCESS_INITIAL_SCAN/,
     'catch-up capability is independent from whether initial-scan events are currently processed'
   );
+
+  const modeHealth = buildHealthConfig({
+    workOrchestrator: { runtimeMode: 'legacy' }
+  });
+  assert.equal(modeHealth.workOrchestrator.runtimeMode, 'legacy');
 });
 
 test('bridge-created failure cards forward configured Slack mention recipients', async () => {

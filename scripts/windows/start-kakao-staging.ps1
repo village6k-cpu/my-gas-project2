@@ -16,6 +16,9 @@ param(
 
     [string]$HermesPath,
 
+    [ValidateSet('cli', 'gateway')]
+    [string]$HermesTransport = 'cli',
+
     [switch]$IncludeGateway,
 
     [switch]$EnableWrites
@@ -120,6 +123,7 @@ try {
     else {
         Set-KakaoStagingSafeEnvironment
     }
+    [Environment]::SetEnvironmentVariable('KAKAO_HERMES_TRANSPORT', $HermesTransport, 'Process')
     [Environment]::SetEnvironmentVariable('VILLAGE_AI_WORKER_CMD', $workerCommand, 'Process')
 
     if ([string]::IsNullOrWhiteSpace($env:HERMES_HOME)) {
@@ -189,7 +193,16 @@ try {
     # Chromium can relaunch itself and normalize --user-data-dir quoting.  The
     # unique profile path is stable while the full argument spelling is not.
     $chromeCommandMarker = $chromeProfilePath
-    $chromeProcess = Start-Process -FilePath $ChromePath -ArgumentList $chromeCommandLine -PassThru -ErrorAction Stop
+    $chromeLogRoot = Get-KakaoStagingRoot
+    foreach ($stream in @('out', 'err')) {
+        $cur = Join-Path $chromeLogRoot ("chrome.{0}.log" -f $stream)
+        if (Test-Path -LiteralPath $cur) {
+            Move-Item -LiteralPath $cur -Destination (Join-Path $chromeLogRoot ("chrome.{0}.prev.log" -f $stream)) -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $chromeProcess = Start-Process -FilePath $ChromePath -ArgumentList $chromeCommandLine -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput (Join-Path $chromeLogRoot 'chrome.out.log') `
+        -RedirectStandardError (Join-Path $chromeLogRoot 'chrome.err.log')
     $chromeStarted = [pscustomobject]@{
         Name           = 'chrome'
         Process        = $chromeProcess

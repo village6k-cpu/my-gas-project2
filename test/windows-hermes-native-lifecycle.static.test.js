@@ -11,6 +11,12 @@ const harnessPath = path.join(
   'windows',
   'test-hermes-native-skill-lifecycle.ps1'
 );
+const kakaoGatewayNoSendHarnessPath = path.join(
+  root,
+  'scripts',
+  'windows',
+  'test-kakao-hermes-gateway-nosend.ps1'
+);
 
 function readHarness() {
   assert.ok(fs.existsSync(harnessPath), `missing lifecycle harness: ${harnessPath}`);
@@ -155,4 +161,15 @@ test('WhatIf can preview a full kakaoworker-shaped isolated lifecycle', { skip: 
   assert.match(preview.stdout.replaceAll('\\', '/'), /workerProfileHome=.*profiles\/kakaoworker/i);
   assert.match(preview.stdout.replaceAll('\\', '/'), /workerRepo=.*my-gas-project2/i);
   assert.equal(fs.existsSync(candidate), false, '-WhatIf must not create the worker-shaped profile');
+});
+
+test('Kakao Gateway lifecycle proof is a separate isolated no-send harness', () => {
+  assert.ok(fs.existsSync(kakaoGatewayNoSendHarnessPath));
+  const source = fs.readFileSync(kakaoGatewayNoSendHarnessPath, 'utf8');
+  assert.match(source, /kakao-hermes-nosend/i);
+  assert.match(source, /AI_WORKER_AUTO_SEND[^\r\n]+['"]0['"]/i);
+  assert.match(source, /VILLAGE_WINDOWS_WRITES_ENABLED[^\r\n]+['"]0['"]/i);
+  assert.match(source, /SLACK_AGENT_CARD_DELIVERY_ENABLED[^\r\n]+['"]0['"]/i);
+  assert.match(source, /kakao-hermes-gateway-nosend-runner\.py/i);
+  assert.doesNotMatch(source, /start-kakao-live|Restart-KakaoBridge|clasp/i);
 });

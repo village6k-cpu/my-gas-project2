@@ -17,6 +17,7 @@
 - After two consecutive unhandled delivered digests, mention the owner; at 24 hours mark overdue; at 72 hours send at most one separate reminder per day.
 - Snooze choices are three hours, today evening, tomorrow, or explicit date/time; expiry preserves original age.
 - P0 bypasses ordinary timing and cannot be hidden or deleted before acknowledgement.
+- A P0 acknowledgement is effective only when it is a real calendar timestamp in exact `YYYY-MM-DDTHH:mm:ss.sssZ` form, year `0001..9999`, at or before the authoritative operation cutoff. Missing, malformed, impossible, year-zero, extended-year, or future values are unacknowledged in every lifecycle, store, digest, and SQL path.
 - New activity merges only through a typed stable `work_key`; never merge by loose customer-name matching.
 - Slack action values include work item id and expected version; stale actions are no-ops.
 - Vercel may request an action, but local authoritative runtime performs/validates completion.
@@ -30,6 +31,7 @@
 - Create `tools/work-orchestrator-v2/work-actions.mjs` and `.test.mjs`: versioned action codec and application policy.
 - Modify `tools/work-orchestrator-v2/supabase-store.mjs` and tests: work/digest RPCs and queries.
 - Modify the foundation migration before production application, or create a CLI-generated additive migration if already applied: work/digest RPCs.
+- Add durable digest message-part state before runner delivery: every ordinary/reminder part has immutable intent, a stable Slack client ID, delivery attempts/state, exact coordinates, and cleanup evidence.
 - Modify `tools/ai-browser-worker/worker.mjs` and tests: v2 dual-write integration in `finalizePreparedKakaoDecision`.
 - Modify `tools/kakao-dom-bridge/server.mjs` and tests: scheduler and action poller.
 - Modify `apps/follow-up-dashboard/api/slack-actions.js` and tests: signed v2 action requests.
@@ -53,14 +55,16 @@
 Cover:
 
 ```js
-assert.deepEqual(buildHumanWorkCandidates({ autoReplyResult: { sent: true, readbackConfirmed: true }, followUpRows: [{ type: 'reply_needed' }] }), []);
-assert.equal(buildHumanWorkCandidates({ autoReplyResult: { sent: false }, followUpRows: [{ payload: { work_key: 'room:1:reply' } }] })[0].work_key, 'room:1:reply');
+assert.deepEqual(buildHumanWorkCandidates({ autoReplyResult: { sent: true, readbackConfirmed: true, completed_work_key: 'room:1:reply' }, followUpRows: [{ work_key: 'room:1:reply', type: 'reply_needed' }] }), []);
+assert.equal(buildHumanWorkCandidates({ autoReplyResult: { sent: false }, followUpRows: [{ payload: { work_key: 'room:1:reply', requires_human_action: true } }] })[0].work_key, 'room:1:reply');
 assert.throws(() => buildHumanWorkCandidates({ followUpRows: [{ customer_name: '동명이인' }] }), /typed work_key/i);
 assert.equal(mergeWorkItem(existing, incoming, now).version, existing.version + 1);
 assert.throws(() => applyWorkAction(item, { type: 'progress', expectedVersion: item.version - 1 }, now), /stale work version/i);
 ```
 
-Add snooze expiry, P0 acknowledgement, resolved evidence, and dismissed terminal-state tests.
+An untyped row may map to the finite `human_review` type only for the reviewed legacy form that has both an explicit `requires_human_action=true` boolean and a stable payload key. A key-only audit row is invalid. Verified auto-reply suppression uses an exact confirmed work/follow-up key; the legacy no-key fallback applies only when the batch contains one distinct `reply_needed` key.
+
+Add snooze expiry, P0 escalation wake-up, first-acknowledgement preservation, resolved evidence, and dismissed terminal-state tests.
 
 - [ ] **Step 2: Run RED**
 
@@ -133,7 +137,9 @@ git commit -m "feat: define durable human work lifecycle"
 - Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
 
 **Interfaces:**
-- Produces RPCs `upsert_work_item_v2`, `request_work_item_action_v2`, `claim_digest_run_v2`, `finalize_digest_run_v2` and store methods with the same camelCase names.
+- Produces RPCs `upsert_work_item_v2`, `request_work_item_action_v2`, `list_actionable_work_v2`, `claim_digest_run_v2`, `finalize_digest_run_v2`, `fail_digest_run_v2`, and `record_digest_cleanup_v2`, plus matching store methods.
+- Every successful digest claim/reclaim returns a unique `lease_token`; finalize/fail require exact run ID, lease owner, and token.
+- A new run records and returns the exact latest prior delivered digest coordinate. Cleanup evidence is recorded only after the new run is delivered.
 
 - [ ] **Step 1: Generate an additive migration only when the foundation is already in migration history**
 
@@ -164,7 +170,8 @@ Expected: FAIL because RPCs/methods are absent.
 - `upsert_work_item_v2`: lock active row by `work_key`, insert if absent, otherwise merge typed source keys and update content/version; terminal rows are never reopened.
 - `request_work_item_action_v2`: update only when `id`, `version`, and active state match; store pending action and increment version.
 - `claim_digest_run_v2`: insert by `(destination_key,scheduled_at)` or claim an expired `building|failed` lease; only one caller receives `claimed=true`.
-- `finalize_digest_run_v2`: lock run and snapshot work rows; mark delivered and increment counters only for IDs and versions in `item_snapshot`.
+- `finalize_digest_run_v2`: require the exact lease generation, lock run and snapshot work rows, validate content-free snapshot semantics, then mark delivered and increment counters only for matching active IDs and versions. An empty snapshot stores null Slack coordinates and represents a no-send delivery.
+- `record_digest_cleanup_v2`: only after the new run is delivered, record confirmed deletion/already-absence or a reviewed cleanup failure for its exact `previous_digest_id`; mark the prior run replaced only after confirmed deletion/absence.
 
 Each function returns JSON `{applied|claimed|created,row}` and schema-qualifies all tables.
 
@@ -177,8 +184,9 @@ upsertWorkItem(candidate)
 requestWorkAction({ id, expectedVersion, action, requestedBy })
 listActionableWork({ now, limit })
 claimDigestRun({ destinationKey, scheduledAt, windowStartedAt, windowEndedAt, leaseOwner, leaseSeconds })
-finalizeDigestRun({ id, itemSnapshot, channelId, messageTs, deliveredAt })
-failDigestRun({ id, error })
+finalizeDigestRun({ id, leaseOwner, leaseToken, itemSnapshot, channelId, messageTs, deliveredAt })
+failDigestRun({ id, leaseOwner, leaseToken, error })
+recordDigestCleanup({ id, previousDigestId, outcome, error })
 ```
 
 Run:
@@ -246,7 +254,9 @@ git commit -m "feat: dual write typed human work items"
 
 **Interfaces:**
 - Consumes: active work rows and a supplied clock.
-- Produces: `selectDigestItems(items,now)`, `buildDigestSnapshot(items,now)`, `buildDigestSlackMessage(snapshot,config)`, `nextDigestScheduledAt(lastDeliveredAt,intervalMinutes)`.
+- Produces: `selectDigestItems(items,now)`, `buildDigestSnapshot(selected)`, `buildDigestSlackMessage(selected,config)`, `nextDigestScheduledAt(lastScheduledAt,intervalMinutes)`.
+- `selectDigestItems` returns render-safe selected entries with a section and inclusion reason while retaining the bounded work fields needed for display. `buildDigestSnapshot` is the separate content-free persistence projection `{id,version,inclusionReason,priority}`; rendering must not attempt to reconstruct useful text from that minimal snapshot.
+- `buildDigestSlackMessage` returns deterministic message parts for the complete selected set plus any due daily-reminder parts. Task 5 must durably retain every posted coordinate before multi-part delivery can be enabled; a single stored coordinate must never stand in for several Slack messages.
 
 - [ ] **Step 1: Write table-driven RED tests**
 
@@ -254,10 +264,10 @@ Use fixed KST timestamps to prove:
 
 - snoozed rows are excluded before but included at `snoozed_until`;
 - every active actionable row appears;
-- P0 acknowledged unresolved precedes overdue, urgent, carry-over, normal;
+- unacknowledged P0 remains on its separate immediate/P0 surface and is excluded from the ordinary digest; acknowledged unresolved P0 precedes overdue, urgent, carry-over, normal;
 - `consecutive_unhandled_digests >= 2` adds owner mention;
 - age >=24h adds overdue section;
-- age >=72h and `next_reminder_at <= now` adds daily reminder reason;
+- age >=72h and `next_reminder_at <= now` (or no prior reminder timestamp) adds a once-due daily reminder part and `daily_reminder` snapshot reason;
 - snapshot stores only `{id,version,inclusionReason,priority}`;
 - rendered buttons encode id/version/action.
 
@@ -269,7 +279,7 @@ node --test tools\work-orchestrator-v2\digests.test.mjs
 
 - [ ] **Step 3: Implement deterministic pure functions**
 
-Define sections as `p0`, `overdue`, `urgent`, `carry_over`, `actionable`; cap each Slack message at 45 work rows and create additional numbered digest messages only when required. A run snapshot contains all rows across its messages.
+Define sections as `p0`, `overdue`, `urgent`, `carry_over`, `actionable`. Render each work row as one valid Slack `section` block plus one `actions` block, so cap each message part at 24 work rows: one header plus 48 row blocks stays below Slack's 50-block message maximum. Create additional numbered digest messages only when required. A run snapshot contains all rows across its messages. Escape Slack mrkdwn and reject malformed/unbounded active rows rather than emitting ambiguous actions. Selection and rendering are pure and never read the ambient clock.
 
 - [ ] **Step 4: Run GREEN and commit**
 
@@ -278,6 +288,38 @@ node --test tools\work-orchestrator-v2\digests.test.mjs
 git add -- tools/work-orchestrator-v2/digests.mjs tools/work-orchestrator-v2/digests.test.mjs
 git commit -m "feat: build durable focus digests"
 ```
+
+---
+
+### Task 4.5: Add durable multi-part digest delivery operations
+
+**Files:**
+- Modify: the unapplied foundation migration, or create one additive CLI migration if production history later proves the foundation applied
+- Modify: `tools/work-orchestrator-v2/schema.test.mjs`
+- Modify: `tools/work-orchestrator-v2/pglite-schema.test.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
+
+**Interfaces:**
+- Add `digest_message_parts` as the service-role-only durable manifest and delivery/cleanup lifecycle for every ordinary and daily-reminder Slack message.
+- Add atomic store/RPC operations to prepare an immutable content-free manifest, claim and terminally record each delivery attempt, finalize only a completely delivered manifest, return all prior coordinates, and record cleanup per prior part.
+- Cleanup uses two fenced operations: `claimDigestPartCleanup({id,previousDigestId,previousPartId,cleanupOwner,leaseSeconds})` rotates a durable cleanup token and increments the attempt generation for `idle|failed` or expired `deleting`; `recordDigestPartCleanup({id,previousDigestId,previousPartId,cleanupOwner,cleanupToken,expectedCleanupAttempts,outcome,error})` can settle only that exact unexpired generation. This permits crash recovery to converge through `already_absent` without a concurrent or stale terminal writer overwriting newer evidence.
+
+- [ ] **Step 1: Write RED schema/store/PGlite tests**
+
+Prove immutable/idempotent preparation, exact ordinary partition plus reminder subset, stable DB-issued client message IDs, delivery-attempt and run-lease fencing, crash/reclaim resume without reposting delivered parts, all-parts-before-finalize, zero-item no-send, full previous-coordinate return, and all-parts-before-replaced cleanup.
+
+- [ ] **Step 2: Implement the service-only part schema and RPCs**
+
+Keep rendered content out of the database. Persist only part kind/index/count, ordered item IDs, a deterministic payload hash, DB-issued client message ID, mechanical delivery state/attempts/timestamps/errors, exact channel/TS after confirmation, and cleanup state/timestamps/errors. Every function is `SECURITY INVOKER`, has empty `search_path`, schema-qualified relations, and exact service-role ACLs.
+
+- [ ] **Step 3: Bind run finalization and replacement to the full manifest**
+
+The prepared snapshot and manifest are immutable for a run. Nonempty finalization derives its root compatibility coordinate from the first ordinary part and succeeds only when every planned ordinary/reminder part has a durable delivered coordinate. Previous digest lookup returns every exact part coordinate. Prior run state becomes `replaced` only after every prior delivered part is confirmed `deleted|already_absent`; a failed cleanup remains retryable and never rolls back the delivered new run.
+
+- [ ] **Step 4: Run GREEN and commit**
+
+Run focused static/store/PGlite tests, the full Work Orchestrator suite, package checks, and `git diff --check`. Do not send Slack or touch live Supabase. Commit only the schema/store/test files.
 
 ---
 
@@ -292,7 +334,7 @@ git commit -m "feat: build durable focus digests"
 - Modify: `tools/kakao-dom-bridge/server.test.mjs`
 
 **Interfaces:**
-- Consumes: store, Slack client, digest pure functions.
+- Consumes: store multi-part operations, Slack client, digest pure functions.
 - Produces: `runDigestCycle({store,slack,config,now,leaseOwner})` and bridge `/maintenance/work-orchestrator-digest`.
 
 - [ ] **Step 1: Write RED runner tests**
@@ -300,11 +342,12 @@ git commit -m "feat: build durable focus digests"
 Prove:
 
 1. two runners race and one claims;
-2. zero eligible items marks the run delivered with an empty snapshot and sends no digest;
-3. new digest posts and finalizes before previous digest deletion;
-4. post failure preserves previous digest and counters;
-5. previous deletion failure records cleanup error without failing the delivered new digest;
-6. work counters advance only after finalize succeeds.
+2. zero eligible items prepares an empty manifest, finalizes without coordinates, and sends no digest;
+3. the complete content-free part manifest is durable before the first post; every post uses the stored client message ID;
+4. a crash after any subset of parts resumes the same run/client IDs, reconciles ambiguous posts, skips confirmed parts, and never silently duplicates or drops a part;
+5. finalization and work counters wait until every ordinary and daily-reminder part has a confirmed durable coordinate;
+6. post failure preserves the previous digest and counters;
+7. every exact part of the claimed `previous_digest` is deleted only after complete new delivery; per-part deletion failure is recorded/retried without failing the delivered new digest or prematurely replacing the prior run.
 
 - [ ] **Step 2: Run RED**
 
@@ -339,12 +382,19 @@ git commit -m "feat: schedule and replace focus digests"
 - Create: `tools/work-orchestrator-v2/work-actions.test.mjs`
 - Modify: `apps/follow-up-dashboard/api/slack-actions.js`
 - Modify: `apps/follow-up-dashboard/api/slack-actions.test.mjs`
+- Create: `apps/follow-up-dashboard/api/_work-action-codec.js`
+- Modify: `supabase/migrations/20260829030730_work_orchestrator_v2_foundation.sql`
+- Modify: `tools/work-orchestrator-v2/schema.test.mjs`
+- Modify: `tools/work-orchestrator-v2/pglite-schema.test.mjs`
 - Modify: `tools/kakao-dom-bridge/server.mjs`
 - Modify: `tools/kakao-dom-bridge/server.test.mjs`
 
 **Interfaces:**
 - Vercel consumes Slack-signed `village_work_v2_*` actions and calls `request_work_item_action_v2`.
 - Bridge consumes pending actions and calls `processPendingWorkAction({row,action,now})`.
+- The service-only action-request RPC and digest preparation share a deterministic advisory lock per `{id,version}`. An action request returns `applied=false` while that exact version is present in any unfinished prepared run; the bridge lists only exact processable mechanical actions through `list_pending_work_actions_v2`.
+
+**Render-contract cutover gate:** Until a persisted render-contract version is added, renderer code or render-affecting configuration may change only after proving that there are zero unfinished prepared digest runs (`building|delivering|failed` with a stored manifest). This Task 6 feature is not deployed. Task 5 production cutover must prove the same zero-unfinished-run condition before enabling it. The action-request fence closes the Slack button mutation race only; it does not claim to fence every general worker or source mutation.
 
 - [ ] **Step 1: Write Vercel RED tests**
 
@@ -370,7 +420,7 @@ node --test apps\follow-up-dashboard\api\slack-actions.test.mjs
 
 - [ ] **Step 3: Implement signed v2 request handling**
 
-Reuse existing signature verification. Route legacy ids unchanged. For v2, call the service-only RPC and return an ephemeral stale-state message when `applied=false`.
+Reuse existing signature verification. Route legacy ids unchanged. For v2, call the service-only RPC and return one content-free ephemeral retry message when `applied=false`; it must cover both stale versions and a still-finishing digest without falsely classifying either case.
 
 - [ ] **Step 4: Write and implement local action tests**
 
@@ -422,6 +472,61 @@ npm --prefix apps\today-dashboard run build
 git add -- apps/today-dashboard/app/api/follow-ups/route.ts apps/today-dashboard/test/workOrchestratorFollowUpsRoute.test.mjs apps/today-dashboard/README.md
 git commit -m "feat: expose v2 work items to staff dashboard"
 ```
+
+---
+
+### Task 8: Make divergent digest recovery successor-first
+
+**Files:**
+- Modify: `tools/work-orchestrator-v2/digest-runner.mjs`
+- Modify: `tools/work-orchestrator-v2/digest-runner.test.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.mjs`
+- Modify: `tools/work-orchestrator-v2/supabase-store.test.mjs`
+- Modify: `supabase/migrations/20260829030730_work_orchestrator_v2_foundation.sql`
+- Modify: `tools/work-orchestrator-v2/schema.test.mjs`
+- Modify: `tools/work-orchestrator-v2/pglite-schema.test.mjs`
+- Modify other existing digest-state consumer tests only when the new durable state/link requires it.
+
+**Interfaces and binding ruling:**
+- A prepared generation whose current re-render no longer matches is immutable audit evidence, not content that may be reconstructed or overwritten.
+- Its confirmed exact bot coordinates remain visible and untouched while a successor generation is built, posted, settled, and finalized. Temporary overlap is acceptable; a zero-digest visibility gap is not.
+- The successor durably inherits cleanup responsibility for both the divergent partial generation and that generation's prior full digest. Cleanup starts only after the successor is durably delivered, uses only persisted exact bot coordinates/client IDs, and converges idempotently across restarts.
+- Same `{destination_key,scheduled_at}` first-generation and successor-generation claims are conflict-safe: concurrent callers produce one winner and a clean `claimed:false` loser, never a uniqueness error. Verify the existing destination advisory lock before changing claim SQL.
+- Preserve the authoritative 500/501 fail-closed contract, typed `history_incomplete` no-repost contract, action fencing, default-OFF flags, and all content-free error/health shapes.
+
+- [ ] **Step 1: Write strict RED regressions before production edits**
+
+Prove with real runner/store behavior:
+
+1. a partially posted divergent generation is not deleted or retired before its successor is durably finalized;
+2. successor post, settlement, or finalization failure leaves every old exact coordinate untouched and retryable;
+3. after successor finalization, exact cleanup covers the divergent partial and inherited prior full digest without deleting foreign/human coordinates, then terminally retires/replaces the old generation;
+4. crash/reclaim at each cleanup boundary neither reposts the successor nor loses cleanup responsibility;
+5. two independent database sessions contending for the same first or successor generation yield exactly one `claimed:true`, one `claimed:false`, and no unique violation. If the local PostgreSQL harness cannot supply two real sessions, record that limitation explicitly and add the strongest executable transaction/lock-order coverage available without pretending it proves multi-backend contention;
+6. every SQL/store/runner consumer of digest state remains fail-closed for the new transition/link.
+
+- [ ] **Step 2: Run RED and record the exact failures**
+
+```powershell
+node --test tools\work-orchestrator-v2\digest-runner.test.mjs tools\work-orchestrator-v2\supabase-store.test.mjs tools\work-orchestrator-v2\schema.test.mjs tools\work-orchestrator-v2\pglite-schema.test.mjs
+```
+
+- [ ] **Step 3: Implement the smallest durable successor-first transition**
+
+Do not mutate or delete old Slack state to make preparation pass. Add only the durable generation/link/state and CAS operations needed to let generation N+1 deliver first and to transfer exact cleanup responsibility afterward. Keep all RPCs `SECURITY INVOKER`, service-role-only, finite, exact-shape, and lease/generation fenced.
+
+- [ ] **Step 4: Run focused and full offline verification and commit locally**
+
+```powershell
+node --test tools\work-orchestrator-v2\digest-runner.test.mjs tools\work-orchestrator-v2\supabase-store.test.mjs tools\work-orchestrator-v2\schema.test.mjs tools\work-orchestrator-v2\pglite-schema.test.mjs
+npm --prefix tools\work-orchestrator-v2 test
+npm --prefix tools\kakao-dom-bridge test
+npm --prefix tools\work-orchestrator-v2 run check
+npm --prefix tools\kakao-dom-bridge run check
+git diff --check
+```
+
+Do not use network access, linked/live Supabase, Slack sends/deletes, timers, deployment, push, or customer/business mutations. Commit locally on the feature branch only.
 
 ---
 
