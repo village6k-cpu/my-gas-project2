@@ -400,7 +400,7 @@ function Test-KakaoGatewayWatchdogHealth {
     )
 
     return [bool](
-        (Test-KakaoLiveBridgeContract -Health $Health) -and
+        (Test-KakaoLiveBridgeContract -Health $Health -RequireInvariantHealth $false) -and
         (Test-KakaoGatewayHealthContract -Health $Health -RuntimeProbe $RuntimeProbe `
             -GatewayRuntime $GatewayRuntime -SmokeEvidence $SmokeEvidence -RequireCleanHistory $false)
     )
@@ -410,7 +410,9 @@ function Test-KakaoLiveBridgeContract {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [psobject]$Health
+        [psobject]$Health,
+
+        [bool]$RequireInvariantHealth = $true
     )
 
     $configProperty = $Health.PSObject.Properties['config']
@@ -480,7 +482,7 @@ function Test-KakaoLiveBridgeContract {
         (Test-KakaoLiveHealthProperty -Object $config -Name 'followUpRowsEnabled' -ExpectedValue $false) -and
         (Test-KakaoLiveHealthProperty -Object $config -Name 'slackActionPollEnabled' -ExpectedValue $false) -and
         (Test-KakaoLiveHealthProperty -Object $config -Name 'p0SlackEscalationEnabled' -ExpectedValue $false) -and
-        $workOrchestratorInvariantHealthy
+        ((-not $RequireInvariantHealth) -or $workOrchestratorInvariantHealthy)
     )
 }
 

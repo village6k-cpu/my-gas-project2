@@ -130,7 +130,8 @@ function gatewayWatchdogHealth({
   fresh = true,
   receiptVerified = true,
   targetMode = 'v2',
-  healthMode = 'v2'
+  healthMode = 'v2',
+  invariantHealthy = true
 } = {}) {
   const escapedPath = modulePath.replaceAll("'", "''");
   const legacyHealth = healthMode === 'legacy';
@@ -141,7 +142,7 @@ function gatewayWatchdogHealth({
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
     `$env:WORK_ORCHESTRATOR_V2_RUNTIME_MODE='${targetMode}'`,
-    `$health=[pscustomobject]@{ok=$true; workOrchestrator=[pscustomobject]@{ok=$true}; config=[pscustomobject]@{hermesTransport='gateway'; scheduleOwnerReviewRequired=$true; killSwitchPolicyEnforced=$true; workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$${legacyHealth ? 'true' : 'false'}; followUpRowsEnabled=$${legacyHealth ? 'true' : 'false'}; slackActionPollEnabled=$${legacyHealth ? 'true' : 'false'}; p0SlackEscalationEnabled=$${legacyHealth ? 'true' : 'false'}; slackBotTokenPresent=$true; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2; workOrchestrator=[pscustomobject]@${workOrchestrator}}; gateway=[pscustomobject]@{gatewayReady=$true; consumer=[pscustomobject]@{fresh=$${fresh ? 'true' : 'false'}}; queue=[pscustomobject]@{ready=${ready}; claimed=${claimed}; retry=${retry}; failed=${failed}}; unnotified_application_failures=${unnotified}}}`,
+    `$health=[pscustomobject]@{ok=$true; workOrchestrator=[pscustomobject]@{ok=$${invariantHealthy ? 'true' : 'false'}}; config=[pscustomobject]@{hermesTransport='gateway'; scheduleOwnerReviewRequired=$true; killSwitchPolicyEnforced=$true; workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$${legacyHealth ? 'true' : 'false'}; followUpRowsEnabled=$${legacyHealth ? 'true' : 'false'}; slackActionPollEnabled=$${legacyHealth ? 'true' : 'false'}; p0SlackEscalationEnabled=$${legacyHealth ? 'true' : 'false'}; slackBotTokenPresent=$true; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2; workOrchestrator=[pscustomobject]@${workOrchestrator}}; gateway=[pscustomobject]@{gatewayReady=$true; consumer=[pscustomobject]@{fresh=$${fresh ? 'true' : 'false'}}; queue=[pscustomobject]@{ready=${ready}; claimed=${claimed}; retry=${retry}; failed=${failed}}; unnotified_application_failures=${unnotified}}}`,
     `$probe=[pscustomobject]@{state='healthy'; cdpReady=$true; authenticated=$true; watcherReady=$true}`,
     `$runtime=[pscustomobject]@{profile='kakaoworker'; pid=123; pluginPath='C:\\fixture\\kakao_village'; manifestSha256=('a' * 64); pluginReceiptVerified=$${receiptVerified ? 'true' : 'false'}}`,
     `$smoke=[pscustomobject]@{nativeSessionResult='pass'; scheduleOwnerReviewRequired=$true; sendCount=0; writeCount=0; killSwitchObserved='active'}`,
@@ -156,6 +157,10 @@ function gatewayWatchdogHealth({
     return false;
   }
 }
+
+test('watchdog keeps a ready matching runtime alive while Work Orchestrator debt heals', () => {
+  assert.equal(gatewayWatchdogHealth({ invariantHealthy: false }), true);
+});
 
 function verifyPluginReceipt({ tamper = false } = {}) {
   const temp = mkdtempSync(path.join(tmpdir(), 'kakao-plugin-receipt-'));
