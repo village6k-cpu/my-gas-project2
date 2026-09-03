@@ -165,13 +165,19 @@ function boundedSourceKeys(values) {
 
 function sourceEventKeys(row, job) {
   const payload = isRecord(row?.payload) ? row.payload : {};
+  const jobEventKeys = Array.isArray(job?.events)
+    ? job.events.slice(0, 100).flatMap((event) => (isRecord(event)
+      ? [event.source_event_key, event.event_hash, event.eventHash]
+      : []))
+    : [];
   return boundedSourceKeys([
     Array.isArray(row?.source_event_keys) ? row.source_event_keys : [],
     row?.source_event_key,
     payload.source_event_key,
     job?.source_event_key,
     job?.event_hash,
-    job?.eventHash
+    job?.eventHash,
+    jobEventKeys
   ]);
 }
 

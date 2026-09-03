@@ -312,6 +312,31 @@ test('candidate output is bounded, table-shaped, JSON-safe, and payload-allowlis
   ]);
 });
 
+test('debounced work keeps every exact receipt event key for later cleanup linkage', () => {
+  const [candidate] = buildHumanWorkCandidates({
+    now: NOW,
+    job: {
+      eventHash: 'event-job',
+      events: [
+        { eventHash: 'event-receipt-b' },
+        { event_hash: 'event-receipt-a' },
+        { source_event_key: 'event-receipt-b' }
+      ]
+    },
+    followUpRows: [{
+      work_key: 'room:1:failure',
+      source_event_key: 'event-row',
+      room_key: 'room:1',
+      type: 'automation_error_review',
+      requires_human_action: true
+    }]
+  });
+
+  assert.deepEqual(candidate.source_event_keys, [
+    'event-job', 'event-receipt-a', 'event-receipt-b', 'event-row'
+  ]);
+});
+
 test('unsupported typed work and state values fail closed', () => {
   assert.throws(
     () => buildHumanWorkCandidates({ followUpRows: [{ work_key: 'x', type: 'invented_business_judgment' }] }),
