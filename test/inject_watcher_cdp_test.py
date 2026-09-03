@@ -60,6 +60,38 @@ def healthy_extension_probe(**overrides):
 
 
 class WatcherHealthTest(unittest.TestCase):
+    def test_repairs_stale_target_metadata_when_runtime_is_still_about_blank(self):
+        class FakeCDP:
+            def __init__(self):
+                self.paths = iter(["blank", "/_xhPMls/chats"])
+                self.navigations = []
+
+            def call(self, method, params=None):
+                if method == "Runtime.evaluate":
+                    return {
+                        "result": {
+                            "result": {
+                                "value": next(self.paths),
+                            }
+                        }
+                    }
+                if method == "Page.navigate":
+                    self.navigations.append(params["url"])
+                    return {"result": {}}
+                raise AssertionError(f"unexpected CDP method: {method}")
+
+        cdp = FakeCDP()
+        destination = "https://business.kakao.com/_xhPMls/chats"
+
+        self.assertTrue(
+            INJECTOR.ensure_chat_list_runtime(
+                cdp,
+                destination,
+                wait_seconds=0.1,
+            )
+        )
+        self.assertEqual(cdp.navigations, [destination])
+
     def test_accepts_the_running_extension_after_a_repair_reload_removes_the_cdp_watcher(self):
         self.assertTrue(
             INJECTOR.watcher_is_healthy(

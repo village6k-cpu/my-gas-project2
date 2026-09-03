@@ -239,6 +239,38 @@ def extract_watcher_version(content_js: str) -> str:
     return match.group(1)
 
 
+def runtime_location_path(cdp: CDPWebSocket) -> str | None:
+    location = cdp.call("Runtime.evaluate", {
+        "expression": "location.pathname",
+        "returnByValue": True,
+    })
+    value = location.get("result", {}).get("result", {}).get("value")
+    return value if isinstance(value, str) else None
+
+
+def ensure_chat_list_runtime(
+    cdp: CDPWebSocket,
+    destination: str,
+    wait_seconds: float,
+    allow_navigation: bool = True,
+) -> bool:
+    destination_path = urlparse(destination).path.rstrip("/")
+    if (runtime_location_path(cdp) or "").rstrip("/") == destination_path:
+        return True
+    if not allow_navigation:
+        return False
+
+    navigation = cdp.call("Page.navigate", {"url": destination})
+    if navigation.get("error"):
+        raise RuntimeError("Kakao chat-list navigation failed")
+    navigation_deadline = time.time() + wait_seconds
+    while time.time() < navigation_deadline:
+        if (runtime_location_path(cdp) or "").rstrip("/") == destination_path:
+            return True
+        time.sleep(0.25)
+    raise RuntimeError("Kakao chat-list navigation timed out")
+
+
 def probe_watcher(cdp: CDPWebSocket) -> dict[str, Any] | None:
     verify = cdp.call("Runtime.evaluate", {
         "expression": r"""(async () => {
@@ -416,26 +448,15 @@ def main() -> int:
         cdp.call("Runtime.enable")
         cdp.call("Page.enable")
         destination = chat_list_url(str(page.get("url") or ""))
-        current = urlparse(str(page.get("url") or ""))
-        if current.path.rstrip("/") != urlparse(destination).path.rstrip("/"):
-            if args.probe_only:
-                print(json.dumps({"ok": False, **classification, "state": "watcher_repair_required", "watcherReady": False}, ensure_ascii=False))
-                return 2
-            navigation = cdp.call("Page.navigate", {"url": destination})
-            if navigation.get("error"):
-                raise RuntimeError("Kakao chat-list navigation failed")
-            navigation_deadline = time.time() + args.wait
-            while time.time() < navigation_deadline:
-                location = cdp.call("Runtime.evaluate", {
-                    "expression": "location.pathname",
-                    "returnByValue": True,
-                })
-                path = location.get("result", {}).get("result", {}).get("value")
-                if isinstance(path, str) and CHAT_LIST_PATH_RE.fullmatch(path):
-                    break
-                time.sleep(0.25)
-            else:
-                raise RuntimeError("Kakao chat-list navigation timed out")
+        runtime_ready = ensure_chat_list_runtime(
+            cdp,
+            destination,
+            wait_seconds=args.wait,
+            allow_navigation=not args.probe_only,
+        )
+        if not runtime_ready:
+            print(json.dumps({"ok": False, **classification, "state": "watcher_repair_required", "watcherReady": False}, ensure_ascii=False))
+            return 2
         if args.probe_only:
             value = probe_watcher(cdp)
             healthy = watcher_is_healthy(value, expected_extension_version)
