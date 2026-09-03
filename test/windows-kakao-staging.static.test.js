@@ -16,6 +16,7 @@ const register = read('scripts/windows/register-kakao-scheduled-tasks.ps1');
 const runbook = read('docs/windows-kakao-hermes-migration-runbook.md');
 const envExample = read('scripts/windows/.env.windows.example');
 const bridgeServer = read('tools/kakao-dom-bridge/server.mjs');
+const workOrchestratorContracts = read('tools/work-orchestrator-v2/contracts.mjs');
 const workerWrapperPath = path.join(root, 'scripts/windows/windows-ai-worker.mjs');
 const workerWrapper = fs.existsSync(workerWrapperPath) ? fs.readFileSync(workerWrapperPath, 'utf8') : '';
 const allScripts = [common, start, status, stop, restart].join('\n');
@@ -238,7 +239,11 @@ test('canonical 1 and 0 booleans are consumed consistently by PowerShell and the
   assert.match(bridgeServer, /function\s+readBooleanEnvironment/);
   assert.match(
     bridgeServer,
-    /slackActionPollEnabled:\s*readBooleanEnvironment\(process\.env\.SLACK_ACTION_POLL_ENABLED,\s*true\)/
+    /slackActionPollEnabled:\s*CUTOVER_CONFIG\.legacyActionPollEnabled/
+  );
+  assert.match(
+    workOrchestratorContracts,
+    /readStrictBooleanEnvironment\(env\.SLACK_ACTION_POLL_ENABLED,\s*true,\s*'SLACK_ACTION_POLL_ENABLED'\)/
   );
   assert.match(
     bridgeServer,
