@@ -1127,7 +1127,7 @@ test('Gateway failure notification keeps pending when enabled Slack returns a ne
   assert.equal(marks, 0);
 });
 
-test('worker failure routing writes stable v2 human work and legacy rows only in enabled modes', async () => {
+test('worker failure routing keeps technical failures out of v2 owner work', async () => {
   const job = {
     id: 'aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaa1',
     jobId: 'worker-job-1',
@@ -1168,19 +1168,14 @@ test('worker failure routing writes stable v2 human work and legacy rows only in
 
   const overlap = await runMode({ legacyEnabled: true, workItemsEnabled: true });
   assert.equal(overlap.legacyRows.length, 1);
-  assert.equal(overlap.workCandidates.length, 1);
-  assert.equal(overlap.result.workOrchestratorV2.applied, true);
+  assert.equal(overlap.workCandidates.length, 0);
+  assert.deepEqual(overlap.result.workOrchestratorV2, { skipped: true, reason: 'operational_only' });
 
   const cutover = await runMode({ legacyEnabled: false, workItemsEnabled: true });
   assert.equal(cutover.legacyRows.length, 0);
-  assert.equal(cutover.workCandidates.length, 1);
+  assert.equal(cutover.workCandidates.length, 0);
   assert.equal(cutover.result.legacy.skipped, true);
-  assert.equal(cutover.workCandidates[0].work_key, overlap.workCandidates[0].work_key);
-  assert.match(cutover.workCandidates[0].work_key, /^bridge-failure:room:worker-failure:[0-9a-f]{16}$/);
-  assert.equal(cutover.workCandidates[0].automation_state, 'needs_human');
-  assert.equal(cutover.workCandidates[0].payload.requires_human_action, true);
-  assert.equal(JSON.stringify(cutover.workCandidates[0]).includes('private customer conversation'), false);
-  assert.equal(JSON.stringify(cutover.workCandidates[0]).includes('private technical failure detail'), false);
+  assert.deepEqual(cutover.result.workOrchestratorV2, { skipped: true, reason: 'operational_only' });
 });
 
 test('v2 bridge action maintenance leaves the legacy poller idle while the v2 poller remains active', async () => {

@@ -188,7 +188,7 @@ test('reviewed payload work keys and reviewed legacy follow-up keys map without 
 
 test('an arbitrary untyped key-only row is not promoted into human work', () => {
   assert.throws(
-    () => buildHumanWorkCandidates({ followUpRows: [{ payload: { work_key: 'audit:1' } }] }),
+    () => buildHumanWorkCandidates({ followUpRows: [{ work_key: 'audit:1', requires_human_action: true }] }),
     /explicit human work type/i
   );
 });
@@ -209,6 +209,26 @@ test('explicit non-human, terminal, and completed-log rows never become work', (
   assert.deepEqual(candidates, []);
 });
 
+test('only explicit semantic owner actions become work while operational failures stay internal', () => {
+  const candidates = buildHumanWorkCandidates({
+    now: NOW,
+    followUpRows: [
+      { work_key: 'trade:implicit', type: 'payment_check' },
+      { work_key: 'trade:false', type: 'payment_check', requires_human_action: false },
+      { work_key: 'room:error', type: 'automation_error_review', requires_human_action: true },
+      { work_key: 'room:timeout', type: 'reservation_review_timeout', requires_human_action: true },
+      {
+        work_key: 'room:reply',
+        type: 'reply_needed',
+        requires_human_action: true,
+        recommended_action: '고객에게 답변하기'
+      }
+    ]
+  });
+
+  assert.deepEqual(candidates.map((item) => item.work_key), ['room:reply']);
+});
+
 test('human-action flags must remain typed booleans', () => {
   assert.throws(
     () => buildHumanWorkCandidates({
@@ -220,24 +240,24 @@ test('human-action flags must remain typed booleans', () => {
 
 test('missing, blank, non-canonical, and name-only keys fail closed', () => {
   assert.throws(
-    () => buildHumanWorkCandidates({ followUpRows: [{ type: 'reservation_review', customer_name: '동명이인' }] }),
+    () => buildHumanWorkCandidates({ followUpRows: [{ type: 'reservation_review', customer_name: '동명이인', requires_human_action: true }] }),
     /typed work_key/i
   );
   assert.throws(
-    () => buildHumanWorkCandidates({ followUpRows: [{ type: 'reservation_review', work_key: '   ' }] }),
+    () => buildHumanWorkCandidates({ followUpRows: [{ type: 'reservation_review', work_key: '   ', requires_human_action: true }] }),
     /typed work_key/i
   );
   assert.throws(
-    () => buildHumanWorkCandidates({ followUpRows: [{ type: 'reservation_review', work_key: ' room:1 ' }] }),
+    () => buildHumanWorkCandidates({ followUpRows: [{ type: 'reservation_review', work_key: ' room:1 ', requires_human_action: true }] }),
     /typed work_key/i
   );
   assert.throws(
-    () => buildHumanWorkCandidates({ followUpRows: [{ type: 'reservation_review', work_key: 'x'.repeat(501) }] }),
+    () => buildHumanWorkCandidates({ followUpRows: [{ type: 'reservation_review', work_key: 'x'.repeat(501), requires_human_action: true }] }),
     /typed work_key/i
   );
   assert.throws(
     () => buildHumanWorkCandidates({
-      followUpRows: [{ work_key: 'room:1', follow_up_key: 'room:2', type: 'reservation_review' }]
+      followUpRows: [{ work_key: 'room:1', follow_up_key: 'room:2', type: 'reservation_review', requires_human_action: true }]
     }),
     /typed work_key is ambiguous/i
   );
@@ -247,8 +267,8 @@ test('same-name people remain separate when their explicit stable keys differ', 
   const candidates = buildHumanWorkCandidates({
     now: NOW,
     followUpRows: [
-      { work_key: 'trade:1:payment', type: 'payment_check', customer_name: '동명이인' },
-      { work_key: 'trade:2:payment', type: 'payment_check', customer_name: '동명이인' }
+      { work_key: 'trade:1:payment', type: 'payment_check', customer_name: '동명이인', requires_human_action: true },
+      { work_key: 'trade:2:payment', type: 'payment_check', customer_name: '동명이인', requires_human_action: true }
     ]
   });
 
@@ -312,8 +332,8 @@ test('candidate output is bounded, table-shaped, JSON-safe, and payload-allowlis
   ]);
 });
 
-test('debounced work keeps every exact receipt event key for later cleanup linkage', () => {
-  const [candidate] = buildHumanWorkCandidates({
+test('operational failure rows do not create cleanup-linked owner work', () => {
+  const candidates = buildHumanWorkCandidates({
     now: NOW,
     job: {
       eventHash: 'event-job',
@@ -332,18 +352,16 @@ test('debounced work keeps every exact receipt event key for later cleanup linka
     }]
   });
 
-  assert.deepEqual(candidate.source_event_keys, [
-    'event-job', 'event-receipt-a', 'event-receipt-b', 'event-row'
-  ]);
+  assert.deepEqual(candidates, []);
 });
 
 test('unsupported typed work and state values fail closed', () => {
   assert.throws(
-    () => buildHumanWorkCandidates({ followUpRows: [{ work_key: 'x', type: 'invented_business_judgment' }] }),
+    () => buildHumanWorkCandidates({ followUpRows: [{ work_key: 'x', type: 'invented_business_judgment', requires_human_action: true }] }),
     /unsupported human work type/i
   );
   assert.throws(
-    () => buildHumanWorkCandidates({ followUpRows: [{ work_key: 'x', type: 'payment_check', status: 'mystery' }] }),
+    () => buildHumanWorkCandidates({ followUpRows: [{ work_key: 'x', type: 'payment_check', status: 'mystery', requires_human_action: true }] }),
     /invalid human work state/i
   );
 });

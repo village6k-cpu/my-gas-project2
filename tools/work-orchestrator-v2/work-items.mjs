@@ -25,6 +25,10 @@ const WORK_TYPES = new Set([
   'reservation_review_timeout',
   'automation_error_review'
 ]);
+const OPERATIONAL_ONLY_WORK_TYPES = new Set([
+  'reservation_review_timeout',
+  'automation_error_review'
+]);
 const ACTIVE_STATES = new Set(['open', 'in_progress', 'snoozed']);
 const TERMINAL_STATES = new Set(['resolved', 'dismissed']);
 const TERMINAL_SOURCE_STATES = new Set(['done', 'completed', ...TERMINAL_STATES]);
@@ -124,7 +128,7 @@ function humanActionRequirement(row) {
     throw new Error('requires_human_action must be boolean');
   }
   return {
-    disabled: supplied.includes(false),
+    disabled: supplied.includes(false) || !supplied.includes(true),
     explicitHumanAction: supplied.includes(true)
   };
 }
@@ -254,7 +258,7 @@ export function buildHumanWorkCandidates(input = {}) {
     const state = sourceState(row);
     if (TERMINAL_SOURCE_STATES.has(state)) continue;
     const type = humanWorkType(row, requirement);
-    if (type === 'completed_log') continue;
+    if (type === 'completed_log' || OPERATIONAL_ONLY_WORK_TYPES.has(type)) continue;
     eligible.push({ row, type, workType: type, workKey: stableWorkKey(row) });
   }
 
