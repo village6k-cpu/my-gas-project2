@@ -399,8 +399,11 @@ function Test-KakaoGatewayWatchdogHealth {
         [Parameter(Mandatory = $true)][psobject]$SmokeEvidence
     )
 
-    return Test-KakaoGatewayHealthContract -Health $Health -RuntimeProbe $RuntimeProbe `
-        -GatewayRuntime $GatewayRuntime -SmokeEvidence $SmokeEvidence -RequireCleanHistory $false
+    return [bool](
+        (Test-KakaoLiveBridgeContract -Health $Health) -and
+        (Test-KakaoGatewayHealthContract -Health $Health -RuntimeProbe $RuntimeProbe `
+            -GatewayRuntime $GatewayRuntime -SmokeEvidence $SmokeEvidence -RequireCleanHistory $false)
+    )
 }
 
 function Test-KakaoLiveBridgeContract {

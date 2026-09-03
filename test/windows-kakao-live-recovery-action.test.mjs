@@ -128,13 +128,20 @@ function gatewayWatchdogHealth({
   failed = 0,
   unnotified = 0,
   fresh = true,
-  receiptVerified = true
+  receiptVerified = true,
+  targetMode = 'v2',
+  healthMode = 'v2'
 } = {}) {
   const escapedPath = modulePath.replaceAll("'", "''");
+  const legacyHealth = healthMode === 'legacy';
+  const workOrchestrator = legacyHealth
+    ? `{runtimeMode='legacy';shadowWrites=$false;immediateEnabled=$false;workItemsEnabled=$false;digestEnabled=$false;cleanupEnabled=$false;p0ReadbackEnabled=$false;p0CutoverEnabled=$false}`
+    : `{runtimeMode='v2';shadowWrites=$true;immediateEnabled=$true;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$true;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true;cleanupLocalConfigReady=$true}`;
   const command = [
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
-    `$health=[pscustomobject]@{ok=$true; config=[pscustomobject]@{hermesTransport='gateway'; scheduleOwnerReviewRequired=$true; killSwitchPolicyEnforced=$true}; gateway=[pscustomobject]@{gatewayReady=$true; consumer=[pscustomobject]@{fresh=$${fresh ? 'true' : 'false'}}; queue=[pscustomobject]@{ready=${ready}; claimed=${claimed}; retry=${retry}; failed=${failed}}; unnotified_application_failures=${unnotified}}}`,
+    `$env:WORK_ORCHESTRATOR_V2_RUNTIME_MODE='${targetMode}'`,
+    `$health=[pscustomobject]@{ok=$true; workOrchestrator=[pscustomobject]@{ok=$true}; config=[pscustomobject]@{hermesTransport='gateway'; scheduleOwnerReviewRequired=$true; killSwitchPolicyEnforced=$true; workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$${legacyHealth ? 'true' : 'false'}; followUpRowsEnabled=$${legacyHealth ? 'true' : 'false'}; slackActionPollEnabled=$${legacyHealth ? 'true' : 'false'}; p0SlackEscalationEnabled=$${legacyHealth ? 'true' : 'false'}; slackBotTokenPresent=$true; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2; workOrchestrator=[pscustomobject]@${workOrchestrator}}; gateway=[pscustomobject]@{gatewayReady=$true; consumer=[pscustomobject]@{fresh=$${fresh ? 'true' : 'false'}}; queue=[pscustomobject]@{ready=${ready}; claimed=${claimed}; retry=${retry}; failed=${failed}}; unnotified_application_failures=${unnotified}}}`,
     `$probe=[pscustomobject]@{state='healthy'; cdpReady=$true; authenticated=$true; watcherReady=$true}`,
     `$runtime=[pscustomobject]@{profile='kakaoworker'; pid=123; pluginPath='C:\\fixture\\kakao_village'; manifestSha256=('a' * 64); pluginReceiptVerified=$${receiptVerified ? 'true' : 'false'}}`,
     `$smoke=[pscustomobject]@{nativeSessionResult='pass'; scheduleOwnerReviewRequired=$true; sendCount=0; writeCount=0; killSwitchObserved='active'}`,
@@ -246,6 +253,7 @@ test('Gateway cutover health fails closed on queue, consumer, or plugin receipt 
 test('Gateway watchdog ignores terminal history but still requires an idle safe live path', () => {
   assert.equal(gatewayWatchdogHealth(), true);
   assert.equal(gatewayWatchdogHealth({ failed: 3, unnotified: 1 }), true);
+  assert.equal(gatewayWatchdogHealth({ targetMode: 'v2', healthMode: 'legacy' }), false);
   assert.equal(gatewayWatchdogHealth({ ready: 1 }), false);
   assert.equal(gatewayWatchdogHealth({ claimed: 1 }), false);
   assert.equal(gatewayWatchdogHealth({ retry: 1 }), false);
