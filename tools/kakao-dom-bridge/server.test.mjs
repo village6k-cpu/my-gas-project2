@@ -1127,7 +1127,7 @@ test('Gateway failure notification keeps pending when enabled Slack returns a ne
   assert.equal(marks, 0);
 });
 
-test('worker failure routing writes stable v2 human work and legacy rows only in enabled modes', async () => {
+test('worker failure routing keeps technical failures out of v2 owner work', async () => {
   const job = {
     id: 'aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaa1',
     jobId: 'worker-job-1',
@@ -1168,19 +1168,14 @@ test('worker failure routing writes stable v2 human work and legacy rows only in
 
   const overlap = await runMode({ legacyEnabled: true, workItemsEnabled: true });
   assert.equal(overlap.legacyRows.length, 1);
-  assert.equal(overlap.workCandidates.length, 1);
-  assert.equal(overlap.result.workOrchestratorV2.applied, true);
+  assert.equal(overlap.workCandidates.length, 0);
+  assert.deepEqual(overlap.result.workOrchestratorV2, { skipped: true, reason: 'operational_only' });
 
   const cutover = await runMode({ legacyEnabled: false, workItemsEnabled: true });
   assert.equal(cutover.legacyRows.length, 0);
-  assert.equal(cutover.workCandidates.length, 1);
+  assert.equal(cutover.workCandidates.length, 0);
   assert.equal(cutover.result.legacy.skipped, true);
-  assert.equal(cutover.workCandidates[0].work_key, overlap.workCandidates[0].work_key);
-  assert.match(cutover.workCandidates[0].work_key, /^bridge-failure:room:worker-failure:[0-9a-f]{16}$/);
-  assert.equal(cutover.workCandidates[0].automation_state, 'needs_human');
-  assert.equal(cutover.workCandidates[0].payload.requires_human_action, true);
-  assert.equal(JSON.stringify(cutover.workCandidates[0]).includes('private customer conversation'), false);
-  assert.equal(JSON.stringify(cutover.workCandidates[0]).includes('private technical failure detail'), false);
+  assert.deepEqual(cutover.result.workOrchestratorV2, { skipped: true, reason: 'operational_only' });
 });
 
 test('v2 bridge action maintenance leaves the legacy poller idle while the v2 poller remains active', async () => {
@@ -2580,8 +2575,8 @@ test('v2 P0 review round 1 cutover controls are distinct, default OFF, and readb
 test('v2 cutover guard validates the bridge startup target independently', () => {
   const validTarget = {
     WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
-    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
-    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '0',
+    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
     WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
@@ -2598,10 +2593,9 @@ test('v2 cutover guard validates the bridge startup target independently', () =>
   assert.throws(
     () => validateWorkOrchestratorV2CutoverConfig({
       ...validTarget,
-      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
-      WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0'
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1'
     }),
-    /legacy cards.*immediate/i
+    /exact cutover/i
   );
   assert.throws(
     () => validateWorkOrchestratorV2CutoverConfig({
@@ -2625,9 +2619,9 @@ test('v2 cutover guard validates the bridge startup target independently', () =>
       AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
       KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
       P0_SLACK_ESCALATION_ENABLED: '1',
-      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0'
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1'
     }),
-    /cleanup.*immediate/i
+    /exact cutover/i
   );
 });
 
@@ -2637,7 +2631,7 @@ test('v2 cutover guard blocks invalid bridge module startup', () => {
     ['false legacy card flag', { SLACK_AGENT_CARD_DELIVERY_ENABLED: 'false' }, []],
     ['mixed legacy work flags', { KAKAO_FOLLOW_UP_ITEMS_ENABLED: 'false' }, []],
     ['legacy P0 false', { P0_SLACK_ESCALATION_ENABLED: 'false' }, []],
-    ['cleanup without immediate', { WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1' }, []]
+    ['v2 immediate leak', { WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2', WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1' }, []]
   ]) {
     const env = { ...process.env, ...SAFE_PRE_CUTOVER_ENV, ...overrides, KAKAO_DOM_BRIDGE_NO_LISTEN: '1' };
     for (const key of omitted) delete env[key];
@@ -2645,7 +2639,7 @@ test('v2 cutover guard blocks invalid bridge module startup', () => {
       cwd: bridgeDirectory, env, encoding: 'utf8'
     });
     assert.equal(result.status, 1, name);
-    assert.match(`${result.stdout}\n${result.stderr}`, /cutover guard/i, name);
+    assert.match(`${result.stdout}\n${result.stderr}`, /cutover/i, name);
   }
 });
 
@@ -4566,7 +4560,7 @@ test('immediate notification gate rejects every non-delivered runtime result bef
   }
 });
 
-test('immediate notification OFF makes zero store or Slack calls and preserves legacy duplicate behavior', async () => {
+test('silent v2 intake persists and queues accepted events without shadow receipts or Slack calls', async () => {
   const calls = [];
   const runtime = createWorkOrchestratorImmediateRuntime({
     config: { immediateEnabled: false },
@@ -4580,7 +4574,10 @@ test('immediate notification OFF makes zero store or Slack calls and preserves l
   });
   const dependencies = {
     appendNdjson: () => {},
-    shadowRuntime: { recordAccepted: (_, roomVersion) => calls.push(`shadow:${roomVersion.changed}`) },
+    shadowRuntime: {
+      enabled: false,
+      recordAccepted: () => calls.push('shadow-receipt')
+    },
     immediateRuntime: runtime,
     writeSupabaseEvent: async () => calls.push('legacy-write'),
     scheduleDebouncedJob: () => calls.push('legacy-queue')
@@ -4591,7 +4588,7 @@ test('immediate notification OFF makes zero store or Slack calls and preserves l
 
   assert.deepEqual(first.body, { ok: true, roomKey: 'chat:immediate-off', eventHash: 'immediate-off-1' });
   assert.deepEqual(duplicate.body, first.body);
-  assert.deepEqual(calls, ['shadow:true', 'legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
+  assert.deepEqual(calls, ['legacy-write', 'legacy-queue', 'legacy-write', 'legacy-queue']);
 });
 
 test('immediate notification startup is locally fail-closed and performs no network at construction', () => {
@@ -4667,6 +4664,7 @@ test('Work Orchestrator shadow starts after revision acceptance and does not blo
   let settleShadow;
   const shadowPending = new Promise((resolve) => { settleShadow = resolve; });
   const shadowRuntime = {
+    enabled: true,
     recordAccepted(event, roomVersion) {
       calls.push(`shadow:${event.roomRevision}:${roomVersion.changed}`);
       return shadowPending;

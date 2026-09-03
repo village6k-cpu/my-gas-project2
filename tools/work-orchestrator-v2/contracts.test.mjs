@@ -152,8 +152,8 @@ test('runtime mode defaults to the exact legacy rollback contract and rejects un
 test('runtime mode validates the exact v2 target and exact legacy rollback sender contracts', () => {
   const exactV2 = resolveWorkOrchestratorV2CutoverConfig({
     WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
-    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
-    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '0',
+    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
     WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
@@ -166,6 +166,9 @@ test('runtime mode validates the exact v2 target and exact legacy rollback sende
     P0_SLACK_ESCALATION_ENABLED: '0'
   });
   assert.equal(exactV2.runtimeMode, 'v2');
+  assert.equal(exactV2.shadowWrites, false);
+  assert.equal(exactV2.immediateEnabled, false);
+  assert.equal(exactV2.cleanupEnabled, true);
   assert.equal(exactV2.legacyP0Enabled, false);
   assert.equal(exactV2.p0CutoverEnabled, true);
   assert.equal(exactV2.legacyActionPollEnabled, false);
@@ -250,7 +253,7 @@ test('effective v2 P0 rejects legacy-off unless work items, readback, and cutove
   assert.throws(
     () => resolveWorkOrchestratorV2CutoverConfig({
       WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
-      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
       WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
       WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
       WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',

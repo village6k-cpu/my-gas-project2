@@ -36,7 +36,8 @@ test('Bridge health exposes runtime-mode-derived follow-up and Slack gates', () 
   assert.match(bridge, /slackChannels:\s*CONFIG\.slackChannels/);
 });
 
-test('Bridge failure follow-ups are delivered to Slack, not only inserted into Supabase', () => {
+test('Bridge failures stay legacy-deliverable but remain operational-only in v2', () => {
+  const failureRoute = bridge.match(/export async function routeWorkerFailureFollowUp[\s\S]*?\nasync function createWorkerFailureFollowUp/)?.[0] || '';
   assert.match(bridge, /import \{ buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows \}/);
   assert.match(bridge, /slackFollowUpEnabled:\s*CONFIG\.slackCardDeliveryEnabled/);
   assert.match(bridge, /slackBotToken:\s*CONFIG\.slackBotToken/);
@@ -44,8 +45,9 @@ test('Bridge failure follow-ups are delivered to Slack, not only inserted into S
   assert.match(bridge, /workItemsEnabled:\s*CONFIG\.workOrchestrator\.workItemsEnabled/);
   assert.match(bridge, /legacyUpsert:\s*\(rows\) => upsertFollowUpRows\(followUp, rows\)/);
   assert.match(bridge, /legacyDeliver:\s*\(rows\) => deliverSlackFollowUpRows\(followUp, rows\)/);
-  assert.match(bridge, /if \(legacyEnabled\)[\s\S]*?legacy = await legacyUpsert\(\[row\]\)/);
-  assert.match(bridge, /if \(workItemsEnabled\)[\s\S]*?workStore\.upsertWorkItem/);
+  assert.match(failureRoute, /if \(legacyEnabled\)[\s\S]*?legacy = await legacyUpsert\(\[row\]\)/);
+  assert.match(failureRoute, /workItemsEnabled[\s\S]*?reason: 'operational_only'/);
+  assert.doesNotMatch(failureRoute, /upsertWorkItem/);
   assert.match(bridge, /worker_failure_followup_slack_delivery/);
 });
 

@@ -138,20 +138,14 @@ export function resolveWorkOrchestratorV2CutoverConfig(env = process.env) {
   if (p0CutoverEnabled && !p0ReadbackEnabled) {
     throw new Error('Work Orchestrator v2 P0 cutover requires readback');
   }
-  if (!legacyCardsEnabled && !workOrchestrator.immediateEnabled) {
-    throw new Error('Work Orchestrator v2 cutover guard: legacy cards require v2 immediate notifications');
-  }
   if (!legacyWorkRowsEnabled && !workOrchestrator.workItemsEnabled) {
     throw new Error('Work Orchestrator v2 cutover guard: legacy work rows require v2 work items');
   }
   if (!legacyP0Enabled && !(workOrchestrator.workItemsEnabled && p0ReadbackEnabled && p0CutoverEnabled)) {
     throw new Error('Work Orchestrator v2 cutover guard: legacy P0 requires v2 work items, readback, and cutover');
   }
-  if (workOrchestrator.cleanupEnabled && !workOrchestrator.immediateEnabled) {
-    throw new Error('Work Orchestrator v2 cutover guard: cleanup requires v2 immediate notifications');
-  }
-  const v2FlagsEnabled = workOrchestrator.shadowWrites
-    && workOrchestrator.immediateEnabled
+  const v2FlagsEnabled = !workOrchestrator.shadowWrites
+    && !workOrchestrator.immediateEnabled
     && workOrchestrator.workItemsEnabled
     && workOrchestrator.digestEnabled
     && workOrchestrator.cleanupEnabled
@@ -165,11 +159,11 @@ export function resolveWorkOrchestratorV2CutoverConfig(env = process.env) {
     || workOrchestrator.shadowWrites || workOrchestrator.immediateEnabled
     || workOrchestrator.workItemsEnabled || workOrchestrator.digestEnabled
     || workOrchestrator.cleanupEnabled || p0ReadbackEnabled || p0CutoverEnabled)) {
-    throw new Error('Work Orchestrator legacy runtime mode requires the exact rollback contract');
+    throw new Error('Work Orchestrator cutover guard: legacy runtime mode requires the exact rollback contract');
   }
   if (runtimeMode === 'v2' && (!v2FlagsEnabled || legacyCardsEnabled
     || legacyWorkRowsEnabled || legacyP0Enabled || legacyActionPollEnabled)) {
-    throw new Error('Work Orchestrator v2 runtime mode requires the exact cutover contract');
+    throw new Error('Work Orchestrator v2 cutover guard: runtime mode requires the exact cutover contract');
   }
   return {
     runtimeMode,

@@ -6,11 +6,32 @@ const SLACK_USER_ID = /^[UW][A-Z0-9]{1,79}$/;
 const ACTIVE_STATES = new Set(['open', 'in_progress', 'snoozed']);
 const TERMINAL_STATES = new Set(['resolved', 'dismissed']);
 const PRIORITIES = new Set(['p0', 'urgent', 'normal', 'low']);
+const OWNER_ACTION_WORK_TYPES = new Set([
+  'human_review',
+  'reply_needed',
+  'quote_send',
+  'tax_invoice',
+  'schedule_check',
+  'reservation_review',
+  'price_review',
+  'payment_check',
+  'contract_document',
+  'return_extension',
+  'damage_repair',
+  'sheet_duplicate_check'
+]);
 const SECTIONS = Object.freeze(['p0', 'overdue', 'urgent', 'carry_over', 'actionable']);
+const SECTION_LABELS = Object.freeze({
+  p0: '즉시 확인',
+  overdue: '기한 경과',
+  urgent: '우선 처리',
+  carry_over: '미처리',
+  actionable: '대표님 할 일'
+});
 const SECTION_RANK = new Map(SECTIONS.map((section, index) => [section, index]));
 const INCLUSION_REASONS = new Set([...SECTIONS, 'daily_reminder']);
 const SELECTED_KEYS = Object.freeze([
-  'id', 'version', 'title', 'summary', 'ownerId', 'roomKey', 'priority', 'dueAt',
+  'id', 'version', 'title', 'summary', 'workType', 'recommendedAction', 'ownerId', 'roomKey', 'priority', 'dueAt',
   'firstOpenedAt', 'section', 'inclusionReason', 'ownerMentionRequired', 'dailyReminderDue'
 ]);
 const MAX_INPUT_ITEMS = 500;
@@ -31,6 +52,8 @@ const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{
  * @property {number} version
  * @property {string} title
  * @property {string} summary
+ * @property {string} workType
+ * @property {string} recommendedAction
  * @property {string|null} ownerId
  * @property {string} roomKey
  * @property {'p0'|'urgent'|'normal'|'low'} priority
@@ -124,6 +147,18 @@ function selectedSection(row, nowMs) {
   return 'actionable';
 }
 
+function ownerActionMetadata(row) {
+  if (!isRecord(row) || !isRecord(row.payload) || row.payload.requires_human_action !== true) return null;
+  if (typeof row.work_type !== 'string' || !OWNER_ACTION_WORK_TYPES.has(row.work_type)) return null;
+  const recommended = row.payload.recommended_action;
+  return {
+    workType: row.work_type,
+    recommendedAction: typeof recommended === 'string' && recommended.trim() === recommended && recommended.length > 0
+      ? exactText(recommended, 1200)
+      : exactText(row.title, 300)
+  };
+}
+
 function validateActiveRow(row, nowMs) {
   if (!isRecord(row)) throw invalidInput();
   const state = row.state;
@@ -180,9 +215,11 @@ function validateSelectedEntry(entry) {
   const id = exactText(entry.id, 36).toLowerCase();
   if (!UUID.test(id)) throw invalidInput();
   const priority = exactText(entry.priority, 20);
+  const workType = exactText(entry.workType, 100);
   const section = exactText(entry.section, 30);
   const inclusionReason = exactText(entry.inclusionReason, 30);
-  if (!PRIORITIES.has(priority) || !SECTION_RANK.has(section) || !INCLUSION_REASONS.has(inclusionReason)) {
+  if (!PRIORITIES.has(priority) || !OWNER_ACTION_WORK_TYPES.has(workType)
+    || !SECTION_RANK.has(section) || !INCLUSION_REASONS.has(inclusionReason)) {
     throw invalidInput();
   }
   if (typeof entry.ownerMentionRequired !== 'boolean' || typeof entry.dailyReminderDue !== 'boolean') {
@@ -195,6 +232,8 @@ function validateSelectedEntry(entry) {
     version: positiveVersion(entry.version),
     title: exactText(entry.title, 300),
     summary: summaryText(entry.summary),
+    workType,
+    recommendedAction: exactText(entry.recommendedAction, 1200),
     ownerId: optionalText(entry.ownerId, 200),
     roomKey: exactText(entry.roomKey, 500),
     priority,
@@ -229,6 +268,8 @@ export function selectDigestItems(items, now) {
 
     for (const row of items) {
       if (isRecord(row) && TERMINAL_STATES.has(row.state)) continue;
+      const ownerAction = ownerActionMetadata(row);
+      if (ownerAction === null) continue;
       const item = validateActiveRow(row, nowMs);
       if (seen.has(item.id)) throw invalidInput();
       seen.add(item.id);
@@ -246,6 +287,8 @@ export function selectDigestItems(items, now) {
         version: item.version,
         title: item.title,
         summary: item.summary,
+        workType: ownerAction.workType,
+        recommendedAction: ownerAction.recommendedAction,
         ownerId: item.ownerId,
         roomKey: item.roomKey,
         priority: item.priority,
@@ -386,8 +429,10 @@ function workBlock(item, config, presets, reminder) {
   const due = item.dueAt ? ` · 기한 ${escapeSlackText(item.dueAt, 40)}` : '';
   const reminderLabel = reminder ? ' · 매일 알림' : '';
   const lines = [
-    `${owner ? `${owner} ` : ''}*[${item.section}${reminderLabel}] ${escapeSlackText(item.title, MAX_RENDERED_TITLE)}*`,
-    `${escapeSlackText(item.summary, MAX_RENDERED_SUMMARY)}\n방 ${escapeSlackText(item.roomKey, MAX_RENDERED_ROOM)}${due}`
+    `${owner ? `${owner} ` : ''}*[${SECTION_LABELS[item.section]}${reminderLabel}] ${escapeSlackText(item.title, MAX_RENDERED_TITLE)}*`,
+    `직원이 정리한 내용: ${escapeSlackText(item.summary || item.title, 900)}`,
+    `대표님이 할 일: ${escapeSlackText(item.recommendedAction, 900)}`,
+    `방 ${escapeSlackText(item.roomKey, MAX_RENDERED_ROOM)}${due}`
   ];
   const text = lines.join('\n');
   if (text.length > MAX_SLACK_SECTION_TEXT) throw invalidInput();

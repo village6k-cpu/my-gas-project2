@@ -90,7 +90,7 @@ function combinedLiveHealth(runtimeState, { authenticated = true, watcherReady =
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
     `$env:WORK_ORCHESTRATOR_V2_RUNTIME_MODE='v2'`,
-    `$bridge=[pscustomobject]@{ok=$true; workOrchestrator=[pscustomobject]@{ok=$true}; config=[pscustomobject]@{workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$false; followUpRowsEnabled=$false; slackActionPollEnabled=$false; p0SlackEscalationEnabled=$false; slackBotTokenPresent=$true; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2; workOrchestrator=[pscustomobject]@{runtimeMode='v2';shadowWrites=$true;immediateEnabled=$true;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$true;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true;cleanupLocalConfigReady=$true}}}`,
+    `$bridge=[pscustomobject]@{ok=$true; workOrchestrator=[pscustomobject]@{ok=$true}; config=[pscustomobject]@{workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$false; followUpRowsEnabled=$false; slackActionPollEnabled=$false; p0SlackEscalationEnabled=$false; slackBotTokenPresent=$true; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2; workOrchestrator=[pscustomobject]@{runtimeMode='v2';shadowWrites=$false;immediateEnabled=$false;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$false;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true;cleanupLocalConfigReady=$true}}}`,
     `$probe=[pscustomobject]@{state='${runtimeState.replaceAll("'", "''")}'; cdpReady=$true; authenticated=$${authenticated ? 'true' : 'false'}; watcherReady=$${watcherReady ? 'true' : 'false'}}`,
     `[pscustomobject]@{state=(Get-KakaoLiveRuntimeState -Probe $probe); healthy=(Test-KakaoLiveHealth -Health $bridge -RuntimeProbe $probe)} | ConvertTo-Json -Compress`
   ].join('; ');
@@ -137,7 +137,7 @@ function gatewayWatchdogHealth({
   const legacyHealth = healthMode === 'legacy';
   const workOrchestrator = legacyHealth
     ? `{runtimeMode='legacy';shadowWrites=$false;immediateEnabled=$false;workItemsEnabled=$false;digestEnabled=$false;cleanupEnabled=$false;p0ReadbackEnabled=$false;p0CutoverEnabled=$false}`
-    : `{runtimeMode='v2';shadowWrites=$true;immediateEnabled=$true;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$true;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true;cleanupLocalConfigReady=$true}`;
+    : `{runtimeMode='v2';shadowWrites=$false;immediateEnabled=$false;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$false;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true;cleanupLocalConfigReady=$true}`;
   const command = [
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
@@ -277,10 +277,11 @@ test('v2 cutover health rejects every missing or false local/runtime proof', () 
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
     `$env:WORK_ORCHESTRATOR_V2_RUNTIME_MODE='v2'`,
-    `$valid=[pscustomobject]@{ok=$true;workOrchestrator=[pscustomobject]@{ok=$true};config=[pscustomobject]@{workerLive=$true;workerDryRun=$false;windowsWritesEnabled=$true;autoSendEnabled=$true;slackCardDeliveryEnabled=$false;followUpRowsEnabled=$false;slackActionPollEnabled=$false;p0SlackEscalationEnabled=$false;slackBotTokenPresent=$true;supabaseRecoveryEnabled=$true;kakaoTabCleanupEnabled=$true;startupCatchupSupported=$true;aiDomSplitEnabled=$true;aiDecisionConcurrency=2;workOrchestrator=[pscustomobject]@{runtimeMode='v2';shadowWrites=$true;immediateEnabled=$true;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$true;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true;cleanupLocalConfigReady=$true}}}`,
+    `$valid=[pscustomobject]@{ok=$true;workOrchestrator=[pscustomobject]@{ok=$true};config=[pscustomobject]@{workerLive=$true;workerDryRun=$false;windowsWritesEnabled=$true;autoSendEnabled=$true;slackCardDeliveryEnabled=$false;followUpRowsEnabled=$false;slackActionPollEnabled=$false;p0SlackEscalationEnabled=$false;slackBotTokenPresent=$true;supabaseRecoveryEnabled=$true;kakaoTabCleanupEnabled=$true;startupCatchupSupported=$true;aiDomSplitEnabled=$true;aiDecisionConcurrency=2;workOrchestrator=[pscustomobject]@{runtimeMode='v2';shadowWrites=$false;immediateEnabled=$false;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$false;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true;cleanupLocalConfigReady=$true}}}`,
     `$results=[ordered]@{valid=(Test-KakaoLiveBridgeContract -Health $valid)}`,
     `foreach($name in @('slackBotTokenPresent')){$broken=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$broken.config.$name=$false;$results["false_$name"]=Test-KakaoLiveBridgeContract -Health $broken;$missing=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$missing.config.PSObject.Properties.Remove($name);$results["missing_$name"]=Test-KakaoLiveBridgeContract -Health $missing}`,
-    `foreach($name in @('shadowWrites','immediateEnabled','workItemsEnabled','digestEnabled','cleanupEnabled','p0ReadbackEnabled','p0CutoverEnabled','storeConfigured','immediateLocalConfigReady','p0LocalConfigReady','digestLocalConfigReady','actionLocalConfigReady','cleanupLocalConfigReady')){$broken=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$broken.config.workOrchestrator.$name=$false;$results["false_$name"]=Test-KakaoLiveBridgeContract -Health $broken;$missing=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$missing.config.workOrchestrator.PSObject.Properties.Remove($name);$results["missing_$name"]=Test-KakaoLiveBridgeContract -Health $missing}`,
+    `foreach($name in @('workItemsEnabled','digestEnabled','cleanupEnabled','p0ReadbackEnabled','p0CutoverEnabled','storeConfigured','p0LocalConfigReady','digestLocalConfigReady','actionLocalConfigReady','cleanupLocalConfigReady')){$broken=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$broken.config.workOrchestrator.$name=$false;$results["false_$name"]=Test-KakaoLiveBridgeContract -Health $broken;$missing=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$missing.config.workOrchestrator.PSObject.Properties.Remove($name);$results["missing_$name"]=Test-KakaoLiveBridgeContract -Health $missing}`,
+    `foreach($name in @('shadowWrites','immediateEnabled','immediateLocalConfigReady')){$broken=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$broken.config.workOrchestrator.$name=$true;$results["true_$name"]=Test-KakaoLiveBridgeContract -Health $broken;$missing=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$missing.config.workOrchestrator.PSObject.Properties.Remove($name);$results["missing_$name"]=Test-KakaoLiveBridgeContract -Health $missing}`,
     `$invariant=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$invariant.workOrchestrator.ok=$false;$results['invariantHealth']=Test-KakaoLiveBridgeContract -Health $invariant`,
     `$missingInvariant=$valid|ConvertTo-Json -Depth 8|ConvertFrom-Json;$missingInvariant.workOrchestrator.PSObject.Properties.Remove('ok');$results['missingInvariantHealth']=Test-KakaoLiveBridgeContract -Health $missingInvariant`,
     `$results|ConvertTo-Json -Compress`
@@ -301,7 +302,7 @@ test('bridge health validates the selected legacy or v2 mode without silently sw
     `Import-Module '${escapedPath}' -Force`,
     `$base=[ordered]@{ok=$true;config=[pscustomobject]@{workerLive=$true;workerDryRun=$false;windowsWritesEnabled=$true;autoSendEnabled=$true;slackBotTokenPresent=$true;supabaseRecoveryEnabled=$true;kakaoTabCleanupEnabled=$true;startupCatchupSupported=$true;aiDomSplitEnabled=$true;aiDecisionConcurrency=2}}`,
     `$legacy=$base|ConvertTo-Json -Depth 8|ConvertFrom-Json;$legacy|Add-Member workOrchestrator ([pscustomobject]@{ok=$false});$legacy.config|Add-Member slackCardDeliveryEnabled $true;$legacy.config|Add-Member followUpRowsEnabled $true;$legacy.config|Add-Member slackActionPollEnabled $true;$legacy.config|Add-Member p0SlackEscalationEnabled $true;$legacy.config|Add-Member workOrchestrator ([pscustomobject]@{runtimeMode='legacy';shadowWrites=$false;immediateEnabled=$false;workItemsEnabled=$false;digestEnabled=$false;cleanupEnabled=$false;p0ReadbackEnabled=$false;p0CutoverEnabled=$false})`,
-    `$v2=$base|ConvertTo-Json -Depth 8|ConvertFrom-Json;$v2|Add-Member workOrchestrator ([pscustomobject]@{ok=$true});$v2.config|Add-Member slackCardDeliveryEnabled $false;$v2.config|Add-Member followUpRowsEnabled $false;$v2.config|Add-Member slackActionPollEnabled $false;$v2.config|Add-Member p0SlackEscalationEnabled $false;$v2.config|Add-Member workOrchestrator ([pscustomobject]@{runtimeMode='v2';shadowWrites=$true;immediateEnabled=$true;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$true;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true;cleanupLocalConfigReady=$true})`,
+    `$v2=$base|ConvertTo-Json -Depth 8|ConvertFrom-Json;$v2|Add-Member workOrchestrator ([pscustomobject]@{ok=$true});$v2.config|Add-Member slackCardDeliveryEnabled $false;$v2.config|Add-Member followUpRowsEnabled $false;$v2.config|Add-Member slackActionPollEnabled $false;$v2.config|Add-Member p0SlackEscalationEnabled $false;$v2.config|Add-Member workOrchestrator ([pscustomobject]@{runtimeMode='v2';shadowWrites=$false;immediateEnabled=$false;workItemsEnabled=$true;digestEnabled=$true;cleanupEnabled=$true;p0ReadbackEnabled=$true;p0CutoverEnabled=$true;storeConfigured=$true;immediateLocalConfigReady=$false;p0LocalConfigReady=$true;digestLocalConfigReady=$true;actionLocalConfigReady=$true;cleanupLocalConfigReady=$true})`,
     `$env:WORK_ORCHESTRATOR_V2_RUNTIME_MODE='legacy';$legacyResult=Test-KakaoLiveBridgeContract -Health $legacy;$legacyRejectsV2=Test-KakaoLiveBridgeContract -Health $v2`,
     `$env:WORK_ORCHESTRATOR_V2_RUNTIME_MODE='v2';$v2Result=Test-KakaoLiveBridgeContract -Health $v2;$v2RejectsLegacy=Test-KakaoLiveBridgeContract -Health $legacy`,
     `[pscustomobject]@{legacy=$legacyResult;legacyRejectsV2=$legacyRejectsV2;v2=$v2Result;v2RejectsLegacy=$v2RejectsLegacy}|ConvertTo-Json -Compress`
@@ -374,7 +375,7 @@ test('v2 cutover guard rejects an invalid contract before stamping the Process e
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
     `$env:AI_WORKER_LIVE='before-guard'`,
-    `$invalid=Get-KakaoLiveRuntimeContract -RuntimeMode 'v2';$invalid['WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED']='0'`,
+    `$invalid=Get-KakaoLiveRuntimeContract -RuntimeMode 'v2';$invalid['WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED']='1'`,
     `$reason=''; try { Set-KakaoLiveRuntimeEnvironment -Contract $invalid } catch { $reason=$_.Exception.Message }`,
     `[pscustomobject]@{reason=$reason;workerLive=$env:AI_WORKER_LIVE} | ConvertTo-Json -Compress`
   ].join('; ');
@@ -382,7 +383,7 @@ test('v2 cutover guard rejects an invalid contract before stamping the Process e
     encoding: 'utf8', windowsHide: true
   });
   const observed = JSON.parse(result);
-  assert.match(observed.reason, /legacy cards.*immediate/i);
+  assert.match(observed.reason, /exact cutover/i);
   assert.equal(observed.workerLive, 'before-guard');
 });
 
@@ -428,9 +429,9 @@ test('persistent runtime mode selects exact legacy rollback and v2 cutover contr
   assert.equal(v2.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED, '0');
   assert.equal(v2.KAKAO_FOLLOW_UP_ITEMS_ENABLED, '0');
   assert.equal(v2.P0_SLACK_ESCALATION_ENABLED, '0');
+  assert.equal(v2.WORK_ORCHESTRATOR_V2_SHADOW_WRITES, '0');
+  assert.equal(v2.WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED, '0');
   for (const key of [
-    'WORK_ORCHESTRATOR_V2_SHADOW_WRITES',
-    'WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED',
     'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED',
     'WORK_ORCHESTRATOR_V2_DIGEST_ENABLED',
     'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED',
@@ -464,8 +465,8 @@ test('v2 cutover environment stamp validates exact contract shape and rolls back
     `$missingReason='';try{Set-KakaoLiveRuntimeEnvironment -Contract $missing}catch{$missingReason=$_.Exception.Message}`,
     `$extraReason='';try{Set-KakaoLiveRuntimeEnvironment -Contract $extra}catch{$extraReason=$_.Exception.Message}`,
     `$booleanResults=[ordered]@{}`,
-    `foreach($case in @(@{name='cardsFalseImmediateFalse';values=@{SLACK_AGENT_CARD_DELIVERY_ENABLED='false';WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED='false';WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED='false'}},@{name='mixedWork';values=@{AI_WORKER_FOLLOW_UP_ITEMS_ENABLED='false';KAKAO_FOLLOW_UP_ITEMS_ENABLED='true';WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED='false'}},@{name='p0False';values=@{P0_SLACK_ESCALATION_ENABLED='false';WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED='false';WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED='false'}},@{name='unknown';values=@{SLACK_AGENT_CARD_DELIVERY_ENABLED='unexpected'}})){$candidate=[ordered]@{};foreach($entry in $base.GetEnumerator()){$candidate[$entry.Key]=$entry.Value};foreach($entry in $case.values.GetEnumerator()){$candidate[$entry.Key]=$entry.Value};try{Assert-KakaoLiveV2CutoverContract -Contract $candidate;$booleanResults[$case.name]='accepted'}catch{$booleanResults[$case.name]=$_.Exception.Message}}`,
-    `$normalized=[ordered]@{};foreach($entry in $base.GetEnumerator()){$normalized[$entry.Key]=$entry.Value};$normalized['SLACK_AGENT_CARD_DELIVERY_ENABLED']=' FALSE ';$normalized['WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED']=' TRUE ';$normalized['AI_WORKER_FOLLOW_UP_ITEMS_ENABLED']=' FALSE ';$normalized['KAKAO_FOLLOW_UP_ITEMS_ENABLED']=' FALSE ';$normalized['WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED']=' TRUE ';$normalized['P0_SLACK_ESCALATION_ENABLED']=' FALSE ';$normalized['WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED']=' TRUE ';$normalized['WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED']=' TRUE ';$normalized['WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED']=' TRUE ';$normalizedResult='';try{Assert-KakaoLiveV2CutoverContract -Contract $normalized;$normalizedResult='accepted'}catch{$normalizedResult=$_.Exception.Message}`,
+    `foreach($case in @(@{name='cardsFalseImmediateTrue';values=@{SLACK_AGENT_CARD_DELIVERY_ENABLED='false';WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED='true'}},@{name='mixedWork';values=@{AI_WORKER_FOLLOW_UP_ITEMS_ENABLED='false';KAKAO_FOLLOW_UP_ITEMS_ENABLED='true';WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED='false'}},@{name='p0False';values=@{P0_SLACK_ESCALATION_ENABLED='false';WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED='false';WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED='false'}},@{name='unknown';values=@{SLACK_AGENT_CARD_DELIVERY_ENABLED='unexpected'}})){$candidate=[ordered]@{};foreach($entry in $base.GetEnumerator()){$candidate[$entry.Key]=$entry.Value};foreach($entry in $case.values.GetEnumerator()){$candidate[$entry.Key]=$entry.Value};try{Assert-KakaoLiveV2CutoverContract -Contract $candidate;$booleanResults[$case.name]='accepted'}catch{$booleanResults[$case.name]=$_.Exception.Message}}`,
+    `$normalized=[ordered]@{};foreach($entry in $base.GetEnumerator()){$normalized[$entry.Key]=$entry.Value};$normalized['SLACK_AGENT_CARD_DELIVERY_ENABLED']=' FALSE ';$normalized['WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED']=' FALSE ';$normalized['AI_WORKER_FOLLOW_UP_ITEMS_ENABLED']=' FALSE ';$normalized['KAKAO_FOLLOW_UP_ITEMS_ENABLED']=' FALSE ';$normalized['WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED']=' TRUE ';$normalized['P0_SLACK_ESCALATION_ENABLED']=' FALSE ';$normalized['WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED']=' TRUE ';$normalized['WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED']=' TRUE ';$normalized['WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED']=' TRUE ';$normalizedResult='';try{Assert-KakaoLiveV2CutoverContract -Contract $normalized;$normalizedResult='accepted'}catch{$normalizedResult=$_.Exception.Message}`,
     `$env:AI_WORKER_LIVE='before-marker';$env:WORKER_TIMEOUT_MS='before-timeout'`,
     `$setter={param($name,$value)if($name -eq 'WORKER_TIMEOUT_MS'){throw 'injected set failure'};[Environment]::SetEnvironmentVariable($name,$value,'Process')}`,
     `$failureReason='';try{Set-KakaoLiveRuntimeEnvironment -Contract $base -SetEnvironmentVariable $setter}catch{$failureReason=$_.Exception.Message};$rollbackMarker=$env:AI_WORKER_LIVE;$rollbackTimeout=$env:WORKER_TIMEOUT_MS`,
@@ -477,7 +478,7 @@ test('v2 cutover environment stamp validates exact contract shape and rolls back
   }));
   assert.match(observed.missingReason, /missing.*cleanup/i);
   assert.match(observed.extraReason, /not allowed/i);
-  assert.match(observed.booleanResults.cardsFalseImmediateFalse, /legacy cards.*immediate/i);
+  assert.match(observed.booleanResults.cardsFalseImmediateTrue, /exact cutover/i);
   assert.match(observed.booleanResults.mixedWork, /legacy work rows.*work items/i);
   assert.match(observed.booleanResults.p0False, /legacy P0.*work items.*readback.*cutover/i);
   assert.match(observed.booleanResults.unknown, /invalid boolean/i);

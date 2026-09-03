@@ -34,7 +34,6 @@ import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-n
 import { digestScheduleWindow, runDigestCycle } from '../work-orchestrator-v2/digest-runner.mjs';
 import { processPendingWorkAction } from '../work-orchestrator-v2/work-actions.mjs';
 import {
-  buildHumanWorkCandidates,
   buildV2P0DeliveryClaim,
   encodeWorkActionValue,
   v2P0ReminderDecision
@@ -594,6 +593,7 @@ export function createWorkOrchestratorShadowRuntime({
   record = recordShadowNotificationObligation,
   now = () => new Date().toISOString()
 } = {}) {
+  const enabled = config.shadowWrites === true;
   const state = {
     shadowClaims: 0,
     shadowDuplicates: 0,
@@ -612,6 +612,7 @@ export function createWorkOrchestratorShadowRuntime({
   }
 
   return {
+    enabled,
     state,
     recordAccepted(event, roomVersion = {}) {
       if (roomVersion.changed !== true) return null;
@@ -4060,34 +4061,6 @@ function buildWorkerFailureFollowUpRow(job = {}, error = new Error('worker faile
   return row;
 }
 
-function buildWorkerFailureWorkRow(row = {}) {
-  const timeout = row.payload?.failure_kind === 'worker_timeout';
-  const recommendedAction = String(row.recommended_action || '').slice(0, 1200);
-  return {
-    work_key: row.follow_up_key,
-    room_key: row.room_key,
-    work_type: row.decision_classification,
-    priority: row.priority,
-    status: 'open',
-    title: row.title,
-    summary: timeout
-      ? '자동 처리 제한 시간을 넘겨 사람 확인으로 전환됐습니다.'
-      : '자동 처리 오류로 사람 확인이 필요합니다.',
-    automation_state: 'needs_human',
-    blocking_reason: timeout
-      ? '자동 처리 제한 시간 초과로 사람 확인 전환'
-      : '자동 처리 오류로 사람 확인 전환',
-    recommended_action: recommendedAction,
-    payload: {
-      requires_human_action: true,
-      action_family: 'worker_failure_review',
-      business_key: row.follow_up_key,
-      alert_reason: timeout ? 'worker_timeout' : 'worker_error',
-      recommended_action: recommendedAction
-    }
-  };
-}
-
 export async function routeWorkerFailureFollowUp({
   job = {},
   error = new Error('worker failed'),
@@ -4127,22 +4100,9 @@ export async function routeWorkerFailureFollowUp({
     }
   }
 
-  let workOrchestratorV2 = disabled;
-  if (workItemsEnabled) {
-    if (!workStore || typeof workStore.upsertWorkItem !== 'function') {
-      throw new Error('v2 worker failure store is required');
-    }
-    const candidates = buildHumanWorkCandidates({
-      job,
-      followUpRows: [buildWorkerFailureWorkRow(row)],
-      now
-    });
-    if (candidates.length !== 1) throw new Error('v2 worker failure candidate is required');
-    workOrchestratorV2 = await workStore.upsertWorkItem(candidates[0]);
-    if (workOrchestratorV2?.applied !== true || !workOrchestratorV2?.row) {
-      throw new Error('v2 worker failure upsert was not applied');
-    }
-  }
+  const workOrchestratorV2 = workItemsEnabled
+    ? Object.freeze({ skipped: true, reason: 'operational_only' })
+    : disabled;
 
   const legacyResult = legacyEnabled ? legacy : { inserted: 0, rows: [] };
   return {
@@ -6159,7 +6119,7 @@ export async function handleEvent(req, res, dependencies = {}) {
   event.roomRevision = roomVersion.revision;
   dependencies.onRoomRevisionAccepted?.(event, roomVersion);
 
-  if (roomVersion.changed) {
+  if (roomVersion.changed && shadowRuntime?.enabled === true) {
     try {
       const shadowObservation = shadowRuntime?.recordAccepted?.(event, roomVersion);
       if (shadowObservation && typeof shadowObservation.catch === 'function') {

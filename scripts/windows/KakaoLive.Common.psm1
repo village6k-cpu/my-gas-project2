@@ -35,8 +35,8 @@ function Get-KakaoLiveRuntimeContract {
         KAKAO_FOLLOW_UP_ITEMS_ENABLED     = $(if ($legacy) { '1' } else { '0' })
         P0_SLACK_ESCALATION_ENABLED       = $(if ($legacy) { '1' } else { '0' })
         WORK_ORCHESTRATOR_V2_RUNTIME_MODE = $mode
-        WORK_ORCHESTRATOR_V2_SHADOW_WRITES = $(if ($v2) { '1' } else { '0' })
-        WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED = $(if ($v2) { '1' } else { '0' })
+        WORK_ORCHESTRATOR_V2_SHADOW_WRITES = '0'
+        WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED = '0'
         WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED = $(if ($v2) { '1' } else { '0' })
         WORK_ORCHESTRATOR_V2_DIGEST_ENABLED = $(if ($v2) { '1' } else { '0' })
         WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED = $(if ($v2) { '1' } else { '0' })
@@ -125,19 +125,13 @@ function Assert-KakaoLiveV2CutoverContract {
     if ($p0CutoverEnabled -and -not $p0ReadbackEnabled) {
         throw 'Work Orchestrator v2 P0 cutover requires readback.'
     }
-    if (-not $legacyCardsEnabled -and -not $immediateEnabled) {
-        throw 'Work Orchestrator v2 cutover guard: legacy cards require v2 immediate notifications.'
-    }
     if (-not $legacyWorkRowsEnabled -and -not $workItemsEnabled) {
         throw 'Work Orchestrator v2 cutover guard: legacy work rows require v2 work items.'
     }
     if (-not $legacyP0Enabled -and -not ($workItemsEnabled -and $p0ReadbackEnabled -and $p0CutoverEnabled)) {
         throw 'Work Orchestrator v2 cutover guard: legacy P0 requires v2 work items, readback, and cutover.'
     }
-    if ($cleanupEnabled -and -not $immediateEnabled) {
-        throw 'Work Orchestrator v2 cutover guard: cleanup requires v2 immediate notifications.'
-    }
-    $v2FlagsEnabled = $shadowWritesEnabled -and $immediateEnabled -and $workItemsEnabled -and $digestEnabled -and `
+    $v2FlagsEnabled = (-not $shadowWritesEnabled) -and (-not $immediateEnabled) -and $workItemsEnabled -and $digestEnabled -and `
         $cleanupEnabled -and $p0ReadbackEnabled -and $p0CutoverEnabled
     $legacyFlagsEnabled = $legacyCardsEnabled -and $legacyWorkRowsEnabled -and $legacyP0Enabled -and $legacyActionPollEnabled
     if ($runtimeMode -eq 'legacy' -and (-not $legacyFlagsEnabled -or $shadowWritesEnabled -or $immediateEnabled -or `
@@ -426,9 +420,15 @@ function Test-KakaoLiveBridgeContract {
     $runtimeModeMatches = Test-KakaoLiveHealthProperty -Object $workOrchestrator -Name 'runtimeMode' -ExpectedValue $runtimeMode
     $workOrchestratorModeHealthy = $null -ne $workOrchestrator -and $runtimeModeMatches
     if ($workOrchestratorModeHealthy -and $runtimeMode -eq 'v2') {
+        foreach ($propertyName in @('shadowWrites', 'immediateEnabled', 'immediateLocalConfigReady')) {
+            if (-not (Test-KakaoLiveHealthProperty -Object $workOrchestrator -Name $propertyName -ExpectedValue $false)) {
+                $workOrchestratorModeHealthy = $false
+                break
+            }
+        }
         foreach ($propertyName in @(
-            'shadowWrites', 'immediateEnabled', 'workItemsEnabled', 'digestEnabled', 'cleanupEnabled',
-            'p0ReadbackEnabled', 'p0CutoverEnabled', 'storeConfigured', 'immediateLocalConfigReady',
+            'workItemsEnabled', 'digestEnabled', 'cleanupEnabled',
+            'p0ReadbackEnabled', 'p0CutoverEnabled', 'storeConfigured',
             'p0LocalConfigReady', 'digestLocalConfigReady', 'actionLocalConfigReady', 'cleanupLocalConfigReady'
         )) {
             if (-not (Test-KakaoLiveHealthProperty -Object $workOrchestrator -Name $propertyName -ExpectedValue $true)) {
