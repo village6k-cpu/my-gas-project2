@@ -2580,8 +2580,8 @@ test('v2 P0 review round 1 cutover controls are distinct, default OFF, and readb
 test('v2 cutover guard validates the bridge startup target independently', () => {
   const validTarget = {
     WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
-    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '1',
-    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '0',
+    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
     WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
@@ -2598,10 +2598,9 @@ test('v2 cutover guard validates the bridge startup target independently', () =>
   assert.throws(
     () => validateWorkOrchestratorV2CutoverConfig({
       ...validTarget,
-      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
-      WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0'
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1'
     }),
-    /legacy cards.*immediate/i
+    /exact cutover/i
   );
   assert.throws(
     () => validateWorkOrchestratorV2CutoverConfig({
@@ -2625,9 +2624,9 @@ test('v2 cutover guard validates the bridge startup target independently', () =>
       AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '1',
       KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1',
       P0_SLACK_ESCALATION_ENABLED: '1',
-      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0'
+      WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1'
     }),
-    /cleanup.*immediate/i
+    /exact cutover/i
   );
 });
 
@@ -2637,7 +2636,7 @@ test('v2 cutover guard blocks invalid bridge module startup', () => {
     ['false legacy card flag', { SLACK_AGENT_CARD_DELIVERY_ENABLED: 'false' }, []],
     ['mixed legacy work flags', { KAKAO_FOLLOW_UP_ITEMS_ENABLED: 'false' }, []],
     ['legacy P0 false', { P0_SLACK_ESCALATION_ENABLED: 'false' }, []],
-    ['cleanup without immediate', { WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1' }, []]
+    ['v2 immediate leak', { WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2', WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '1' }, []]
   ]) {
     const env = { ...process.env, ...SAFE_PRE_CUTOVER_ENV, ...overrides, KAKAO_DOM_BRIDGE_NO_LISTEN: '1' };
     for (const key of omitted) delete env[key];
@@ -2645,7 +2644,7 @@ test('v2 cutover guard blocks invalid bridge module startup', () => {
       cwd: bridgeDirectory, env, encoding: 'utf8'
     });
     assert.equal(result.status, 1, name);
-    assert.match(`${result.stdout}\n${result.stderr}`, /cutover guard/i, name);
+    assert.match(`${result.stdout}\n${result.stderr}`, /cutover/i, name);
   }
 });
 
