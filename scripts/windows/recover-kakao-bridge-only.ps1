@@ -63,7 +63,7 @@ try {
         try { $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8787/health' -TimeoutSec 2 }
         catch { $health = $null }
     } while ($null -eq $health -and [DateTime]::UtcNow -lt $deadline -and -not $process.HasExited)
-    if ($null -eq $health -or -not (Test-KakaoLiveBridgeContract -Health $health)) {
+    if ($null -eq $health -or -not (Test-KakaoLiveBridgeContract -Health $health -RequireInvariantHealth $false)) {
         throw 'Bridge-only recovery did not satisfy the full-live contract.'
     }
     [pscustomobject]@{

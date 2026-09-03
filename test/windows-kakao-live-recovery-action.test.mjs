@@ -325,13 +325,16 @@ test('new bridge source waits for a fully idle runtime before restart', () => {
 test('a missing bridge preserves healthy Chrome and takes the bridge-only recovery path', () => {
   const startScript = readFileSync(startScriptPath, 'utf8');
   const bridgeRecovery = readFileSync(bridgeRecoveryPath, 'utf8');
+  const bridgeRestart = readFileSync(restartBridgePath, 'utf8');
 
   assert.match(startScript, /if \(\$null -eq \$health\)[\s\S]*Test-KakaoWatcherRuntime[\s\S]*recover-kakao-bridge-only\.ps1/);
   assert.match(startScript, /if \(\$watcherStillHealthy\)[\s\S]*recover-kakao-bridge-only\.ps1[\s\S]*else[\s\S]*stop-kakao-staging\.ps1/);
   assert.match(bridgeRecovery, /--probe-only/);
   assert.match(bridgeRecovery, /authenticated -ne \$true/);
   assert.match(bridgeRecovery, /watcherReady -ne \$true/);
-  assert.match(bridgeRecovery, /Test-KakaoLiveBridgeContract/);
+  assert.match(startScript, /Test-KakaoLiveBridgeContract -Health \$health -RequireInvariantHealth \$false/);
+  assert.match(bridgeRecovery, /Test-KakaoLiveBridgeContract -Health \$health -RequireInvariantHealth \$false/);
+  assert.match(bridgeRestart, /Test-KakaoLiveBridgeContract -Health \$post -RequireInvariantHealth \$false/);
   assert.match(bridgeRecovery, /-WindowStyle Hidden/);
 });
 

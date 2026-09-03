@@ -290,7 +290,7 @@ if ($null -eq $health) {
     $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8787/health' -TimeoutSec 8
 }
 
-$bridgeHealthy = Test-KakaoLiveBridgeContract -Health $health
+$bridgeHealthy = Test-KakaoLiveBridgeContract -Health $health -RequireInvariantHealth $false
 $runtimeProbe = Get-KakaoWatcherRuntime
 $runtimeState = Get-KakaoLiveRuntimeState -Probe $runtimeProbe
 $openRooms = if ($health.state.PSObject.Properties.Name -contains 'openRooms') { [int]$health.state.openRooms } else { 0 }

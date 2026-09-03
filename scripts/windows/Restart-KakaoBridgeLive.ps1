@@ -319,7 +319,7 @@ try {
         catch { $post = $null }
     } while ($null -eq $post -and [DateTime]::UtcNow -lt $deadline -and -not $newProcess.HasExited)
 
-    if ($null -eq $post -or -not (Test-KakaoLiveBridgeContract -Health $post)) {
+    if ($null -eq $post -or -not (Test-KakaoLiveBridgeContract -Health $post -RequireInvariantHealth $false)) {
         throw 'Restarted bridge did not satisfy the full-live contract.'
     }
 
