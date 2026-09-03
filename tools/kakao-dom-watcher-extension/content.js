@@ -91,14 +91,14 @@
     const host = location.hostname;
     const path = location.pathname;
     const isKakaoManagerHost = host === 'business.kakao.com' || host === 'center-pf.kakao.com';
-    return isKakaoManagerHost && (/^\/_[^/]+\/chats(?:\/|$)/.test(path) || /^\/_chats(?:\/|$)/.test(path));
+    return isKakaoManagerHost && (/^(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats(?:\/|$)/.test(path) || /^\/_chats(?:\/|$)/.test(path));
   }
 
   function isKakaoMainChatListPage() {
     const host = location.hostname;
     const path = location.pathname;
     const isKakaoManagerHost = host === 'business.kakao.com' || host === 'center-pf.kakao.com';
-    return isKakaoManagerHost && (/^\/_[^/]+\/chats\/?$/.test(path) || /^\/_chats\/?$/.test(path));
+    return isKakaoManagerHost && (/^(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats\/?$/.test(path) || /^\/_chats\/?$/.test(path));
   }
 
   function loadConfig() {

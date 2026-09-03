@@ -60,6 +60,22 @@ def healthy_extension_probe(**overrides):
 
 
 class WatcherHealthTest(unittest.TestCase):
+    def test_accepts_current_space_channel_chat_routes(self):
+        list_url = "https://business.kakao.com/space/353491/channel/_xhPMls/chats"
+        detail_url = f"{list_url}/4845268282772547"
+
+        self.assertTrue(INJECTOR.is_authenticated_chat_path("/space/353491/channel/_xhPMls/chats"))
+        self.assertTrue(INJECTOR.is_authenticated_chat_path("/space/353491/channel/_xhPMls/chats/4845268282772547"))
+        self.assertEqual(INJECTOR.chat_list_url(detail_url), list_url)
+        selected = INJECTOR.choose_kakao_page([
+            {
+                "type": "page",
+                "url": list_url,
+                "webSocketDebuggerUrl": "ws://current-list",
+            }
+        ])
+        self.assertEqual(selected["webSocketDebuggerUrl"], "ws://current-list")
+
     def test_repairs_stale_target_metadata_when_runtime_is_still_about_blank(self):
         class FakeCDP:
             def __init__(self):

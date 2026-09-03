@@ -427,12 +427,39 @@ assert.match(
     assert.ok(isChatListUrl.test(`https://${host}.kakao.com/_xhPMls/chats`), `${host} chat list must match`);
     assert.ok(isChatListUrl.test(`https://${host}.kakao.com/_xhPMls/chats?t_src=x`), `${host} chat list with query must match`);
     assert.ok(
+      isChatListUrl.test(`https://${host}.kakao.com/space/353491/channel/_xhPMls/chats`),
+      `${host} current space channel chat list must match`
+    );
+    assert.ok(
       !isChatListUrl.test(`https://${host}.kakao.com/_xhPMls/chats/123456`),
       'AI worker DevTools tab targeting must not treat individual customer conversation URLs as the main chat list'
     );
   }
   assert.ok(!isChatListUrl.test('https://example.com/_xhPMls/chats'), 'unrelated hosts must not match');
 }
+
+assert.match(
+  content,
+  /space\\\/\[\^\/\]\+\\\/channel/,
+  'Watcher page guards must accept the current Kakao space channel route'
+);
+
+assert.match(
+  bridge,
+  /space\\\/\[\^\/\]\+\\\/channel/,
+  'Bridge DevTools targeting must accept the current Kakao space channel route'
+);
+
+assert.match(
+  automation,
+  /space\\\/\[\^\/\]\+\\\/channel/,
+  'Kakao automation tab cleanup must preserve the current main list route'
+);
+
+assert.ok(
+  !automation.includes('kakao\\.com\\/_[^/]+\\/chats'),
+  'Every Kakao automation readiness matcher must accept the current space channel route'
+);
 
 assert.match(
   worker,
@@ -483,7 +510,7 @@ assert.match(
 );
 
 assert.ok(
-  automation.includes('isMainChatList = /^https:\\/\\/(business|center-pf)\\.kakao\\.com\\/_') &&
+  automation.includes('isMainChatList = /^https:\\/\\/(business|center-pf)\\.kakao\\.com(?:\\/space') &&
     automation.includes('\\/chats(?:[?#]|$)/.test(url)'),
   'Automation launcher must close individual Kakao conversation tabs and keep only the main chat list'
 );
