@@ -1157,6 +1157,41 @@ test('listActionableWork selects a bounded deterministic digest surface includin
   });
 });
 
+test('listActionableWork canonicalizes PostgREST timestamp offsets before digest rendering', async () => {
+  const fetch = createFetch([response({ data: actionablePayload([workRow({
+    actionable_at: '2026-08-29T03:00:00.000+00:00',
+    due_at: '2026-08-29T04:00:00.000+00:00',
+    snoozed_until: null,
+    first_opened_at: '2026-08-29T01:00:00.000+00:00',
+    last_activity_at: '2026-08-29T02:00:00.000+00:00',
+    last_digest_at: '2026-08-29T02:30:00.000+00:00',
+    next_reminder_at: '2026-08-30T03:00:00.000+00:00'
+  })]) })]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const [row] = await store.listActionableWork({ now: '2026-08-29T03:00:00.000Z', limit: 50 });
+
+  assert.deepEqual({
+    actionable_at: row.actionable_at,
+    due_at: row.due_at,
+    snoozed_until: row.snoozed_until,
+    first_opened_at: row.first_opened_at,
+    last_activity_at: row.last_activity_at,
+    last_digest_at: row.last_digest_at,
+    next_reminder_at: row.next_reminder_at
+  }, {
+    actionable_at: '2026-08-29T03:00:00.000Z',
+    due_at: '2026-08-29T04:00:00.000Z',
+    snoozed_until: null,
+    first_opened_at: '2026-08-29T01:00:00.000Z',
+    last_activity_at: '2026-08-29T02:00:00.000Z',
+    last_digest_at: '2026-08-29T02:30:00.000Z',
+    next_reminder_at: '2026-08-30T03:00:00.000Z'
+  });
+});
+
 test('listActionableWork returns an authoritative eligible count at the 500/501 boundary', async () => {
   const rows = Array.from({ length: 500 }, (_, index) => workRow({
     id: `90000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,

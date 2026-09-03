@@ -387,6 +387,11 @@ function responseTimestamp(value, { nullable = false } = {}) {
   return value;
 }
 
+function canonicalResponseTimestamp(value, options = {}) {
+  const timestamp = responseTimestamp(value, options);
+  return timestamp === null ? null : new Date(timestamp).toISOString();
+}
+
 function responseUuid(value, { nullable = false } = {}) {
   if ((value === null || value === undefined) && nullable) return null;
   if (typeof value !== 'string' || !UUID.test(value) || value !== value.toLowerCase()) throw responseInvalid();
@@ -955,6 +960,7 @@ function actionableResponse(data, now, limit) {
     || !Number.isSafeInteger(data.eligible_count) || data.eligible_count < 0
     || data.rows.length !== Math.min(data.eligible_count, limit)) throw responseInvalid();
   const rows = data.rows;
+  const normalizedRows = [];
   const expectedKeys = ACTIONABLE_WORK_SELECT.split(',');
   for (const row of rows) {
     if (!exactKeys(row, expectedKeys)) throw responseInvalid();
@@ -967,9 +973,19 @@ function actionableResponse(data, now, limit) {
     const due = Date.parse(row.actionable_at) <= Date.parse(now);
     const unacknowledgedP0 = row.priority === 'p0' && !hasCanonicalP0Acknowledgement(row.payload, now);
     if (!due && !unacknowledgedP0) throw responseInvalid();
+    normalizedRows.push({
+      ...row,
+      actionable_at: canonicalResponseTimestamp(row.actionable_at),
+      due_at: canonicalResponseTimestamp(row.due_at, { nullable: true }),
+      snoozed_until: canonicalResponseTimestamp(row.snoozed_until, { nullable: true }),
+      first_opened_at: canonicalResponseTimestamp(row.first_opened_at),
+      last_activity_at: canonicalResponseTimestamp(row.last_activity_at),
+      last_digest_at: canonicalResponseTimestamp(row.last_digest_at, { nullable: true }),
+      next_reminder_at: canonicalResponseTimestamp(row.next_reminder_at, { nullable: true })
+    });
   }
-  Object.defineProperty(rows, 'eligibleCount', { value: data.eligible_count, enumerable: false });
-  return rows;
+  Object.defineProperty(normalizedRows, 'eligibleCount', { value: data.eligible_count, enumerable: false });
+  return normalizedRows;
 }
 
 function p0WorkResponseRow(row) {
