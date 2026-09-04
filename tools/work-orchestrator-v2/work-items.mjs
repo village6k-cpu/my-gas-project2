@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { OWNER_WORK_TYPES } from './work-taxonomy.mjs';
 
 export const WORK_ACTIONS = Object.freeze([
   'progress',
@@ -9,18 +10,7 @@ export const WORK_ACTIONS = Object.freeze([
 ]);
 
 const WORK_TYPES = new Set([
-  'human_review',
-  'reply_needed',
-  'quote_send',
-  'tax_invoice',
-  'schedule_check',
-  'reservation_review',
-  'price_review',
-  'payment_check',
-  'contract_document',
-  'return_extension',
-  'damage_repair',
-  'sheet_duplicate_check',
+  ...OWNER_WORK_TYPES,
   'completed_log',
   'reservation_review_timeout',
   'automation_error_review'

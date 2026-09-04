@@ -544,6 +544,24 @@ test('upsertWorkItem sends only the reviewed bounded candidate to the atomic RPC
   assert.deepEqual(result, { applied: true, created: true, row: workRow() });
 });
 
+test('upsertWorkItem preserves reviewed schedule register and change types', async () => {
+  const fetch = createFetch([
+    response({ data: { applied: true, created: true, row: workRow({ work_type: 'schedule_register' }) } }),
+    response({ data: { applied: true, created: true, row: workRow({ work_type: 'schedule_change' }) } })
+  ]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  const registered = await store.upsertWorkItem({ ...workCandidate, work_type: 'schedule_register' });
+  const changed = await store.upsertWorkItem({ ...workCandidate, work_type: 'schedule_change' });
+
+  assert.equal(registered.row.work_type, 'schedule_register');
+  assert.equal(changed.row.work_type, 'schedule_change');
+  assert.deepEqual(fetch.requests.map(({ init }) => JSON.parse(init.body).p_candidate.work_type), [
+    'schedule_register',
+    'schedule_change'
+  ]);
+});
+
 test('requestWorkAction preserves exact id/version action CAS and exposes stale no-op', async () => {
   const fetch = createFetch([
     response({ data: { applied: true, row: workRow({ version: 5, pending_action: {

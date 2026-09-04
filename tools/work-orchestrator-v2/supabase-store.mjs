@@ -1,5 +1,6 @@
 import { assertNotificationTransition } from './contracts.mjs';
 import { validateWorkOrchestratorHealthAggregate } from './observability.mjs';
+import { OWNER_WORK_TYPES } from './work-taxonomy.mjs';
 
 const REQUEST_ERROR_PREFIX = 'Work Orchestrator Supabase request failed';
 const MAX_EVENT_KEY_LENGTH = 500;
@@ -30,9 +31,7 @@ const AUTOMATION_NOTICE_TEXT = new Set([
   'Human review is required because authoritative resolution is unavailable.'
 ]);
 const WORK_TYPES = new Set([
-  'human_review', 'reply_needed', 'quote_send', 'tax_invoice', 'schedule_check',
-  'reservation_review', 'price_review', 'payment_check', 'contract_document',
-  'return_extension', 'damage_repair', 'sheet_duplicate_check',
+  ...OWNER_WORK_TYPES,
   'reservation_review_timeout', 'automation_error_review'
 ]);
 const WORK_PAYLOAD_TEXT_LIMITS = Object.freeze({

@@ -229,6 +229,38 @@ test('only explicit semantic owner actions become work while operational failure
   assert.deepEqual(candidates.map((item) => item.work_key), ['room:reply']);
 });
 
+test('Hermes schedule register and change types survive candidate building without text reclassification', () => {
+  const candidates = buildHumanWorkCandidates({
+    now: NOW,
+    followUpRows: [
+      {
+        work_key: 'room:register',
+        type: 'schedule_register',
+        requires_human_action: true,
+        title: '스케줄 등록'
+      },
+      {
+        work_key: 'room:change',
+        type: 'schedule_change',
+        requires_human_action: true,
+        title: '스케줄 변경'
+      },
+      {
+        work_key: 'room:explicit-human-review',
+        type: 'human_review',
+        requires_human_action: true,
+        summary: '견적과 세금계산서와 스케줄을 함께 언급한 고객 요청'
+      }
+    ]
+  });
+
+  assert.deepEqual(candidates.map(({ work_key, work_type }) => [work_key, work_type]), [
+    ['room:register', 'schedule_register'],
+    ['room:change', 'schedule_change'],
+    ['room:explicit-human-review', 'human_review']
+  ]);
+});
+
 test('human-action flags must remain typed booleans', () => {
   assert.throws(
     () => buildHumanWorkCandidates({
