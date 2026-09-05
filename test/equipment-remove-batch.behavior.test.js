@@ -30,7 +30,7 @@ function harness({ rows: initialRows, checkoutStarted = false, outerLockHeld = f
     deleteProperty: (k) => values.delete(k),
     getProperties: () => Object.fromEntries(values),
   };
-  const calls = { deletes: [], projections: [], regens: [], triggerLockStates: [], lockTries: 0 };
+  const calls = { deletes: [], projections: [], regens: [], triggerLockStates: [], lockTries: 0, invalidations: 0 };
   let lockHeld = outerLockHeld;
 
   const sheet = {
@@ -61,7 +61,7 @@ function harness({ rows: initialRows, checkoutStarted = false, outerLockHeld = f
     },
     dashboardTradeMutationLeaseError_: () => null,
     isDashboardTradeCheckoutStarted_: () => checkoutStarted,
-    invalidateDashboardReturnInspectionForTrade_: () => ({}),
+    invalidateDashboardReturnInspectionForTrade_: () => { calls.invalidations += 1; return {}; },
     deleteDashboardRowsDescending_: (_sheet, deleteRows) => {
       calls.deletes.push(Array.from(deleteRows));
       for (const row of deleteRows) rows.splice(row - 2, 1);
@@ -176,6 +176,23 @@ test('이미 반출된 거래는 일괄 제외도 막는다', () => {
   const res = context.batch(TRADE, [{ scheduleId: `${TRADE}-04` }], { mutationId: 'remove:locked' });
   assert.match(String(res.error), /이미 반출된 품목/);
   assert.equal(calls.deletes.length, 0);
+});
+
+test('반납완료 과거 정정의 내부 capability는 반납 상태를 재오픈하거나 일반 투영을 예약하지 않는다', () => {
+  const { context, calls, rowsNow } = harness({ rows: ROWS, checkoutStarted: true, outerLockHeld: true });
+  const privateToken = {};
+  context.REGISTERED_HISTORICAL_CORRECTION_TOKEN_ = privateToken;
+  const res = context.batch(TRADE, [{ scheduleId: `${TRADE}-04` }], {
+    lockAlreadyHeld: true,
+    deferContractRegeneration: true,
+    mutationId: 'remove:historical-correction',
+    historicalCorrectionToken: privateToken,
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(calls.invalidations, 0, '반납완료를 다시 여는 검수 초기화는 금지된다');
+  assert.deepEqual(calls.projections, [], 'Supabase의 정확한 과거 정정 단계가 구조 투영을 소유한다');
+  assert.equal(rowsNow().some((row) => row[0] === `${TRADE}-04`), false);
 });
 
 test('응답만 유실된 재시도는 같은 mutationId로 수렴하고 두 번 지우지 않는다', () => {

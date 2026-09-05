@@ -189,6 +189,131 @@ function supaMarkScheduleItemsRemoved_(tid, scheduleIds) {
 }
 
 /**
+ * 이미 반납완료된 거래의 예약 문서 오기를 바로잡을 때만 쓰는 exact projection.
+ * 물리 반출 기준선(taken_qty)은 절대 생성·수정하지 않고, 새 문서 행은 excluded audit
+ * row로만 남긴다. 호출부는 GAS 시트 변경 후 ScriptLock을 놓은 상태여야 한다.
+ */
+function supaApplyReturnedTradeHistoricalCorrection_(tid, removedScheduleIds, addedItems) {
+  tid = String(tid || '').trim();
+  removedScheduleIds = (removedScheduleIds || []).map(function(id) {
+    return String(id || '').trim();
+  }).filter(Boolean);
+  addedItems = Array.isArray(addedItems) ? addedItems : [];
+  if (!/^\d{6}-\d{3,}$/.test(tid) || !addedItems.length) {
+    return { ok: false, error: '반납완료 과거 정정의 거래/제거/추가 증거가 불완전합니다' };
+  }
+
+  var authority = supaGetCheckoutBaselineState_(tid);
+  if (!authority || authority.ok !== true || authority.tradeFound !== true ||
+      authority.returnDone !== true || String(authority.contractStatus || '').trim() !== '반납완료') {
+    return { ok: false, error: String(authority && authority.error || 'Supabase 반납완료 권한 상태가 정확하지 않습니다') };
+  }
+  var protectedIds = {};
+  (authority.items || []).forEach(function(item) {
+    if (Number(item.taken_qty || 0) > 0) protectedIds[String(item.schedule_id || '').trim()] = true;
+  });
+  var protectedRemovals = removedScheduleIds.filter(function(id) { return !!protectedIds[id]; });
+  if (protectedRemovals.length) {
+    return { ok: false, error: '불변 반출 기준선(taken_qty) 품목은 제거할 수 없습니다: ' + protectedRemovals.join(', ') };
+  }
+
+  var seenAddedIds = {};
+  var rows = [];
+  for (var i = 0; i < addedItems.length; i++) {
+    var item = addedItems[i] || {};
+    var scheduleId = String(item.scheduleId || item.schedule_id || '').trim();
+    var name = String(item.name || '').trim();
+    var setName = String(item.setName || item.set_name || '').trim();
+    var qty = Number(item.qty || item.quantity);
+    var prefix = scheduleId.match(/^(\d{6}-\d{3,})-(\d+)$/);
+    if (!prefix || prefix[1] !== tid || !name || !Number.isInteger(qty) || qty < 1 || qty > 99 || seenAddedIds[scheduleId]) {
+      return { ok: false, error: '반납완료 과거 정정 추가 행의 정체성이 올바르지 않습니다: ' + scheduleId };
+    }
+    seenAddedIds[scheduleId] = true;
+    rows.push({
+      schedule_id: scheduleId,
+      trade_id: tid,
+      sort: Number(prefix[2]),
+      name: name,
+      qty: qty,
+      set_name: setName || null,
+      is_set_header: !setName || setName === name,
+      is_component: !!setName && setName !== name,
+      checkout_state: 'excluded',
+      onsite: false,
+      removed_at: null
+    });
+  }
+
+  try {
+    var cfg = SUPA_CFG_();
+    var token = supaToken_(cfg);
+    if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음' };
+    var headers = {
+      apikey: cfg.apikey,
+      Authorization: 'Bearer ' + token,
+      'Content-Profile': 'village',
+      'Accept-Profile': 'village'
+    };
+    var addedIds = rows.map(function(row) { return row.schedule_id; });
+    var inList = addedIds.map(function(id) { return '"' + id.replace(/"/g, '') + '"'; }).join(',');
+    var existing = UrlFetchApp.fetch(
+      cfg.url + '/rest/v1/schedule_items?select=schedule_id,taken_qty,removed_at'
+        + '&trade_id=eq.' + encodeURIComponent(tid)
+        + '&schedule_id=in.(' + encodeURIComponent(inList) + ')',
+      { method: 'get', headers: { apikey: cfg.apikey, Authorization: 'Bearer ' + token, 'Accept-Profile': 'village' }, muteHttpExceptions: true }
+    );
+    var existingRows = [];
+    try { existingRows = JSON.parse(existing.getContentText() || '[]'); } catch (existingParseError) {}
+    if (existing.getResponseCode() >= 300) {
+      return { ok: false, error: 'Supabase 과거 정정 추가ID 조회 실패 (' + existing.getResponseCode() + ')' };
+    }
+    if (!Array.isArray(existingRows) || existingRows.length) {
+      return { ok: false, error: 'Supabase에 과거 정정 추가 스케줄ID가 이미 존재해 충돌했습니다' };
+    }
+
+    var inserted = UrlFetchApp.fetch(
+      cfg.url + '/rest/v1/schedule_items?on_conflict=schedule_id',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        headers: Object.assign({}, headers, { Prefer: 'resolution=ignore-duplicates,return=representation' }),
+        payload: JSON.stringify(rows),
+        muteHttpExceptions: true
+      }
+    );
+    var insertedRows = [];
+    try { insertedRows = JSON.parse(inserted.getContentText() || '[]'); } catch (insertParseError) {}
+    var insertedIds = Array.isArray(insertedRows) ? insertedRows.map(function(row) {
+      return String(row.schedule_id || '').trim();
+    }).sort() : [];
+    if (inserted.getResponseCode() >= 300 || JSON.stringify(insertedIds) !== JSON.stringify(addedIds.slice().sort())) {
+      return { ok: false, error: 'Supabase 과거 정정 추가 행 저장/검증 실패 (' + inserted.getResponseCode() + ')' };
+    }
+
+    var removed = removedScheduleIds.length
+      ? supaMarkScheduleItemsRemoved_(tid, removedScheduleIds)
+      : { ok: true, scheduleIds: [] };
+    if (!removed || removed.ok !== true) {
+      return {
+        ok: false,
+        partial: true,
+        error: String(removed && removed.error || 'Supabase 과거 정정 제거 행 반영 실패'),
+        addedScheduleIds: addedIds
+      };
+    }
+    return {
+      ok: true,
+      addedScheduleIds: addedIds,
+      removedScheduleIds: removedScheduleIds,
+      physicalCheckoutBaselineChanged: false
+    };
+  } catch (err) {
+    return { ok: false, error: 'Supabase 반납완료 과거 정정 오류: ' + (err && err.message ? err.message : String(err)) };
+  }
+}
+
+/**
  * 반출완료 서버 권한 저장. 브라우저 전체 upsert와 분리해 다른 탭/기기의 오래된
  * 스냅샷이 setup_done을 되돌리지 못하게 한다. 행 없음도 성공으로 간주하지 않는다.
  */

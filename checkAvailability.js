@@ -8867,6 +8867,13 @@ function dashboardAddEquipments(tid, entries, options) {
     options.forceZeroPrice === "1" || options.forceZeroPrice === "true";
   var lockAlreadyHeld = options.lockAlreadyHeld === true;
   var deferContractRegeneration = options.deferContractRegeneration === true;
+  var historicalCorrection = !!options.historicalCorrectionToken &&
+    typeof REGISTERED_HISTORICAL_CORRECTION_TOKEN_ !== 'undefined' &&
+    options.historicalCorrectionToken === REGISTERED_HISTORICAL_CORRECTION_TOKEN_ &&
+    lockAlreadyHeld && deferContractRegeneration;
+  if (options.historicalCorrectionToken && !historicalCorrection) {
+    return { error: '반납완료 과거 정정은 등록변경 원자 작업에서만 허용됩니다.', code: 'FORBIDDEN' };
+  }
   var requireExactCatalog = options.requireExactCatalog === true;
   var availabilityPreflighted = options.availabilityPreflighted === true && lockAlreadyHeld;
   var excludeScheduleIds = Array.isArray(options.excludeScheduleIds)
@@ -9143,11 +9150,14 @@ function dashboardAddEquipments(tid, entries, options) {
     }
 
     var addedScheduleIds = newRows.map(function(newRow) { return String(newRow[0] || '').trim(); }).filter(Boolean);
-    var addInvalidated = invalidateDashboardReturnInspectionForTrade_(
-      tid, addedScheduleIds, '스케줄 품목 추가'
-    );
-    if (addInvalidated && addInvalidated.error) return attachProfile_(addInvalidated);
-    structureProjectionQueued = !!(addInvalidated && addInvalidated.projectionPending);
+    var addInvalidated = null;
+    if (!historicalCorrection) {
+      addInvalidated = invalidateDashboardReturnInspectionForTrade_(
+        tid, addedScheduleIds, '스케줄 품목 추가'
+      );
+      if (addInvalidated && addInvalidated.error) return attachProfile_(addInvalidated);
+      structureProjectionQueued = !!(addInvalidated && addInvalidated.projectionPending);
+    }
 
     // 현장추가 멱등 요청은 실제 append 직전에 발급 ID와 행 지문을 먼저 기록한다.
     // 실행이 setValues 뒤 hard-timeout되어도 재시도가 시트 정본으로 성공을 확정할 수 있다.
@@ -9176,7 +9186,7 @@ function dashboardAddEquipments(tid, entries, options) {
     markProfile_('write_new_rows');
     applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidRow, hadFollowingRow);
     markProfile_('format_new_rows');
-    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+    if (!historicalCorrection && isDashboardTradeCheckoutStarted_(ss, tid)) {
       var addedBaselineItems = getDashboardReturnCheckableItems_(newRows.map(function(row) {
         var setName = String(row[2] || '').trim();
         var name = String(row[3] || '').trim();
@@ -10354,6 +10364,13 @@ function dashboardRemoveEquipmentBatch(tid, entries, options) {
   options = options || {};
   var lockAlreadyHeld = options.lockAlreadyHeld === true;
   var deferContractRegeneration = options.deferContractRegeneration === true;
+  var historicalCorrection = !!options.historicalCorrectionToken &&
+    typeof REGISTERED_HISTORICAL_CORRECTION_TOKEN_ !== 'undefined' &&
+    options.historicalCorrectionToken === REGISTERED_HISTORICAL_CORRECTION_TOKEN_ &&
+    lockAlreadyHeld && deferContractRegeneration;
+  if (options.historicalCorrectionToken && !historicalCorrection) {
+    return { error: '반납완료 과거 정정은 등록변경 원자 작업에서만 허용됩니다.', code: 'FORBIDDEN' };
+  }
 
   // 같은 묶음에 같은 품목이 두 번 들어와도 한 번만 처리한다.
   var bySchedule = {};
@@ -10449,7 +10466,7 @@ function dashboardRemoveEquipmentBatch(tid, entries, options) {
 
     var leaseBlock = dashboardTradeMutationLeaseError_(props, tid, 'equipmentRemove', '');
     if (leaseBlock) return leaseBlock;
-    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+    if (!historicalCorrection && isDashboardTradeCheckoutStarted_(ss, tid)) {
       return { error: '이미 반출된 품목은 삭제할 수 없습니다. 반납 의무와 기준선을 보존해야 합니다.' };
     }
 
@@ -10466,13 +10483,18 @@ function dashboardRemoveEquipmentBatch(tid, entries, options) {
       return { error: '완료된 삭제 요청의 대상 행이 다시 존재합니다.', code: 'STATE_CONFLICT' };
     }
 
-    var invalidated = invalidateDashboardReturnInspectionForTrade_(tid, removedScheduleIds, '스케줄 품목 일괄 삭제');
-    if (invalidated && invalidated.error) return invalidated;
-    structureProjectionQueued = !!(invalidated && invalidated.projectionPending);
+    var invalidated = null;
+    if (!historicalCorrection) {
+      invalidated = invalidateDashboardReturnInspectionForTrade_(tid, removedScheduleIds, '스케줄 품목 일괄 삭제');
+      if (invalidated && invalidated.error) return invalidated;
+      structureProjectionQueued = !!(invalidated && invalidated.projectionPending);
+    }
 
     deleteDashboardRowsDescending_(sched, rowsToDelete);
-    scheduleDashboardStructureProjectionUnderLock_(tid, { removeScheduleIds: removedScheduleIds });
-    structureProjectionQueued = true;
+    if (!historicalCorrection) {
+      scheduleDashboardStructureProjectionUnderLock_(tid, { removeScheduleIds: removedScheduleIds });
+      structureProjectionQueued = true;
+    }
     if (!deferContractRegeneration) {
       scheduleContractRegenUnderLock_(tid);
       contractRegenQueued = true;
@@ -18318,6 +18340,11 @@ function normalizeRegisteredTradeCorrection_(args) {
   return { tradeId: tradeId, operationId: operationId, expectedPeriod: expectedPeriod, dateChange: dateChange, remove: remove, add: add };
 }
 
+// JSON/HTTP 입력으로는 위조할 수 없는 동일 런타임 객체 capability다. 반납완료 거래의
+// 과거 문서 정정은 correctRegisteredTrade가 durable taken_qty를 검증한 뒤에만 이 객체를
+// 내부 추가/삭제 함수에 전달한다.
+var REGISTERED_HISTORICAL_CORRECTION_TOKEN_ = {};
+
 function registeredTradeCorrectionDate_(raw, display) {
   if (raw instanceof Date) return Utilities.formatDate(raw, 'Asia/Seoul', 'yyyy-MM-dd');
   var match = String(display || raw || '').trim().match(/(\d{4})[^\d]+(\d{1,2})[^\d]+(\d{1,2})/);
@@ -18340,8 +18367,8 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger) {
   if (!contractSheet || !scheduleSheet) throw new Error('계약마스터/스케줄상세 중 일부가 없습니다');
 
   var contractLast = contractSheet.getLastRow();
-  var contractRaw = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 9).getValues() : [];
-  var contractDisplay = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 9).getDisplayValues() : [];
+  var contractRaw = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 10).getValues() : [];
+  var contractDisplay = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 10).getDisplayValues() : [];
   var contractMatches = [];
   for (var ci = 0; ci < contractRaw.length; ci++) {
     if (String(contractRaw[ci][0] || '').trim() === tradeId) contractMatches.push(ci);
@@ -18353,7 +18380,8 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger) {
     startTime: registeredTradeCorrectionTime_(contractRaw[cidx][5], contractDisplay[cidx][5]),
     endDate: registeredTradeCorrectionDate_(contractRaw[cidx][6], contractDisplay[cidx][6]),
     endTime: registeredTradeCorrectionTime_(contractRaw[cidx][7], contractDisplay[cidx][7]),
-    rounds: Number(contractRaw[cidx][8] || contractDisplay[cidx][8] || 0)
+    rounds: Number(contractRaw[cidx][8] || contractDisplay[cidx][8] || 0),
+    status: String(contractDisplay[cidx][9] || contractRaw[cidx][9] || '').trim()
   };
 
   var scheduleLast = scheduleSheet.getLastRow();
@@ -18476,6 +18504,9 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
   }
   var expectedRounds = calcRentalDays(expectedPeriod.startDate, expectedPeriod.startTime, expectedPeriod.endDate, expectedPeriod.endTime);
   if (Number(finalState.contract.rounds) !== expectedRounds) throw new Error('final readback 회차 불일치');
+  if (baseline.contract.status === '반납완료' && finalState.contract.status !== baseline.contract.status) {
+    throw new Error('final readback 반납완료 상태가 변경되었습니다');
+  }
 
   var expectedItems = {};
   Object.keys(baseline.schedule.topLevelQuantities || {}).forEach(function(name) {
@@ -18591,6 +18622,15 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
 
 function correctRegisteredTrade(args) {
   var correction = normalizeRegisteredTradeCorrection_(args);
+  var historicalAuthority = null;
+  var historicalCandidate = correction.add.length > 0 && !correction.dateChange;
+  // Supabase HTTP는 ScriptLock 밖에서만 수행한다. 이 조회는 반출 순간에 고정된 taken_qty와
+  // return_done을 읽는 사전 증거이며, 잠금 안에서 시트 정본/기간/대상을 다시 검증한다.
+  if (historicalCandidate) {
+    historicalAuthority = typeof supaGetCheckoutBaselineState_ === 'function'
+      ? supaGetCheckoutBaselineState_(correction.tradeId)
+      : { ok: false, error: 'Supabase 반출 권한 상태 조회 함수 없음', items: [] };
+  }
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(1500)) {
     return {
@@ -18609,6 +18649,7 @@ function correctRegisteredTrade(args) {
   var mutationStarted = false;
   var attemptedStage = '';
   var structureChanged = false;
+  var historicalCorrection = false;
   var failure = null;
   try {
     lockedBaseline = readRegisteredTradeCorrectionState_(correction.tradeId, false);
@@ -18670,9 +18711,34 @@ function correctRegisteredTrade(args) {
       if (!remainingScheduleRows.length && !correction.add.length) {
         throw new Error('모든 스케줄 행을 제거만 하는 보정은 허용되지 않습니다. 대체 장비를 함께 지정하세요.');
       }
-      if (isDashboardTradeCheckoutStarted_(SpreadsheetApp.getActiveSpreadsheet(), correction.tradeId)) {
-        throw new Error('이미 반출된 품목은 삭제할 수 없습니다. 반납 의무와 기준선을 보존해야 합니다.');
+    }
+    var checkoutStarted = (correction.add.length || correction.remove.length) &&
+      isDashboardTradeCheckoutStarted_(SpreadsheetApp.getActiveSpreadsheet(), correction.tradeId);
+    if (checkoutStarted && lockedBaseline.contract.status === '반납완료') {
+      var exactReturnedAuthority = historicalCandidate &&
+        historicalAuthority && historicalAuthority.ok === true && historicalAuthority.tradeFound === true &&
+        historicalAuthority.returnDone === true && historicalAuthority.contractStatus === '반납완료';
+      if (!exactReturnedAuthority) {
+        var authorityError = historicalAuthority && historicalAuthority.ok === false
+          ? String(historicalAuthority.error || 'Supabase 반출 권한 상태를 읽지 못했습니다')
+          : '반납완료 거래의 과거 정정 권한 상태가 정확하지 않습니다.';
+        throw new Error(authorityError);
       }
+      var protectedScheduleIds = {};
+      (historicalAuthority.items || []).forEach(function(item) {
+        if (Number(item.taken_qty || 0) > 0) {
+          protectedScheduleIds[String(item.schedule_id || '').trim()] = true;
+        }
+      });
+      var protectedRemovalIds = removalPlan.scheduleIds.filter(function(scheduleId) {
+        return !!protectedScheduleIds[String(scheduleId || '').trim()];
+      });
+      if (protectedRemovalIds.length) {
+        throw new Error('불변 반출 기준선(taken_qty)에 포함된 품목은 과거 정정으로 제거할 수 없습니다: ' + protectedRemovalIds.join(', '));
+      }
+      historicalCorrection = true;
+    } else if (checkoutStarted && correction.remove.length) {
+      throw new Error('이미 반출된 품목은 삭제할 수 없습니다. 반납 의무와 기준선을 보존해야 합니다.');
     }
     var expectedPeriod = correction.dateChange ? {
       startDate: correction.dateChange.newStartDate,
@@ -18732,7 +18798,8 @@ function correctRegisteredTrade(args) {
           requireExactCatalog: true,
           availabilityPreflighted: true,
           excludeScheduleIds: removalPlan.scheduleIds,
-          mutationId: correction.operationId + ':add'
+          mutationId: correction.operationId + ':add',
+          historicalCorrectionToken: historicalCorrection ? REGISTERED_HISTORICAL_CORRECTION_TOKEN_ : null
         }
       ));
       stages.push('scheduleAddEquips');
@@ -18748,7 +18815,8 @@ function correctRegisteredTrade(args) {
         {
           lockAlreadyHeld: true,
           deferContractRegeneration: true,
-          mutationId: correction.operationId + ':remove'
+          mutationId: correction.operationId + ':remove',
+          historicalCorrectionToken: historicalCorrection ? REGISTERED_HISTORICAL_CORRECTION_TOKEN_ : null
         }
       ));
       stages.push('scheduleRemoveEquips');
@@ -18802,6 +18870,26 @@ function correctRegisteredTrade(args) {
   if (failure) {
     if (!mutationStarted) throw failure;
     return partialResult_(failure);
+  }
+
+  if (historicalCorrection) {
+    attemptedStage = 'syncHistoricalProjection';
+    try {
+      var historicalProjection = typeof supaApplyReturnedTradeHistoricalCorrection_ === 'function'
+        ? supaApplyReturnedTradeHistoricalCorrection_(
+          correction.tradeId,
+          removalPlan.scheduleIds,
+          (addResult && addResult.addedItems) || []
+        )
+        : { ok: false, error: 'Supabase 반납완료 과거 정정 함수 없음' };
+      if (!historicalProjection || historicalProjection.ok !== true) {
+        throw new Error(String(historicalProjection && historicalProjection.error || 'Supabase 과거 정정 실패'));
+      }
+      stages.push('syncHistoricalProjection');
+      attemptedStage = '';
+    } catch (historicalProjectionError) {
+      return partialResult_(historicalProjectionError);
+    }
   }
 
   var regeneration = null;

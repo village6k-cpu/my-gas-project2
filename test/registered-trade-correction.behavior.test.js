@@ -15,11 +15,11 @@ function section(source, start, end) {
   return source.slice(from, to);
 }
 
-function successState() {
+function successState(contractStatus = '') {
   return {
     contract: {
       startDate: '2026-08-18', startTime: '04:30',
-      endDate: '2026-08-21', endTime: '04:30', rounds: 3,
+      endDate: '2026-08-21', endTime: '04:30', rounds: 3, status: contractStatus,
     },
     schedule: {
       periods: ['2026-08-18|04:30|2026-08-21|04:30'],
@@ -47,6 +47,20 @@ function harness({
   useRealRemovalPreflight = false,
   baselineRows = null,
   expectedExcludeScheduleIds = ['260813-005-01'],
+  baselineContractStatus = '',
+  finalContractStatus = '',
+  durableCheckoutState = {
+    ok: true,
+    tradeFound: true,
+    setupDone: false,
+    returnDone: false,
+    contractStatus: '',
+    started: false,
+    items: [],
+  },
+  historicalProjectionError = '',
+  finalState = null,
+  useRealVerification = false,
 } = {}) {
   const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
   const body = section(
@@ -59,6 +73,8 @@ function harness({
     preflight: [], mutate: [], lockTries: 0, lockReleases: 0,
     regenerations: 0, notifications: 0, lockHeldDuringRegeneration: null, triggerLockStates: [], reads: 0,
     removeEntries: [],
+    durableCheckoutReads: 0, historicalProjectionCalls: [],
+    addHistoricalToken: null, removeHistoricalToken: null,
   };
   let lockHeld = false;
   const effectiveBaselineRows = baselineRows || [
@@ -71,7 +87,7 @@ function harness({
   const baseline = {
     contract: {
       startDate: '2026-08-17', startTime: '04:30',
-      endDate: '2026-08-20', endTime: '04:30', rounds: 3,
+      endDate: '2026-08-20', endTime: '04:30', rounds: 3, status: baselineContractStatus,
     },
     schedule: {
       periods: ['2026-08-17|04:30|2026-08-20|04:30'],
@@ -111,6 +127,20 @@ function harness({
         .filter(Boolean);
     },
     isDashboardTradeCheckoutStarted_() { return checkoutStarted; },
+    supaGetCheckoutBaselineState_() {
+      calls.durableCheckoutReads += 1;
+      return durableCheckoutState;
+    },
+    supaApplyReturnedTradeHistoricalCorrection_(_tid, _removedIds, _addedItems) {
+      calls.historicalProjectionCalls.push({
+        tid: _tid,
+        removedIds: Array.from(_removedIds || []),
+        addedItems: Array.from(_addedItems || [], (item) => ({ ...item })),
+      });
+      return historicalProjectionError
+        ? { ok: false, error: historicalProjectionError }
+        : { ok: true, removedScheduleIds: Array.from(_removedIds || []), addedScheduleIds: Array.from(_addedItems || [], (item) => item.scheduleId) };
+    },
     normalizeDashboardAddEntries_(entries) {
       return (entries || []).map((entry) => ({
         name: String(entry.name || '').trim(),
@@ -167,13 +197,25 @@ function harness({
       assert.equal(lockHeld, true, 'add mutation must run under the outer lock');
       assert.equal(options.lockAlreadyHeld, true);
       assert.equal(options.deferContractRegeneration, true);
+      calls.addHistoricalToken = options.historicalCorrectionToken || null;
       calls.mutate.push('add');
-      return addMutationError ? { error: addMutationError } : { success: true, addedRows: 1 };
+      return addMutationError ? { error: addMutationError } : {
+        success: true,
+        addedRows: _entries.length,
+        addedItems: _entries.map((entry, index) => ({
+          scheduleId: `260813-005-${12 + index}`,
+          setName: '',
+          name: entry.name,
+          qty: entry.qty,
+          isComponent: false,
+        })),
+      };
     },
     dashboardRemoveEquipmentBatch(_tid, _entries, options) {
       assert.equal(lockHeld, true, 'remove mutation must run under the outer lock');
       assert.equal(options.lockAlreadyHeld, true);
       assert.equal(options.deferContractRegeneration, true);
+      calls.removeHistoricalToken = options.historicalCorrectionToken || null;
       calls.mutate.push('remove');
       calls.removeEntries = _entries.map((entry) => ({ ...entry }));
       return {
@@ -205,15 +247,17 @@ function harness({
 
   context.readRegisteredTradeCorrectionState_ = () => {
     calls.reads += 1;
-    return calls.reads === 1 ? baseline : successState();
+    return calls.reads === 1 ? baseline : (finalState || successState(finalContractStatus));
   };
   if (!useRealRemovalPreflight) {
-    context.preflightRegisteredTradeRemoval_ = () => {
+    context.preflightRegisteredTradeRemoval_ = (_state, removals) => {
       calls.preflight.push('remove');
-      return { success: true, scheduleIds: ['260813-005-01'] };
+      return { success: true, scheduleIds: (removals || []).length ? ['260813-005-01'] : [] };
     };
   }
-  context.verifyRegisteredTradeCorrectionState_ = (_baseline, finalState) => finalState;
+  if (!useRealVerification) {
+    context.verifyRegisteredTradeCorrectionState_ = (_baseline, finalState) => finalState;
+  }
 
   return { context, calls, verifyActual, baseline };
 }
@@ -431,6 +475,191 @@ test('a checkout-started removal is rejected before date or add mutation', () =>
   assert.equal(calls.regenerations, 0);
 });
 
+test('a returned trade replacement may correct only an untaken historical row without reopening return state', () => {
+  const returnedFinal = {
+    contract: {
+      startDate: '2026-08-17', startTime: '04:30',
+      endDate: '2026-08-20', endTime: '04:30', rounds: 3, status: '반납완료',
+    },
+    schedule: {
+      periods: ['2026-08-17|04:30|2026-08-20|04:30'],
+      rows: [
+        { scheduleId: '260813-005-12', setName: '', name: 'BURANO 8K', qty: 1, isComponent: false },
+      ],
+      topLevelQuantities: { 'BURANO 8K': 1 },
+    },
+    ledger: {
+      rows: 1,
+      startDate: '2026-08-17',
+      contractLink: 'https://docs.example/contract',
+      links: ['https://docs.example/contract'],
+    },
+  };
+  const { context, calls } = harness({
+    checkoutStarted: true,
+    baselineContractStatus: '반납완료',
+    finalContractStatus: '반납완료',
+    finalState: returnedFinal,
+    useRealVerification: true,
+    durableCheckoutState: {
+      ok: true,
+      tradeFound: true,
+      setupDone: true,
+      returnDone: true,
+      contractStatus: '반납완료',
+      started: true,
+      items: [{ schedule_id: '260813-005-99', taken_qty: 1 }],
+    },
+  });
+
+  const result = context.correct({
+    tradeId: input.tradeId,
+    operationId: input.operationId,
+    expectedPeriod: input.expectedPeriod,
+    remove: input.remove,
+    add: input.add,
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(calls.mutate, ['add', 'remove']);
+  assert.equal(calls.durableCheckoutReads, 1);
+  assert.ok(calls.addHistoricalToken, 'the add must receive the private historical-correction capability');
+  assert.equal(calls.removeHistoricalToken, calls.addHistoricalToken);
+  assert.deepEqual(calls.historicalProjectionCalls, [{
+    tid: input.tradeId,
+    removedIds: ['260813-005-01'],
+    addedItems: [{ scheduleId: '260813-005-12', setName: '', name: 'BURANO 8K', qty: 1, isComponent: false }],
+  }]);
+  assert.equal(result.readback.contract.status, '반납완료');
+});
+
+test('a returned trade addition is recorded as historical documentation without reopening return state', () => {
+  const returnedFinal = {
+    contract: {
+      startDate: '2026-08-17', startTime: '04:30',
+      endDate: '2026-08-20', endTime: '04:30', rounds: 3, status: '반납완료',
+    },
+    schedule: {
+      periods: ['2026-08-17|04:30|2026-08-20|04:30'],
+      rows: [
+        { scheduleId: '260813-005-01', setName: '', name: 'FX9', qty: 1, isComponent: false },
+        { scheduleId: '260813-005-12', setName: '', name: 'BURANO 8K', qty: 1, isComponent: false },
+      ],
+      topLevelQuantities: { FX9: 1, 'BURANO 8K': 1 },
+    },
+    ledger: {
+      rows: 1,
+      startDate: '2026-08-17',
+      contractLink: 'https://docs.example/contract',
+      links: ['https://docs.example/contract'],
+    },
+  };
+  const { context, calls } = harness({
+    checkoutStarted: true,
+    expectedExcludeScheduleIds: [],
+    baselineContractStatus: '반납완료',
+    finalState: returnedFinal,
+    useRealVerification: true,
+    durableCheckoutState: {
+      ok: true,
+      tradeFound: true,
+      setupDone: true,
+      returnDone: true,
+      contractStatus: '반납완료',
+      started: true,
+      items: [{ schedule_id: '260813-005-01', taken_qty: 1 }],
+    },
+  });
+
+  const result = context.correct({
+    tradeId: input.tradeId,
+    operationId: input.operationId,
+    expectedPeriod: input.expectedPeriod,
+    add: input.add,
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(calls.mutate, ['add']);
+  assert.ok(calls.addHistoricalToken);
+  assert.deepEqual(calls.historicalProjectionCalls[0].removedIds, []);
+  assert.equal(result.readback.contract.status, '반납완료');
+});
+
+test('a returned trade correction fails closed before writes when the target belongs to the immutable checkout baseline', () => {
+  const { context, calls } = harness({
+    checkoutStarted: true,
+    baselineContractStatus: '반납완료',
+    durableCheckoutState: {
+      ok: true,
+      tradeFound: true,
+      setupDone: true,
+      returnDone: true,
+      contractStatus: '반납완료',
+      started: true,
+      items: [{ schedule_id: '260813-005-01', taken_qty: 1 }],
+    },
+  });
+
+  assert.throws(() => context.correct({
+    tradeId: input.tradeId,
+    operationId: input.operationId,
+    expectedPeriod: input.expectedPeriod,
+    remove: input.remove,
+    add: input.add,
+  }), /불변 반출 기준선|taken_qty/);
+  assertNoWriteSideEffects(calls);
+  assert.equal(calls.historicalProjectionCalls.length, 0);
+});
+
+test('a returned trade correction fails closed before writes when durable checkout authority cannot be read', () => {
+  const { context, calls } = harness({
+    checkoutStarted: true,
+    baselineContractStatus: '반납완료',
+    durableCheckoutState: { ok: false, error: 'authority unavailable', started: false, items: [] },
+  });
+
+  assert.throws(() => context.correct({
+    tradeId: input.tradeId,
+    operationId: input.operationId,
+    expectedPeriod: input.expectedPeriod,
+    remove: input.remove,
+    add: input.add,
+  }), /authority unavailable|권한 상태/);
+  assertNoWriteSideEffects(calls);
+});
+
+test('a returned historical correction reports partial state if its exact Supabase projection fails after sheet writes', () => {
+  const { context, calls } = harness({
+    checkoutStarted: true,
+    baselineContractStatus: '반납완료',
+    historicalProjectionError: 'projection unavailable',
+    durableCheckoutState: {
+      ok: true,
+      tradeFound: true,
+      setupDone: true,
+      returnDone: true,
+      contractStatus: '반납완료',
+      started: true,
+      items: [],
+    },
+  });
+
+  const result = context.correct({
+    tradeId: input.tradeId,
+    operationId: input.operationId,
+    expectedPeriod: input.expectedPeriod,
+    remove: input.remove,
+    add: input.add,
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'PARTIAL_STATE');
+  assert.deepEqual(Array.from(result.appliedStages), ['scheduleAddEquips', 'scheduleRemoveEquips']);
+  assert.equal(result.attemptedStage, 'syncHistoricalProjection');
+  assert.equal(calls.regenerations, 0);
+  assert.equal(result.customerNotificationSent, false);
+});
+
 test('an active cross-operation lease blocks even a date-only correction before mutation', () => {
   const { context, calls } = harness({ leaseError: '같은 거래의 반납 상태를 처리 중입니다.' });
   assert.throws(
@@ -632,6 +861,80 @@ test('actual batch/set GAS add allocates unique monotonic suffixes 100 and 101',
   assert.equal(new Set(Array.from(result.plannedItems, (row) => row.scheduleId)).size, 2);
   assert.equal(Array.from(result.plannedItems).every((row) => !/-00$/.test(row.scheduleId)), true);
   assert.deepEqual(Array.from(plannedRowWidths), [13, 13]);
+});
+
+test('actual historical GAS add preserves returned state and delegates no checkout baseline projection', () => {
+  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+  const body = section(gas, 'function dashboardAddEquipments(', '\nvar DASHBOARD_ONSITE_IDEM_PROP_');
+  const tradeId = '260813-005';
+  const privateToken = {};
+  const calls = { invalidations: 0, projections: [], written: [] };
+  const props = { getProperty: () => '', setProperty() {}, deleteProperty() {} };
+  const sched = {
+    getLastRow: () => 2,
+    getRange(row, column) {
+      if (column === 6) {
+        return { getDisplayValues: () => [[
+          '2026-08-17', '04:30', '2026-08-20', '04:30', '', '', '', '테스트 고객',
+        ]] };
+      }
+      return { setValues: (rows) => { calls.written = rows.map((entry) => Array.from(entry)); } };
+    },
+    insertRowsAfter() {},
+  };
+  const ss = {
+    getSheetByName(name) {
+      if (name === '스케줄상세') return sched;
+      if (name === '장비마스터' || name === '세트마스터') return {};
+      return null;
+    },
+  };
+  const context = {
+    Date, JSON, Math, Object, Array, String, Number, RegExp, Error,
+    REGISTERED_HISTORICAL_CORRECTION_TOKEN_: privateToken,
+    normalizeDashboardAddEntries_: (entries) => entries.map((entry) => ({ name: entry.name, qty: entry.qty })),
+    normalizeDashboardMutationId_: (value) => String(value || ''),
+    PropertiesService: { getScriptProperties: () => props },
+    CacheService: { getScriptCache: () => ({ get: () => '', put() {} }) },
+    SpreadsheetApp: { getActiveSpreadsheet: () => ss },
+    dashboardTradeMutationLeaseError_: () => null,
+    dashboardOnsiteRequestFingerprint_: () => 'fingerprint',
+    beginDashboardMutation_: () => ({ ok: true }),
+    commitDashboardMutation_() {},
+    findDashboardRowsByValue_: () => [2],
+    readDashboardScheduleRows_: () => [[`${tradeId}-11`]],
+    parseDT: () => new Date('2026-08-17T00:00:00Z'),
+    buildDashboardSetLookup_: () => ({ items: {}, prices: {}, components: {} }),
+    buildAvailabilityItems_: (name, qty) => [{ name, qty }],
+    buildDashboardEquipmentMeta_: () => ({ equipment: { 'BURANO 8K': true } }),
+    mergeAvailabilityItems_: (items) => items,
+    dashboardAddedItemsFromRows_: (rows) => rows.map((row) => ({
+      scheduleId: row[0], setName: row[2], name: row[3], qty: row[4], isComponent: false,
+    })),
+    invalidateDashboardReturnInspectionForTrade_: () => { calls.invalidations += 1; return {}; },
+    applyDashboardAddRowFormats_() {},
+    isDashboardTradeCheckoutStarted_: () => true,
+    getDashboardReturnCheckableItems_: () => { throw new Error('must not extend immutable checkout baseline'); },
+    scheduleDashboardStructureProjectionUnderLock_: (_tid, patch) => calls.projections.push({ tid: _tid, patch }),
+    invalidateDashboardCache() {},
+    invalidateTimelineCache() {},
+  };
+  vm.runInNewContext(`${body}\nthis.addMany = dashboardAddEquipments;`, context);
+
+  const result = context.addMany(tradeId, [{ name: 'BURANO 8K', qty: 1 }], {
+    lockAlreadyHeld: true,
+    deferContractRegeneration: true,
+    rawNames: true,
+    requireExactCatalog: true,
+    availabilityPreflighted: true,
+    mutationId: `${input.operationId}:add`,
+    historicalCorrectionToken: privateToken,
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(calls.invalidations, 0);
+  assert.deepEqual(calls.projections, []);
+  assert.deepEqual(Array.from(calls.written, (row) => row[0]), [`${tradeId}-12`]);
 });
 
 test('sheetAPI exposes the bounded correction action and capability', () => {
