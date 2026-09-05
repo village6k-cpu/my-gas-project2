@@ -38,6 +38,19 @@ function finiteMinutes(value, fallback, minimum) {
   return Number.isFinite(numeric) ? Math.max(minimum, numeric) : fallback;
 }
 
+function safeHttpsUrl(value) {
+  const normalized = bounded(value, 2048);
+  if (!normalized) return '';
+  try {
+    const url = new URL(normalized);
+    return url.protocol === 'https:' && url.hostname && !url.username && !url.password && !url.hash
+      ? url.href
+      : '';
+  } catch {
+    return '';
+  }
+}
+
 export function readStrictBooleanEnvironment(value, defaultValue, name = 'environment variable') {
   if (value === undefined || value === null || String(value).trim() === '') return defaultValue;
   const normalized = String(value).trim().toLowerCase();
@@ -109,6 +122,9 @@ export function loadWorkOrchestratorConfig(env = process.env) {
     workItemsEnabled: readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED, false, 'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED'),
     digestEnabled: readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_DIGEST_ENABLED, false, 'WORK_ORCHESTRATOR_V2_DIGEST_ENABLED'),
     cleanupEnabled: readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED, false, 'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED'),
+    reportOnlyEnabled: readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED, false, 'WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED'),
+    heybilliActionsReady: readStrictBooleanEnvironment(env.WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY, false, 'WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY'),
+    dashboardUrl: safeHttpsUrl(env.SLACK_DASHBOARD_URL),
     inboxChannelId: bounded(env.WORK_ORCHESTRATOR_V2_INBOX_CHANNEL_ID, 500),
     digestChannelId: bounded(env.WORK_ORCHESTRATOR_V2_DIGEST_CHANNEL_ID, 500),
     digestIntervalMinutes: finiteMinutes(env.WORK_ORCHESTRATOR_V2_DIGEST_INTERVAL_MINUTES, 180, 60),
@@ -149,6 +165,9 @@ export function resolveWorkOrchestratorV2CutoverConfig(env = process.env) {
     && workOrchestrator.workItemsEnabled
     && workOrchestrator.digestEnabled
     && workOrchestrator.cleanupEnabled
+    && workOrchestrator.reportOnlyEnabled
+    && workOrchestrator.heybilliActionsReady
+    && Boolean(workOrchestrator.dashboardUrl)
     && p0ReadbackEnabled
     && p0CutoverEnabled;
   const legacyFlagsEnabled = legacyCardsEnabled
@@ -158,7 +177,8 @@ export function resolveWorkOrchestratorV2CutoverConfig(env = process.env) {
   if (runtimeMode === 'legacy' && (!legacyFlagsEnabled || v2FlagsEnabled
     || workOrchestrator.shadowWrites || workOrchestrator.immediateEnabled
     || workOrchestrator.workItemsEnabled || workOrchestrator.digestEnabled
-    || workOrchestrator.cleanupEnabled || p0ReadbackEnabled || p0CutoverEnabled)) {
+    || workOrchestrator.cleanupEnabled || workOrchestrator.reportOnlyEnabled
+    || workOrchestrator.heybilliActionsReady || p0ReadbackEnabled || p0CutoverEnabled)) {
     throw new Error('Work Orchestrator cutover guard: legacy runtime mode requires the exact rollback contract');
   }
   if (runtimeMode === 'v2' && (!v2FlagsEnabled || legacyCardsEnabled

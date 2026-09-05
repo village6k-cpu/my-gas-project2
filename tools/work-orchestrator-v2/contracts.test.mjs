@@ -132,6 +132,9 @@ test('runtime mode defaults to the exact legacy rollback contract and rejects un
     workItemsEnabled: false,
     digestEnabled: false,
     cleanupEnabled: false,
+    dashboardUrl: '',
+    reportOnlyEnabled: false,
+    heybilliActionsReady: false,
     inboxChannelId: '',
     digestChannelId: '',
     digestIntervalMinutes: 180,
@@ -159,6 +162,9 @@ test('runtime mode validates the exact v2 target and exact legacy rollback sende
     WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY: '1',
+    SLACK_DASHBOARD_URL: 'https://heybilli.example/follow-ups',
     AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
     KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
     SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
@@ -172,6 +178,8 @@ test('runtime mode validates the exact v2 target and exact legacy rollback sende
   assert.equal(exactV2.legacyP0Enabled, false);
   assert.equal(exactV2.p0CutoverEnabled, true);
   assert.equal(exactV2.legacyActionPollEnabled, false);
+  assert.equal(exactV2.reportOnlyEnabled, true);
+  assert.equal(exactV2.heybilliActionsReady, true);
 
   assert.throws(
     () => resolveWorkOrchestratorV2CutoverConfig({
@@ -185,6 +193,36 @@ test('runtime mode validates the exact v2 target and exact legacy rollback sende
   );
 });
 
+test('report-only runtime mode rejects every partial owner-action cutover', () => {
+  const target = {
+    WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'v2',
+    WORK_ORCHESTRATOR_V2_SHADOW_WRITES: '0',
+    WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED: '0',
+    WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_DIGEST_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY: '1',
+    SLACK_DASHBOARD_URL: 'https://heybilli.example/follow-ups',
+    AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
+    KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
+    SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
+    P0_SLACK_ESCALATION_ENABLED: '0',
+    SLACK_ACTION_POLL_ENABLED: '0'
+  };
+  assert.doesNotThrow(() => resolveWorkOrchestratorV2CutoverConfig(target));
+  for (const partial of [
+    { WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED: '0' },
+    { WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY: '0' },
+    { SLACK_ACTION_POLL_ENABLED: '1' },
+    { SLACK_DASHBOARD_URL: '' }
+  ]) {
+    assert.throws(() => resolveWorkOrchestratorV2CutoverConfig({ ...target, ...partial }), /exact cutover/i);
+  }
+});
+
 test('binding Task 7 target and rollback blocks pass the real exact-mode guard', () => {
   const target = readPlanEnvironment('The valid production target is:');
   const rollback = readPlanEnvironment('Rollback flags:');
@@ -195,6 +233,8 @@ test('binding Task 7 target and rollback blocks pass the real exact-mode guard',
     p0Cutover: target.WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED,
     legacyP0: target.P0_SLACK_ESCALATION_ENABLED,
     legacyActions: target.SLACK_ACTION_POLL_ENABLED,
+    reportOnly: target.WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED,
+    heybilliActionsReady: target.WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY,
     botUserId: target.WORK_ORCHESTRATOR_V2_SLACK_BOT_USER_ID,
     botId: target.WORK_ORCHESTRATOR_V2_SLACK_BOT_ID,
     teamId: target.WORK_ORCHESTRATOR_V2_SLACK_TEAM_ID,
@@ -207,6 +247,8 @@ test('binding Task 7 target and rollback blocks pass the real exact-mode guard',
     p0Cutover: '1',
     legacyP0: '0',
     legacyActions: '0',
+    reportOnly: '1',
+    heybilliActionsReady: '1',
     botUserId: 'U_FROM_AUTH_TEST',
     botId: 'B_FROM_AUTH_TEST',
     teamId: 'T_FROM_AUTH_TEST',
@@ -230,7 +272,9 @@ test('binding Task 7 target and rollback blocks pass the real exact-mode guard',
     bridgeLegacy: restored.KAKAO_FOLLOW_UP_ITEMS_ENABLED,
     legacyCards: restored.SLACK_AGENT_CARD_DELIVERY_ENABLED,
     legacyP0: restored.P0_SLACK_ESCALATION_ENABLED,
-    legacyActions: restored.SLACK_ACTION_POLL_ENABLED
+    legacyActions: restored.SLACK_ACTION_POLL_ENABLED,
+    reportOnly: restored.WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED,
+    heybilliActionsReady: restored.WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY
   }, {
     runtimeMode: 'legacy',
     shadowWrites: '0',
@@ -244,7 +288,9 @@ test('binding Task 7 target and rollback blocks pass the real exact-mode guard',
     bridgeLegacy: '1',
     legacyCards: '1',
     legacyP0: '1',
-    legacyActions: '1'
+    legacyActions: '1',
+    reportOnly: '0',
+    heybilliActionsReady: '0'
   });
   assert.equal(resolveWorkOrchestratorV2CutoverConfig(restored).runtimeMode, 'legacy');
 });

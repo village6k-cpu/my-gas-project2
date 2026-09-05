@@ -2483,6 +2483,33 @@ test('P0 Slack escalation claim is durable and produces a deterministic Slack me
   assert.equal(message.client_msg_id, first.clientMessageId);
 });
 
+test('report-only P0 alert is buttonless and sends all handling to Heybilli', () => {
+  const row = {
+    id: '11111111-1111-4111-8111-111111111111',
+    version: 3,
+    work_type: 'quote_send',
+    priority: 'p0',
+    state: 'open',
+    title: '견적서 발송 확인',
+    payload: {
+      requires_human_action: true,
+      recommended_action: '헤이빌리에서 견적 내용을 확인하고 발송하세요.'
+    }
+  };
+  const claim = { attempt: 1, clientMessageId: '22222222-2222-4222-8222-222222222222' };
+  const message = buildP0SlackEscalationMessage(row, claim, {
+    dashboardUrl: 'https://heybilli.example/follow-ups',
+    fallbackChannelId: 'CFOCUS'
+  });
+  const serialized = JSON.stringify(message);
+  assert.match(message.text, /긴급 후속조치/);
+  assert.match(message.text, /헤이빌리에서 처리/);
+  assert.deepEqual(message.blocks.map(({ type }) => type), ['header', 'section', 'context']);
+  for (const forbidden of ['actions', 'button', 'action_id', 'village_work_v2_ack_p0']) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
 test('P0 Slack escalation backs off exponentially and stops at the attempt cap', () => {
   const base = {
     id: 'p0-row', status: 'open', customer_name: '백남준', title: '즉시 확인',
@@ -2582,6 +2609,9 @@ test('v2 cutover guard validates the bridge startup target independently', () =>
     WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '1',
     WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED: '1',
+    WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY: '1',
+    SLACK_DASHBOARD_URL: 'https://heybilli.example/follow-ups',
     AI_WORKER_FOLLOW_UP_ITEMS_ENABLED: '0',
     KAKAO_FOLLOW_UP_ITEMS_ENABLED: '0',
     SLACK_AGENT_CARD_DELIVERY_ENABLED: '0',
@@ -3677,15 +3707,19 @@ test('v2 P0 definite Slack rejection records a same-generation retry without lea
   assert.doesNotMatch(JSON.stringify(result), /private rejected content/);
 });
 
-test('v2 P0 alert carries a current versioned acknowledgement action', async () => {
+test('v2 report-only P0 alert carries no Slack action and links to Heybilli', async () => {
   const row = {
     id: '11111111-1111-4111-8111-111111111111', version: 7, priority: 'p0', state: 'open',
-    first_opened_at: '2026-08-29T05:00:00.000Z', title: 'Immediate review', summary: 'Review required',
-    payload: { requires_human_action: true }
+    work_type: 'human_review', first_opened_at: '2026-08-29T05:00:00.000Z',
+    title: 'Immediate review', summary: 'Review required',
+    payload: { requires_human_action: true, recommended_action: '헤이빌리에서 확인하세요.' }
   };
   let postedInput = null;
   const runtime = createWorkOrchestratorP0Runtime({
-    config: { workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true, digestChannelId: 'CP0' },
+    config: {
+      workItemsEnabled: true, p0ReadbackEnabled: true, p0CutoverEnabled: true,
+      reportOnlyEnabled: true, dashboardUrl: 'https://heybilli.example/follow-ups', digestChannelId: 'CP0'
+    },
     store: {
       async listDueP0Work() { return { rows: [row], eligibleCount: 1, selectedCount: 1, omittedCount: 0 }; },
       async claimP0Delivery(input) {
@@ -3707,15 +3741,10 @@ test('v2 P0 alert carries a current versioned acknowledgement action', async () 
   });
 
   const result = await runtime.sweep('test');
-  const action = postedInput.blocks[1].elements[0];
-  const decoded = JSON.parse(Buffer.from(action.value, 'base64url').toString('utf8'));
   assert.equal(result.delivered, 1);
-  assert.equal(action.action_id, 'village_work_v2_ack_p0');
-  assert.deepEqual(decoded, {
-    id: row.id,
-    version: 7,
-    action: { type: 'ack_p0' }
-  });
+  assert.deepEqual(postedInput.blocks.map(({ type }) => type), ['header', 'section', 'context']);
+  assert.match(JSON.stringify(postedInput), /헤이빌리/);
+  assert.doesNotMatch(JSON.stringify(postedInput), /actions|button|action_id|ack_p0/);
 });
 
 function deferred() {
@@ -4787,6 +4816,8 @@ test('Work Orchestrator shadow health exposes only flags, readiness, counters, t
       workItemsEnabled: false,
       p0ReadbackEnabled: false,
       p0CutoverEnabled: false,
+      reportOnlyEnabled: false,
+      heybilliActionsReady: false,
       digestEnabled: false,
       cleanupEnabled: false
     },
@@ -4810,6 +4841,8 @@ test('Work Orchestrator shadow health exposes only flags, readiness, counters, t
       workItemsEnabled: false,
       p0ReadbackEnabled: false,
       p0CutoverEnabled: false,
+      reportOnlyEnabled: false,
+      heybilliActionsReady: false,
       digestEnabled: false,
       cleanupEnabled: false,
       storeConfigured: false,
@@ -4873,7 +4906,7 @@ test('Work Orchestrator shadow health fails closed on arbitrary internal receipt
 
 function digestStoreStub() {
   return Object.fromEntries([
-    'claimDivergentDigestRun', 'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
+    'claimDivergentDigestRun', 'claimDigestRun', 'listActionableWork', 'listHeybilliOwnerWork', 'prepareDigestParts', 'claimDigestPartDelivery',
     'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
     'markDigestGenerationDiverged',
     'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
@@ -4971,6 +5004,36 @@ test('digest startup catches up only the latest boundary and checks once per min
   await intervals[0].callback();
   assert.equal(calls.length, 2);
   assert.equal(runtime.state.nextScheduledAt, '2026-08-29T12:00:00.000Z');
+});
+
+test('report-only digest keeps the declared remainder as information instead of an omission failure', async () => {
+  let receivedConfig = null;
+  const runtime = createWorkOrchestratorDigestRuntime({
+    config: {
+      digestEnabled: true,
+      digestChannelId: 'CFOCUS',
+      dashboardUrl: 'https://heybilli.example/follow-ups'
+    },
+    store: digestStoreStub(),
+    slack: { postMessage() {}, findMessageByClientId() {}, deleteMessage() {} },
+    now: () => '2026-08-29T06:01:00.000Z',
+    run: async ({ config }) => {
+      receivedConfig = config;
+      return {
+        status: 'delivered', scheduledAt: '2026-08-29T06:00:00.000Z',
+        runId: '10000000-0000-4000-8000-000000000001',
+        selectedCount: 123, renderedCount: 5, omittedEligibleCount: 118,
+        partCount: 1, deliveredPartCount: 1,
+        cleanup: { attempted: 0, settled: 0, failed: 0 }
+      };
+    },
+    setIntervalImpl: () => ({})
+  });
+  const result = await runtime.runNow('manual');
+  assert.equal(result.status, 'delivered');
+  assert.equal(result.omittedEligibleCount, 118);
+  assert.equal(receivedConfig.dashboardUrl, 'https://heybilli.example/follow-ups');
+  assert.equal(runtime.state.digestFailureCount, 0);
 });
 
 test('minute checks retry failed cleanup on the same delivered boundary', async () => {
@@ -5479,6 +5542,16 @@ test('health config exposes the live safety contract used by supervised restarts
     workOrchestrator: { runtimeMode: 'legacy' }
   });
   assert.equal(modeHealth.workOrchestrator.runtimeMode, 'legacy');
+
+  const reportOnlyHealth = buildHealthConfig({
+    workOrchestrator: {
+      runtimeMode: 'v2', reportOnlyEnabled: true, heybilliActionsReady: true,
+      dashboardUrl: 'https://private.example/follow-ups?token=secret'
+    }
+  });
+  assert.equal(reportOnlyHealth.workOrchestrator.reportOnlyEnabled, true);
+  assert.equal(reportOnlyHealth.workOrchestrator.heybilliActionsReady, true);
+  assert.doesNotMatch(JSON.stringify(reportOnlyHealth), /private\.example|token|secret|dashboardUrl/);
 });
 
 test('bridge-created failure cards forward configured Slack mention recipients', async () => {
