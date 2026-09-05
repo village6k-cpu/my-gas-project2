@@ -405,6 +405,9 @@ test('persistent runtime mode selects exact legacy rollback and v2 cutover contr
     WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED: '0',
     WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED: '0',
     WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED: '0',
+    WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED: '0',
+    WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY: '0',
+    SLACK_DASHBOARD_URL: '',
     VILLAGE_WINDOWS_WRITES_ENABLED: '1',
     SUPABASE_RECOVERY_ENABLED: '1',
     KAKAO_TAB_CLEANUP_ENABLED: '1',
@@ -436,8 +439,11 @@ test('persistent runtime mode selects exact legacy rollback and v2 cutover contr
     'WORK_ORCHESTRATOR_V2_DIGEST_ENABLED',
     'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED',
     'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED',
-    'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED'
+    'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED',
+    'WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED',
+    'WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY'
   ]) assert.equal(v2[key], '1', key);
+  assert.equal(v2.SLACK_DASHBOARD_URL, 'https://today-dashboard-ten.vercel.app/follow-ups');
 
   assert.throws(() => runtimeContract('shadow'), /runtime mode.*legacy.*v2/i);
 });

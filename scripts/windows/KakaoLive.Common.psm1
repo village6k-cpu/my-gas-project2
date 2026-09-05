@@ -42,6 +42,9 @@ function Get-KakaoLiveRuntimeContract {
         WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED = $(if ($v2) { '1' } else { '0' })
         WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED = $(if ($v2) { '1' } else { '0' })
         WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED = $(if ($v2) { '1' } else { '0' })
+        WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED = $(if ($v2) { '1' } else { '0' })
+        WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY = $(if ($v2) { '1' } else { '0' })
+        SLACK_DASHBOARD_URL                = $(if ($v2) { 'https://today-dashboard-ten.vercel.app/follow-ups' } else { '' })
         VILLAGE_WINDOWS_WRITES_ENABLED    = '1'
         SUPABASE_RECOVERY_ENABLED         = '1'
         KAKAO_TAB_CLEANUP_ENABLED         = '1'
@@ -93,6 +96,8 @@ function Assert-KakaoLiveV2CutoverContract {
         'WORK_ORCHESTRATOR_V2_IMMEDIATE_ENABLED', 'WORK_ORCHESTRATOR_V2_WORK_ITEMS_ENABLED',
         'WORK_ORCHESTRATOR_V2_DIGEST_ENABLED', 'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED',
         'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED', 'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED',
+        'WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED', 'WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY',
+        'SLACK_DASHBOARD_URL',
         'VILLAGE_WINDOWS_WRITES_ENABLED', 'SUPABASE_RECOVERY_ENABLED', 'KAKAO_TAB_CLEANUP_ENABLED',
         'HERMES_WORKER_COMMAND_MODE', 'HERMES_HOME', 'DEBOUNCE_MS', 'MAX_WAIT_MS',
         'WORKER_SLOW_ALERT_MS', 'WORKER_TIMEOUT_MS', 'WORKER_CATCHUP_TIMEOUT_MS',
@@ -121,6 +126,10 @@ function Assert-KakaoLiveV2CutoverContract {
     $cleanupEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_CLEANUP_ENABLED']
     $p0ReadbackEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_P0_READBACK_ENABLED']
     $p0CutoverEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_P0_CUTOVER_ENABLED']
+    $reportOnlyEnabled = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED' -Value $Contract['WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED']
+    $heybilliActionsReady = ConvertFrom-KakaoLiveContractBoolean -Name 'WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY' -Value $Contract['WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY']
+    $dashboardUrl = $Contract['SLACK_DASHBOARD_URL'].Trim()
+    $expectedDashboardUrl = 'https://today-dashboard-ten.vercel.app/follow-ups'
 
     if ($p0CutoverEnabled -and -not $p0ReadbackEnabled) {
         throw 'Work Orchestrator v2 P0 cutover requires readback.'
@@ -132,10 +141,12 @@ function Assert-KakaoLiveV2CutoverContract {
         throw 'Work Orchestrator v2 cutover guard: legacy P0 requires v2 work items, readback, and cutover.'
     }
     $v2FlagsEnabled = (-not $shadowWritesEnabled) -and (-not $immediateEnabled) -and $workItemsEnabled -and $digestEnabled -and `
-        $cleanupEnabled -and $p0ReadbackEnabled -and $p0CutoverEnabled
+        $cleanupEnabled -and $p0ReadbackEnabled -and $p0CutoverEnabled -and $reportOnlyEnabled -and `
+        $heybilliActionsReady -and $dashboardUrl -ceq $expectedDashboardUrl
     $legacyFlagsEnabled = $legacyCardsEnabled -and $legacyWorkRowsEnabled -and $legacyP0Enabled -and $legacyActionPollEnabled
     if ($runtimeMode -eq 'legacy' -and (-not $legacyFlagsEnabled -or $shadowWritesEnabled -or $immediateEnabled -or `
-        $workItemsEnabled -or $digestEnabled -or $cleanupEnabled -or $p0ReadbackEnabled -or $p0CutoverEnabled)) {
+        $workItemsEnabled -or $digestEnabled -or $cleanupEnabled -or $p0ReadbackEnabled -or $p0CutoverEnabled -or `
+        $reportOnlyEnabled -or $heybilliActionsReady -or $dashboardUrl -ne '')) {
         throw 'Work Orchestrator legacy runtime mode requires the exact rollback contract.'
     }
     if ($runtimeMode -eq 'v2' -and (-not $v2FlagsEnabled -or $legacyCardsEnabled -or $legacyWorkRowsEnabled -or `
