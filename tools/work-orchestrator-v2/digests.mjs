@@ -1,33 +1,10 @@
-import { encodeWorkActionValue } from './work-items.mjs';
-import { encodeWorkActionContext } from './work-actions.mjs';
+import { describeOwnerWorkType, isOwnerWorkType } from './work-taxonomy.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SLACK_USER_ID = /^[UW][A-Z0-9]{1,79}$/;
 const ACTIVE_STATES = new Set(['open', 'in_progress', 'snoozed']);
 const TERMINAL_STATES = new Set(['resolved', 'dismissed']);
 const PRIORITIES = new Set(['p0', 'urgent', 'normal', 'low']);
-const OWNER_ACTION_WORK_TYPES = new Set([
-  'human_review',
-  'reply_needed',
-  'quote_send',
-  'tax_invoice',
-  'schedule_check',
-  'reservation_review',
-  'price_review',
-  'payment_check',
-  'contract_document',
-  'return_extension',
-  'damage_repair',
-  'sheet_duplicate_check'
-]);
 const SECTIONS = Object.freeze(['p0', 'overdue', 'urgent', 'carry_over', 'actionable']);
-const SECTION_LABELS = Object.freeze({
-  p0: '즉시 확인',
-  overdue: '기한 경과',
-  urgent: '우선 처리',
-  carry_over: '미처리',
-  actionable: '대표님 할 일'
-});
 const SECTION_RANK = new Map(SECTIONS.map((section, index) => [section, index]));
 const INCLUSION_REASONS = new Set([...SECTIONS, 'daily_reminder']);
 const SELECTED_KEYS = Object.freeze([
@@ -35,16 +12,22 @@ const SELECTED_KEYS = Object.freeze([
   'firstOpenedAt', 'section', 'inclusionReason', 'ownerMentionRequired', 'dailyReminderDue'
 ]);
 const MAX_INPUT_ITEMS = 500;
-const MAX_ROWS_PER_PART = 24;
 const MAX_INTERVAL_MINUTES = 7 * 24 * 60;
-const MAX_RENDERED_TITLE = 500;
-const MAX_RENDERED_SUMMARY = 1500;
-const MAX_RENDERED_ROOM = 500;
 const MAX_SLACK_SECTION_TEXT = 3000;
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-const KST_OFFSET_MS = 9 * HOUR_MS;
 const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
+const REPORT_ITEM_KEYS = Object.freeze([
+  'category', 'dueAt', 'firstOpenedAt', 'id', 'priority', 'recommendedAction', 'snoozedUntil',
+  'state', 'summary', 'title', 'updatedAt', 'version', 'workType', 'workTypeLabel'
+]);
+const REPORT_CATEGORIES = Object.freeze([
+  ['schedule', '예약·스케줄'],
+  ['quote', '견적·가격'],
+  ['settlement', '정산·서류'],
+  ['customer', '고객 응대'],
+  ['operations', '운영·예외']
+]);
 
 /**
  * @typedef {object} SelectedDigestItem
@@ -149,7 +132,7 @@ function selectedSection(row, nowMs) {
 
 function ownerActionMetadata(row) {
   if (!isRecord(row) || !isRecord(row.payload) || row.payload.requires_human_action !== true) return null;
-  if (typeof row.work_type !== 'string' || !OWNER_ACTION_WORK_TYPES.has(row.work_type)) return null;
+  if (typeof row.work_type !== 'string' || !isOwnerWorkType(row.work_type)) return null;
   const recommended = row.payload.recommended_action;
   return {
     workType: row.work_type,
@@ -218,7 +201,7 @@ function validateSelectedEntry(entry) {
   const workType = exactText(entry.workType, 100);
   const section = exactText(entry.section, 30);
   const inclusionReason = exactText(entry.inclusionReason, 30);
-  if (!PRIORITIES.has(priority) || !OWNER_ACTION_WORK_TYPES.has(workType)
+  if (!PRIORITIES.has(priority) || !isOwnerWorkType(workType)
     || !SECTION_RANK.has(section) || !INCLUSION_REASONS.has(inclusionReason)) {
     throw invalidInput();
   }
@@ -342,164 +325,155 @@ function escapeSlackText(value, maxLength) {
   return result;
 }
 
-function addMillisecondsIso(timestamp, milliseconds) {
-  const result = new Date(Date.parse(timestamp) + milliseconds);
-  if (Number.isNaN(result.getTime())) throw invalidConfig();
-  return result.toISOString();
-}
-
-function kstPresetTimes(now) {
-  const nowMs = Date.parse(now);
-  const kst = new Date(nowMs + KST_OFFSET_MS);
-  const year = kst.getUTCFullYear();
-  const month = kst.getUTCMonth();
-  const day = kst.getUTCDate();
-  const eveningMs = Date.UTC(year, month, day, 18) - KST_OFFSET_MS;
-  const tomorrowMorningMs = Date.UTC(year, month, day + 1, 9) - KST_OFFSET_MS;
-  const presets = [
-    {
-      actionId: 'village_work_v2_snooze_3h',
-      label: '3시간 미루기',
-      snoozedUntil: addMillisecondsIso(now, 3 * HOUR_MS)
-    }
-  ];
-  if (eveningMs > nowMs) {
-    presets.push({
-      actionId: 'village_work_v2_snooze_evening',
-      label: '오늘 저녁',
-      snoozedUntil: new Date(eveningMs).toISOString()
-    });
+function safeDashboardUrl(value) {
+  if (typeof value !== 'string' || !value || value.length > 2048 || value !== value.trim()) throw invalidConfig();
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw invalidConfig();
   }
-  presets.push(
-    {
-      actionId: 'village_work_v2_snooze_tomorrow',
-      label: '내일 오전',
-      snoozedUntil: new Date(tomorrowMorningMs).toISOString()
-    }
-  );
-  return presets;
+  if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password || parsed.hash) {
+    throw invalidConfig();
+  }
+  return parsed.href;
 }
 
-function button(item, actionId, label, action, style) {
-  const result = {
-    type: 'button',
-    text: { type: 'plain_text', text: label.slice(0, 75), emoji: true },
-    action_id: actionId,
-    value: encodeWorkActionValue({ id: item.id, version: item.version, action })
-  };
-  if (style) result.style = style;
-  return result;
+function validateReportSummary(value) {
+  if (!exactKeys(value, ['now', 'snoozed', 'completed', 'p0', 'byCategory'])
+    || !exactKeys(value.byCategory, REPORT_CATEGORIES.map(([key]) => key))) throw invalidConfig();
+  const counters = [value.now, value.snoozed, value.completed, value.p0, ...Object.values(value.byCategory)];
+  if (counters.some((counter) => !Number.isSafeInteger(counter) || counter < 0)
+    || value.p0 > value.now
+    || Object.values(value.byCategory).reduce((sum, counter) => sum + counter, 0) !== value.now + value.snoozed) {
+    throw invalidConfig();
+  }
+  return structuredClone(value);
 }
 
-function contextButton(item, actionId, label) {
+function validateReportItem(entry) {
+  if (!exactKeys(entry, REPORT_ITEM_KEYS)) throw invalidInput();
+  const id = exactText(entry.id, 36).toLowerCase();
+  const priority = exactText(entry.priority, 20);
+  const definition = describeOwnerWorkType(entry.workType);
+  if (!UUID.test(id) || !PRIORITIES.has(priority) || definition === null
+    || definition.category !== entry.category || definition.typeLabel !== entry.workTypeLabel
+    || !ACTIVE_STATES.has(entry.state)) throw invalidInput();
   return {
-    type: 'button',
-    text: { type: 'plain_text', text: label.slice(0, 75), emoji: true },
-    action_id: actionId,
-    value: encodeWorkActionContext({ id: item.id, version: item.version })
+    id,
+    version: positiveVersion(entry.version),
+    category: definition.category,
+    workType: definition.type,
+    workTypeLabel: definition.typeLabel,
+    priority,
+    state: entry.state,
+    title: exactText(entry.title, 300),
+    summary: summaryText(entry.summary),
+    recommendedAction: typeof entry.recommendedAction === 'string' && entry.recommendedAction.length === 0
+      ? ''
+      : exactText(entry.recommendedAction, 1200),
+    dueAt: canonicalIso(entry.dueAt, { nullable: true }),
+    snoozedUntil: canonicalIso(entry.snoozedUntil, { nullable: true }),
+    firstOpenedAt: canonicalIso(entry.firstOpenedAt),
+    updatedAt: canonicalIso(entry.updatedAt)
   };
 }
 
-function itemActions(item, presets) {
-  const actions = [
-    button(item, 'village_work_v2_progress', '진행 중', { type: 'progress' }, 'primary'),
-    ...presets.map((preset) => button(item, preset.actionId, preset.label, {
-      type: 'snooze', snoozedUntil: preset.snoozedUntil
-    })),
-    contextButton(item, 'village_work_v2_snooze_custom', '날짜 지정')
-  ];
-  actions.push(
-    button(item, 'village_work_v2_request_resolve', '해결 요청', { type: 'request_resolve' }),
-    button(item, 'village_work_v2_dismiss', '닫기', { type: 'dismiss' }, 'danger')
-  );
-  return actions;
-}
-
-function configuredOwnerMention(item, config) {
-  if (!item.ownerMentionRequired) return '';
-  const configured = isRecord(config.ownerSlackIds) ? config.ownerSlackIds[item.ownerId] : null;
-  const candidate = typeof configured === 'string' && SLACK_USER_ID.test(configured)
-    ? configured
-    : (typeof item.ownerId === 'string' && SLACK_USER_ID.test(item.ownerId) ? item.ownerId : null);
-  return candidate ? `<@${candidate}>` : '_담당자 미지정_';
-}
-
-function workBlock(item, config, presets, reminder) {
-  const owner = configuredOwnerMention(item, config);
-  const due = item.dueAt ? ` · 기한 ${escapeSlackText(item.dueAt, 40)}` : '';
-  const reminderLabel = reminder ? ' · 매일 알림' : '';
-  const lines = [
-    `${owner ? `${owner} ` : ''}*[${SECTION_LABELS[item.section]}${reminderLabel}] ${escapeSlackText(item.title, MAX_RENDERED_TITLE)}*`,
-    `직원이 정리한 내용: ${escapeSlackText(item.summary || item.title, 900)}`,
-    `대표님이 할 일: ${escapeSlackText(item.recommendedAction, 900)}`,
-    `방 ${escapeSlackText(item.roomKey, MAX_RENDERED_ROOM)}${due}`
-  ];
-  const text = lines.join('\n');
-  if (text.length > MAX_SLACK_SECTION_TEXT) throw invalidInput();
-  return [
-    {
-      type: 'section',
-      text: { type: 'mrkdwn', text }
-    },
-    {
-      type: 'actions',
-      elements: itemActions(item, presets)
-    }
-  ];
-}
-
-function chunks(values, size) {
-  const result = [];
-  for (let index = 0; index < values.length; index += size) result.push(values.slice(index, index + size));
-  return result;
-}
-
-function buildParts(items, config, presets, kind) {
-  const groups = chunks(items, MAX_ROWS_PER_PART);
-  return groups.map((group, index) => {
-    const partNumber = index + 1;
-    const partCount = groups.length;
-    const reminder = kind === 'daily_reminder';
-    const header = reminder ? '⏰ 매일 확인 알림' : '🎯 집중 작업 다이제스트';
-    const suffix = partCount > 1 ? ` (${partNumber}/${partCount})` : '';
-    return {
-      kind,
-      partNumber,
-      partCount,
-      itemIds: group.map(({ id }) => id),
-      text: `${header}${suffix}: ${group.length}개 작업`,
-      blocks: [
-        { type: 'header', text: { type: 'plain_text', text: `${header}${suffix}`.slice(0, 150), emoji: true } },
-        ...group.flatMap((item) => workBlock(item, config, presets, reminder))
-      ]
-    };
+function validateReportItems(items, expectedCount) {
+  if (!Array.isArray(items) || items.length !== Math.min(expectedCount, 5)) throw invalidInput();
+  const seen = new Set();
+  return items.map((entry) => {
+    const item = validateReportItem(entry);
+    if (seen.has(item.id)) throw invalidInput();
+    seen.add(item.id);
+    return item;
   });
+}
+
+export function buildReportDigestSnapshot(highlights, now) {
+  try {
+    const timestamp = canonicalIso(now);
+    if (!Array.isArray(highlights) || highlights.length > 5) throw invalidInput();
+    const seen = new Set();
+    return highlights.map((entry) => {
+      const item = validateReportItem(entry);
+      if (seen.has(item.id)) throw invalidInput();
+      seen.add(item.id);
+      const inclusionReason = item.priority === 'p0'
+        ? 'p0'
+        : Date.parse(timestamp) - Date.parse(item.firstOpenedAt) >= DAY_MS
+          ? 'overdue'
+          : item.priority === 'urgent' ? 'urgent' : 'actionable';
+      return { id: item.id, version: item.version, inclusionReason, priority: item.priority };
+    });
+  } catch {
+    throw invalidInput();
+  }
+}
+
+function reportHighlightText(items) {
+  const lines = items.map((item, index) => {
+    const priority = item.priority === 'p0' ? '즉시 확인' : item.priority === 'urgent' ? '긴급' : item.workTypeLabel;
+    const title = escapeSlackText(item.title, 180);
+    const action = escapeSlackText(item.recommendedAction || item.summary || item.title, 240);
+    return `${index + 1}. *[${priority}] ${title}*\n   → ${action}`;
+  });
+  const text = lines.join('\n');
+  if (!text || text.length > MAX_SLACK_SECTION_TEXT) throw invalidInput();
+  return text;
 }
 
 /**
  * @returns {{selectedCount:number,renderedCount:number,dailyReminderCount:number,
  * ordinaryParts:DigestMessagePart[],dailyReminderParts:DigestMessagePart[]}}
  */
-export function buildDigestSlackMessage(selected, config = {}) {
-  let normalized;
-  let now;
+export function buildDigestSlackMessage(highlights, config = {}) {
+  let items;
+  let summary;
+  let dashboardUrl;
   try {
-    normalized = validateSelected(selected);
-    now = canonicalIso(config.now, { error: invalidConfig });
+    canonicalIso(config.now, { error: invalidConfig });
+    summary = validateReportSummary(config.summary);
+    dashboardUrl = safeDashboardUrl(config.dashboardUrl);
+    items = validateReportItems(highlights, summary.now);
   } catch (error) {
     if (error?.message === 'invalid digest input') throw invalidInput();
     throw invalidConfig();
   }
-  const presets = kstPresetTimes(now);
-  const reminderItems = normalized.filter(({ dailyReminderDue }) => dailyReminderDue);
-  const ordinaryParts = buildParts(normalized, config, presets, 'digest');
-  const dailyReminderParts = buildParts(reminderItems, config, presets, 'daily_reminder');
+  if (summary.now === 0) {
+    return {
+      selectedCount: 0, renderedCount: 0, dailyReminderCount: 0,
+      ordinaryParts: [], dailyReminderParts: []
+    };
+  }
+  const categoryText = REPORT_CATEGORIES
+    .map(([key, label]) => `${label} ${summary.byCategory[key]}`)
+    .join(' · ');
+  const totalsText = `*지금 할 일 ${summary.now}건* · 즉시 확인 ${summary.p0}건 · 미뤄둔 일 ${summary.snoozed}건\n업무별 전체: ${categoryText}`;
+  const highlightText = reportHighlightText(items);
+  const omitted = summary.now - items.length;
+  const link = dashboardUrl.replaceAll('&', '&amp;').replaceAll('>', '%3E').replaceAll('|', '%7C');
+  const contextText = `<${link}|헤이빌리 후속조치에서 처리> · ${omitted > 0 ? `나머지 ${omitted}건` : '모든 업무 표시'}`;
+  const fallback = `오늘 처리할 일 요약 — 지금 ${summary.now}건, 즉시 확인 ${summary.p0}건, ${omitted > 0 ? `나머지 ${omitted}건` : '전체 표시'} · 헤이빌리 후속조치에서 처리`;
+  const ordinaryParts = [{
+    kind: 'ordinary',
+    partNumber: 1,
+    partCount: 1,
+    itemIds: items.map(({ id }) => id),
+    text: fallback,
+    blocks: [
+      { type: 'header', text: { type: 'plain_text', text: '오늘 처리할 일 요약', emoji: true } },
+      { type: 'section', text: { type: 'mrkdwn', text: totalsText } },
+      { type: 'section', text: { type: 'mrkdwn', text: highlightText } },
+      { type: 'context', elements: [{ type: 'mrkdwn', text: contextText }] }
+    ]
+  }];
   return {
-    selectedCount: normalized.length,
-    renderedCount: ordinaryParts.reduce((count, part) => count + part.itemIds.length, 0),
-    dailyReminderCount: dailyReminderParts.reduce((count, part) => count + part.itemIds.length, 0),
+    selectedCount: summary.now,
+    renderedCount: items.length,
+    dailyReminderCount: 0,
     ordinaryParts,
-    dailyReminderParts
+    dailyReminderParts: []
   };
 }
 
