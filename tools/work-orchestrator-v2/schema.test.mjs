@@ -10,6 +10,8 @@ const noticeCleanupMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_notice_cleanup\.sql$/.test(name));
 const healthAggregateMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_health_aggregate\.sql$/.test(name));
+const heybilliInboxMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_heybilli_inbox\.sql$/.test(name));
 
 test('foundation migration enforces the private service-role schema contract', () => {
   assert.equal(migrationFiles.length, 1, 'exactly one foundation migration must exist');
@@ -393,4 +395,63 @@ test('additive health migration exposes exactly one private read-only aggregate 
     'cleanup_attempted_at', 'updated_at', 'cleanup_expires_at', 'scheduled_at',
     'manifest_prepared_at', 'lease_expires_at'
   ]) assert.match(sql, new RegExp(`isfinite\\([^)]*${timestamp}`, 'i'));
+});
+
+test('Heybilli owner inbox migration is private, bounded, and matches the canonical taxonomy', () => {
+  assert.equal(heybilliInboxMigrationFiles.length, 1, 'exactly one CLI-generated Heybilli inbox migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, heybilliInboxMigrationFiles[0]), 'utf8');
+
+  assert.match(sql, /create function public\.owner_work_taxonomy_v2\(\s*p_work_type text\s*\)/i);
+  assert.match(sql, /create function public\.is_valid_work_actor_v2\(\s*p_actor text\s*\)/i);
+  assert.match(sql, /create function public\.list_heybilli_owner_work_v2\(\s*p_now timestamptz,\s*p_view text,\s*p_category text,\s*p_limit integer,\s*p_after jsonb default null\s*\)/i);
+  assert.match(sql, /create or replace function public\.upsert_work_item_v2\(\s*p_candidate jsonb\s*\)/i);
+  assert.match(sql, /returns jsonb language plpgsql stable security invoker set search_path = ''/i);
+  assert.match(sql, /p_limit is null[\s\S]*?p_limit not between 1 and 200/i);
+  assert.match(sql, /p_view not in \('now','snoozed','completed'\)/i);
+  assert.match(sql, /p_category not in \('schedule','quote','settlement','customer','operations'\)/i);
+  assert.match(sql, /requires_human_action/i);
+  assert.match(sql, /owner_work_taxonomy_v2\(w\.work_type\) is not null/i);
+  assert.match(sql, /count\(\*\)[\s\S]*?limit p_limit/i, 'counts are derived before bounded pagination');
+  assert.match(sql, /'summary'[\s\S]*?'items'[\s\S]*?'nextCursor'[\s\S]*?'omittedCount'/i);
+
+  const taxonomy = [
+    ['reservation_review', 'schedule', '예약·스케줄', '예약 확인'],
+    ['schedule_check', 'schedule', '예약·스케줄', '스케줄 확인'],
+    ['schedule_register', 'schedule', '예약·스케줄', '스케줄 등록'],
+    ['schedule_change', 'schedule', '예약·스케줄', '스케줄 변경'],
+    ['return_extension', 'schedule', '예약·스케줄', '반납·연장'],
+    ['quote_send', 'quote', '견적·가격', '견적서 발송'],
+    ['price_review', 'quote', '견적·가격', '가격·할인 확인'],
+    ['payment_check', 'settlement', '정산·서류', '입금·결제 확인'],
+    ['tax_invoice', 'settlement', '정산·서류', '세금계산서 발행'],
+    ['contract_document', 'settlement', '정산·서류', '계약·서류 처리'],
+    ['reply_needed', 'customer', '고객 응대', '고객 답변 필요'],
+    ['human_review', 'operations', '운영·예외', '기타 사람 확인'],
+    ['damage_repair', 'operations', '운영·예외', '파손·수리'],
+    ['sheet_duplicate_check', 'operations', '운영·예외', '중복 확인']
+  ];
+  for (const values of taxonomy) {
+    for (const value of values) assert.match(sql, new RegExp(`'${value}'`, 'i'));
+  }
+  for (const type of ['completed_log', 'reservation_review_timeout', 'automation_error_review']) {
+    assert.doesNotMatch(sql, new RegExp(`when\\s+'${type}'`, 'i'));
+  }
+
+  assert.match(sql, /\^\[UW\]\[A-Z0-9\]\{2,79\}\$/i);
+  assert.match(sql, /\^heybilli:\[0-9a-f\]/i);
+  for (const signature of [
+    'owner_work_taxonomy_v2(text)',
+    'is_valid_work_actor_v2(text)',
+    'list_heybilli_owner_work_v2(timestamptz,text,text,integer,jsonb)',
+    'upsert_work_item_v2(jsonb)',
+    'request_work_item_action_v2(uuid,integer,jsonb,text)',
+    'is_processable_pending_work_action_v2(jsonb,integer)',
+    'is_valid_pending_work_action_at_v2(jsonb,integer,timestamptz)'
+  ]) {
+    const escaped = signature.replace(/[()]/g, '\\$&');
+    assert.match(sql, new RegExp(`revoke execute on function public\\.${escaped}\\s+from public, anon, authenticated`, 'i'));
+    assert.match(sql, new RegExp(`grant execute on function public\\.${escaped}\\s+to service_role`, 'i'));
+  }
+  assert.doesNotMatch(sql, /customer_message|transcript|source_event_keys|resolution_evidence/i);
+  assert.doesNotMatch(sql, /security definer|grant execute[^;]+to (?:public|anon|authenticated)/i);
 });
