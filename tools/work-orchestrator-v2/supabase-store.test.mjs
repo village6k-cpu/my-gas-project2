@@ -71,6 +71,39 @@ function actionablePayload(rows, eligibleCount = rows.length) {
   return { rows, eligible_count: eligibleCount };
 }
 
+function heybilliItem(overrides = {}) {
+  return {
+    id: WORK_ID,
+    version: 7,
+    category: 'schedule',
+    workType: 'schedule_check',
+    workTypeLabel: '스케줄 확인',
+    priority: 'urgent',
+    state: 'open',
+    title: '김OO 촬영 일정 확인',
+    summary: '직원이 확인한 안전한 요약',
+    recommendedAction: '후보 일정 하나를 선택',
+    dueAt: null,
+    snoozedUntil: null,
+    firstOpenedAt: '2026-09-05T08:00:00.000Z',
+    updatedAt: '2026-09-05T08:30:00.000Z',
+    ...overrides
+  };
+}
+
+function heybilliInbox(overrides = {}) {
+  return {
+    summary: {
+      now: 1, snoozed: 0, completed: 0, p0: 0,
+      byCategory: { schedule: 1, quote: 0, settlement: 0, customer: 0, operations: 0 }
+    },
+    items: [heybilliItem()],
+    nextCursor: null,
+    omittedCount: 0,
+    ...overrides
+  };
+}
+
 function digestRow(overrides = {}) {
   const row = {
     id: DIGEST_ID,
@@ -587,6 +620,66 @@ test('requestWorkAction preserves exact id/version action CAS and exposes stale 
     p_action: { type: 'request_resolve' },
     p_requested_by: 'UOWNER'
   });
+});
+
+test('requestWorkAction accepts a canonical Heybilli actor and rejects untrusted actor text before fetch', async () => {
+  const actor = 'heybilli:550e8400-e29b-41d4-a716-446655440000';
+  const fetch = createFetch([response({ data: { applied: true, row: workRow({ version: 2, pending_action: {
+    type: 'progress', action: { type: 'progress' }, status: 'pending',
+    requested_at: '2026-09-05T09:00:00.000Z', requested_by: actor, expected_version: 1
+  } }) } })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  const result = await store.requestWorkAction({
+    id: WORK_ID, expectedVersion: 1, action: { type: 'progress' }, requestedBy: actor,
+    now: '2026-09-05T09:00:00.000Z'
+  });
+  assert.equal(result.applied, true);
+  assert.equal(JSON.parse(fetch.requests[0].init.body).p_requested_by, actor);
+  await assert.rejects(store.requestWorkAction({
+    id: WORK_ID, expectedVersion: 2, action: { type: 'progress' }, requestedBy: 'heybilli:not-a-uuid',
+    now: '2026-09-05T09:00:00.000Z'
+  }), /input is invalid/i);
+  assert.equal(fetch.requests.length, 1);
+});
+
+test('listHeybilliOwnerWork sends the exact read RPC input and returns the safe finite model', async () => {
+  const fetch = createFetch([response({ data: heybilliInbox() })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  const result = await store.listHeybilliOwnerWork({
+    now: '2026-09-05T09:00:00.000Z', view: 'now', category: 'schedule', limit: 100, after: null
+  });
+
+  assert.deepEqual(result, heybilliInbox());
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/list_heybilli_owner_work_v2');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_now: '2026-09-05T09:00:00.000Z', p_view: 'now', p_category: 'schedule', p_limit: 100, p_after: null
+  });
+  assert.equal(JSON.stringify(result).includes('room_key'), false);
+});
+
+test('listHeybilliOwnerWork rejects malformed, inconsistent, or content-bearing responses generically', async () => {
+  const malformed = [
+    { ...heybilliInbox(), extra: true },
+    { ...heybilliInbox(), summary: { ...heybilliInbox().summary, extra: 1 } },
+    { ...heybilliInbox(), summary: { ...heybilliInbox().summary, now: -1 } },
+    { ...heybilliInbox(), summary: { ...heybilliInbox().summary, now: 1.5 } },
+    { ...heybilliInbox(), items: [{ ...heybilliItem(), category: 'unknown' }] },
+    { ...heybilliInbox(), items: [{ ...heybilliItem(), workType: 'automation_error_review' }] },
+    { ...heybilliInbox(), items: [{ ...heybilliItem(), firstOpenedAt: '2026-09-05 08:00:00Z' }] },
+    { ...heybilliInbox(), items: [{ ...heybilliItem(), roomKey: 'private-room' }] },
+    { ...heybilliInbox(), items: [], omittedCount: 1 },
+    { ...heybilliInbox(), nextCursor: { p0Rank: 0 } }
+  ];
+  const fetch = createFetch(malformed.map((data) => response({ data })));
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+  for (const value of malformed) {
+    await assert.rejects(store.listHeybilliOwnerWork({
+      now: '2026-09-05T09:00:00.000Z', view: 'now', category: null, limit: 100, after: null
+    }), (error) => /Heybilli inbox response invalid/.test(error.message)
+      && !error.message.includes(JSON.stringify(value)));
+  }
 });
 
 const authoritativeResolution = {

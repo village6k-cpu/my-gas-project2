@@ -97,6 +97,21 @@ test('parsePendingWorkAction accepts PostgreSQL JSONB timestamptz offsets and no
   );
 });
 
+test('parsePendingWorkAction accepts only canonical authenticated Heybilli actors beside Slack actors', () => {
+  const actor = 'heybilli:550e8400-e29b-41d4-a716-446655440000';
+  const current = row({ pending_action: { ...row().pending_action, requested_by: actor } });
+  assert.equal(parsePendingWorkAction(current, NOW).requestedBy, actor);
+  for (const requestedBy of [
+    'heybilli:550E8400-E29B-41D4-A716-446655440000',
+    'heybilli:not-a-uuid',
+    'browser:550e8400-e29b-41d4-a716-446655440000'
+  ]) {
+    assert.throws(() => parsePendingWorkAction(
+      row({ pending_action: { ...row().pending_action, requested_by: requestedBy } }), NOW
+    ), { message: 'invalid pending work action' });
+  }
+});
+
 test('processPendingWorkAction returns exact mechanical CAS patches and clears pending action', async (t) => {
   const cases = [
     {
