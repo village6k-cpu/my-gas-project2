@@ -157,7 +157,7 @@ function Get-KakaoworkerGatewayRuntime {
 
 function Test-KakaoworkerGatewayTaskDefinition {
     $task = Get-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker_Native' -ErrorAction SilentlyContinue
-    $actions = if ($null -ne $task) { @($task.Actions) } else { @() }
+    $actions = @(if ($null -ne $task) { $task.Actions } else { @() })
     if ($actions.Count -ne 1) { return $false }
     $expectedPowerShell = [IO.Path]::GetFullPath('C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')
     $launcher = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'start-hermes-kakaoworker-gateway.ps1') -ErrorAction Stop).Path

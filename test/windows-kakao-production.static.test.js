@@ -20,6 +20,18 @@ const liveStart = read('scripts/windows/start-kakao-live.ps1');
 const gatewayTaskRegistration = read('scripts/windows/register-hermes-gateway-tasks.ps1');
 const benchmarkReport = JSON.parse(read('docs/kakao-hermes-gateway-benchmark-report.json'));
 
+test('live start preserves a single Gateway task action as an array under strict mode', () => {
+  const functionStart = liveStart.indexOf('function Test-KakaoworkerGatewayTaskDefinition');
+  const functionEnd = liveStart.indexOf('\nfunction ', functionStart + 1);
+  const taskDefinition = liveStart.slice(functionStart, functionEnd);
+
+  assert.match(
+    taskDefinition,
+    /\$actions\s*=\s*@\(\s*if\s*\(\$null\s*-ne\s*\$task\)/,
+    'the outer array wrapper must survive PowerShell pipeline unrolling when exactly one task action exists',
+  );
+});
+
 test('native Gateway cutover is explicit, benchmark-gated, plan-only, and rollback-first', () => {
   assert.match(liveStart, /\[switch\]\$ConfirmKakaoGatewayCutover/);
   assert.match(liveStart, /\[string\]\$BenchmarkReportPath/);
