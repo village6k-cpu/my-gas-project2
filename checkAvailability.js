@@ -11609,6 +11609,16 @@ function _findReplaceableConfirmRequestGroups_(sheet, req, requestedEquipItems) 
   });
 }
 
+/**
+ * 기존 RQ를 지우는 권한은 AI가 추측한 고객/기간 유사성이 아니라, 직원 확정
+ * 변경 계약이 exact request_id와 baseline을 검증해 만든 fence에서만 나온다.
+ * 레거시 stale 후보 탐색은 진단용으로 남기되 일반 full_plan 쓰기에는 사용하지 않는다.
+ */
+function _selectAuthorizedConfirmRequestReplacementGroups_(staffConfirmedPendingFence) {
+  if (!staffConfirmedPendingFence || !staffConfirmedPendingFence.group) return [];
+  return [staffConfirmedPendingFence.group];
+}
+
 function _deleteConfirmRequestGroups_(sheet, groups) {
   var rowSet = {};
   (groups || []).forEach(function(group) {
@@ -11873,6 +11883,13 @@ function _insertAndCheckRequest(req) {
   var resolvedDiscount = _resolveConfirmRequestDiscountOrBlank_(req.할인유형 || req.업체명, dbDiscount);
   var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone, 할인유형: resolvedDiscount });
 
+  // 장비목록이 달라도 같은 실제 고객의 exact 대여기간에 이미 등록 거래가 있으면
+  // 새 확인요청이 아니라 registered_reservation_change 경로여야 한다.
+  var registeredTradeId = _findRegisteredTradeForConfirmRequest_(ss, reqForDedupe);
+  if (registeredTradeId) {
+    throw new Error("기존 등록 예약 변경은 확인요청으로 입력할 수 없습니다 (거래ID: " + registeredTradeId + ")");
+  }
+
   // ── 중복 체크: 같은 예약자명/연락처 + 반출·반납창 + 같은 최상위 장비/수량 ──
   var duplicateRequest = staffConfirmedPendingFence
     ? null
@@ -11902,9 +11919,7 @@ function _insertAndCheckRequest(req) {
   const dateStr = Utilities.formatDate(now, "Asia/Seoul", "yyMMdd");
   var reqID = _reserveNextConfirmRequestId_(sheet, dateStr);
 
-  var replacedGroups = staffConfirmedPendingFence
-    ? [staffConfirmedPendingFence.group]
-    : _findReplaceableConfirmRequestGroups_(sheet, reqForDedupe, requestedEquipItems);
+  var replacedGroups = _selectAuthorizedConfirmRequestReplacementGroups_(staffConfirmedPendingFence);
   var replacedReqIDs = replacedGroups.map(function(group) { return group.reqID; });
   var replacedRows = 0;
   if (replacedGroups.length > 0) {
@@ -15986,6 +16001,44 @@ function checkDuplicateRequest(ss, 예약자명, 반출일, 장비목록, 연락
     if (sg.date === dupDate && _confirmRequestContainsAllEquip_(sg.equips, dupEquipArr)) {
       return tid;
     }
+  }
+  return null;
+}
+
+/**
+ * 확인요청 쓰기 전에 같은 실제 고객과 exact 대여기간의 활성 등록 거래를 찾는다.
+ * 장비목록은 변경 대상일 수 있으므로 비교하지 않는다.
+ */
+function _findRegisteredTradeForConfirmRequest_(ss, req) {
+  req = req || {};
+  var contractSheet = ss && ss.getSheetByName ? ss.getSheetByName("계약마스터") : null;
+  if (!contractSheet || contractSheet.getLastRow() < 2) return null;
+
+  var reqName = String(req.예약자명 || "").trim();
+  var reqPhone = _confirmRequestPhoneKey_(req.연락처);
+  var reqStartDate = _confirmRequestDateKey_(req.반출일);
+  var reqStartTime = _confirmRequestTimeKey_(req.반출시간);
+  var reqEndDate = _confirmRequestDateKey_(req.반납일);
+  var reqEndTime = _confirmRequestTimeKey_(req.반납시간);
+  if ((!reqName && !reqPhone) || !reqStartDate || !reqStartTime || !reqEndDate || !reqEndTime) return null;
+
+  var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getValues();
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var tradeId = String(row[0] || "").trim();
+    var status = String(row[9] || "").trim();
+    if (!tradeId || /^취소/.test(status)) continue;
+    var rowName = String(row[1] || "").trim();
+    var rowPhone = _confirmRequestPhoneKey_(row[2]);
+    var sameName = !!(reqName && rowName && reqName === rowName);
+    var samePhone = !!(reqPhone && rowPhone && reqPhone === rowPhone);
+    if (!sameName && !samePhone) continue;
+    if (sameName && !samePhone && reqPhone && rowPhone && reqPhone !== rowPhone) continue;
+    if (_confirmRequestDateKey_(row[4]) !== reqStartDate
+        || _confirmRequestTimeKey_(row[5]) !== reqStartTime
+        || _confirmRequestDateKey_(row[6]) !== reqEndDate
+        || _confirmRequestTimeKey_(row[7]) !== reqEndTime) continue;
+    return tradeId;
   }
   return null;
 }

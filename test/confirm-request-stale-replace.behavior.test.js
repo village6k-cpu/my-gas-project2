@@ -93,7 +93,19 @@ assert.equal(
 assert.deepEqual(
   context._findReplaceableConfirmRequestGroups_(staleSheet, baseReq, [{ name: '소니 90mm 매크로', qty: 1 }]).map((group) => group.reqID),
   ['RQ-old'],
-  '같은 고객/같은 일정의 장비 변경 후보는 삭제 대상으로 잡아야 한다'
+  '레거시 진단 헬퍼는 같은 고객/일정의 변경 후보를 식별할 수 있다'
+);
+
+assert.deepEqual(
+  context._selectAuthorizedConfirmRequestReplacementGroups_(null),
+  [],
+  '직원확정 fence가 없으면 식별된 stale 후보도 자동 삭제 권한이 없어야 한다'
+);
+const exactFenceGroup = { reqID: 'RQ-old', rows: [2, 3] };
+assert.deepEqual(
+  context._selectAuthorizedConfirmRequestReplacementGroups_({ group: exactFenceGroup }),
+  [exactFenceGroup],
+  '직원확정 fence가 가리키는 exact RQ만 교체 권한을 가져야 한다'
 );
 
 assert.equal(

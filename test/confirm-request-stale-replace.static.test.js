@@ -24,8 +24,14 @@ assert.match(
 
 assert.match(
   source,
-  /var replacedGroups = staffConfirmedPendingFence[\s\S]*_findReplaceableConfirmRequestGroups_\(sheet, reqForDedupe, requestedEquipItems\);[\s\S]*_deleteConfirmRequestGroups_\(sheet, replacedGroups\)/,
-  'typed pending은 exact fenced RQ를, 일반 입력은 stale RQ 그룹을 새 확인요청 쓰기 전에 삭제해야 한다'
+  /var replacedGroups = _selectAuthorizedConfirmRequestReplacementGroups_\(staffConfirmedPendingFence\);[\s\S]*_deleteConfirmRequestGroups_\(sheet, replacedGroups\)/,
+  '직원확정 exact fence가 있는 RQ만 새 확인요청 쓰기 전에 교체해야 한다'
+);
+
+assert.doesNotMatch(
+  source.slice(source.indexOf('function _insertAndCheckRequest'), source.indexOf('function insertAndCheckRequest')),
+  /_findReplaceableConfirmRequestGroups_\(/,
+  '일반 full_plan 입력은 같은 고객/기간의 기존 RQ를 추측으로 삭제하면 안 된다'
 );
 
 assert.match(

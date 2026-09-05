@@ -3191,7 +3191,10 @@ function completeSheetDecision(overrides = {}) {
     safety_checks: {
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
-      latest_customer_message_after_last_staff_reply: true
+      latest_customer_message_after_last_staff_reply: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true
     },
     sheet_row_candidate: {
       plan_complete: true,
@@ -6297,8 +6300,32 @@ test('staff-confirmed confirmation preflight names the missing duplicate evidenc
   assert.equal(missing.valid, false);
   assert.match(missing.errors.join('|'), /duplicate check/i);
 
+  decision.safety_checks.duplicate_checked_contract_master = true;
+  decision.safety_checks.duplicate_checked_schedule_detail = true;
   decision.safety_checks.duplicate_checked_request_sheet = true;
   assert.deepEqual(workerModule.validateVillageConfirmationExecutionDecision(decision), {
+    valid: true,
+    errors: []
+  });
+});
+
+test('customer-turn confirmation writes require all three authoritative duplicate checks', () => {
+  const unchecked = completeSheetDecision({
+    safety_checks: {
+      duplicate_checked_contract_master: false,
+      duplicate_checked_schedule_detail: false,
+      duplicate_checked_request_sheet: false
+    }
+  });
+  const validation = workerModule.validateVillageConfirmationExecutionDecision(unchecked);
+  assert.equal(validation.valid, false);
+  assert.match(validation.errors.join('|'), /contract master|schedule detail|request sheet|duplicate check/i);
+  assert.equal(buildSheetAppendPayload(unchecked, { apiKey: 'secret' }), null);
+
+  unchecked.safety_checks.duplicate_checked_contract_master = true;
+  unchecked.safety_checks.duplicate_checked_schedule_detail = true;
+  unchecked.safety_checks.duplicate_checked_request_sheet = true;
+  assert.deepEqual(workerModule.validateVillageConfirmationExecutionDecision(unchecked), {
     valid: true,
     errors: []
   });
@@ -7108,7 +7135,7 @@ test('untyped additions-only registered booking never builds a confirmation payl
   assert.equal(payload, null);
 });
 
-test('buildSheetAppendPayload allows reservation-format writes when non-blocking checks are incomplete', () => {
+test('buildSheetAppendPayload blocks reservation writes until every duplicate source is checked', () => {
   const decision = {
     should_write_to_sheet: true,
     safety_checks: {
@@ -7136,11 +7163,7 @@ test('buildSheetAppendPayload allows reservation-format writes when non-blocking
   };
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
-  assert.equal(payload.action, 'run');
-  assert.equal(payload.func, 'insertAndCheckRequest');
-  assert.deepEqual(payload.args.장비, [{ 이름: 'FX6', 수량: 1 }]);
-  assert.equal(payload.args.예약자명, '홍길동');
-  assert.equal(payload.args.비고, '');
+  assert.equal(payload, null);
 });
 
 test('buildSheetAppendPayload trusts an exact set-master name over the customer request phrase', () => {
@@ -7169,6 +7192,9 @@ test('buildSheetAppendPayload trusts an exact set-master name over the customer 
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
       exact_equipment_name_verified_from_set_master: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
       latest_customer_message_after_last_staff_reply: true
     },
     sheet_row_candidate: {
@@ -7195,6 +7221,9 @@ test('buildSheetAppendPayload refuses to reconstruct a missing AI equipment plan
     safety_checks: {
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
       latest_customer_message_after_last_staff_reply: true
     },
     customer: { name: '김성윤' },
@@ -7228,6 +7257,9 @@ test('buildSheetAppendPayload never swaps in a reservation list when AI marks a 
     safety_checks: {
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
       latest_customer_message_after_last_staff_reply: true
     },
     customer: { name: '전찬영' },

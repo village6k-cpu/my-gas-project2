@@ -1444,7 +1444,10 @@ export function canAutoSendCustomerDocumentAssets(decision = {}, config = {}) {
 const REQUIRED_SHEET_SAFETY_CHECKS = [
   'kakao_conversation_opened',
   'did_not_classify_from_preview_only',
-  'latest_customer_message_after_last_staff_reply'
+  'latest_customer_message_after_last_staff_reply',
+  'duplicate_checked_contract_master',
+  'duplicate_checked_schedule_detail',
+  'duplicate_checked_request_sheet'
 ];
 
 function isStaffConfirmedUnregisteredSheetCandidate(decision = {}) {
@@ -1453,8 +1456,8 @@ function isStaffConfirmedUnregisteredSheetCandidate(decision = {}) {
   const equipment = Array.isArray(reservation.equipment_requested) ? reservation.equipment_requested : [];
   const hasReservationEvidence = reservation.is_reservation_inquiry === true || equipment.length > 0;
   const duplicateChecked = checks.duplicate_checked_contract_master === true
-    || checks.duplicate_checked_schedule_detail === true
-    || checks.duplicate_checked_request_sheet === true;
+    && checks.duplicate_checked_schedule_detail === true
+    && checks.duplicate_checked_request_sheet === true;
   return checks.kakao_conversation_opened === true
     && checks.did_not_classify_from_preview_only === true
     && checks.latest_customer_message_after_last_staff_reply === false
@@ -1483,6 +1486,11 @@ function sheetSafetyValidationErrors(decision = {}) {
   if (checks.did_not_classify_from_preview_only !== true) {
     errors.push('sheet writes require safety_checks.did_not_classify_from_preview_only=true');
   }
+  if (checks.duplicate_checked_contract_master !== true
+    || checks.duplicate_checked_schedule_detail !== true
+    || checks.duplicate_checked_request_sheet !== true) {
+    errors.push('sheet writes require contract master, schedule detail, and request sheet duplicate checks');
+  }
   if (checks.latest_customer_message_after_last_staff_reply === false) {
     if (checks.no_auto_reply_sent !== true) {
       errors.push('staff-confirmed sheet writes require safety_checks.no_auto_reply_sent=true');
@@ -1495,11 +1503,6 @@ function sheetSafetyValidationErrors(decision = {}) {
     }
     if (reservation.already_registered !== false) {
       errors.push('staff-confirmed sheet writes require reservation_inquiry.already_registered=false');
-    }
-    if (checks.duplicate_checked_contract_master !== true
-      && checks.duplicate_checked_schedule_detail !== true
-      && checks.duplicate_checked_request_sheet !== true) {
-      errors.push('staff-confirmed sheet writes require at least one explicit duplicate check');
     }
   } else if (checks.latest_customer_message_after_last_staff_reply !== true) {
     errors.push('sheet writes require an explicit boolean safety_checks.latest_customer_message_after_last_staff_reply');

@@ -176,6 +176,40 @@ assert.strictEqual(
   'same name with explicitly different phone should not block 동명이인'
 );
 
+const registeredPeriodSs = new FakeSpreadsheet({
+  '계약마스터': new FakeSheet([
+    makeRow(),
+    makeRow({
+      1: '260902-009', 2: '테스트 고객', 3: '010-4047-3867',
+      5: '2026-09-05', 6: '06:00', 7: '2026-09-06', 8: '06:00', 10: '예약'
+    })
+  ])
+});
+assert.strictEqual(
+  context._findRegisteredTradeForConfirmRequest_(registeredPeriodSs, {
+    예약자명: '테스트 고객', 연락처: '010-4047-3867',
+    반출일: '2026-09-05', 반출시간: '06:00', 반납일: '2026-09-06', 반납시간: '06:00'
+  }),
+  '260902-009',
+  '같은 고객과 exact 기간의 등록 거래는 장비목록과 무관하게 새 RQ 입력을 차단해야 한다'
+);
+assert.strictEqual(
+  context._findRegisteredTradeForConfirmRequest_(registeredPeriodSs, {
+    예약자명: '카카오 별명', 연락처: '01040473867',
+    반출일: '2026-09-05', 반출시간: '06:00', 반납일: '2026-09-06', 반납시간: '06:00'
+  }),
+  '260902-009',
+  '전화번호가 같으면 카카오 별명과 예약자명이 달라도 등록 거래로 식별해야 한다'
+);
+assert.strictEqual(
+  context._findRegisteredTradeForConfirmRequest_(registeredPeriodSs, {
+    예약자명: '테스트 고객', 연락처: '010-4047-3867',
+    반출일: '2026-09-05', 반출시간: '06:00', 반납일: '2026-09-06', 반납시간: '18:00'
+  }),
+  null,
+  '반납시각이 다르면 exact 등록 기간으로 간주하지 않아야 한다'
+);
+
 assert.match(
   source,
   /요청ID는 stale\/등록완료 행이 삭제된 뒤에도 Script Properties의 날짜별 상한을[\s\S]*이미 사용한 번호를 다시 발급하지 않는다/,
