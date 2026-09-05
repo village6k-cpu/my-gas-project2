@@ -2160,6 +2160,66 @@ test('Gateway result coordinator fails closed when required owner review persist
   }
 });
 
+test('Gateway result coordinator accepts durable v2 owner work when legacy rows and item cards are disabled', async () => {
+  const order = [];
+  const durableJob = {
+    job_id: 'job-v2-owner-work', room_key: 'room-v2-owner-work', room_revision: 1,
+    event: { job_id: 'job-v2-owner-work', room_key: 'room-v2-owner-work', room_revision: 1 },
+    local_context: {
+      job: { jobId: 'job-v2-owner-work', roomKey: 'room-v2-owner-work', roomRevision: 1 },
+      turn_internal: { snapshot: {} }
+    },
+    result: { content: 'FINAL_JSON {}' }, tool_receipts: [], application: { state: 'pending' }
+  };
+  const channel = {
+    async claimApplication() {
+      return { claimed: true, application_id: 'application-v2-owner-work', job: structuredClone(durableJob) };
+    },
+    async beginApplication() { order.push('persist_applying'); },
+    async recordApplicationApplied() { order.push('persist_applied'); },
+    async finalizeApplication() { order.push('persist_finalized'); },
+    async failApplication() { order.push('unexpected_failed'); },
+    async listPendingApplicationFailureNotifications() { return []; },
+    async markApplicationFailureNotified() { order.push('unexpected_notified'); }
+  };
+  const prepared = {
+    status: 'ai_prepared', snapshot: {},
+    decision: { owner_review_required: true, reply_decision: { shouldCreateTask: true } }
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel,
+    getConfig: () => ({ followUpRowsEnabled: false, workOrchestratorV2WorkItemsEnabled: true }),
+    prepare: async () => prepared,
+    apply: async () => { order.push('apply'); return { prepared, autoReplyResult: { sent: false } }; },
+    finalize: async () => {
+      order.push('finalize');
+      return {
+        ...prepared,
+        status: 'ai_completed',
+        followUpResult: {
+          inserted: 0, skipped: true, reason: 'kakao_follow_up_rows_disabled', rows: []
+        },
+        workOrchestratorResult: {
+          skipped: false, inserted: 1, merged: 0,
+          rows: [{ id: '5e3b46bd-7f25-4d22-8d5d-25c3dccf32f8', version: 1 }], error: null
+        },
+        slackDeliveryResult: {
+          skipped: true, reason: 'kakao_follow_up_rows_disabled', results: []
+        }
+      };
+    },
+    record: async () => { order.push('audit'); },
+    onFailure: async () => { order.push('unexpected_human_review'); }
+  });
+
+  await coordinator.enqueue(durableJob);
+  await coordinator.idle();
+
+  assert.deepEqual(order, [
+    'persist_applying', 'apply', 'persist_applied', 'finalize', 'audit', 'persist_finalized'
+  ]);
+});
+
 test('Gateway result coordinator marks an apply-phase crash ambiguous and never replays DOM apply', async () => {
   const order = [];
   let claimed = false;
@@ -2977,6 +3037,14 @@ test('bridge exposes invariant health as a separate top-level subsystem without 
   assert.equal(response.gateway.authenticated, true);
   assert.equal(response.state.privatePayload, 'not-inspected');
   assert.doesNotMatch(JSON.stringify(response.workOrchestrator), /not-inspected/);
+
+  const reportOnlySubsystem = await readBridgeWorkOrchestratorHealth({
+    store: { readHealthAggregate: async () => aggregate },
+    now: () => now,
+    reportOnly: true
+  });
+  assert.equal(reportOnlySubsystem.ok, true);
+  assert.deepEqual(reportOnlySubsystem.reasons, []);
 });
 
 test('v2 P0 review round 1 exposes finite content-free cutover readiness health', () => {

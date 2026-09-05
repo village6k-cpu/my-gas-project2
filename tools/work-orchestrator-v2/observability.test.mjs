@@ -136,6 +136,30 @@ test('readWorkOrchestratorHealth alarms only after the fixed five-minute SLA and
   ]);
 });
 
+test('report-only health ignores retired immediate delivery and full-card coverage alarms', async () => {
+  const historical = aggregate({
+    notifications: {
+      ...aggregate().notifications,
+      oldest_undelivered_at: '2026-09-02T11:54:59.000Z',
+      oldest_undelivered_age_seconds: 301
+    },
+    digests: {
+      ...aggregate().digests,
+      latest_delivered_eligible_omitted_count: 43
+    }
+  });
+  const health = await readWorkOrchestratorHealth({
+    store: { readHealthAggregate: async () => historical },
+    now: NOW,
+    reportOnly: true
+  });
+
+  assert.equal(health.ok, true);
+  assert.deepEqual(health.reasons, []);
+  assert.equal(health.metrics.notifications.failed_count, 1);
+  assert.equal(health.metrics.digests.latest_delivered_eligible_omitted_count, 43);
+});
+
 test('expired scheduler leases remain metrics and do not invent a separate health alarm', async () => {
   const value = aggregate({
     leases: {

@@ -408,7 +408,8 @@ export function buildHealthConfig(config = {}) {
 
 export async function readBridgeWorkOrchestratorHealth({
   store = null,
-  now = () => new Date().toISOString()
+  now = () => new Date().toISOString(),
+  reportOnly = false
 } = {}) {
   let measuredAt;
   try {
@@ -416,7 +417,7 @@ export async function readBridgeWorkOrchestratorHealth({
   } catch {
     measuredAt = null;
   }
-  return readWorkOrchestratorHealth({ store, now: measuredAt });
+  return readWorkOrchestratorHealth({ store, now: measuredAt, reportOnly });
 }
 
 export function attachWorkOrchestratorInvariantHealth(bridgeHealth, workOrchestratorHealth) {
@@ -2277,7 +2278,7 @@ export function createGatewayResultApplicationCoordinator({
     return candidates.length ? Math.min(...candidates) : localStartedAt;
   }
 
-  function assertGatewayFinalizationSucceeded(finalized = {}) {
+  function assertGatewayFinalizationSucceeded(finalized = {}, config = {}) {
     if (finalized?.superseded === true || finalized?.status === 'superseded_by_newer_room_event') return;
     const decision = finalized?.decision || {};
     const reply = decision?.reply_decision || {};
@@ -2287,11 +2288,23 @@ export function createGatewayResultApplicationCoordinator({
       || reply?.should_create_task === true;
     const followUp = finalized?.followUpResult || {};
     const persistedRows = Array.isArray(followUp.rows) ? followUp.rows : [];
-    if (followUp.error) {
-      throw new Error(`gateway_owner_review_persistence_failed: ${String(followUp.error).slice(0, 500)}`);
-    }
-    if (ownerReviewExpected && (followUp.skipped === true || persistedRows.length === 0)) {
-      throw new Error('gateway_owner_review_not_persisted: required owner-review row is missing');
+    const v2OwnerWorkEnabled = config?.workOrchestratorV2WorkItemsEnabled === true;
+    if (v2OwnerWorkEnabled) {
+      const workOrchestrator = finalized?.workOrchestratorResult || {};
+      const durableWorkRows = Array.isArray(workOrchestrator.rows) ? workOrchestrator.rows : [];
+      if (workOrchestrator.error) {
+        throw new Error(`gateway_owner_review_persistence_failed: ${String(workOrchestrator.error).slice(0, 500)}`);
+      }
+      if (ownerReviewExpected && (workOrchestrator.skipped === true || durableWorkRows.length === 0)) {
+        throw new Error('gateway_owner_review_not_persisted: required v2 owner work is missing');
+      }
+    } else {
+      if (followUp.error) {
+        throw new Error(`gateway_owner_review_persistence_failed: ${String(followUp.error).slice(0, 500)}`);
+      }
+      if (ownerReviewExpected && (followUp.skipped === true || persistedRows.length === 0)) {
+        throw new Error('gateway_owner_review_not_persisted: required owner-review row is missing');
+      }
     }
 
     const slack = finalized?.slackDeliveryResult || {};
@@ -2307,6 +2320,8 @@ export function createGatewayResultApplicationCoordinator({
     if (slack.skipped === true) {
       const reason = String(slack.reason || '').trim();
       const intentionalSkip = reason === 'disabled'
+        || (reason === 'kakao_follow_up_rows_disabled'
+          && v2OwnerWorkEnabled && config?.followUpRowsEnabled === false)
         || (reason === 'no_rows' && !ownerReviewExpected && persistedRows.length === 0)
         || (reason === 'automation_audit_rows' && !ownerReviewExpected);
       if (!intentionalSkip) {
@@ -2343,10 +2358,11 @@ export function createGatewayResultApplicationCoordinator({
     const internal = localContext?.turn_internal;
     const event = durableJob?.event;
     if (!job || !internal || !event) throw new Error('gateway_local_turn_context_missing');
+    const config = getConfig();
     const localStartedAt = currentTimeMs();
     const elapsedBaselineAt = totalElapsedBaselineMs(durableJob, job, localStartedAt);
     const prepared = await prepare({
-      config: getConfig(),
+      config,
       job,
       turn: { event, internal },
       finalText: String(durableJob?.result?.content ?? durableJob?.result?.final_text ?? ''),
@@ -2357,7 +2373,7 @@ export function createGatewayResultApplicationCoordinator({
       application_id: claimed.application_id
     });
     durableJob.application = { ...(durableJob.application || {}), state: 'applying' };
-    const applied = await apply({ config: getConfig(), job, prepared });
+    const applied = await apply({ config, job, prepared });
     await channel.recordApplicationApplied({
       job_id: durableJob.job_id,
       application_id: claimed.application_id,
@@ -2369,8 +2385,8 @@ export function createGatewayResultApplicationCoordinator({
       }
     });
     durableJob.application = { ...(durableJob.application || {}), state: 'applied' };
-    const finalized = await finalize({ config: getConfig(), job, applied });
-    assertGatewayFinalizationSucceeded(finalized);
+    const finalized = await finalize({ config, job, applied });
+    assertGatewayFinalizationSucceeded(finalized, config);
     const finishedAt = currentTimeMs();
     const elapsedMs = Math.max(0, finishedAt - elapsedBaselineAt);
     const localApplicationElapsedMs = Math.max(0, finishedAt - localStartedAt);
@@ -6213,7 +6229,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/health') {
       await workOrchestratorImmediateRuntime.refreshBacklogHealth();
       const workOrchestratorInvariantHealth = await readBridgeWorkOrchestratorHealth({
-        store: workOrchestratorStore
+        store: workOrchestratorStore,
+        reportOnly: CONFIG.workOrchestrator.reportOnlyEnabled
       });
       const gatewayStatus = gatewayChannel ? await gatewayChannel.status() : {};
       const documentExecutionConfig = gatewayTransportEnabled

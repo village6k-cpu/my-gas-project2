@@ -8,7 +8,10 @@ const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TABLE = process.env.SUPABASE_FOLLOW_UP_TABLE || "ai_follow_up_items";
-const V2_DASHBOARD_ENABLED = process.env.WORK_ORCHESTRATOR_V2_DASHBOARD_ENABLED === "1";
+// The shipped owner UI speaks only the v2 inbox contract. Keep the legacy route
+// solely as an explicit rollback; an omitted deployment variable must not make
+// the API return a different successful payload that the UI cannot render.
+const V2_DASHBOARD_ENABLED = process.env.WORK_ORCHESTRATOR_V2_DASHBOARD_ENABLED !== "0";
 
 const FIELDS =
   "id,follow_up_key,job_id,room_key,customer_name,type,priority,status,title,summary,recommended_action,suggested_reply_draft,evidence,blocking_reason,due_hint,decision_classification,decision_confidence,created_at,updated_at,completed_at";

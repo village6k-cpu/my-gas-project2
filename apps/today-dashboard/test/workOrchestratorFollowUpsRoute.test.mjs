@@ -26,6 +26,7 @@ test.after(() => authCacheHooks.deregister());
 function loadRoute({
   authed = true,
   enabled = "1",
+  omitEnabled = false,
   serviceKey = "service-role-key",
   anonKey = "anon-key",
   authModule = {
@@ -45,15 +46,16 @@ function loadRoute({
     body,
     async json() { return body; },
   });
+  const env = {
+    NEXT_PUBLIC_SUPABASE_URL: "https://unit.test",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: anonKey,
+    SUPABASE_SERVICE_ROLE_KEY: serviceKey,
+  };
+  if (!omitEnabled) env.WORK_ORCHESTRATOR_V2_DASHBOARD_ENABLED = enabled;
   const context = {
     module,
     exports: module.exports,
-    process: { env: {
-      NEXT_PUBLIC_SUPABASE_URL: "https://unit.test",
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: anonKey,
-      SUPABASE_SERVICE_ROLE_KEY: serviceKey,
-      WORK_ORCHESTRATOR_V2_DASHBOARD_ENABLED: enabled,
-    } },
+    process: { env },
     require(specifier) {
       if (specifier === "next/server") return { NextResponse: { json: responseJson } };
       if (specifier === "@/lib/server/authCache") return authModule;
@@ -241,6 +243,42 @@ test("legacy GET remains unchanged when the v2 dashboard flag is off", async () 
   assert.match(requests[0].url, /\/ai_follow_up_items\?select=/);
   assert.match(requests[0].url, /status=not\.in\.\(done,dismissed\)/);
   assert.equal(requests[0].init.headers.apikey, "anon-key");
+});
+
+test("the deployed owner inbox defaults to v2 when the dashboard flag is absent", async () => {
+  const requests = [];
+  const { GET } = loadRoute({
+    omitEnabled: true,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return response({
+        summary: {
+          now: 1, snoozed: 0, completed: 0, p0: 0,
+          byCategory: { schedule: 1, quote: 0, settlement: 0, customer: 0, operations: 0 },
+        },
+        items: [{
+          id: "11111111-1111-4111-8111-111111111111", version: 7,
+          category: "schedule", workType: "schedule_check", workTypeLabel: "스케줄 확인",
+          priority: "normal", state: "open", title: "촬영 일정 확인",
+          summary: "직원이 확인한 안전한 요약", recommendedAction: "후보 일정 하나를 선택",
+          dueAt: null, snoozedUntil: null,
+          firstOpenedAt: "2026-09-05T08:00:00.000Z", updatedAt: "2026-09-05T08:30:00.000Z",
+        }],
+        nextCursor: null,
+        omittedCount: 0,
+      });
+    },
+  });
+
+  const result = await GET(getV2Request());
+  const body = await readBody(result);
+
+  assert.equal(result.status, 200);
+  assert.equal(body.source, "work_items_v2");
+  assert.equal(body.items.length, 1);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://unit.test/rest/v1/rpc/list_heybilli_owner_work_v2");
+  assert.equal(requests[0].init.headers.apikey, "service-role-key");
 });
 
 test("v2 PATCH records the exact versioned action with a server-owned Heybilli actor", async () => {

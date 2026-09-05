@@ -151,7 +151,7 @@ function failed(measuredAt, reason) {
   return { ok: false, measuredAt, reasons: [reason], metrics: null };
 }
 
-export async function readWorkOrchestratorHealth({ store, now } = {}) {
+export async function readWorkOrchestratorHealth({ store, now, reportOnly = false } = {}) {
   let measuredAt;
   try {
     measuredAt = canonicalTimestamp(now);
@@ -182,11 +182,12 @@ export async function readWorkOrchestratorHealth({ store, now } = {}) {
   }
 
   const reasons = [];
-  if (metrics.notifications.oldest_undelivered_age_seconds !== null
+  if (reportOnly !== true
+    && metrics.notifications.oldest_undelivered_age_seconds !== null
     && metrics.notifications.oldest_undelivered_age_seconds > IMMEDIATE_DELIVERY_SLA_SECONDS) {
     reasons.push('immediate_delivery_sla_breached');
   }
-  if (metrics.digests.latest_delivered_eligible_omitted_count > 0) {
+  if (reportOnly !== true && metrics.digests.latest_delivered_eligible_omitted_count > 0) {
     reasons.push('delivered_digest_eligible_omission');
   }
   if (metrics.work.unacknowledged_p0_missing_alert_count > 0) {
