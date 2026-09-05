@@ -16,6 +16,8 @@ const [p0ReconciliationMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_p0_reconciliation\.sql$/.test(name));
 const [healthAggregateMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_health_aggregate\.sql$/.test(name));
+const [heybilliInboxMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_heybilli_inbox\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -60,6 +62,13 @@ async function createHealthAggregateDatabase() {
     assert.ok(migration, 'every additive migration through health aggregate must exist');
     await db.exec(readFileSync(join(migrationsDirectory, migration), 'utf8'));
   }
+  return db;
+}
+
+async function createHeybilliInboxDatabase() {
+  const db = await createHealthAggregateDatabase();
+  assert.ok(heybilliInboxMigrationName, 'the CLI-generated Heybilli inbox migration must exist');
+  await db.exec(readFileSync(join(migrationsDirectory, heybilliInboxMigrationName), 'utf8'));
   return db;
 }
 
@@ -3708,6 +3717,229 @@ test('SQL proves 500/501 completeness and divergent partial generations converge
       where state in ('building','delivering','failed')
     `);
     assert.equal(unfinished.rows[0].count, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Heybilli owner inbox applies eligibility before pagination and returns only the safe read model', async () => {
+  const db = await createHeybilliInboxDatabase();
+  const now = '2026-09-05T09:00:00.000Z';
+  const idFor = (prefix, value) => `${prefix}-0000-4000-8000-${String(value).padStart(12, '0')}`;
+
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, due_at, snoozed_until, first_opened_at, last_activity_at,
+        payload, created_at, updated_at
+      )
+      select
+        ('10000000-0000-4000-8000-' || lpad(i::text, 12, '0'))::uuid,
+        'heybilli:active:' || i::text, 'private-room-' || i::text,
+        '고객 ' || i::text || ' 후속조치', '직원이 확인한 안전한 요약 ' || i::text,
+        case
+          when i between 1 and 41 then (array['reservation_review','schedule_check','schedule_register','schedule_change','return_extension'])[1 + ((i - 1) % 5)]
+          when i between 42 and 81 then (array['quote_send','price_review'])[1 + ((i - 42) % 2)]
+          when i between 82 and 121 then (array['payment_check','tax_invoice','contract_document'])[1 + ((i - 82) % 3)]
+          when i between 122 and 161 then 'reply_needed'
+          else (array['human_review','damage_repair','sheet_duplicate_check'])[1 + ((i - 162) % 3)]
+        end,
+        case when i between 1 and 3 then 'p0' when i in (4,5) then 'urgent' else 'normal' end,
+        case when i in (201,202) then 'snoozed' else 'open' end,
+        case when i = 202 then '2026-09-05T12:00:00Z'::timestamptz else '2026-09-05T08:00:00Z'::timestamptz end,
+        case when i in (4,6) then '2026-09-05T08:30:00Z'::timestamptz else null end,
+        case when i = 201 then '2026-09-05T08:59:59Z'::timestamptz
+             when i = 202 then '2026-09-05T12:00:00Z'::timestamptz else null end,
+        '2026-09-05T09:00:00Z'::timestamptz - make_interval(mins => i),
+        '2026-09-05T08:00:00Z'::timestamptz,
+        jsonb_strip_nulls(jsonb_build_object(
+          'requires_human_action', true,
+          'recommended_action', '대표가 할 한 가지 ' || i::text,
+          'p0_acknowledged_at', case when i = 1 then '2026-09-05T08:59:59.000Z'
+                                     when i = 2 then '2026-09-05T09:00:00.000Z'
+                                     when i = 3 then '2026-09-05T09:00:01.000Z' else null end,
+          'customer_message', 'must never leave the database'
+        )),
+        '2026-09-05T07:00:00Z'::timestamptz, '2026-09-05T08:00:00Z'::timestamptz
+      from generate_series(1, 202) as generated(i)
+    `);
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload, created_at, updated_at
+      ) values
+        ($1::uuid, 'heybilli:completed:1', 'private-completed-1', '완료 1', '완료 요약', 'schedule_check', 'normal', 'resolved',
+          $3::timestamptz, $3::timestamptz, $3::timestamptz, '{"requires_human_action":true}', $3::timestamptz, $3::timestamptz),
+        ($2::uuid, 'heybilli:completed:2', 'private-completed-2', '완료 2', '완료 요약', 'quote_send', 'normal', 'dismissed',
+          $3::timestamptz, $3::timestamptz, $3::timestamptz, '{"requires_human_action":true}', $3::timestamptz, $3::timestamptz)
+    `, [idFor('20000000', 1), idFor('20000000', 2), now]);
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload, created_at, updated_at
+      ) values
+        ($1::uuid, 'heybilli:excluded:false', 'private-excluded', '비대상', '', 'schedule_check', 'normal', 'open',
+          $5::timestamptz, $5::timestamptz, $5::timestamptz, '{"requires_human_action":false}', $5::timestamptz, $5::timestamptz),
+        ($2::uuid, 'heybilli:excluded:completed-log', 'private-excluded', '비대상', '', 'completed_log', 'normal', 'open',
+          $5::timestamptz, $5::timestamptz, $5::timestamptz, '{"requires_human_action":true}', $5::timestamptz, $5::timestamptz),
+        ($3::uuid, 'heybilli:excluded:timeout', 'private-excluded', '비대상', '', 'reservation_review_timeout', 'normal', 'open',
+          $5::timestamptz, $5::timestamptz, $5::timestamptz, '{"requires_human_action":true}', $5::timestamptz, $5::timestamptz),
+        ($4::uuid, 'heybilli:excluded:error', 'private-excluded', '비대상', '', 'automation_error_review', 'normal', 'open',
+          $5::timestamptz, $5::timestamptz, $5::timestamptz, '{"requires_human_action":true}', $5::timestamptz, $5::timestamptz)
+    `, [idFor('30000000', 1), idFor('30000000', 2), idFor('30000000', 3), idFor('30000000', 4), now]);
+
+    const first = await db.query(`
+      select public.list_heybilli_owner_work_v2($1::timestamptz, 'now', null, 100, null) as result
+    `, [now]);
+    const pageOne = first.rows[0].result;
+    assert.deepEqual(Object.keys(pageOne).sort(), ['items', 'nextCursor', 'omittedCount', 'summary'].sort());
+    assert.deepEqual(pageOne.summary, {
+      now: 201, snoozed: 1, completed: 2, p0: 1,
+      byCategory: { schedule: 41, quote: 40, settlement: 40, customer: 40, operations: 41 }
+    });
+    assert.equal(pageOne.items.length, 100);
+    assert.equal(pageOne.omittedCount, 101);
+    assert.deepEqual(Object.keys(pageOne.nextCursor).sort(), ['id', 'openedAt', 'overdueRank', 'p0Rank', 'priorityRank'].sort());
+    const safeItemKeys = [
+      'id', 'version', 'category', 'workType', 'workTypeLabel', 'priority', 'state',
+      'title', 'summary', 'recommendedAction', 'dueAt', 'snoozedUntil', 'firstOpenedAt', 'updatedAt'
+    ].sort();
+    assert.ok(pageOne.items.every((item) => JSON.stringify(Object.keys(item).sort()) === JSON.stringify(safeItemKeys)));
+    assert.ok(!JSON.stringify(pageOne).includes('private-room'));
+    assert.ok(!JSON.stringify(pageOne).includes('customer_message'));
+    assert.deepEqual(pageOne.items.slice(0, 4).map(({ id }) => id), [
+      idFor('10000000', 3), idFor('10000000', 4), idFor('10000000', 6), idFor('10000000', 5)
+    ]);
+
+    const second = await db.query(`
+      select public.list_heybilli_owner_work_v2($1::timestamptz, 'now', null, 200, $2::jsonb) as result
+    `, [now, JSON.stringify(pageOne.nextCursor)]);
+    const pageTwo = second.rows[0].result;
+    assert.equal(pageTwo.items.length, 101);
+    assert.equal(pageTwo.omittedCount, 0);
+    assert.equal(pageTwo.nextCursor, null);
+    assert.deepEqual(pageTwo.summary, pageOne.summary);
+    assert.equal(new Set([...pageOne.items, ...pageTwo.items].map(({ id }) => id)).size, 201);
+
+    const snoozed = await db.query(`
+      select public.list_heybilli_owner_work_v2($1::timestamptz, 'snoozed', 'operations', 20, null) as result
+    `, [now]);
+    assert.deepEqual(snoozed.rows[0].result.items.map(({ id }) => id), [idFor('10000000', 202)]);
+    const completed = await db.query(`
+      select public.list_heybilli_owner_work_v2($1::timestamptz, 'completed', null, 20, null) as result
+    `, [now]);
+    assert.equal(completed.rows[0].result.items.length, 2);
+
+    for (const [clock, view, category, limit, after] of [
+      ['infinity', 'now', null, 100, null], [now, 'unknown', null, 100, null],
+      [now, 'now', 'unknown', 100, null], [now, 'now', null, 0, null],
+      [now, 'now', null, 100, { ...pageOne.nextCursor, extra: true }]
+    ]) {
+      await assert.rejects(
+        db.query(`select public.list_heybilli_owner_work_v2($1::timestamptz, $2::text, $3::text, $4::integer, $5::jsonb)`,
+          [clock, view, category, limit, after === null ? null : JSON.stringify(after)]),
+        /invalid Heybilli owner inbox query/
+      );
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test('Heybilli actor remains versioned, processable, and service-role only', async () => {
+  const db = await createHeybilliInboxDatabase();
+  const id = '40000000-0000-4000-8000-000000000001';
+  const actor = 'heybilli:550e8400-e29b-41d4-a716-446655440000';
+
+  try {
+    const { rows: privileges } = await db.query(`
+      select
+        has_function_privilege('anon', 'public.list_heybilli_owner_work_v2(timestamptz,text,text,integer,jsonb)', 'execute') as anon_execute,
+        has_function_privilege('authenticated', 'public.list_heybilli_owner_work_v2(timestamptz,text,text,integer,jsonb)', 'execute') as authenticated_execute,
+        has_function_privilege('service_role', 'public.list_heybilli_owner_work_v2(timestamptz,text,text,integer,jsonb)', 'execute') as service_execute
+    `);
+    assert.deepEqual(privileges[0], { anon_execute: false, authenticated_execute: false, service_execute: true });
+    const candidate = {
+      source_event_keys: ['heybilli:typed'], room_key: 'private-room', title: '스케줄 업무', summary: '확인 완료',
+      priority: 'normal', state: 'open', owner_id: null, actionable_at: '2026-09-05T08:00:00.000Z',
+      due_at: null, snoozed_until: null, first_opened_at: '2026-09-05T08:00:00.000Z',
+      last_activity_at: '2026-09-05T08:00:00.000Z', automation_state: 'needs_human',
+      payload: { requires_human_action: true, recommended_action: '대표 확인' }
+    };
+    for (const workType of ['schedule_register', 'schedule_change']) {
+      const { rows } = await db.query(`select public.upsert_work_item_v2($1::jsonb) as result`, [JSON.stringify({
+        ...candidate, work_key: `heybilli:typed:${workType}`, work_type: workType
+      })]);
+      assert.equal(rows[0].result.applied, true);
+      assert.equal(rows[0].result.created, true);
+      assert.equal(rows[0].result.row.work_type, workType);
+    }
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload, created_at, updated_at
+      ) values (
+        $1::uuid, 'heybilli:actor', 'private-room', '스케줄 확인', '확인 완료',
+        'schedule_check', 'normal', 'open', '2026-09-05T08:00:00Z',
+        '2026-09-05T08:00:00Z', '2026-09-05T08:00:00Z',
+        '{"requires_human_action":true,"recommended_action":"대표 확인"}',
+        '2026-09-05T08:00:00Z', '2026-09-05T08:00:00Z'
+      )
+    `, [id]);
+    const requested = await db.query(`
+      select public.request_work_item_action_v2($1::uuid, 1, '{"type":"progress"}'::jsonb, $2::text) as result
+    `, [id, actor]);
+    assert.equal(requested.rows[0].result.applied, true);
+    assert.equal(requested.rows[0].result.row.pending_action.requested_by, actor);
+    assert.equal(requested.rows[0].result.row.version, 2);
+    const processable = await db.query(`
+      select
+        public.is_processable_pending_work_action_v2(pending_action, version) as worker_valid,
+        public.is_valid_pending_work_action_at_v2(pending_action, version, '2100-01-01T00:00:00Z') as health_valid
+      from public.work_items_v2 where id = $1::uuid
+    `, [id]);
+    assert.deepEqual(processable.rows[0], { worker_valid: true, health_valid: true });
+    const stale = await db.query(`
+      select public.request_work_item_action_v2($1::uuid, 1, '{"type":"progress"}'::jsonb, $2::text) as result
+    `, [id, actor]);
+    assert.equal(stale.rows[0].result.applied, false);
+    await assert.rejects(
+      db.query(`select public.request_work_item_action_v2($1::uuid, 2, '{"type":"progress"}'::jsonb, 'heybilli:not-a-uuid')`, [id]),
+      /invalid work action request/
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test('Heybilli owner inbox fails closed on unbounded display evidence', async () => {
+  const db = await createHeybilliInboxDatabase();
+  const id = '50000000-0000-4000-8000-000000000001';
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload, created_at, updated_at
+      ) values (
+        $1::uuid, 'heybilli:bounded', 'private-room', '안전한 제목', '안전한 요약',
+        'schedule_check', 'normal', 'open', '2026-09-05T08:00:00Z',
+        '2026-09-05T08:00:00Z', '2026-09-05T08:00:00Z',
+        '{"requires_human_action":true,"recommended_action":"대표 확인"}',
+        '2026-09-05T08:00:00Z', '2026-09-05T08:00:00Z'
+      )
+    `, [id]);
+    for (const [assignment, params] of [
+      ['title = repeat(\'가\', 301)', []],
+      ['title = \'안전한 제목\', summary = repeat(\'나\', 2001)', []],
+      ['summary = \'안전한 요약\', payload = jsonb_set(payload, \'{recommended_action}\', to_jsonb(repeat(\'다\', 1201)))', []]
+    ]) {
+      await db.query(`update public.work_items_v2 set ${assignment} where id = $1::uuid`, [id, ...params]);
+      await assert.rejects(
+        db.query(`select public.list_heybilli_owner_work_v2('2026-09-05T09:00:00Z', 'now', null, 100, null)`),
+        /invalid Heybilli owner inbox evidence/
+      );
+    }
   } finally {
     await db.close();
   }

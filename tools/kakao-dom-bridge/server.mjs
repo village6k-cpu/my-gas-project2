@@ -35,9 +35,9 @@ import { digestScheduleWindow, runDigestCycle } from '../work-orchestrator-v2/di
 import { processPendingWorkAction } from '../work-orchestrator-v2/work-actions.mjs';
 import {
   buildV2P0DeliveryClaim,
-  encodeWorkActionValue,
   v2P0ReminderDecision
 } from '../work-orchestrator-v2/work-items.mjs';
+import { describeOwnerWorkType } from '../work-orchestrator-v2/work-taxonomy.mjs';
 import { recordShadowNotificationObligation } from '../work-orchestrator-v2/shadow-receipts.mjs';
 import { createSlackClient } from '../work-orchestrator-v2/slack-client.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
@@ -380,6 +380,8 @@ export function buildHealthConfig(config = {}) {
       workItemsEnabled: Boolean(config.workOrchestrator.workItemsEnabled),
       p0ReadbackEnabled: Boolean(config.workOrchestrator.p0ReadbackEnabled),
       p0CutoverEnabled: Boolean(config.workOrchestrator.p0CutoverEnabled),
+      reportOnlyEnabled: Boolean(config.workOrchestrator.reportOnlyEnabled),
+      heybilliActionsReady: Boolean(config.workOrchestrator.heybilliActionsReady),
       digestEnabled: Boolean(config.workOrchestrator.digestEnabled),
       cleanupEnabled: Boolean(config.workOrchestrator.cleanupEnabled),
       storeConfigured: Boolean(config.workOrchestratorStoreConfigured),
@@ -943,7 +945,7 @@ export function createWorkOrchestratorImmediateRuntime({
 }
 
 const DIGEST_STORE_METHODS = [
-  'claimDivergentDigestRun', 'claimDigestRun', 'listActionableWork', 'prepareDigestParts', 'claimDigestPartDelivery',
+  'claimDivergentDigestRun', 'claimDigestRun', 'listHeybilliOwnerWork', 'prepareDigestParts', 'claimDigestPartDelivery',
   'markDigestPartDelivered', 'markDigestPartFailed', 'finalizeDigestRun', 'failDigestRun',
   'markDigestGenerationDiverged',
   'listDigestCleanupBacklog', 'claimDigestPartCleanup', 'recordDigestPartCleanup'
@@ -1434,6 +1436,7 @@ export function createWorkOrchestratorDigestRuntime({
   const channelId = String(config.digestChannelId || '').trim();
   const intervalMinutes = config.digestIntervalMinutes === undefined ? 180 : Number(config.digestIntervalMinutes);
   const cleanupEnabled = config.cleanupEnabled === true;
+  const dashboardUrl = safeHeybilliDashboardUrl(config.dashboardUrl);
   const storeReady = Boolean(store && DIGEST_STORE_METHODS.every((method) => typeof store[method] === 'function'));
   const slackReady = Boolean(slack
     && typeof slack.postMessage === 'function'
@@ -1442,6 +1445,7 @@ export function createWorkOrchestratorDigestRuntime({
   const localConfigReady = Boolean(enabled
     && storeReady
     && slackReady
+    && (config.reportOnlyEnabled !== true || Boolean(dashboardUrl))
     && /^[A-Z0-9][A-Z0-9_-]{0,79}$/.test(channelId)
     && Number.isSafeInteger(intervalMinutes)
     && intervalMinutes >= 60
@@ -1539,7 +1543,8 @@ export function createWorkOrchestratorDigestRuntime({
             cleanupLeaseSeconds: 120,
             cleanupBacklogLimit: 10,
             reconcileWindowSeconds: 300,
-            ownerSlackIds: config.ownerSlackIds || {}
+            ownerSlackIds: config.ownerSlackIds || {},
+            dashboardUrl
           },
           now: at,
           leaseOwner
@@ -1549,11 +1554,7 @@ export function createWorkOrchestratorDigestRuntime({
       }
 
       let error = result.error || null;
-      if (result.status === 'delivered' && result.omittedEligibleCount !== 0) {
-        result.status = 'failed';
-        result.error = 'digest_omission_detected';
-        error = result.error;
-      } else if (result.cleanup.failed > 0) {
+      if (result.cleanup.failed > 0) {
         error = 'digest_cleanup_failed';
       }
       runtimeState.omittedEligibleCount = result.omittedEligibleCount;
@@ -2581,7 +2582,24 @@ export function buildP0SlackEscalationClaim(row = {}, options = {}) {
   };
 }
 
-export function buildP0SlackEscalationMessage(row = {}, claim = {}, { mentionUserIds = [], fallbackChannelId = '' } = {}) {
+function escapeSlackMarkup(value) {
+  return String(value ?? '').replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[character]);
+}
+
+function safeHeybilliDashboardUrl(value) {
+  const normalized = String(value ?? '').trim();
+  if (!normalized || normalized.length > 2048) return '';
+  try {
+    const url = new URL(normalized);
+    return url.protocol === 'https:' && url.hostname && !url.username && !url.password && !url.hash
+      ? url.href
+      : '';
+  } catch {
+    return '';
+  }
+}
+
+export function buildP0SlackEscalationMessage(row = {}, claim = {}, { mentionUserIds = [], fallbackChannelId = '', dashboardUrl = '' } = {}) {
   const payload = objectPayload(row.payload);
   const delivery = objectPayload(payload.slack_delivery);
   const mentions = Array.from(new Set((Array.isArray(mentionUserIds) ? mentionUserIds : [])
@@ -2594,6 +2612,32 @@ export function buildP0SlackEscalationMessage(row = {}, claim = {}, { mentionUse
   const reason = String(payload.alert_reason || payload.alertReason || 'AI가 P0 즉시 확인으로 판단').slice(0, 1000);
   const channel = delivery.channel_id || String(fallbackChannelId || '').trim();
   const threadTs = delivery.channel_id ? (delivery.thread_ts || delivery.message_ts) : '';
+  const safeDashboardUrl = safeHeybilliDashboardUrl(dashboardUrl);
+  if (safeDashboardUrl) {
+    const definition = describeOwnerWorkType(row.work_type);
+    const recommendedAction = String(payload.recommended_action || '').trim().slice(0, 1000);
+    if (!definition || row.priority !== 'p0' || !['open', 'in_progress', 'snoozed'].includes(row.state)
+      || payload.requires_human_action !== true || !recommendedAction || !channel) {
+      throw new Error('P0 report-only message is invalid');
+    }
+    const safeTitle = escapeSlackMarkup(String(row.title || '').trim().slice(0, 300));
+    if (!safeTitle) throw new Error('P0 report-only message is invalid');
+    const label = `${definition.categoryLabel} · ${definition.typeLabel}`;
+    const text = `${attention} 🚨 긴급 후속조치 · ${label} · ${safeTitle} · 헤이빌리에서 처리`;
+    return {
+      channel,
+      reply_broadcast: false,
+      client_msg_id: claim.clientMessageId,
+      text,
+      blocks: [
+        { type: 'header', text: { type: 'plain_text', text: '🚨 긴급 후속조치', emoji: true } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*${escapeSlackMarkup(label)}*\n${safeTitle}\n_${escapeSlackMarkup(recommendedAction)}_` } },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: `<${safeDashboardUrl}|헤이빌리 후속조치에서 처리>` }] }
+      ],
+      unfurl_links: false,
+      unfurl_media: false
+    };
+  }
   return {
     channel,
     ...(threadTs ? { thread_ts: threadTs } : {}),
@@ -2612,36 +2656,17 @@ function finiteV2P0Error(value) {
   ].includes(value) ? value : 'p0_failed';
 }
 
-function v2P0SlackMessage(row, claim, channel, mentionUserIds = []) {
-  const mentions = [...new Set((Array.isArray(mentionUserIds) ? mentionUserIds : [])
-    .map((value) => String(value || '').trim())
-    .filter((value) => /^[UW][A-Z0-9]{1,79}$/.test(value)))]
-    .map((value) => `<@${value}>`)
-    .join(' ');
-  const title = String(row?.title || 'Immediate review required').trim().slice(0, 300);
-  const summary = String(row?.summary || '').trim().slice(0, 1000);
-  const text = `${mentions ? `${mentions} ` : ''}<!channel> 🚨 P0 unacknowledged · ${title}${summary ? ` · ${summary}` : ''}`;
-  const actionValue = encodeWorkActionValue({
-    id: row.id,
-    version: row.version,
-    action: { type: 'ack_p0' }
+function v2P0SlackMessage(row, claim, channel, mentionUserIds = [], dashboardUrl = '') {
+  const message = buildP0SlackEscalationMessage(row, claim, {
+    mentionUserIds,
+    fallbackChannelId: channel,
+    dashboardUrl
   });
   return {
-    channel,
-    text,
-    clientMsgId: claim.clientMessageId,
-    blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text } },
-      {
-        type: 'actions',
-        elements: [{
-          type: 'button',
-          text: { type: 'plain_text', text: 'P0 확인', emoji: true },
-          action_id: 'village_work_v2_ack_p0',
-          value: actionValue
-        }]
-      }
-    ]
+    channel: message.channel,
+    text: message.text,
+    clientMsgId: message.client_msg_id,
+    blocks: message.blocks
   };
 }
 
@@ -2677,6 +2702,7 @@ export function createWorkOrchestratorP0Runtime({
   const cutoverEnabled = readbackEnabled && config.p0CutoverEnabled === true;
   const enabled = readbackEnabled;
   const channel = String(config.digestChannelId || '').trim();
+  const dashboardUrl = safeHeybilliDashboardUrl(config.dashboardUrl);
   const listReady = store && typeof store.listDueP0Work === 'function';
   const deliveryReady = listReady
     && typeof store.claimP0Delivery === 'function'
@@ -2692,7 +2718,8 @@ export function createWorkOrchestratorP0Runtime({
     && boundedCatchUpDelayMs >= 60_000
     && boundedCatchUpDelayMs <= 300_000;
   const localConfigReady = !enabled || Boolean(listReady && (!cutoverEnabled
-    || channel && deliveryReady && WORK_ACTION_UUID.test(owner) && catchUpReady));
+    || channel && (config.reportOnlyEnabled !== true || dashboardUrl)
+      && deliveryReady && WORK_ACTION_UUID.test(owner) && catchUpReady));
   if (!localConfigReady) throw new Error('Work Orchestrator P0 local configuration is missing');
 
   const settleKnownCoordinates = async ({ row, delivery, expectedStatus, posted }) => {
@@ -2880,7 +2907,7 @@ export function createWorkOrchestratorP0Runtime({
             posted = await slack.postMessage(v2P0SlackMessage(reconciliationRow, {
               clientMessageId: leasedDelivery.client_message_id,
               attempt: leasedDelivery.attempt
-            }, channel, mentionUserIds));
+            }, channel, mentionUserIds, dashboardUrl));
           } catch (error) {
             await settleReconciliationFailure(error?.ambiguous === true
               ? 'reconcile_pending' : 'retry_pending');
@@ -2927,7 +2954,7 @@ export function createWorkOrchestratorP0Runtime({
       }
       let posted;
       try {
-        posted = await slack.postMessage(v2P0SlackMessage(row, claim, channel, mentionUserIds));
+        posted = await slack.postMessage(v2P0SlackMessage(row, claim, channel, mentionUserIds, dashboardUrl));
       } catch (error) {
         try {
           const recorded = await store.settleP0Delivery({

@@ -10,6 +10,7 @@ const require = createRequire(import.meta.url);
 const ts = require("typescript");
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const routePath = path.join(appRoot, "app/api/follow-ups/route.ts");
+const AUTH_USER_ID = "550e8400-e29b-41d4-a716-446655440000";
 const authCacheHooks = registerHooks({
   resolve(specifier, context, nextResolve) {
     const result = nextResolve(specifier, context);
@@ -28,7 +29,7 @@ function loadRoute({
   serviceKey = "service-role-key",
   anonKey = "anon-key",
   authModule = {
-    getAuthedUser: async () => (authed ? { id: "verified-user" } : null),
+    getAuthedUser: async () => (authed ? { id: AUTH_USER_ID } : null),
     isAuthedRequest: async () => authed,
   },
   fetchImpl = async () => response([]),
@@ -79,6 +80,7 @@ function loadRoute({
     Date,
     Error,
     Promise,
+    Buffer,
   };
   vm.runInNewContext(compiled, context, { filename: routePath });
   return module.exports;
@@ -96,6 +98,10 @@ function getRequest(status = "active") {
   return { nextUrl: new URL(`https://dashboard.test/api/follow-ups?status=${status}`) };
 }
 
+function getV2Request(query = "view=now") {
+  return { nextUrl: new URL(`https://dashboard.test/api/follow-ups?${query}`) };
+}
+
 async function readBody(result) {
   return JSON.parse(JSON.stringify(await result.json()));
 }
@@ -104,7 +110,7 @@ test("v2 GET rejects an unauthenticated request before config or database access
   let fetchCalls = 0;
   const { GET } = loadRoute({ authed: false, fetchImpl: async () => { fetchCalls += 1; throw new Error("must not fetch"); } });
 
-  const result = await GET(getRequest());
+  const result = await GET(getV2Request());
 
   assert.equal(result.status, 401);
   assert.deepEqual(await readBody(result), { error: "인증 필요" });
@@ -130,7 +136,7 @@ test("v2 GET uses the real fail-closed authCache user guard when anon auth confi
     fetchImpl: async () => { fetchCalls += 1; throw new Error("must not fetch"); },
   });
   const result = await GET({
-    ...getRequest(),
+    ...getV2Request(),
     headers: new Headers({ authorization: "Bearer unverified-token" }),
   });
 
@@ -145,79 +151,76 @@ test("v2 GET requires the server service-role key and never falls back to anon",
   let fetchCalls = 0;
   const { GET } = loadRoute({ serviceKey: "", fetchImpl: async () => { fetchCalls += 1; throw new Error("must not fetch"); } });
 
-  const result = await GET(getRequest());
+  const result = await GET(getV2Request());
 
   assert.equal(result.status, 503);
-  assert.deepEqual(await readBody(result), { error: "work orchestrator unavailable" });
+  assert.deepEqual(await readBody(result), { error: "후속조치 정보를 불러오지 못했습니다" });
   assert.equal(fetchCalls, 0);
 });
 
 test("v2 GET reads only active allowlisted fields with service role and maps them to dashboard items", async () => {
+  const after = {
+    p0Rank: 0, overdueRank: 1, priorityRank: 1,
+    openedAt: "2026-09-05T08:00:00.000Z", id: "11111111-1111-4111-8111-111111111111",
+  };
+  const nextCursor = {
+    p0Rank: 1, overdueRank: 1, priorityRank: 0,
+    openedAt: "2026-09-05T08:00:00.000Z", id: "11111111-1111-4111-8111-111111111111",
+  };
   const requests = [];
   const { GET } = loadRoute({ fetchImpl: async (url, init) => {
     requests.push({ url, init });
-    return response([{
-      id: "v2-1",
-      room_key: "room-1",
-      title: "반납 일정 확인",
-      summary: "내일 10시 반납 확인 필요",
-      work_type: "reservation_review_timeout",
-      priority: "p0",
-      state: "snoozed",
-      due_at: "2026-09-01T01:00:00.000Z",
-      first_opened_at: "2026-08-31T01:00:00.000Z",
-      updated_at: "2026-08-31T02:00:00.000Z",
-      recommended_action: "직원에게 반납 일정을 확인하세요",
-      blocking_reason: "고객 회신 대기",
-      due_hint: "오늘 중",
-      work_key: "do-not-expose",
-      source_event_keys: ["do-not-expose"],
-      pending_action: { secret: "do-not-expose" },
-      resolution_evidence: { secret: "do-not-expose" },
-      payload: { customer_message: "do-not-expose" },
-    }]);
+    return response({
+      summary: {
+        now: 12, snoozed: 4, completed: 38, p0: 2,
+        byCategory: { schedule: 5, quote: 3, settlement: 2, customer: 1, operations: 5 },
+      },
+      items: [{
+        id: "11111111-1111-4111-8111-111111111111", version: 7,
+        category: "schedule", workType: "schedule_check", workTypeLabel: "스케줄 확인",
+        priority: "urgent", state: "open", title: "김OO 촬영 일정 확인",
+        summary: "직원이 확인한 안전한 요약", recommendedAction: "후보 일정 하나를 선택",
+        dueAt: null, snoozedUntil: null,
+        firstOpenedAt: "2026-09-05T08:00:00.000Z", updatedAt: "2026-09-05T08:30:00.000Z",
+      }],
+      nextCursor,
+      omittedCount: 11,
+    });
   } });
 
-  const result = await GET(getRequest());
+  const encodedAfter = Buffer.from(JSON.stringify(after), "utf8").toString("base64url");
+  const result = await GET({ nextUrl: new URL(`https://dashboard.test/api/follow-ups?view=now&category=schedule&limit=1&after=${encodedAfter}`) });
   const body = await readBody(result);
 
   assert.equal(result.status, 200);
   assert.equal(body.source, "work_items_v2");
-  assert.deepEqual(body.items, [{
-    id: "v2-1",
-    room_key: "room-1",
-    type: "reservation_review",
-    priority: "urgent",
-    status: "waiting_internal",
-    title: "반납 일정 확인",
-    summary: "내일 10시 반납 확인 필요",
-    recommended_action: "직원에게 반납 일정을 확인하세요",
-    blocking_reason: "고객 회신 대기",
-    due_hint: "오늘 중",
-    created_at: "2026-08-31T01:00:00.000Z",
-    updated_at: "2026-08-31T02:00:00.000Z",
-  }]);
+  assert.equal(body.items[0].workType, "schedule_check");
+  assert.deepEqual(Object.keys(body.items[0]).sort(), [
+    "category", "dueAt", "firstOpenedAt", "id", "priority", "recommendedAction", "snoozedUntil",
+    "state", "summary", "title", "updatedAt", "version", "workType", "workTypeLabel",
+  ].sort());
+  assert.equal(body.nextCursor, Buffer.from(JSON.stringify(nextCursor), "utf8").toString("base64url"));
+  assert.equal(body.omittedCount, 11);
   assert.equal(JSON.stringify(body).includes("do-not-expose"), false);
   assert.equal(requests.length, 1);
-  assert.match(requests[0].url, /\/work_items_v2\?select=/);
-  assert.match(requests[0].url, /state=in\.\(open,in_progress,snoozed\)/);
+  assert.equal(requests[0].url, "https://unit.test/rest/v1/rpc/list_heybilli_owner_work_v2");
+  assert.equal(requests[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    p_now: JSON.parse(requests[0].init.body).p_now,
+    p_view: "now", p_category: "schedule", p_limit: 1, p_after: after,
+  });
+  assert.match(JSON.parse(requests[0].init.body).p_now, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(requests[0].init.headers.apikey, "service-role-key");
   assert.equal(requests[0].init.headers.authorization, "Bearer service-role-key");
-  assert.equal(requests[0].url.includes("pending_action"), false);
-  assert.equal(requests[0].url.includes("resolution_evidence"), false);
-  assert.equal(requests[0].url.includes("source_event_keys"), false);
-  assert.equal(requests[0].url.includes("work_key"), false);
-  assert.match(requests[0].url, /recommended_action:payload->>recommended_action/);
-  assert.equal(requests[0].url.includes(",payload,"), false);
 });
 
 test("v2 GET fails closed when a successful upstream response is not an array", async () => {
   for (const malformed of [{ error: "upstream detail" }, null, "not-an-array"]) {
     const { GET } = loadRoute({ fetchImpl: async () => response(malformed) });
-    const result = await GET(getRequest());
+    const result = await GET(getV2Request());
 
     assert.equal(result.status, 503);
-    assert.deepEqual(await readBody(result), { error: "work orchestrator unavailable" });
+    assert.deepEqual(await readBody(result), { error: "후속조치 정보를 불러오지 못했습니다" });
   }
 });
 
@@ -240,13 +243,58 @@ test("legacy GET remains unchanged when the v2 dashboard flag is off", async () 
   assert.equal(requests[0].init.headers.apikey, "anon-key");
 });
 
-test("v2 PATCH fails closed before any legacy database call", async () => {
-  let fetchCalls = 0;
-  const { PATCH } = loadRoute({ fetchImpl: async () => { fetchCalls += 1; throw new Error("must not fetch"); } });
+test("v2 PATCH records the exact versioned action with a server-owned Heybilli actor", async () => {
+  const requests = [];
+  const { PATCH } = loadRoute({ fetchImpl: async (url, init) => {
+    requests.push({ url, init });
+    return response({ applied: true, row: {
+      id: "11111111-1111-4111-8111-111111111111", version: 8,
+      title: "김OO 촬영 일정 확인", summary: "직원이 확인한 안전한 요약",
+      work_type: "schedule_check", priority: "urgent", state: "open",
+      due_at: null, snoozed_until: null, first_opened_at: "2026-09-05T08:00:00.000Z",
+      updated_at: "2026-09-05T09:00:00.000Z",
+      payload: { requires_human_action: true, recommended_action: "후보 일정 하나를 선택", secret: "do-not-expose" },
+      pending_action: {
+        type: "progress", action: { type: "progress" }, status: "pending",
+        requested_at: "2026-09-05T09:00:00.000Z", requested_by: `heybilli:${AUTH_USER_ID}`, expected_version: 7,
+      },
+    } });
+  } });
 
-  const result = await PATCH({ async json() { return { id: "v2-1", status: "done" }; } });
+  const result = await PATCH({ async json() {
+    return { id: "11111111-1111-4111-8111-111111111111", expectedVersion: 7, action: { type: "progress" } };
+  } });
+  const body = await readBody(result);
 
-  assert.equal(result.status, 409);
-  assert.deepEqual(await readBody(result), { error: "work orchestrator v2 is read-only" });
-  assert.equal(fetchCalls, 0);
+  assert.equal(result.status, 200);
+  assert.equal(body.item.version, 8);
+  assert.equal(JSON.stringify(body).includes("do-not-expose"), false);
+  assert.equal(requests[0].url, "https://unit.test/rest/v1/rpc/request_work_item_action_v2");
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    p_id: "11111111-1111-4111-8111-111111111111", p_expected_version: 7,
+    p_action: { type: "progress" }, p_requested_by: `heybilli:${AUTH_USER_ID}`,
+  });
+});
+
+test("v2 PATCH returns conflict for stale work and rejects extra browser-owned actor input", async () => {
+  const requests = [];
+  const { PATCH } = loadRoute({ fetchImpl: async (url, init) => {
+    requests.push({ url, init });
+    return response({ applied: false, row: null });
+  } });
+  const stale = await PATCH({ async json() {
+    return { id: "11111111-1111-4111-8111-111111111111", expectedVersion: 7, action: { type: "progress" } };
+  } });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await readBody(stale), { error: "다른 곳에서 이미 변경되었습니다" });
+
+  const extra = await PATCH({ async json() {
+    return {
+      id: "11111111-1111-4111-8111-111111111111", expectedVersion: 7,
+      action: { type: "progress" }, requestedBy: "UFORGED",
+    };
+  } });
+  assert.equal(extra.status, 400);
+  assert.deepEqual(await readBody(extra), { error: "invalid work action" });
+  assert.equal(requests.length, 1);
 });

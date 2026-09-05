@@ -61,22 +61,25 @@ Local bridge / worker env:
 - `SLACK_CHANNEL_DOCUMENT_AGENT=서류발송-agent`
 - `SLACK_CHANNEL_SETTLEMENT_AGENT=정산-agent`
 - `SLACK_CHANNEL_OTHER_AGENT=기타문의`
-- `SLACK_DASHBOARD_URL=https://village-follow-up-dashboard.vercel.app`
-- `SLACK_ACTION_POLL_ENABLED=true` only in `legacy` mode. The reviewed `v2`
-  contract pins this legacy action-row poller to `0` while leaving the Work
-  Orchestrator v2 action poller active. Rollback persists `legacy`, restores
-  every legacy card/work/P0/action flag, and disables every v2 flag before the
-  bounded recovery path verifies selected-mode health readback.
+- `SLACK_DASHBOARD_URL=https://today-dashboard-ten.vercel.app/follow-ups`
+- The reviewed `v2` target sets `WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED=1`
+  and `WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY=1`. Slack then contains only
+  the scheduled summary report and a buttonless P0 link; every work action is
+  completed in the authenticated Heybilli `후속조치` screen.
+- `SLACK_ACTION_POLL_ENABLED=1` is legacy-only. The exact v2 target pins it to
+  `0`. Rollback sets both report-only/Heybilli-readiness flags to `0`, restores
+  every legacy card/work/P0/action flag, and verifies legacy-mode health.
 
-Slack button handling:
+Legacy Slack button handling:
 
-- The live Hermes Slack app runs in Socket Mode, so `village_followup_*` button
+- In legacy mode only, the Hermes Slack app runs in Socket Mode, so
+  `village_followup_*` button
   events are handled inside Hermes and forwarded to the local bridge at
   `http://127.0.0.1:8787/slack/actions`.
 - `scripts/kakao-automation start` and `scripts/kakao-automation check` apply
   the local Hermes Socket Mode patch idempotently.
-- The Vercel `/api/slack-actions` route remains available only for a future
-  HTTP-interactivity Slack app setup.
+- The Vercel `/api/slack-actions` route remains a legacy HTTP-interactivity
+  fallback. It is not part of the v2 report-only owner workflow.
 
 Optional Vercel env for the HTTP-interactivity fallback:
 

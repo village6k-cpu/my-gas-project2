@@ -2,8 +2,7 @@ import { createHash } from 'node:crypto';
 
 import {
   buildDigestSlackMessage,
-  buildDigestSnapshot,
-  selectDigestItems
+  buildReportDigestSnapshot
 } from './digests.mjs';
 
 const CHANNEL_ID = /^[A-Z0-9][A-Z0-9_-]{0,79}$/;
@@ -38,6 +37,20 @@ function requiredText(value, maxLength) {
   return value;
 }
 
+function requiredHttpsUrl(value) {
+  const text = requiredText(value, 2048);
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw invalidInput();
+  }
+  if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password || parsed.hash) {
+    throw invalidInput();
+  }
+  return parsed.href;
+}
+
 function boundedInteger(value, fallback, minimum, maximum) {
   const candidate = value === undefined ? fallback : value;
   if (!Number.isSafeInteger(candidate) || candidate < minimum || candidate > maximum) throw invalidInput();
@@ -59,6 +72,7 @@ function normalizeConfig(value) {
   if (value.ownerSlackIds !== undefined && !isRecord(value.ownerSlackIds)) throw invalidInput();
   return {
     channelId,
+    dashboardUrl: requiredHttpsUrl(value.dashboardUrl),
     destinationKey: value.destinationKey === undefined
       ? `slack:${channelId}`
       : requiredText(value.destinationKey, 500),
@@ -78,7 +92,7 @@ function requireMethod(value, method) {
 
 function validateDependencies(store, slack, cleanupEnabled) {
   for (const method of [
-    'claimDivergentDigestRun', 'claimDigestRun', 'listActionableWork', 'prepareDigestParts',
+    'claimDivergentDigestRun', 'claimDigestRun', 'listHeybilliOwnerWork', 'prepareDigestParts',
     'claimDigestPartDelivery', 'markDigestPartDelivered', 'markDigestPartFailed',
     'markDigestGenerationDiverged',
     'finalizeDigestRun', 'failDigestRun'
@@ -715,30 +729,31 @@ async function runDigestWindow({ store, slack, config, timestamp, owner, window,
   let localParts = [];
   let persistedParts = [];
   try {
-    const rows = await store.listActionableWork({ now: window.scheduledAt, limit: 500 });
-    const eligibleCount = rows?.eligibleCount;
-    if (!Array.isArray(rows) || !Number.isSafeInteger(eligibleCount)
-      || eligibleCount < rows.length || rows.length !== Math.min(eligibleCount, 500)) {
+    const report = await store.listHeybilliOwnerWork({
+      now: window.scheduledAt,
+      view: 'now',
+      category: null,
+      limit: 5,
+      after: null
+    });
+    if (!isRecord(report) || !isRecord(report.summary) || !Array.isArray(report.items)
+      || report.items.length > 5 || !Number.isSafeInteger(report.summary.now)
+      || report.summary.now < report.items.length
+      || !Number.isSafeInteger(report.omittedCount)
+      || report.omittedCount !== report.summary.now - report.items.length) {
       throw new Error('digest_manifest_invalid');
     }
-    if (eligibleCount > 500) {
-      selectedCount = eligibleCount;
-      await markRunFailed(store, run, owner, 'digest_eligible_overflow');
-      return finish({
-        status: 'failed', error: 'digest_eligible_overflow', retryable: true,
-        scheduledAt: window.scheduledAt, runId: run.id,
-        selectedCount, renderedCount: 0, partCount: 0, deliveredPartCount: 0
-      });
-    }
-    const selected = selectDigestItems(rows, window.scheduledAt);
-    const snapshot = buildDigestSnapshot(selected);
-    const rendered = buildDigestSlackMessage(selected, {
+    const snapshot = buildReportDigestSnapshot(report.items, window.scheduledAt);
+    const rendered = buildDigestSlackMessage(report.items, {
       now: window.scheduledAt,
-      ownerSlackIds: config.ownerSlackIds
+      dashboardUrl: config.dashboardUrl,
+      summary: report.summary
     });
     selectedCount = rendered.selectedCount;
     renderedCount = rendered.renderedCount;
-    if (renderedCount !== selectedCount) throw new Error('digest_manifest_invalid');
+    if (renderedCount !== report.items.length || selectedCount !== report.summary.now) {
+      throw new Error('digest_manifest_invalid');
+    }
     localParts = messageParts(rendered, config.channelId);
     const prepared = await store.prepareDigestParts({
       id: run.id,

@@ -5,6 +5,7 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const UTC_MS = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const POSTGRES_TIMESTAMP = /^(?!0000)([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,6}))?(?:Z|([+-])([0-9]{2}):([0-9]{2}))$/;
 const SLACK_USER_ID = /^[UW][A-Z0-9]{2,79}$/;
+const HEYBILLI_USER_ID = /^heybilli:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACTIVE_STATES = new Set(['open', 'in_progress', 'snoozed']);
 const MAX_CONTEXT_LENGTH = 1000;
 
@@ -105,7 +106,8 @@ function validatePendingAction(row, pending, now) {
     || pending.status !== 'pending'
     || !Number.isSafeInteger(pending.expected_version) || pending.expected_version < 1
     || row.version !== pending.expected_version + 1
-    || typeof pending.requested_by !== 'string' || !SLACK_USER_ID.test(pending.requested_by)) {
+    || typeof pending.requested_by !== 'string'
+    || (!SLACK_USER_ID.test(pending.requested_by) && !HEYBILLI_USER_ID.test(pending.requested_by))) {
     throw new Error('invalid pending work action');
   }
   const requestedAt = canonicalPendingTimestamp(pending.requested_at);

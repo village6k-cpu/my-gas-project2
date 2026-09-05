@@ -238,8 +238,28 @@ test('silent Kakao intake hands off only one Hermes-classified owner action', as
       ]))
     }));
     const selected = selectDigestItems(actionableRows, '2026-09-03T00:00:02.000Z');
-    const digest = buildDigestSlackMessage(selected, {
-      now: '2026-09-03T00:00:02.000Z', ownerSlackIds: {}
+    const digest = buildDigestSlackMessage([{
+      id: selected[0].id,
+      version: selected[0].version,
+      category: 'customer',
+      workType: selected[0].workType,
+      workTypeLabel: '고객 답변 필요',
+      priority: selected[0].priority,
+      state: 'open',
+      title: selected[0].title,
+      summary: selected[0].summary,
+      recommendedAction: selected[0].recommendedAction,
+      dueAt: selected[0].dueAt,
+      snoozedUntil: null,
+      firstOpenedAt: selected[0].firstOpenedAt,
+      updatedAt: '2026-09-03T00:00:01.000Z'
+    }], {
+      now: '2026-09-03T00:00:02.000Z',
+      dashboardUrl: 'https://heybilli.example/follow-ups',
+      summary: {
+        now: 1, snoozed: 0, completed: 0, p0: 0,
+        byCategory: { schedule: 0, quote: 0, settlement: 0, customer: 1, operations: 0 }
+      }
     });
 
     const automatic = buildHumanWorkCandidates({
@@ -280,7 +300,8 @@ test('silent Kakao intake hands off only one Hermes-classified owner action', as
     assert.deepEqual(selected.map(({ id }) => id), [semanticWorkId]);
     assert.equal(selected.length, 1);
     assert.equal(digest.renderedCount, 1);
-    assert.match(digest.ordinaryParts[0].blocks[1].text.text, /대표님이 할 일/);
+    assert.equal(JSON.stringify(digest).includes('actions'), false);
+    assert.match(digest.ordinaryParts[0].blocks[2].text.text, /고객 답변 필요/);
     assert.equal(p0Calls, 1);
   } finally {
     await db.close();

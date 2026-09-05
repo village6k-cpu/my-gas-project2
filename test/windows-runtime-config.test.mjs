@@ -53,6 +53,8 @@ test('buildWindowsStagingConfig applies write-safe staging defaults', () => {
     AI_WORKER_AUTO_SEND: 'true',
     SLACK_ACTION_POLL_ENABLED: 'true',
     SLACK_AGENT_CARD_DELIVERY_ENABLED: 'true',
+    WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED: 'true',
+    WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY: 'true',
     KAKAO_TAB_CLEANUP_ENABLED: 'true'
   });
 
@@ -60,6 +62,8 @@ test('buildWindowsStagingConfig applies write-safe staging defaults', () => {
   assert.equal(staging.AI_WORKER_AUTO_SEND, '0');
   assert.equal(staging.SLACK_ACTION_POLL_ENABLED, '0');
   assert.equal(staging.SLACK_AGENT_CARD_DELIVERY_ENABLED, '0');
+  assert.equal(staging.WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED, '0');
+  assert.equal(staging.WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY, '0');
   assert.equal(staging.KAKAO_TAB_CLEANUP_ENABLED, '1');
   assert.equal(staging.KAKAO_WORKER_CONTROL_MODE, 'devtools_first');
   assert.equal(staging.KAKAO_WORKER_SEARCH_TARGET_CHAT, '1');
@@ -102,6 +106,8 @@ test('buildWindowsStagingConfig normalizes explicitly enabled write booleans to 
       AI_WORKER_AUTO_SEND: 'true',
       SLACK_ACTION_POLL_ENABLED: true,
       SLACK_AGENT_CARD_DELIVERY_ENABLED: 'false',
+      WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED: true,
+      WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY: 'true',
       KAKAO_TAB_CLEANUP_ENABLED: '0',
       KAKAO_APPLESCRIPT_FALLBACK: false,
       AI_WORKER_DRY_RUN: 'false',
@@ -114,6 +120,8 @@ test('buildWindowsStagingConfig normalizes explicitly enabled write booleans to 
   assert.equal(staging.AI_WORKER_AUTO_SEND, '1');
   assert.equal(staging.SLACK_ACTION_POLL_ENABLED, '1');
   assert.equal(staging.SLACK_AGENT_CARD_DELIVERY_ENABLED, '0');
+  assert.equal(staging.WORK_ORCHESTRATOR_V2_REPORT_ONLY_ENABLED, '1');
+  assert.equal(staging.WORK_ORCHESTRATOR_V2_HEYBILLI_ACTIONS_READY, '1');
   assert.equal(staging.KAKAO_TAB_CLEANUP_ENABLED, '0');
   assert.equal(staging.KAKAO_APPLESCRIPT_FALLBACK, '0');
   assert.equal(staging.AI_WORKER_DRY_RUN, '0');

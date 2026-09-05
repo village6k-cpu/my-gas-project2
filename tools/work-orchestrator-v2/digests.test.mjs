@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { decodeWorkActionValue } from './work-items.mjs';
-import { decodeWorkActionContext } from './work-actions.mjs';
-
 const digestModule = await import('./digests.mjs').catch(() => ({}));
 const missing = (name) => () => assert.fail(`${name} is not implemented`);
 const selectDigestItems = digestModule.selectDigestItems ?? missing('selectDigestItems');
@@ -54,29 +51,6 @@ function workItem(overrides = {}) {
 
 function selectedItem(overrides = {}) {
   return selectDigestItems([workItem(overrides)], NOW)[0];
-}
-
-const renderConfig = Object.freeze({
-  now: NOW,
-  ownerSlackIds: Object.freeze({ 'owner-primary': 'UOWNER1' })
-});
-
-function itemSections(result) {
-  return result.ordinaryParts.flatMap((part) => part.blocks.filter((block) => block.type === 'section'));
-}
-
-function actionBlocks(result) {
-  return result.ordinaryParts.flatMap((part) => part.blocks.filter((block) => block.type === 'actions'));
-}
-
-function decodedActions(block) {
-  return block.elements
-    .map((element) => ({
-      actionId: element.action_id,
-      decoded: element.action_id === 'village_work_v2_snooze_custom'
-        ? { ...decodeWorkActionContext(element.value), action: { type: 'snooze_custom' } }
-        : decodeWorkActionValue(element.value)
-    }));
 }
 
 test('digest module exports the four required pure interfaces', () => {
@@ -213,160 +187,155 @@ test('selection returns the exact render allowlist and no caller object aliases'
   assert.doesNotMatch(JSON.stringify(selected), /PRIVATE|work_key|payload|customer/i);
 });
 
-test('digest keeps only explicit semantic owner actions and renders an employee handoff', () => {
+function reportItem(index = 0, overrides = {}) {
+  const fixtures = [
+    ['schedule', 'schedule_check', '스케줄 확인'],
+    ['quote', 'quote_send', '견적서 발송'],
+    ['settlement', 'tax_invoice', '세금계산서 발행'],
+    ['customer', 'reply_needed', '고객 답변 필요'],
+    ['operations', 'human_review', '기타 사람 확인']
+  ];
+  const [category, workType, workTypeLabel] = fixtures[index % fixtures.length];
+  return {
+    id: UUIDS[index],
+    version: index + 1,
+    category,
+    workType,
+    workTypeLabel,
+    priority: index === 0 ? 'p0' : index === 1 ? 'urgent' : 'normal',
+    state: 'open',
+    title: `대표 업무 ${index + 1}`,
+    summary: `직원이 정리한 내용 ${index + 1}`,
+    recommendedAction: `헤이빌리에서 처리 ${index + 1}`,
+    dueAt: null,
+    snoozedUntil: null,
+    firstOpenedAt: '2026-08-29T05:00:00.000Z',
+    updatedAt: '2026-08-29T05:30:00.000Z',
+    ...overrides
+  };
+}
+
+function reportSummary(overrides = {}) {
+  return {
+    now: 5,
+    snoozed: 0,
+    completed: 9,
+    p0: 1,
+    byCategory: { schedule: 1, quote: 1, settlement: 1, customer: 1, operations: 1 },
+    ...overrides
+  };
+}
+
+function reportConfig(overrides = {}) {
+  return {
+    now: NOW,
+    dashboardUrl: 'https://heybilli.example/follow-ups',
+    summary: reportSummary(),
+    ...overrides
+  };
+}
+
+test('digest keeps only explicit semantic owner actions and never classifies customer text', () => {
   const selected = selectDigestItems([
-    workItem({
-      id: UUIDS[0],
-      title: '견적 발송',
-      summary: '고객이 최종 견적서를 요청했고 자동 발송 조건은 충족되지 않았습니다.',
-      work_type: 'quote_send',
-      payload: {
-        requires_human_action: true,
-        recommended_action: '확정 견적서를 검토한 뒤 고객에게 발송하세요.'
-      }
-    }),
-    workItem({
-      id: UUIDS[1],
-      work_type: 'automation_error_review',
-      summary: 'worker timeout database transport error',
-      payload: { requires_human_action: true, recommended_action: '로그를 확인하세요.' }
-    }),
-    workItem({
-      id: UUIDS[2],
-      work_type: 'reservation_review_timeout',
-      summary: 'automation timeout',
-      payload: { requires_human_action: true, recommended_action: '재시도하세요.' }
-    }),
-    workItem({
-      id: UUIDS[3],
-      work_type: 'payment_check',
-      payload: { requires_human_action: false, recommended_action: '처리하지 않음' }
-    }),
-    workItem({
-      id: UUIDS[4],
-      work_type: 'schedule_check',
-      payload: { recommended_action: '명시되지 않은 작업' }
-    })
+    workItem({ id: UUIDS[0], work_type: 'schedule_register', title: '견적과 세금계산서도 언급된 일정 등록' }),
+    workItem({ id: UUIDS[1], work_type: 'schedule_change' }),
+    workItem({ id: UUIDS[2], work_type: 'human_review', title: '견적 세금계산서 스케줄' }),
+    workItem({ id: UUIDS[3], work_type: 'completed_log' }),
+    workItem({ id: UUIDS[4], work_type: 'automation_error_review' }),
+    workItem({ id: UUIDS[5], payload: { requires_human_action: false } })
   ], NOW);
 
-  assert.deepEqual(selected.map(({ id, workType, recommendedAction }) => ({ id, workType, recommendedAction })), [{
-    id: UUIDS[0],
-    workType: 'quote_send',
-    recommendedAction: '확정 견적서를 검토한 뒤 고객에게 발송하세요.'
-  }]);
-
-  const rendered = buildDigestSlackMessage(selected, renderConfig);
-  const text = itemSections(rendered)[0].text.text;
-  assert.match(text, /직원이 정리한 내용: 고객이 최종 견적서를 요청/);
-  assert.match(text, /대표님이 할 일: 확정 견적서를 검토한 뒤 고객에게 발송하세요/);
-  assert.doesNotMatch(text, /automation|error|timeout|worker|database/i);
+  assert.deepEqual(selected.map(({ id, workType }) => [id, workType]), [
+    [UUIDS[0], 'schedule_register'],
+    [UUIDS[1], 'schedule_change'],
+    [UUIDS[2], 'human_review']
+  ]);
 });
 
-test('renderer rejects operational work even if a caller forges the selected shape', () => {
-  const selected = selectedItem();
-  assert.throws(
-    () => buildDigestSlackMessage([{ ...selected, workType: 'automation_error_review' }], renderConfig),
-    { message: 'invalid digest input' }
-  );
-});
-
-test('section precedence and deterministic due-age-UUID ordering place every eligible row exactly once', () => {
-  const rows = [
-    workItem({ id: UUIDS[7], first_opened_at: '2026-08-29T05:30:00.000Z' }),
-    workItem({ id: UUIDS[6], consecutive_unhandled_digests: 2, first_opened_at: '2026-08-29T05:00:00.000Z' }),
-    workItem({ id: UUIDS[5], priority: 'urgent', first_opened_at: '2026-08-29T05:00:00.000Z' }),
-    workItem({ id: UUIDS[4], first_opened_at: '2026-08-28T06:00:00.000Z' }),
-    workItem({
-      id: UUIDS[3], priority: 'p0',
-      payload: { requires_human_action: true, p0_acknowledged_at: '2026-08-29T05:00:00.000Z' }
-    }),
-    workItem({ id: UUIDS[2], due_at: '2026-08-30T01:00:00.000Z', first_opened_at: '2026-08-29T04:00:00.000Z' }),
-    workItem({ id: UUIDS[1], due_at: '2026-08-29T23:00:00.000Z', first_opened_at: '2026-08-29T05:30:00.000Z' }),
-    workItem({ id: UUIDS[0], due_at: '2026-08-29T23:00:00.000Z', first_opened_at: '2026-08-29T05:30:00.000Z' })
-  ];
-
-  const selected = selectDigestItems(rows, NOW);
+test('section precedence and deterministic due-age-UUID ordering place every eligible row once', () => {
+  const selected = selectDigestItems([
+    workItem({ id: UUIDS[5], priority: 'normal', first_opened_at: NOW }),
+    workItem({ id: UUIDS[4], priority: 'urgent', first_opened_at: NOW }),
+    workItem({ id: UUIDS[3], consecutive_unhandled_digests: 2, first_opened_at: NOW }),
+    workItem({ id: UUIDS[2], first_opened_at: '2026-08-28T05:59:59.999Z' }),
+    workItem({ id: UUIDS[1], priority: 'p0', payload: { requires_human_action: true, p0_acknowledged_at: NOW } }),
+    workItem({ id: UUIDS[0], priority: 'urgent', due_at: '2026-08-29T05:30:00.000Z', first_opened_at: NOW })
+  ], NOW);
 
   assert.deepEqual(selected.map(({ id, section }) => [id, section]), [
-    [UUIDS[3], 'p0'],
-    [UUIDS[4], 'overdue'],
-    [UUIDS[5], 'urgent'],
-    [UUIDS[6], 'carry_over'],
-    [UUIDS[0], 'actionable'],
-    [UUIDS[1], 'actionable'],
-    [UUIDS[2], 'actionable'],
-    [UUIDS[7], 'actionable']
+    [UUIDS[1], 'p0'],
+    [UUIDS[2], 'overdue'],
+    [UUIDS[0], 'urgent'],
+    [UUIDS[4], 'urgent'],
+    [UUIDS[3], 'carry_over'],
+    [UUIDS[5], 'actionable']
   ]);
-  assert.equal(new Set(selected.map(({ id }) => id)).size, rows.length);
+  assert.equal(new Set(selected.map(({ id }) => id)).size, selected.length);
 });
 
-test('overdue and carry-over boundaries are exact and owner mention survives higher section precedence', () => {
+test('daily reminder selection boundaries remain deterministic for finalization metadata', () => {
+  assert.equal(selectedItem({ first_opened_at: '2026-08-26T06:00:00.001Z' }).dailyReminderDue, false);
+  assert.equal(selectedItem({ first_opened_at: '2026-08-26T06:00:00.000Z' }).dailyReminderDue, true);
+  assert.equal(selectedItem({ next_reminder_at: '2026-08-29T06:00:00.001Z' }).dailyReminderDue, false);
+  assert.equal(selectedItem({ next_reminder_at: NOW }).dailyReminderDue, true);
+});
+
+test('legacy selection snapshot stays an exact ordered content-free allowlist', () => {
   const selected = selectDigestItems([
-    workItem({ id: UUIDS[0], first_opened_at: '2026-08-28T06:00:00.001Z' }),
-    workItem({ id: UUIDS[1], first_opened_at: '2026-08-28T06:00:00.000Z' }),
-    workItem({ id: UUIDS[2], priority: 'urgent', consecutive_unhandled_digests: 1 }),
-    workItem({ id: UUIDS[3], priority: 'urgent', consecutive_unhandled_digests: 2 })
+    workItem({ id: UUIDS[0], priority: 'p0', payload: { requires_human_action: true, p0_acknowledged_at: NOW } }),
+    workItem({ id: UUIDS[1], first_opened_at: '2026-08-20T00:00:00.000Z' })
   ], NOW);
-
-  const byId = Object.fromEntries(selected.map((item) => [item.id, item]));
-  assert.equal(byId[UUIDS[0]].section, 'actionable');
-  assert.equal(byId[UUIDS[1]].section, 'overdue');
-  assert.equal(byId[UUIDS[2]].ownerMentionRequired, false);
-  assert.equal(byId[UUIDS[3]].section, 'urgent');
-  assert.equal(byId[UUIDS[3]].ownerMentionRequired, true);
+  assert.deepEqual(buildDigestSnapshot(selected), [
+    { id: UUIDS[0], version: 4, inclusionReason: 'p0', priority: 'p0' },
+    { id: UUIDS[1], version: 4, inclusionReason: 'daily_reminder', priority: 'normal' }
+  ]);
+  assert.deepEqual(Object.keys(buildDigestSnapshot(selected)[0]), ['id', 'version', 'inclusionReason', 'priority']);
 });
 
-test('daily reminders become due at the first 72h and configured next-reminder boundaries', async (t) => {
-  const cases = [
-    ['first reminder one millisecond early', { first_opened_at: '2026-08-26T06:00:00.001Z' }, false],
-    ['first reminder at 72h', { first_opened_at: '2026-08-26T06:00:00.000Z' }, true],
-    ['next reminder one millisecond early', {
-      first_opened_at: '2026-08-29T05:00:00.000Z', next_reminder_at: '2026-08-29T06:00:00.001Z'
-    }, false],
-    ['next reminder at boundary', {
-      first_opened_at: '2026-08-29T05:00:00.000Z', next_reminder_at: NOW
-    }, true]
-  ];
+test('owner report renders one buttonless Slack summary with five highlights and exact counts', () => {
+  const highlights = Array.from({ length: 5 }, (_, index) => reportItem(index));
+  const summary = reportSummary({
+    now: 123,
+    snoozed: 4,
+    p0: 2,
+    byCategory: { schedule: 30, quote: 25, settlement: 24, customer: 23, operations: 25 }
+  });
+  const rendered = buildDigestSlackMessage(highlights, reportConfig({ summary }));
 
-  for (const [name, overrides, due] of cases) {
-    await t.test(name, () => {
-      const selected = selectedItem(overrides);
-      assert.equal(selected.dailyReminderDue, due);
-      assert.equal(selected.inclusionReason, due ? 'daily_reminder' : selected.section);
-    });
+  assert.deepEqual({
+    selectedCount: rendered.selectedCount,
+    renderedCount: rendered.renderedCount,
+    dailyReminderCount: rendered.dailyReminderCount,
+    ordinaryCount: rendered.ordinaryParts.length,
+    reminderCount: rendered.dailyReminderParts.length
+  }, {
+    selectedCount: 123,
+    renderedCount: 5,
+    dailyReminderCount: 0,
+    ordinaryCount: 1,
+    reminderCount: 0
+  });
+  assert.deepEqual(rendered.ordinaryParts[0].itemIds, highlights.map(({ id }) => id));
+  assert.equal(rendered.ordinaryParts[0].kind, 'ordinary');
+  assert.equal(rendered.ordinaryParts[0].blocks.length, 4);
+  assert.deepEqual(rendered.ordinaryParts[0].blocks.map(({ type }) => type), ['header', 'section', 'section', 'context']);
+  const serialized = JSON.stringify(rendered);
+  for (const forbidden of ['"type":"actions"', '"type":"button"', 'action_id', 'village_work_v2_', 'automation_error_review', 'reservation_review_timeout']) {
+    assert.equal(serialized.includes(forbidden), false, `report leaked ${forbidden}`);
   }
+  assert.match(rendered.ordinaryParts[0].text, /오늘 처리할 일 요약/);
+  assert.match(rendered.ordinaryParts[0].text, /나머지 118건/);
+  assert.match(serialized, /예약·스케줄 30/);
+  assert.match(serialized, /헤이빌리 후속조치에서 처리/);
 });
 
-test('snapshot is an exact ordered content-free allowlist with daily reminder precedence', () => {
-  const selected = selectDigestItems([
-    workItem({ id: UUIDS[0], first_opened_at: '2026-08-26T06:00:00.000Z' }),
-    workItem({ id: UUIDS[1], priority: 'urgent', first_opened_at: '2026-08-29T05:00:00.000Z' })
-  ], NOW);
-
-  const snapshot = buildDigestSnapshot(selected);
-
-  assert.deepEqual(snapshot, [
-    { id: UUIDS[0], version: 4, inclusionReason: 'daily_reminder', priority: 'normal' },
-    { id: UUIDS[1], version: 4, inclusionReason: 'urgent', priority: 'urgent' }
-  ]);
-  assert.deepEqual(snapshot.map((entry) => Object.keys(entry)), [
-    ['id', 'version', 'inclusionReason', 'priority'],
-    ['id', 'version', 'inclusionReason', 'priority']
-  ]);
-  assert.doesNotMatch(JSON.stringify(snapshot), /title|summary|owner|room|customer|slack|Payment/i);
-  assert.throws(() => buildDigestSlackMessage(snapshot, renderConfig), /invalid digest input/);
-});
-
-test('duplicate selected IDs fail closed for snapshots and rendering', () => {
-  const selected = selectedItem();
-  const duplicate = [{ ...selected }, { ...selected }];
-
-  assert.throws(() => buildDigestSnapshot(duplicate), { message: 'invalid digest input' });
-  assert.throws(() => buildDigestSlackMessage(duplicate, renderConfig), { message: 'invalid digest input' });
-});
-
-test('an empty selection has the exact no-send structured result shape', () => {
-  assert.deepEqual(buildDigestSlackMessage([], renderConfig), {
+test('zero current work returns the exact no-send result', () => {
+  assert.deepEqual(buildDigestSlackMessage([], reportConfig({
+    summary: reportSummary({
+      now: 0, snoozed: 0, p0: 0,
+      byCategory: { schedule: 0, quote: 0, settlement: 0, customer: 0, operations: 0 }
+    })
+  })), {
     selectedCount: 0,
     renderedCount: 0,
     dailyReminderCount: 0,
@@ -375,279 +344,77 @@ test('an empty selection has the exact no-send structured result shape', () => {
   });
 });
 
-test('ordinary actions reuse the versioned codec without inventing a newer version', () => {
-  const selected = [selectedItem({
-    priority: 'p0', version: 17,
-    payload: { requires_human_action: true, p0_acknowledged_at: '2026-08-29T05:00:00.000Z' }
-  })];
-
-  const result = buildDigestSlackMessage(selected, renderConfig);
-  const actions = decodedActions(actionBlocks(result)[0]);
-
-  assert.deepEqual(actions.map(({ actionId }) => actionId), [
-    'village_work_v2_progress',
-    'village_work_v2_snooze_3h',
-    'village_work_v2_snooze_evening',
-    'village_work_v2_snooze_tomorrow',
-    'village_work_v2_snooze_custom',
-    'village_work_v2_request_resolve',
-    'village_work_v2_dismiss'
-  ]);
-  assert.deepEqual(actions.map(({ decoded }) => decoded.id), Array(actions.length).fill(UUIDS[0]));
-  assert.deepEqual(actions.map(({ decoded }) => decoded.version), Array(actions.length).fill(17));
-  assert.deepEqual(actions.map(({ decoded }) => decoded.action.type), [
-    'progress', 'snooze', 'snooze', 'snooze', 'snooze_custom', 'request_resolve', 'dismiss'
-  ]);
-  assert.deepEqual(actions.filter(({ decoded }) => decoded.action.type === 'snooze').map(({ decoded }) => decoded.action.snoozedUntil), [
-    '2026-08-29T09:00:00.000Z',
-    '2026-08-29T09:00:00.000Z',
-    '2026-08-30T00:00:00.000Z'
-  ]);
-  for (const block of actionBlocks(result)) {
-    assert.ok(block.elements.length <= 25);
-    const actionIds = block.elements.map(({ action_id: actionId }) => actionId);
-    assert.equal(new Set(actionIds).size, actionIds.length);
-    for (const element of block.elements) {
-      assert.equal(element.type, 'button');
-      assert.ok(element.action_id.length >= 1 && element.action_id.length <= 255);
-      assert.ok(element.text.text.length <= 75);
-      assert.ok(element.value.length <= 1000);
-    }
-  }
-});
-
-test('ordinary digest actions never render acknowledgement, including for an acknowledged P0', () => {
-  const selected = selectDigestItems([
-    workItem({ id: UUIDS[0] }),
-    workItem({
-      id: UUIDS[1],
-      priority: 'p0',
-      payload: {
-        requires_human_action: true,
-        recommended_action: '즉시 확인하세요.',
-        p0_acknowledged_at: NOW
-      }
+test('report text is escaped, bounded, deterministic, and does not consult ambient Date.now', () => {
+  const highlights = [
+    reportItem(0, {
+      title: '<@UATTACK> & *unsafe*',
+      summary: 's'.repeat(2000),
+      recommendedAction: 'a'.repeat(1200)
     })
-  ], NOW);
-  const result = buildDigestSlackMessage(selected, renderConfig);
-
-  for (const block of actionBlocks(result)) {
-    assert.equal(decodedActions(block).some(({ decoded }) => decoded.action.type === 'ack_p0'), false);
-  }
-});
-
-test('today-evening snooze is offered only while the current KST 18:00 boundary is future', async (t) => {
-  const cases = [
-    ['before', '2026-08-29T08:59:59.999Z', true, '2026-08-29T09:00:00.000Z'],
-    ['at', '2026-08-29T09:00:00.000Z', false, null],
-    ['after', '2026-08-29T09:00:00.001Z', false, null]
   ];
-
-  for (const [name, now, expectsEvening, expectedUntil] of cases) {
-    await t.test(name, () => {
-      const rendered = buildDigestSlackMessage([selectedItem()], { ...renderConfig, now });
-      const actions = decodedActions(actionBlocks(rendered)[0]);
-      const evening = actions.find(({ actionId }) => actionId === 'village_work_v2_snooze_evening');
-
-      assert.equal(Boolean(evening), expectsEvening);
-      if (evening) assert.equal(evening.decoded.action.snoozedUntil, expectedUntil);
-      assert.ok(actions.some(({ actionId }) => actionId === 'village_work_v2_snooze_3h'));
-      assert.ok(actions.some(({ actionId }) => actionId === 'village_work_v2_snooze_tomorrow'));
-    });
-  }
-});
-
-test('carry-over renders only validated owner mentions and otherwise uses a neutral unassigned marker', () => {
-  const selected = selectDigestItems([
-    workItem({ id: UUIDS[0], consecutive_unhandled_digests: 2, owner_id: 'owner-primary' }),
-    workItem({ id: UUIDS[1], consecutive_unhandled_digests: 2, owner_id: null }),
-    workItem({ id: UUIDS[2], consecutive_unhandled_digests: 2, owner_id: '<!channel><@UINJECT>' }),
-    workItem({ id: UUIDS[3], consecutive_unhandled_digests: 2, owner_id: 'WROWOWNER' })
-  ], NOW);
-
-  const rendered = buildDigestSlackMessage(selected, {
-    now: NOW,
-    ownerSlackIds: {
-      'owner-primary': 'UOWNER1',
-      '<!channel><@UINJECT>': 'not-a-slack-id'
-    }
+  const summary = reportSummary({
+    now: 1,
+    snoozed: 0,
+    p0: 1,
+    byCategory: { schedule: 1, quote: 0, settlement: 0, customer: 0, operations: 0 }
   });
-  const texts = itemSections(rendered).map((block) => block.text.text);
-
-  assert.ok(texts[0].includes('<@UOWNER1>'));
-  assert.ok(texts[1].includes('_담당자 미지정_'));
-  assert.ok(texts[2].includes('_담당자 미지정_'));
-  assert.ok(texts[3].includes('<@WROWOWNER>'));
-  assert.equal(texts.join('\n').includes('<!channel>'), false);
-  assert.equal(texts.join('\n').includes('<@UINJECT>'), false);
-});
-
-test('untrusted text is escaped, mention injection is neutralized, and Slack fields stay bounded', () => {
-  const selected = [selectedItem({
-    title: '<!channel> <@UINJECT> & *bold* _under_ ~gone~ `code` ' + 'T'.repeat(220),
-    summary: '<https://evil.example|click> & ' + 'S'.repeat(1900),
-    room_key: '<!here>'
-  })];
-
-  const result = buildDigestSlackMessage(selected, renderConfig);
-  const json = JSON.stringify(result);
-  const block = itemSections(result)[0];
-  const content = block.text.text;
-
-  assert.equal(json.includes('<!channel>'), false);
-  assert.equal(json.includes('<@UINJECT>'), false);
-  assert.equal(json.includes('<https://evil.example'), false);
-  assert.equal(json.includes('*bold*'), false);
-  assert.equal(json.includes('_under_'), false);
-  assert.equal(json.includes('~gone~'), false);
-  assert.equal(json.includes('`code`'), false);
-  assert.ok(content.includes('&lt;!channel&gt;'));
-  assert.ok(content.includes('&lt;@UINJECT&gt;'));
-  assert.ok(content.length <= 3000);
-  assert.ok(result.ordinaryParts[0].text.length <= 4000);
-  assert.ok(result.ordinaryParts[0].blocks.length <= 50);
-  assert.ok(result.ordinaryParts[0].blocks[0].text.text.length <= 150);
-  assert.deepEqual(new Set(result.ordinaryParts[0].blocks.map(({ type }) => type)),
-    new Set(['header', 'section', 'actions']));
-});
-
-test('worst-case bounded text truncates per field with ellipses while preserving room and due metadata', () => {
-  const selected = [selectedItem({
-    title: '<&>'.repeat(100),
-    summary: '&'.repeat(2000),
-    room_key: '<'.repeat(500),
-    due_at: '2026-08-30T09:00:00.000Z',
-    first_opened_at: '2026-08-26T06:00:00.000Z',
-    consecutive_unhandled_digests: 2
-  })];
-
-  const result = buildDigestSlackMessage(selected, renderConfig);
-  const texts = [
-    result.ordinaryParts[0].blocks.find(({ type }) => type === 'section').text.text,
-    result.dailyReminderParts[0].blocks.find(({ type }) => type === 'section').text.text
-  ];
-
-  for (const text of texts) {
-    assert.ok(text.length <= 3000);
-    assert.ok((text.match(/…/g) || []).length >= 3);
-    assert.ok(text.includes('<@UOWNER1>'));
-    assert.ok(text.includes('\n방 &lt;&lt;'));
-    assert.ok(text.includes(' · 기한 2026-08-30T09:00:00.000Z'));
-    assert.doesNotMatch(text, /&(?!amp;|lt;|gt;)/);
-    assert.doesNotMatch(text, /&(?:a|am|l|g|gt|lt)…/);
-  }
-});
-
-test('24/25 ordinary pagination preserves valid Block Kit limits and never truncates', async (t) => {
-  for (const count of [24, 25]) {
-    await t.test(String(count), () => {
-      const rows = Array.from({ length: count }, (_, index) => workItem({
-        id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
-        title: `Work ${index + 1}`
-      }));
-      const selected = selectDigestItems(rows, NOW);
-      const rendered = buildDigestSlackMessage(selected, renderConfig);
-      const ids = rendered.ordinaryParts.flatMap((part) => part.itemIds);
-
-      assert.equal(rendered.selectedCount, count);
-      assert.equal(rendered.renderedCount, count);
-      assert.equal(rendered.dailyReminderCount, 0);
-      assert.equal(rendered.ordinaryParts.length, count === 24 ? 1 : 2);
-      assert.deepEqual(rendered.ordinaryParts.map(({ partNumber, partCount }) => [partNumber, partCount]),
-        count === 24 ? [[1, 1]] : [[1, 2], [2, 2]]);
-      assert.equal(ids.length, count);
-      assert.equal(new Set(ids).size, count);
-      assert.deepEqual(ids, selected.map(({ id }) => id));
-      for (const part of rendered.ordinaryParts) {
-        assert.deepEqual(Object.keys(part), ['kind', 'partNumber', 'partCount', 'itemIds', 'text', 'blocks']);
-        assert.ok(part.itemIds.length <= 24);
-        assert.ok(part.blocks.length <= 50);
-        assert.equal(part.blocks.length, 1 + (2 * part.itemIds.length));
-        assert.equal(part.blocks.filter(({ type }) => type === 'section').length, part.itemIds.length);
-        assert.equal(part.blocks.filter(({ type }) => type === 'actions').length, part.itemIds.length);
-        for (const block of part.blocks.filter(({ type }) => type === 'actions')) {
-          const actionIds = block.elements.map(({ action_id: actionId }) => actionId);
-          assert.equal(new Set(actionIds).size, actionIds.length);
-          assert.ok(actionIds.every((actionId) => actionId.length >= 1 && actionId.length <= 255));
-        }
-      }
-    });
-  }
-});
-
-test('daily reminders are separate, paginated, and contain each due selected row at most once', () => {
-  const rows = Array.from({ length: 25 }, (_, index) => workItem({
-    id: `20000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
-    title: `Reminder ${index + 1}`,
-    first_opened_at: '2026-08-26T06:00:00.000Z'
-  }));
-  const selected = selectDigestItems(rows, NOW);
-
-  const rendered = buildDigestSlackMessage(selected, renderConfig);
-  const reminderIds = rendered.dailyReminderParts.flatMap((part) => part.itemIds);
-
-  assert.equal(rendered.selectedCount, 25);
-  assert.equal(rendered.renderedCount, 25);
-  assert.equal(rendered.dailyReminderCount, 25);
-  assert.equal(rendered.ordinaryParts.length, 2);
-  assert.equal(rendered.dailyReminderParts.length, 2);
-  assert.equal(reminderIds.length, 25);
-  assert.equal(new Set(reminderIds).size, 25);
-  assert.deepEqual(reminderIds, selected.map(({ id }) => id));
-});
-
-test('selection and rendering are deterministic and do not mutate caller inputs or consult ambient Date.now', () => {
-  const rows = [workItem(), workItem({ id: UUIDS[1], priority: 'urgent' })];
-  const originalRows = structuredClone(rows);
+  const input = structuredClone(highlights);
   const originalNow = Date.now;
-  Date.now = () => { throw new Error('ambient clock used'); };
+  Date.now = () => { throw new Error('ambient time used'); };
   try {
-    const firstSelected = selectDigestItems(rows, NOW);
-    const firstSelectedBeforeRender = structuredClone(firstSelected);
-    const firstRendered = buildDigestSlackMessage(firstSelected, renderConfig);
-    const secondSelected = selectDigestItems(rows, NOW);
-    const secondRendered = buildDigestSlackMessage(secondSelected, renderConfig);
-
-    assert.deepEqual(secondSelected, firstSelected);
-    assert.deepEqual(secondRendered, firstRendered);
-    assert.deepEqual(rows, originalRows);
-    assert.deepEqual(firstSelected, firstSelectedBeforeRender);
+    const first = buildDigestSlackMessage(highlights, reportConfig({ summary }));
+    const second = buildDigestSlackMessage(highlights, reportConfig({ summary }));
+    assert.deepEqual(first, second);
+    assert.deepEqual(highlights, input);
+    const serialized = JSON.stringify(first);
+    assert.equal(serialized.includes('<@UATTACK>'), false);
+    assert.match(serialized, /&lt;@UATTACK&gt;/);
+    assert.ok(first.ordinaryParts[0].blocks.every((block) => block.type !== 'section' || block.text.text.length <= 3000));
+    assert.ok(first.ordinaryParts[0].text.length <= 4000);
   } finally {
     Date.now = originalNow;
   }
 });
 
-test('malformed active rows and selected entries are rejected with generic errors', async (t) => {
-  const invalidRows = [
-    workItem({ version: 0 }),
-    workItem({ priority: 'customer_urgent' }),
-    workItem({ title: '' }),
-    workItem({ summary: 'S'.repeat(2001) }),
-    workItem({ owner_id: 'O'.repeat(201) }),
-    workItem({ actionable_at: '2026-08-29 06:00:00Z' }),
-    workItem({ first_opened_at: 'not-a-time' }),
-    workItem({ due_at: '2099-01-01' }),
-    workItem({ next_reminder_at: 'not-a-time' }),
-    workItem({ state: 'snoozed', snoozed_until: null })
+test('report and report snapshot reject malformed, duplicate, private, and inconsistent inputs generically', async (t) => {
+  const valid = reportItem(0);
+  const summary = reportSummary({
+    now: 1,
+    byCategory: { schedule: 1, quote: 0, settlement: 0, customer: 0, operations: 0 }
+  });
+  const invalidCases = [
+    [[{ ...valid, id: 'PRIVATE invalid' }], reportConfig({ summary })],
+    [[{ ...valid, privateTranscript: 'PRIVATE' }], reportConfig({ summary })],
+    [[{ ...valid, workType: 'automation_error_review' }], reportConfig({ summary })],
+    [[valid, structuredClone(valid)], reportConfig({ summary: reportSummary({ now: 2, byCategory: { schedule: 2, quote: 0, settlement: 0, customer: 0, operations: 0 } }) })],
+    [[valid], reportConfig({ dashboardUrl: 'http://heybilli.example/follow-ups', summary })],
+    [[valid], reportConfig({ summary: { ...summary, now: 2 } })],
+    [[valid], reportConfig({ summary: { ...summary, extra: 1 } })]
   ];
-  for (const [index, row] of invalidRows.entries()) {
-    await t.test(String(index), () => {
-      assert.throws(() => selectDigestItems([row], NOW), { message: 'invalid digest input' });
-    });
+  for (const [index, [items, config]] of invalidCases.entries()) {
+    await t.test(String(index), () => assert.throws(
+      () => buildDigestSlackMessage(items, config),
+      /invalid digest (input|config)/
+    ));
   }
+  assert.throws(() => digestModule.buildReportDigestSnapshot([{ ...valid, extra: true }], NOW), {
+    message: 'invalid digest input'
+  });
+});
 
-  assert.throws(
-    () => buildDigestSlackMessage([{ ...selectedItem(), title: undefined }], renderConfig),
-    { message: 'invalid digest input' }
-  );
-  assert.throws(
-    () => buildDigestSlackMessage([selectedItem()], { now: 'not-a-time' }),
-    { message: 'invalid digest config' }
-  );
-  assert.throws(
-    () => buildDigestSlackMessage([selectedItem()], { now: '+275760-09-13T00:00:00.000Z' }),
-    { message: 'invalid digest config' }
-  );
+test('report snapshot records only five displayed IDs with finalization-safe inclusion reasons', () => {
+  const highlights = [
+    reportItem(0),
+    reportItem(1, { firstOpenedAt: '2026-08-20T00:00:00.000Z' }),
+    reportItem(2, { priority: 'urgent', firstOpenedAt: NOW }),
+    reportItem(3, { priority: 'normal', firstOpenedAt: NOW })
+  ];
+  assert.deepEqual(digestModule.buildReportDigestSnapshot(highlights, NOW), [
+    { id: UUIDS[0], version: 1, inclusionReason: 'p0', priority: 'p0' },
+    { id: UUIDS[1], version: 2, inclusionReason: 'overdue', priority: 'urgent' },
+    { id: UUIDS[2], version: 3, inclusionReason: 'urgent', priority: 'urgent' },
+    { id: UUIDS[3], version: 4, inclusionReason: 'actionable', priority: 'normal' }
+  ]);
 });
 
 test('next scheduled time adds the exact validated interval to a canonical prior boundary', () => {

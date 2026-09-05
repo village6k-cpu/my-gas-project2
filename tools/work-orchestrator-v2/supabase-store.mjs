@@ -1,11 +1,16 @@
 import { assertNotificationTransition } from './contracts.mjs';
 import { validateWorkOrchestratorHealthAggregate } from './observability.mjs';
+import { describeOwnerWorkType, OWNER_WORK_TYPES } from './work-taxonomy.mjs';
 
 const REQUEST_ERROR_PREFIX = 'Work Orchestrator Supabase request failed';
 const MAX_EVENT_KEY_LENGTH = 500;
 const MAX_DELIVERY_ATTEMPTS = 3;
 const DELIVERY_FAILURE_CODES = new Set(['post_rejected', 'delivery_unconfirmed']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LOWERCASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SLACK_WORK_ACTOR = /^[UW][A-Z0-9]{2,79}$/;
+const HEYBILLI_WORK_ACTOR = /^heybilli:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CANONICAL_UTC_MS = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const WORK_PRIORITIES = new Set(['p0', 'urgent', 'normal', 'low']);
 const AUTOMATION_STATES = new Set(['not_attempted', 'running', 'succeeded', 'failed', 'needs_human']);
 const AUTOMATION_RESOLUTION_KINDS = new Map([
@@ -30,9 +35,7 @@ const AUTOMATION_NOTICE_TEXT = new Set([
   'Human review is required because authoritative resolution is unavailable.'
 ]);
 const WORK_TYPES = new Set([
-  'human_review', 'reply_needed', 'quote_send', 'tax_invoice', 'schedule_check',
-  'reservation_review', 'price_review', 'payment_check', 'contract_document',
-  'return_extension', 'damage_repair', 'sheet_duplicate_check',
+  ...OWNER_WORK_TYPES,
   'reservation_review_timeout', 'automation_error_review'
 ]);
 const WORK_PAYLOAD_TEXT_LIMITS = Object.freeze({
@@ -48,6 +51,13 @@ const WORK_PAYLOAD_TEXT_LIMITS = Object.freeze({
   recommended_action: 1200
 });
 const WORK_ACTIONS = new Set(['progress', 'snooze', 'ack_p0', 'request_resolve', 'dismiss']);
+const HEYBILLI_VIEWS = new Set(['now', 'snoozed', 'completed']);
+const HEYBILLI_CATEGORIES = new Set(['schedule', 'quote', 'settlement', 'customer', 'operations']);
+const HEYBILLI_ITEM_KEYS = [
+  'id', 'version', 'category', 'workType', 'workTypeLabel', 'priority', 'state',
+  'title', 'summary', 'recommendedAction', 'dueAt', 'snoozedUntil', 'firstOpenedAt', 'updatedAt'
+];
+const HEYBILLI_CURSOR_KEYS = ['p0Rank', 'overdueRank', 'priorityRank', 'openedAt', 'id'];
 const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const P0_CLIENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST_INCLUSION_REASONS = new Set(['p0', 'overdue', 'urgent', 'carry_over', 'actionable', 'daily_reminder']);
@@ -160,6 +170,12 @@ function isoTimestamp(value, { nullable = false } = {}) {
 function positiveVersion(value) {
   if (!Number.isSafeInteger(value) || value < 1) throw invalidInput();
   return value;
+}
+
+function workActor(value) {
+  const actor = exactText(value, 200);
+  if (!SLACK_WORK_ACTOR.test(actor) && !HEYBILLI_WORK_ACTOR.test(actor)) throw invalidInput();
+  return actor;
 }
 
 function normalizeAutomationEvidence(input) {
@@ -377,6 +393,10 @@ function normalizeDigestParts(input, snapshot) {
 
 function responseInvalid() {
   return new Error(`${REQUEST_ERROR_PREFIX}: response invalid`);
+}
+
+function heybilliResponseInvalid() {
+  return new Error('Heybilli inbox response invalid');
 }
 
 function responseTimestamp(value, { nullable = false } = {}) {
@@ -611,6 +631,116 @@ function actionResponse(data, input) {
     || row.pending_action.expected_version !== input.expectedVersion) throw responseInvalid();
   responseTimestamp(row.pending_action.requested_at);
   return data;
+}
+
+function canonicalHeybilliTimestamp(value, { nullable = false } = {}) {
+  if (value === null && nullable) return null;
+  if (typeof value !== 'string' || !CANONICAL_UTC_MS.test(value)) throw heybilliResponseInvalid();
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value) throw heybilliResponseInvalid();
+  return value;
+}
+
+function normalizeHeybilliCursor(value, { response = false } = {}) {
+  const fail = () => { throw response ? heybilliResponseInvalid() : invalidInput(); };
+  if (!exactKeys(value, HEYBILLI_CURSOR_KEYS)
+    || !Number.isSafeInteger(value.p0Rank) || value.p0Rank < 0 || value.p0Rank > 1
+    || !Number.isSafeInteger(value.overdueRank) || value.overdueRank < 0 || value.overdueRank > 1
+    || !Number.isSafeInteger(value.priorityRank) || value.priorityRank < 0 || value.priorityRank > 3) fail();
+  let openedAt;
+  let id;
+  try {
+    openedAt = response ? canonicalHeybilliTimestamp(value.openedAt) : isoTimestamp(value.openedAt);
+    id = response ? responseUuid(value.id) : uuid(value.id);
+  } catch {
+    fail();
+  }
+  return {
+    p0Rank: value.p0Rank,
+    overdueRank: value.overdueRank,
+    priorityRank: value.priorityRank,
+    openedAt,
+    id
+  };
+}
+
+function normalizeHeybilliQuery(input) {
+  if (!exactKeys(input, ['after', 'category', 'limit', 'now', 'view'])) throw invalidInput();
+  const now = isoTimestamp(input.now);
+  const view = exactText(input.view, 20);
+  if (!HEYBILLI_VIEWS.has(view)
+    || input.category !== null && !HEYBILLI_CATEGORIES.has(input.category)
+    || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 200) throw invalidInput();
+  return {
+    now,
+    view,
+    category: input.category,
+    limit: input.limit,
+    after: input.after === null ? null : normalizeHeybilliCursor(input.after)
+  };
+}
+
+function heybilliItemResponse(item, input) {
+  if (!exactKeys(item, HEYBILLI_ITEM_KEYS)) throw heybilliResponseInvalid();
+  const id = responseUuid(item.id);
+  if (!LOWERCASE_UUID.test(id) || !Number.isSafeInteger(item.version) || item.version < 1) throw heybilliResponseInvalid();
+  const definition = describeOwnerWorkType(item.workType);
+  if (!definition || definition.category !== item.category || definition.typeLabel !== item.workTypeLabel
+    || !WORK_PRIORITIES.has(item.priority) || !WORK_STATES.has(item.state)) throw heybilliResponseInvalid();
+  responseText(item.title, 300);
+  if (typeof item.summary !== 'string' || item.summary.length > 2000
+    || item.summary && item.summary !== item.summary.trim()
+    || typeof item.recommendedAction !== 'string' || item.recommendedAction.length > 1200
+    || item.recommendedAction && item.recommendedAction !== item.recommendedAction.trim()) throw heybilliResponseInvalid();
+  const dueAt = canonicalHeybilliTimestamp(item.dueAt, { nullable: true });
+  const snoozedUntil = canonicalHeybilliTimestamp(item.snoozedUntil, { nullable: true });
+  const firstOpenedAt = canonicalHeybilliTimestamp(item.firstOpenedAt);
+  const updatedAt = canonicalHeybilliTimestamp(item.updatedAt);
+  if (input.category !== null && item.category !== input.category) throw heybilliResponseInvalid();
+  if (input.view === 'now') {
+    if (!ACTIVE_WORK_STATES.has(item.state)
+      || item.state === 'snoozed' && (snoozedUntil === null || Date.parse(snoozedUntil) > Date.parse(input.now))) {
+      throw heybilliResponseInvalid();
+    }
+  } else if (input.view === 'snoozed') {
+    if (item.state !== 'snoozed' || snoozedUntil === null || Date.parse(snoozedUntil) <= Date.parse(input.now)) {
+      throw heybilliResponseInvalid();
+    }
+  } else if (!['resolved', 'dismissed'].includes(item.state)) {
+    throw heybilliResponseInvalid();
+  }
+  return {
+    id, version: item.version, category: item.category, workType: item.workType,
+    workTypeLabel: item.workTypeLabel, priority: item.priority, state: item.state,
+    title: item.title, summary: item.summary, recommendedAction: item.recommendedAction,
+    dueAt, snoozedUntil, firstOpenedAt, updatedAt
+  };
+}
+
+function heybilliInboxResponse(data, input) {
+  if (!exactKeys(data, ['items', 'nextCursor', 'omittedCount', 'summary'])
+    || !exactKeys(data.summary, ['byCategory', 'completed', 'now', 'p0', 'snoozed'])
+    || !exactKeys(data.summary.byCategory, ['customer', 'operations', 'quote', 'schedule', 'settlement'])
+    || !Array.isArray(data.items) || data.items.length > input.limit
+    || !Number.isSafeInteger(data.omittedCount) || data.omittedCount < 0) throw heybilliResponseInvalid();
+  const counts = [
+    data.summary.now, data.summary.snoozed, data.summary.completed, data.summary.p0,
+    data.summary.byCategory.schedule, data.summary.byCategory.quote,
+    data.summary.byCategory.settlement, data.summary.byCategory.customer,
+    data.summary.byCategory.operations
+  ];
+  if (counts.some((value) => !Number.isSafeInteger(value) || value < 0)
+    || data.summary.p0 > data.summary.now
+    || Object.values(data.summary.byCategory).reduce((sum, value) => sum + value, 0)
+      !== data.summary.now + data.summary.snoozed) throw heybilliResponseInvalid();
+  const items = data.items.map((item) => heybilliItemResponse(item, input));
+  const nextCursor = data.nextCursor === null ? null : normalizeHeybilliCursor(data.nextCursor, { response: true });
+  if ((data.omittedCount > 0) !== (nextCursor !== null)
+    || data.omittedCount > 0 && items.length !== input.limit
+    || nextCursor !== null && (
+      items.length === 0 || nextCursor.id !== items.at(-1).id || nextCursor.openedAt !== items.at(-1).firstOpenedAt
+    )) throw heybilliResponseInvalid();
+  return { summary: data.summary, items, nextCursor, omittedCount: data.omittedCount };
 }
 
 function claimResponse(data, input) {
@@ -1587,7 +1717,7 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
           p_id: uuid(input.id),
           p_expected_version: positiveVersion(input.expectedVersion),
           p_action: normalizeWorkAction(input.action, validationNow),
-          p_requested_by: exactText(input.requestedBy, 200)
+          p_requested_by: workActor(input.requestedBy)
         };
       } catch {
         throw invalidInput();
@@ -1601,6 +1731,25 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         action: body.p_action,
         requestedBy: body.p_requested_by
       });
+    },
+    listHeybilliOwnerWork: async (input = {}) => {
+      let query;
+      try {
+        query = normalizeHeybilliQuery(input);
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/list_heybilli_owner_work_v2', {
+        method: 'POST',
+        body: safeJson({
+          p_now: query.now,
+          p_view: query.view,
+          p_category: query.category,
+          p_limit: query.limit,
+          p_after: query.after
+        })
+      });
+      return heybilliInboxResponse(data, query);
     },
     resolveWorkItem: async (input = {}) => transitionWorkAutomation(input, { resolve: true }),
     markAutomationState: async (input = {}) => transitionWorkAutomation(input),
