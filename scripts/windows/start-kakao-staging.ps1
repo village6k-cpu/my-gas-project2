@@ -28,6 +28,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'KakaoStaging.Common.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'KakaoLive.Common.psm1') -Force
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') -ErrorAction Stop).Path
 $resolvedEnvFile = (Resolve-Path -LiteralPath $EnvFile -ErrorAction Stop).Path
@@ -118,6 +119,7 @@ try {
         [Environment]::SetEnvironmentVariable('HERMES_WORKER_COMMAND_MODE', 'python_module', 'Process')
     }
     if ($EnableWrites.IsPresent) {
+        Set-KakaoLiveRuntimeEnvironment -HermesTransport $HermesTransport
         Set-KakaoStagingSafeEnvironment -EnableWrites
     }
     else {

@@ -32,6 +32,14 @@ test('live start preserves a single Gateway task action as an array under strict
   );
 });
 
+test('write-enabled staging restamps the live contract after loading dotenv', () => {
+  assert.match(
+    stagingStart,
+    /Import-DotEnvFile[\s\S]{0,500}if \(\$EnableWrites\.IsPresent\) \{[\s\S]{0,240}Set-KakaoLiveRuntimeEnvironment -HermesTransport \$HermesTransport[\s\S]{0,240}Set-KakaoStagingSafeEnvironment -EnableWrites/,
+    'the final child-process environment must not inherit stale cutover flags reloaded from dotenv',
+  );
+});
+
 test('native Gateway cutover is explicit, benchmark-gated, plan-only, and rollback-first', () => {
   assert.match(liveStart, /\[switch\]\$ConfirmKakaoGatewayCutover/);
   assert.match(liveStart, /\[string\]\$BenchmarkReportPath/);
