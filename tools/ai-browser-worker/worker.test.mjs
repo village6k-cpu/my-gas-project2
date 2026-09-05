@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { customerClusterHash } from './follow-up-policy.mjs';
 import * as workerModule from './worker.mjs';
 import { loadWorkOrchestratorConfig } from '../work-orchestrator-v2/contracts.mjs';
+import { registeredReservationChangeRequestDigest } from './staff-confirmed-mutation.mjs';
 
 const SAFE_PRE_CUTOVER_ENV = Object.freeze({
   WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'legacy',
@@ -682,7 +683,7 @@ function registeredDecisionFixture(overrides = {}) {
 
 function registeredReceiptFixture(job, overrides = {}) {
   const unrelated = { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 2, isComponent: false };
-  return {
+  const receipt = {
     schema: 'village-registered-reservation-change-receipt/v1',
     receipt_id: 'registered-change-receipt-1',
     job_id: job.jobId,
@@ -712,6 +713,17 @@ function registeredReceiptFixture(job, overrides = {}) {
     operation_id: '11111111-2222-4333-8444-555555555555',
     ...overrides
   };
+  if (receipt.authorized_mutation && !Object.hasOwn(overrides, 'request_digest')) {
+    receipt.request_digest = registeredReservationChangeRequestDigest({
+      schema: 'village-registered-reservation-change-request/v1',
+      job_id: receipt.job_id,
+      room_key: receipt.room_key,
+      room_revision: receipt.room_revision,
+      lease_id: receipt.lease_id,
+      mutation: receipt.authorized_mutation
+    });
+  }
+  return receipt;
 }
 
 function pendingMutationFixture(overrides = {}) {
@@ -1038,6 +1050,98 @@ test('exact registered success retains the typed mutation and produces no duplic
   assert.deepEqual(prepared.availabilityAwareRows, []);
   assert.equal(prepared.gatewaySafetyFailures.length, 0);
   assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
+});
+
+test('exact registered receipt carries the server-authorized mutation so a minimal Hermes final cannot orphan successful post-processing', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const receipt = registeredReceiptFixture(job, { authorized_mutation: mutation });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: 'FINAL_JSON\n{"replyMode":"no_reply","should_write_to_sheet":false,"no_auto_reply_sent":true,"owner_review_required":false,"follow_up_items":[]}',
+    trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.decision.should_write_to_sheet, false);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+  assert.equal(prepared.decision.reply_decision.text, '');
+  assert.equal(prepared.decision.reply_decision.shouldCreateTask, false);
+  assert.equal(prepared.decision.owner_review_required, false);
+  assert.deepEqual(prepared.decision.staff_confirmed_mutation, mutation);
+  assert.deepEqual(prepared.decision.trusted_registered_reservation_change_receipt, receipt);
+  assert.deepEqual(prepared.decision.follow_up_items, []);
+  assert.deepEqual(prepared.availabilityAwareRows, []);
+  assert.equal(prepared.gatewaySafetyFailures.length, 0);
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
+});
+
+test('registered receipt authorization stays fail-closed when its bound mutation is invalid or contradicts receipt identity', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const cases = [
+    ['stale revision', { ...mutation, source_evidence: { ...mutation.source_evidence, conversation_revision: job.roomRevision + 1 } }, {}],
+    ['different trade', { ...mutation, trade_id: '260824-009', expected_before: [{ ...mutation.expected_before[0], schedule_id: '260824-009-07' }] }, {}],
+    ['different kind', { ...mutation, kind: 'equipment_add', expected_before: [] }, {}],
+    ['digest mismatch', mutation, { request_digest: 'b'.repeat(64) }]
+  ];
+  for (const [label, authorizedMutation, receiptOverrides] of cases) {
+    const receipt = registeredReceiptFixture(job, {
+      authorized_mutation: authorizedMutation,
+      ...receiptOverrides
+    });
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: 'FINAL_JSON\n{"replyMode":"no_reply"}',
+      trustedToolReceipts: [receipt]
+    });
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', label);
+    assert.equal(prepared.decision.owner_review_required, true, label);
+    assert.equal(prepared.availabilityAwareRows.length, 1, label);
+  }
+});
+
+test('a full Hermes mutation cannot override stale or divergent server-bound registered authority', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const divergent = {
+    ...mutation,
+    desired_after: [{ name: '소니 GM 24-70mm II', quantity: 1 }]
+  };
+  const cases = [
+    ['stale authority', { ...mutation, source_evidence: { ...mutation.source_evidence, conversation_revision: job.roomRevision + 1 } }],
+    ['divergent authority', divergent]
+  ];
+  for (const [label, authorizedMutation] of cases) {
+    const receipt = registeredReceiptFixture(job, { authorized_mutation: authorizedMutation });
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: mutation }))}`,
+      trustedToolReceipts: [receipt]
+    });
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', label);
+    assert.equal(prepared.decision.owner_review_required, true, label);
+    assert.equal(prepared.availabilityAwareRows.length, 1, label);
+  }
+});
+
+test('registered success requires exactly one valid durable receipt even when Hermes repeats the typed mutation', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const exact = registeredReceiptFixture(job, { authorized_mutation: mutation });
+  const cases = [
+    ['invalid extra', [exact, { ...exact, receipt_id: 'fabricated-extra', operation_id: '00000000-0000-4000-8000-000000000000' }]],
+    ['duplicate exact', [exact, structuredClone(exact)]]
+  ];
+  for (const [label, receipts] of cases) {
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: mutation }))}`,
+      trustedToolReceipts: receipts
+    });
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', label);
+    assert.equal(prepared.decision.owner_review_required, true, label);
+    assert.equal(prepared.availabilityAwareRows.length, 1, label);
+  }
 });
 
 test('all five registered delta kinds finalize only when before plus typed delta equals authoritative after', async () => {

@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const { CorrectionStageError, runRegisteredTradeCorrection } = require('../../scripts/windows/village-registered-trade-correction.js');
@@ -15,6 +16,26 @@ const REQUEST_ID = /^RQ-\d{6}-\d{3}$/;
 const SCHEDULE_ID = /^(\d{6}-\d{3})-\d{2,}$/;
 const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]));
+  }
+  return value;
+}
+
+export function registeredReservationChangeRequestDigest(body = {}) {
+  const payload = {
+    schema: body.schema || 'village-registered-reservation-change-request/v1',
+    job_id: body.job_id,
+    room_key: body.room_key,
+    room_revision: body.room_revision,
+    lease_id: body.lease_id,
+    mutation: body.mutation
+  };
+  return createHash('sha256').update(JSON.stringify(canonicalJson(payload)), 'utf8').digest('hex');
+}
 
 function isRecord(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);

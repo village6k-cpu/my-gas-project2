@@ -1,5 +1,10 @@
 import crypto from 'node:crypto';
-import { validateStaffConfirmedMutation } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
+import {
+  registeredReservationChangeRequestDigest,
+  validateStaffConfirmedMutation
+} from '../ai-browser-worker/staff-confirmed-mutation.mjs';
+
+export { registeredReservationChangeRequestDigest };
 
 const MAX_BODY_BYTES = 1_048_576;
 const GATEWAY_TRANSPORTS = new Set(['gateway', 'gateway_no_send']);
@@ -84,18 +89,6 @@ export function documentRequestDigest(body = {}) {
     document_type: body.document_type,
     trade_id: body.trade_id,
     tax_mode: body.tax_mode
-  };
-  return crypto.createHash('sha256').update(JSON.stringify(canonicalJson(payload)), 'utf8').digest('hex');
-}
-
-export function registeredReservationChangeRequestDigest(body = {}) {
-  const payload = {
-    schema: body.schema || 'village-registered-reservation-change-request/v1',
-    job_id: body.job_id,
-    room_key: body.room_key,
-    room_revision: body.room_revision,
-    lease_id: body.lease_id,
-    mutation: body.mutation
   };
   return crypto.createHash('sha256').update(JSON.stringify(canonicalJson(payload)), 'utf8').digest('hex');
 }
@@ -525,11 +518,14 @@ export function createHermesGatewayHttpHandler({
         if (!validateRegisteredReservationChangeBody(body)) {
           throw requestError(422, 'invalid_registered_reservation_change_request');
         }
+        const request = structuredClone(body);
+        request.lease_id = leaseId;
+        const authorizedMutation = structuredClone(request.mutation);
         if (typeof channel.get !== 'function' || typeof channel.reserveToolOperation !== 'function'
           || typeof channel.recordToolReceipt !== 'function') {
           throw requestError(503, 'registered_reservation_change_fencing_unavailable');
         }
-        const requestDigest = registeredReservationChangeRequestDigest(body);
+        const requestDigest = registeredReservationChangeRequestDigest(request);
         const currentTime = () => {
           const value = now();
           const milliseconds = value instanceof Date ? value.getTime() : Number(value);
@@ -539,14 +535,14 @@ export function createHermesGatewayHttpHandler({
           return milliseconds;
         };
         const assertCurrentClaim = async () => {
-          const currentJob = await channel.get(body.job_id);
-          if (!exactClaimForConfirmation(currentJob, body, leaseId, currentTime())) {
+          const currentJob = await channel.get(request.job_id);
+          if (!exactClaimForConfirmation(currentJob, request, leaseId, currentTime())) {
             throw requestError(409, 'stale_lease');
           }
           return currentJob;
         };
-        const claimKey = [body.job_id, body.room_key, body.room_revision, leaseId].map(String).join('\u0000');
-        const claimedJob = await channel.get(body.job_id);
+        const claimKey = [request.job_id, request.room_key, request.room_revision, leaseId].map(String).join('\u0000');
+        const claimedJob = await channel.get(request.job_id);
         let inFlight = registeredReservationChangeInFlight.get(claimKey);
         if (inFlight && inFlight.requestDigest !== requestDigest) {
           throw requestError(409, 'registered_reservation_change_conflict');
@@ -561,14 +557,14 @@ export function createHermesGatewayHttpHandler({
           }
           return true;
         }
-        const durable = durableRegisteredReservationChangeForRequest(claimedJob, body, leaseId, requestDigest);
+        const durable = durableRegisteredReservationChangeForRequest(claimedJob, request, leaseId, requestDigest);
         if (durable.conflict) throw requestError(409, 'registered_reservation_change_conflict');
         if (durable.receipt) {
           sendJson(res, 200, durable.receipt);
           return true;
         }
         if (durable.reservation) throw requestError(409, 'registered_reservation_change_unresolved');
-        if (!exactClaimForConfirmation(claimedJob, body, leaseId, currentTime())) {
+        if (!exactClaimForConfirmation(claimedJob, request, leaseId, currentTime())) {
           throw requestError(409, 'stale_lease');
         }
         if (typeof executeRegisteredReservationChange !== 'function') {
@@ -579,9 +575,9 @@ export function createHermesGatewayHttpHandler({
           try {
             reserved = await channel.reserveToolOperation({
               tool: 'registered_reservation_change',
-              job_id: body.job_id,
-              room_key: body.room_key,
-              room_revision: body.room_revision,
+              job_id: request.job_id,
+              room_key: request.room_key,
+              room_revision: request.room_revision,
               lease_id: leaseId,
               request_digest: requestDigest
             });
@@ -596,17 +592,19 @@ export function createHermesGatewayHttpHandler({
           }
           const operationFence = reserved.reservation;
           await assertCurrentClaim();
-          const receipt = await executeRegisteredReservationChange(body, { assertCurrentClaim, operationFence });
+          const receipt = await executeRegisteredReservationChange(structuredClone(request), {
+            assertCurrentClaim, operationFence
+          });
           if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
             || receipt.schema !== 'village-registered-reservation-change-receipt/v1') {
             throw requestError(502, 'invalid_registered_reservation_change_receipt');
           }
-          if (String(receipt.job_id || '') !== String(body.job_id || '')
-            || String(receipt.room_key || '') !== String(body.room_key || '')
-            || Number(receipt.room_revision) !== Number(body.room_revision)
+          if (String(receipt.job_id || '') !== String(request.job_id || '')
+            || String(receipt.room_key || '') !== String(request.room_key || '')
+            || Number(receipt.room_revision) !== Number(request.room_revision)
             || receipt.target_scope !== 'registered_trade'
-            || String(receipt.trade_id || '') !== String(body.mutation.trade_id || '')
-            || String(receipt.mutation_kind || '') !== String(body.mutation.kind || '')) {
+            || String(receipt.trade_id || '') !== String(authorizedMutation.trade_id || '')
+            || String(receipt.mutation_kind || '') !== String(authorizedMutation.kind || '')) {
             throw requestError(502, 'registered_reservation_change_receipt_correlation_mismatch');
           }
           if (receipt.lease_id && receipt.lease_id !== leaseId) throw requestError(409, 'lease_id_mismatch');
@@ -620,7 +618,8 @@ export function createHermesGatewayHttpHandler({
             ...receipt,
             lease_id: leaseId,
             request_digest: requestDigest,
-            operation_id: operationFence.operation_id
+            operation_id: operationFence.operation_id,
+            authorized_mutation: authorizedMutation
           };
           await channel.recordToolReceipt(fencedReceipt);
           return fencedReceipt;

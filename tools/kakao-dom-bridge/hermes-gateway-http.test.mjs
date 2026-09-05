@@ -357,7 +357,10 @@ test('Gateway HTTP executes and persists one exact fenced registered reservation
       receivedFence = operationFence;
       assert.deepEqual(body, request);
       await assertCurrentClaim();
-      return registeredChangeReceipt(body);
+      body.mutation.desired_after[0].name = 'executor-mutated-name';
+      return registeredChangeReceipt(body, {
+        authorized_mutation: registeredMutation({ trade_id: '260824-999' })
+      });
     }
   }));
   try {
@@ -375,9 +378,34 @@ test('Gateway HTTP executes and persists one exact fenced registered reservation
     assert.equal(receivedFence.operation_id, 'operation-opaque-1');
     assert.deepEqual(receipt, {
       ...registeredChangeReceipt(request), lease_id: leaseId, request_digest: requestDigest,
-      operation_id: 'operation-opaque-1'
+      operation_id: 'operation-opaque-1', authorized_mutation: request.mutation
     });
     assert.deepEqual(channel.calls.receipt, [receipt]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP canonicalizes a padded registered-change lease before digesting and executing', async () => {
+  const channel = makeChannel();
+  const request = registeredChangeBody({ lease_id: `  ${leaseId}  ` });
+  const canonicalRequest = { ...request, lease_id: leaseId };
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeRegisteredReservationChange: async (body) => {
+      assert.deepEqual(body, canonicalRequest);
+      return registeredChangeReceipt(body);
+    }
+  }));
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request)
+    });
+    assert.equal(response.status, 200);
+    const receipt = await response.json();
+    assert.equal(receipt.lease_id, leaseId);
+    assert.equal(receipt.request_digest, expectedRegisteredReservationChangeDigest(canonicalRequest));
+    assert.deepEqual(receipt.authorized_mutation, canonicalRequest.mutation);
   } finally {
     await app.close();
   }

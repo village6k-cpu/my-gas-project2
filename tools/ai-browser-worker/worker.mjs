@@ -18,7 +18,10 @@ import {
   buildFollowUpCaseLifecycle,
   mergeFollowUpCaseLifecycle
 } from './follow-up-case-lifecycle.mjs';
-import { validateStaffConfirmedMutation } from './staff-confirmed-mutation.mjs';
+import {
+  registeredReservationChangeRequestDigest,
+  validateStaffConfirmedMutation
+} from './staff-confirmed-mutation.mjs';
 import { buildHumanWorkCandidates } from '../work-orchestrator-v2/work-items.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
 import { deriveAutomationResolution } from '../work-orchestrator-v2/automation-resolution.mjs';
@@ -9445,6 +9448,26 @@ function exactTrustedRegisteredReservationChangeReceipt(receipt, { jobId, roomKe
   return receipt.error !== null;
 }
 
+function trustedAuthorizedRegisteredMutation(receipt, { roomRevision }) {
+  const mutation = receipt?.authorized_mutation;
+  if (!mutation || typeof mutation !== 'object' || Array.isArray(mutation)) return null;
+  const validation = validateStaffConfirmedMutation(mutation, { roomRevision });
+  if (!validation.valid
+    || mutation.target_scope !== 'registered_trade'
+    || mutation.trade_id !== receipt.trade_id
+    || mutation.kind !== receipt.mutation_kind) return null;
+  const digest = registeredReservationChangeRequestDigest({
+    schema: 'village-registered-reservation-change-request/v1',
+    job_id: receipt.job_id,
+    room_key: receipt.room_key,
+    room_revision: receipt.room_revision,
+    lease_id: receipt.lease_id,
+    mutation
+  });
+  if (digest !== text(receipt.request_digest).trim().toLowerCase()) return null;
+  return mutation;
+}
+
 function registeredMutationDeltaQuantities(rows) {
   const quantities = {};
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -10028,6 +10051,27 @@ export async function prepareKakaoGatewayDecision({
   const trustedDocumentReceipt = exactDocumentReceipts[0] || null;
   const trustedRegisteredChangeReceipt = exactRegisteredChangeReceipts[0] || null;
   const trustedToolReceipt = trustedRegisteredChangeReceipt || trustedConfirmationReceipt || trustedDocumentReceipt;
+  const registeredReceiptSetValid = Boolean(trustedRegisteredChangeReceipt)
+    && suppliedReceipts.length === 1
+    && exactReceipts.length === 1
+    && !safetyFailures.includes('invalid_trusted_receipt')
+    && !safetyFailures.includes('conflicting_trusted_receipts');
+  const authorizedMutationPresent = Boolean(trustedRegisteredChangeReceipt)
+    && Object.hasOwn(trustedRegisteredChangeReceipt, 'authorized_mutation');
+  const authorizedRegisteredMutation = registeredReceiptSetValid && authorizedMutationPresent
+    ? trustedAuthorizedRegisteredMutation(trustedRegisteredChangeReceipt, { roomRevision })
+    : null;
+  const modelMutation = decision?.staff_confirmed_mutation;
+  if ((modelMutation === undefined || modelMutation === null) && authorizedRegisteredMutation) {
+    decision = { staff_confirmed_mutation: authorizedRegisteredMutation };
+    for (const failure of ['malformed_gateway_final', 'invalid_gateway_decision']) {
+      let index = safetyFailures.indexOf(failure);
+      while (index >= 0) {
+        safetyFailures.splice(index, 1);
+        index = safetyFailures.indexOf(failure);
+      }
+    }
+  }
   const structuredRegisteredMutation = decision?.staff_confirmed_mutation?.target_scope === 'registered_trade';
   const structuredPendingMutation = decision?.staff_confirmed_mutation?.target_scope === 'pending_request';
   const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
@@ -10048,6 +10092,20 @@ export async function prepareKakaoGatewayDecision({
       safetyFailures.push('registered_change_without_trusted_receipt');
       reason = '직원 확정 등록예약 변경이 있지만 채널에 영속화된 registered-change receipt가 없습니다.';
       decision = forceRegisteredMutationOwnerReview(decision || {}, { job, reason });
+    } else if (!registeredReceiptSetValid) {
+      safetyFailures.push('registered_change_receipt_set_invalid');
+      reason = '등록예약 변경을 확정할 수 있는 durable receipt가 정확히 하나로 확정되지 않았습니다.';
+      decision = forceRegisteredMutationOwnerReview(decision || {}, {
+        job, receipt: trustedRegisteredChangeReceipt, reason
+      });
+    } else if (authorizedMutationPresent
+      && (!authorizedRegisteredMutation
+        || !sameGatewayDecisionValue(authorizedRegisteredMutation, mutation))) {
+      safetyFailures.push('trusted_registered_change_authorization_contradiction');
+      reason = '서버가 봉인한 등록예약 변경 mutation이 유효하지 않거나 최종 typed 결정과 일치하지 않습니다.';
+      decision = forceRegisteredMutationOwnerReview(decision || {}, {
+        job, receipt: trustedRegisteredChangeReceipt, reason
+      });
     } else if (trustedRegisteredChangeReceipt.trade_id !== mutation.trade_id
       || trustedRegisteredChangeReceipt.mutation_kind !== mutation.kind) {
       safetyFailures.push('trusted_registered_change_decision_contradiction');
@@ -10071,6 +10129,9 @@ export async function prepareKakaoGatewayDecision({
       });
     }
   } else if (trustedRegisteredChangeReceipt) {
+    if (authorizedMutationPresent && !authorizedRegisteredMutation) {
+      safetyFailures.push('trusted_registered_change_authorization_invalid');
+    }
     safetyFailures.push('trusted_registered_change_decision_contradiction');
     reason = '영속화된 등록예약 변경 receipt와 일치하는 final typed mutation이 없습니다.';
     decision = forceRegisteredMutationOwnerReview(decision || {}, {

@@ -785,11 +785,11 @@ async function createTask7Replay({ id, runRegisteredTradeCorrection, finalize, o
       assert.equal(response.status, 200);
       return response.json();
     },
-    async completeHermesFinal() {
+    async completeHermesFinal(finalDecision = task7HermesDecision(mutation)) {
       const response = await task7Post(app, '/hermes/v1/results', {
         job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
         lease_id: claim.lease_id,
-        content: `FINAL_JSON\n${JSON.stringify(task7HermesDecision(mutation))}`
+        content: `FINAL_JSON\n${JSON.stringify(finalDecision)}`
       });
       assert.equal(response.status, 200);
       await coordinator.idle();
@@ -1403,7 +1403,10 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
       before: task7AuthoritativeBeforeReadback(),
       after: task7AuthoritativeReadback()
     });
-    await replay.completeHermesFinal();
+    await replay.completeHermesFinal({
+      replyMode: 'no_reply', should_write_to_sheet: false, no_auto_reply_sent: true,
+      owner_review_required: false, follow_up_items: []
+    });
 
     assert.deepEqual(replay.counts(), { applyCalls: 1, finalizeCalls: 1 });
     assert.equal(replay.preparedDecisions.length, 1);
@@ -1987,8 +1990,9 @@ test('Gateway result coordinator keeps one application lane across rooms', async
   assert.deepEqual(order, ['start:one', 'end:one', 'start:two', 'end:two']);
 });
 
-test('Gateway result coordinator trusts only the receipt fenced by the durable channel operation', async () => {
-  let receivedReceipts = null;
+test('Gateway result coordinator rejects a non-single durable receipt set before preparation', async () => {
+  let prepareCalls = 0;
+  let failedApplication = null;
   const exact = {
     schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-exact',
     operation_id: 'operation-exact', lease_id: 'lease-exact', request_digest: 'digest-exact',
@@ -2016,14 +2020,15 @@ test('Gateway result coordinator trusts only the receipt fenced by the durable c
   const channel = {
     async claimApplication() { return { claimed: true, application_id: 'application-provenance', job: structuredClone(durableJob) }; },
     async beginApplication() {},
-    async recordApplicationApplied() {}, async finalizeApplication() {}, async failApplication() {},
+    async recordApplicationApplied() {}, async finalizeApplication() {},
+    async failApplication(request) { failedApplication = request; return null; },
     async listPendingApplicationFailureNotifications() { return []; },
     async markApplicationFailureNotified() {}
   };
   const coordinator = createGatewayResultApplicationCoordinator({
     channel, getConfig: () => ({}),
-    prepare: async ({ trustedToolReceipts }) => {
-      receivedReceipts = trustedToolReceipts;
+    prepare: async () => {
+      prepareCalls += 1;
       return { status: 'ai_prepared', snapshot: {} };
     },
     apply: async ({ prepared }) => ({ prepared, autoReplyResult: { sent: false } }),
@@ -2031,7 +2036,9 @@ test('Gateway result coordinator trusts only the receipt fenced by the durable c
   });
   await coordinator.enqueue(durableJob);
   await coordinator.idle();
-  assert.deepEqual(receivedReceipts, [exact]);
+  assert.equal(prepareCalls, 0);
+  assert.equal(failedApplication.error.type, 'gateway_application_failed');
+  assert.match(failedApplication.error.message, /gateway_durable_tool_receipt_set_invalid/);
 });
 
 test('Gateway result coordinator records audit before terminal finalize and fails closed when recording crashes', async () => {

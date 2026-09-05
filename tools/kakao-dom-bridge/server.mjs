@@ -2333,12 +2333,13 @@ export function createGatewayResultApplicationCoordinator({
   function exactDurableToolReceipts(durableJob) {
     const operation = durableJob?.tool_operation;
     if (!operation || operation.state !== 'completed') return [];
+    const receipts = Array.isArray(durableJob?.tool_receipts) ? durableJob.tool_receipts : [];
     const expectedSchema = operation.tool === 'document_send'
       ? 'village-document-receipt/v1'
       : operation.tool === 'registered_reservation_change'
         ? 'village-registered-reservation-change-receipt/v1'
         : 'village-confirmation-receipt/v1';
-    const exact = (Array.isArray(durableJob?.tool_receipts) ? durableJob.tool_receipts : []).find((receipt) => (
+    const exact = receipts.filter((receipt) => (
       receipt?.schema === expectedSchema
       && receipt.receipt_id === operation.receipt_id
       && receipt.operation_id === operation.operation_id
@@ -2348,7 +2349,10 @@ export function createGatewayResultApplicationCoordinator({
       && receipt.room_key === durableJob.room_key
       && receipt.room_revision === durableJob.room_revision
     ));
-    return exact ? [exact] : [];
+    if (receipts.length !== 1 || exact.length !== 1) {
+      throw new Error('gateway_durable_tool_receipt_set_invalid');
+    }
+    return exact;
   }
 
   async function runApplication(claimed) {
