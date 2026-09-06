@@ -6369,6 +6369,10 @@ test('semantic owner case contract accepts only the exact bounded executive repo
     { ...valid.owner_case, caseKey: ' padded ' },
     { ...valid.owner_case, title: '' },
     { ...valid.owner_case, title: 'x'.repeat(121) },
+    { ...valid.owner_case, title: '홍길동 문의' },
+    { ...valid.owner_case, requestSummary: '예약 확인' },
+    { ...valid.owner_case, problemSummary: '확인 필요' },
+    { ...valid.owner_case, nextActionSummary: '확인하세요.' },
     { ...valid.owner_case, requestSummary: 'x'.repeat(501) },
     { ...valid.owner_case, problemSummary: 'customer phone 010-1111-2222' },
     { ...valid.owner_case, nextActionSummary: 'automation_error payload stack' }
@@ -9947,6 +9951,8 @@ test('semantic owner case prompt gives Hermes exact open-case identities to reus
   assert.match(prompt, /applebox-pickup-recovery/);
   assert.match(prompt, /같은 문의.*caseKey.*정확히 재사용/s);
   assert.match(prompt, /같은 업무.*taskKey.*정확히 재사용/s);
+  assert.match(prompt, /장비.*날짜.*수량/s);
+  assert.match(prompt, /예약 확인.*한두 단어.*금지/s);
   assert.doesNotMatch(prompt, /30분.*묶/);
 });
 

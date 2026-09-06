@@ -151,6 +151,11 @@ test("semantic inquiry report keeps request problem and next action facts", asyn
   assert.equal(model.rows[0].requestSummary, semantic.requestSummary);
   assert.equal(model.rows[0].problemSummary, semantic.problemSummary);
   assert.equal(model.rows[0].nextActionSummary, semantic.nextActionSummary);
+  assert.deepEqual(model.rows[0].previewLines, [
+    { label: "요청", text: semantic.requestSummary },
+    { label: "문제", text: semantic.problemSummary },
+    { label: "할 일", text: semantic.nextActionSummary },
+  ]);
 });
 
 test("case model rejects raw evidence, duplicate steps, malformed clocks, and unavailable payloads", async () => {
