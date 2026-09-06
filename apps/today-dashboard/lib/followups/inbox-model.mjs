@@ -13,7 +13,7 @@ const CATEGORY_DEFS = Object.freeze([
 ]);
 const CATEGORY_KEYS = new Set(CATEGORY_DEFS.map(([key]) => key));
 const CASE_KEYS = [
-  "categories", "completedStepCount", "id", "ownerBrief", "priority", "receivedAt", "state",
+  "categories", "completedStepCount", "id", "nextActionSummary", "ownerBrief", "priority", "problemSummary", "receivedAt", "requestSummary", "state",
   "steps", "title", "totalStepCount", "updatedAt",
 ];
 const STEP_KEYS = [
@@ -97,9 +97,13 @@ function safeCase(value, { view, category, now }) {
   if (!exactKeys(value, CASE_KEYS)
     || typeof value.id !== "string" || !UUID.test(value.id)
     || value.state !== view || !VIEWS.has(value.state) || !PRIORITIES.has(value.priority)
-    || typeof value.title !== "string" || !value.title || value.title !== value.title.trim() || value.title.length > 40
+    || typeof value.title !== "string" || !value.title || value.title !== value.title.trim() || value.title.length > 120
     || typeof value.ownerBrief !== "string" || !value.ownerBrief || value.ownerBrief !== value.ownerBrief.trim()
-    || value.ownerBrief.length > 160 || UNSAFE_OWNER_TEXT.test(value.title) || UNSAFE_OWNER_TEXT.test(value.ownerBrief)
+    || value.ownerBrief.length > 160
+    || typeof value.requestSummary !== "string" || !value.requestSummary || value.requestSummary !== value.requestSummary.trim() || value.requestSummary.length > 500
+    || typeof value.problemSummary !== "string" || !value.problemSummary || value.problemSummary !== value.problemSummary.trim() || value.problemSummary.length > 500
+    || typeof value.nextActionSummary !== "string" || !value.nextActionSummary || value.nextActionSummary !== value.nextActionSummary.trim() || value.nextActionSummary.length > 500
+    || [value.title, value.ownerBrief, value.requestSummary, value.problemSummary, value.nextActionSummary].some((text) => UNSAFE_OWNER_TEXT.test(text))
     || !Array.isArray(value.categories) || value.categories.length < 1 || value.categories.length > CATEGORY_KEYS.size
     || new Set(value.categories).size !== value.categories.length
     || value.categories.some((entry) => !CATEGORY_KEYS.has(entry))

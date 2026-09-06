@@ -32,6 +32,9 @@ function inquiryCase(id, overrides = {}) {
     priority: "p0",
     title: "고객가 문의",
     ownerBrief: "스케줄 확인 외 2개 업무",
+    requestSummary: "고객이 촬영 일정과 서류 확인을 요청했습니다.",
+    problemSummary: "일정 가능 여부와 계약서 확인이 남아 있습니다.",
+    nextActionSummary: "일정과 계약서를 확인한 뒤 고객에게 안내하세요.",
     receivedAt: "2026-09-03T12:29:00.000Z",
     updatedAt: "2026-09-03T12:51:00.000Z",
     categories: ["schedule", "settlement", "customer"],
@@ -137,6 +140,19 @@ test("case selection is stable and actions target the exact checklist step versi
   });
 });
 
+test("semantic inquiry report keeps request problem and next action facts", async () => {
+  const { buildInboxView } = await loadModel();
+  const semantic = inquiryCase(orderedCases[0].id, {
+    requestSummary: "예약한 애플박스 풀과 풀세트를 무인 반출하려는 문의입니다.",
+    problemSummary: "현장에는 풀 하나만 있고 계약서도 확인되지 않았습니다.",
+    nextActionSummary: "전화 안내 후 누락 장비와 계약서를 확인하세요.",
+  });
+  const model = buildInboxView({ payload: payload({ cases: [semantic], summary: { ...payload().summary, now: 1 } }), view: "now", category: null, selectedId: null, now });
+  assert.equal(model.rows[0].requestSummary, semantic.requestSummary);
+  assert.equal(model.rows[0].problemSummary, semantic.problemSummary);
+  assert.equal(model.rows[0].nextActionSummary, semantic.nextActionSummary);
+});
+
 test("case model rejects raw evidence, duplicate steps, malformed clocks, and unavailable payloads", async () => {
   const { buildInboxView, formatInquiryTiming } = await loadModel();
   for (const badPayload of [
@@ -148,11 +164,11 @@ test("case model rejects raw evidence, duplicate steps, malformed clocks, and un
   assert.throws(() => buildInboxView({ payload: null, view: "now", category: null, selectedId: null, now }), /inbox unavailable/);
 });
 
-test("FollowUpView is a compact owner report with inquiry timing and a per-case checklist", () => {
+test("FollowUpView is a semantic inquiry report with mobile detail dismissal", () => {
   const source = readFileSync(viewPath, "utf8");
   for (const label of [
     "지금 할 일", "미뤄둔 일", "완료", "예약·스케줄", "견적·가격", "정산·서류",
-    "고객 응대", "운영·예외", "요청 요약", "처리할 일", "접수 정보",
+    "고객 응대", "운영·예외", "고객 요청", "현재 문제", "처리할 일", "접수 정보", "닫기",
   ]) assert.equal(source.includes(label), true, `missing ${label}`);
   for (const rawPresentation of [
     "item.summary", "item.recommendedAction", "직원이 정리한 내용", "권장 처리",
@@ -162,5 +178,11 @@ test("FollowUpView is a compact owner report with inquiry timing and a per-case 
   assert.match(source, /caseItem\.ageLabel/);
   assert.match(source, /caseItem\.steps\.map/);
   assert.match(source, /lg:grid-cols-\[minmax\(320px,0\.9fr\)_minmax\(420px,1\.1fr\)\]/);
-  assert.match(source, /fixed inset-x-0 bottom-0/);
+  assert.match(source, /absolute inset-x-0 bottom-0/);
+  assert.match(source, /aria-label="상세 배경 닫기"/);
+  assert.match(source, /keydown/);
+  assert.match(source, /Escape/);
+  assert.match(source, /document\.body\.style\.overflow/);
+  assert.match(source, /onPointerDown/);
+  assert.match(source, /onPointerUp/);
 });

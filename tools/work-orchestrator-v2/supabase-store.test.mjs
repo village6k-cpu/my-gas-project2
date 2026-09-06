@@ -127,6 +127,9 @@ function heybilliCase(overrides = {}) {
     priority: 'urgent',
     title: '김OO 문의',
     ownerBrief: '직원이 문의를 확인해 처리할 일 1개로 정리했습니다.',
+    requestSummary: '고객이 촬영 일정 확인을 요청했습니다.',
+    problemSummary: '일정 가능 여부를 아직 확인하지 못했습니다.',
+    nextActionSummary: '일정을 확인하고 고객에게 안내하세요.',
     receivedAt: '2026-09-05T08:00:00.000Z',
     updatedAt: '2026-09-05T08:30:00.000Z',
     categories: ['schedule'],
@@ -623,6 +626,47 @@ test('upsertWorkItem sends only the reviewed bounded candidate to the atomic RPC
   assert.deepEqual(result, { applied: true, created: true, row: workRow() });
 });
 
+test('owner case context uses the exact-room bounded service RPC and rejects private evidence', async () => {
+  const safe = {
+    status: 'available',
+    cases: [{
+      caseKey: 'jeong:2026-09-03:applebox-pickup-missing',
+      title: '정원근 애플박스 반출 누락',
+      requestSummary: '예약한 애플박스 풀과 풀세트를 무인 반출하려는 문의',
+      problemSummary: '현장에는 풀 하나만 있고 계약서도 확인되지 않음',
+      nextActionSummary: '전화 안내 후 누락 장비와 계약서를 확인',
+      tasks: [{ taskKey: 'applebox-pickup-recovery', taskLabel: '누락 장비와 계약서 확인' }]
+    }]
+  };
+  const fetch = createFetch([response({ data: safe })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+
+  assert.deepEqual(await store.listOwnerCaseContext({ roomKey: 'room:jeong', limit: 20 }), safe);
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/list_heybilli_owner_case_context_v2');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), { p_room_key: 'room:jeong', p_limit: 20 });
+
+  const unsafeFetch = createFetch([response({ data: {
+    ...safe,
+    cases: [{ ...safe.cases[0], rawEvidence: '010-1111-2222' }]
+  } })]);
+  const unsafeStore = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: unsafeFetch.fetchImpl });
+  await assert.rejects(unsafeStore.listOwnerCaseContext({ roomKey: 'room:jeong', limit: 20 }), /response invalid/i);
+});
+
+test('reconcileOwnerCases sends exact fenced assignments and accepts only content-free results', async () => {
+  const assignment = {
+    id: WORK_ID, expectedVersion: 7, caseKey: 'case:applebox', title: '애플박스 반출 누락',
+    requestSummary: '예약한 장비의 무인 반출 문의', problemSummary: '일부 장비와 계약서가 확인되지 않음',
+    nextActionSummary: '누락 장비와 계약서를 확인', taskKey: 'applebox-recovery'
+  };
+  const responseBody = { applied: true, planned: 1, updated: 1, stale: 0, rows: [{ id: WORK_ID, version: 8, caseKey: 'case:applebox', taskKey: 'applebox-recovery' }] };
+  const fetch = createFetch([response({ data: responseBody })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+  assert.deepEqual(await store.reconcileOwnerCases({ assignments: [assignment], apply: true }), responseBody);
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/reconcile_heybilli_owner_cases_v2');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), { p_assignments: [assignment], p_apply: true });
+});
+
 test('upsertWorkItem preserves reviewed schedule register and change types', async () => {
   const fetch = createFetch([
     response({ data: { applied: true, created: true, row: workRow({ work_type: 'schedule_register' }) } }),
@@ -717,6 +761,23 @@ test('listHeybilliOwnerCases uses the grouped RPC and accepts overlapping case c
   assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
     p_now: input.now, p_view: input.view, p_category: input.category, p_limit: input.limit, p_after: null
   });
+});
+
+test('semantic inquiry case response preserves the three owner-facing business summaries', async () => {
+  const semantic = heybilliCases({ cases: [heybilliCase({
+    categories: ['schedule', 'settlement'],
+    requestSummary: '어퓨쳐 300X와 소니 장비 예약 요청입니다.',
+    problemSummary: '조명 모델 선택이 남아 있어 가용 여부를 아직 확정하지 못했습니다.',
+    nextActionSummary: '모델을 확인하고 가능한 구성이나 대안을 고객에게 안내하세요.'
+  })] });
+  const fetch = createFetch([response({ data: semantic })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+  const result = await store.listHeybilliOwnerCases({
+    now: '2026-09-05T09:00:00.000Z', view: 'now', category: null, limit: 100, after: null
+  });
+  assert.equal(result.cases[0].requestSummary, semantic.cases[0].requestSummary);
+  assert.equal(result.cases[0].problemSummary, semantic.cases[0].problemSummary);
+  assert.equal(result.cases[0].nextActionSummary, semantic.cases[0].nextActionSummary);
 });
 
 test('listHeybilliOwnerCases rejects raw, malformed, duplicate, and request-inconsistent case data', async (t) => {

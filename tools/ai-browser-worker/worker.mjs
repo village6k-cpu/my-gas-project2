@@ -638,6 +638,9 @@ export function buildHermesPrompt(job, options = {}) {
   const navigationContextText = options.navigationContext
     ? `\nBROWSER NAVIGATION RESULT:\n${JSON.stringify(options.navigationContext, null, 2)}\n\nThis was deterministic UI navigation and live AX text capture only. If status is opened_target_chat and conversation_evidence.hint_matched is true, treat conversation_evidence.visible_static_text_tail as current Kakao screen evidence to inspect first; do not spend extra actions re-opening the chat list unless the evidence is insufficient or mismatched. Do not treat the navigation step itself as business classification evidence; the AI must still judge from the visible Kakao evidence.\n`
     : '';
+  const ownerCaseContextText = Object.hasOwn(options, 'ownerCaseContext')
+    ? `\nOWNER CASE CONTEXT:\n${JSON.stringify(compactOwnerCaseContext(options.ownerCaseContext), null, 2)}\n\n- 같은 문의면 표현이 달라도 기존 caseKey를 정확히 재사용한다.\n- 같은 업무면 표현이 달라도 기존 taskKey를 정확히 재사용한다.\n- 같은 고객방이어도 목적이 다르면 별도 caseKey를 만들고, 시간이나 방 이름만으로 합치지 않는다.\n- 한 문의의 여러 조치는 한 case의 중복 없는 task로 정리한다. context가 unavailable이면 현재 의미를 나타내는 안정적인 새 키를 만든다.\n`
+    : '';
   const recentBotSendsText = options.recentBotSends || '';
   const correctionsText = options.corrections || '';
   const ragContextText = options.ragContext
@@ -759,13 +762,13 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 ${currentConfirmedPolicyText}
-${navigationContextText}${terminalAckHintText}${recentBotSendsText}${correctionsText}
+  ${navigationContextText}${ownerCaseContextText}${terminalAckHintText}${recentBotSendsText}${correctionsText}
 ${lookupContextText}${ragContextText}${brainContextText}
 ${sheetExecutionText}
 
 TASK:
-1. Use supplied BROWSER NAVIGATION RESULT/live DevTools DOM first; it is isolated automation Chrome evidence.
-2. DevTools/CDP and the bridge API are the only navigation/control path. No screen-control fallback is available; if live evidence is missing, report the evidence gap instead of opening another control loop.
+1. Inspect the supplied navigation result/live DevTools DOM first.
+2. Use only DevTools/CDP/bridge; if evidence is missing, report the gap without another control loop.
 3. If BROWSER NAVIGATION RESULT says opened_target_chat with hint_matched=true, start from its live conversation_evidence and do not re-open the chat list.
 4. Start with DOM/AX; if insufficient or clipped, use read-only image/vision capture evidence already supplied for the already-open automation Kakao target. Never type or send as part of evidence capture.
 5. Use JOB EVIDENCE navigation_hints only to find/open the target Kakao chat. This is navigation evidence, not business classification evidence.
@@ -796,6 +799,7 @@ The JSON schema:
   "classification": "reservation" | "price" | "faq" | "ignore" | "already_answered" | "unclear",
   "kill_switch_observed": "active" | "paused" | "price_paused" | "not_checked",
   "customer": { "name": string, "source": "Kakao Channel Manager", "chat_status": string | null },
+  "owner_case": {"caseKey":string,"title":string,"requestSummary":string,"problemSummary":string,"nextActionSummary":string},
   "reservation_inquiry": {
     "is_reservation_inquiry": boolean,
     "is_test_message": boolean,
@@ -953,6 +957,15 @@ const AI_ALERT_LEVELS = new Set(['p0', 'none']);
 const AI_MANUAL_ACTION_FAMILIES = new Set(['invoice_issue', 'reservation_change', 'payment_reconcile', 'inventory_check', 'document_approval']);
 const HERMES_WORKER_TOOLSETS = 'terminal,file,web,skills,memory,session_search,vision';
 const CONFIRM_REQUEST_DISCOUNT_TYPES = new Set(['학생', '개인사업자/프리랜서', '단골', '제휴', '일반']);
+const OWNER_CASE_KEYS = ['caseKey', 'title', 'requestSummary', 'problemSummary', 'nextActionSummary'];
+const OWNER_CASE_TEXT_LIMITS = Object.freeze({
+  caseKey: 160,
+  title: 120,
+  requestSummary: 500,
+  problemSummary: 500,
+  nextActionSummary: 500
+});
+const UNSAFE_OWNER_CASE_TEXT = /(?:\b(?:automation|worker|payload|stack|trace|exception|internal)[_-]?(?:error|failure)?\b|\bRQ-\d|(?:\+?82[- ]?)?0\d{1,2}[- ]?\d{3,4}[- ]?\d{4})/i;
 const CUSTOMER_DOCUMENT_ATTACHMENT_KEYS = new Set([
   'village_bankbook_copy',
   'village_business_registration'
@@ -968,6 +981,66 @@ function isStrictIsoDate(value = '') {
 
 function isStrictConfirmRequestTime(value = '') {
   return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(text(value).trim());
+}
+
+function ownerCaseContractErrors(value, prefix = 'owner_case') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return [`${prefix} must be an object`];
+  }
+  const keys = Object.keys(value).sort();
+  if (keys.length !== OWNER_CASE_KEYS.length
+    || keys.some((key, index) => key !== [...OWNER_CASE_KEYS].sort()[index])) {
+    return [`${prefix} must contain exactly ${OWNER_CASE_KEYS.join(', ')}`];
+  }
+  const errors = [];
+  for (const key of OWNER_CASE_KEYS) {
+    const raw = typeof value[key] === 'string' ? value[key] : '';
+    const normalized = raw.trim();
+    if (!normalized || raw !== normalized || normalized.length > OWNER_CASE_TEXT_LIMITS[key]) {
+      errors.push(`${prefix}.${key} must be a non-empty trimmed string up to ${OWNER_CASE_TEXT_LIMITS[key]} characters`);
+      continue;
+    }
+    if (key !== 'caseKey' && UNSAFE_OWNER_CASE_TEXT.test(normalized)) {
+      errors.push(`${prefix}.${key} must contain only owner-facing business facts`);
+    }
+  }
+  return errors;
+}
+
+function compactOwnerCaseContext(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.status !== 'available') {
+    return { status: 'unavailable', cases: [] };
+  }
+  const cases = Array.isArray(value.cases) ? value.cases : [];
+  if (cases.length > 20) return { status: 'unavailable', cases: [] };
+  const normalized = [];
+  for (const item of cases) {
+    const ownerCase = {
+      caseKey: item?.caseKey,
+      title: item?.title,
+      requestSummary: item?.requestSummary,
+      problemSummary: item?.problemSummary,
+      nextActionSummary: item?.nextActionSummary
+    };
+    if (ownerCaseContractErrors(ownerCase, 'ownerCaseContext.cases[]').length) {
+      return { status: 'unavailable', cases: [] };
+    }
+    const tasks = Array.isArray(item?.tasks) ? item.tasks : [];
+    if (tasks.length > 20) return { status: 'unavailable', cases: [] };
+    const seenTaskKeys = new Set();
+    const normalizedTasks = [];
+    for (const task of tasks) {
+      const taskKey = typeof task?.taskKey === 'string' ? task.taskKey.trim() : '';
+      const taskLabel = typeof task?.taskLabel === 'string' ? task.taskLabel.trim() : '';
+      if (!taskKey || taskKey.length > 160 || !taskLabel || taskLabel.length > 240 || seenTaskKeys.has(taskKey)) {
+        return { status: 'unavailable', cases: [] };
+      }
+      seenTaskKeys.add(taskKey);
+      normalizedTasks.push({ taskKey, taskLabel });
+    }
+    normalized.push({ ...ownerCase, tasks: normalizedTasks });
+  }
+  return { status: 'available', cases: normalized };
 }
 
 function decisionReply(decision = {}) {
@@ -1114,6 +1187,12 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
         ? `decision is a provider/tool error payload, not an AI decision: ${providerError.slice(0, 200)}`
         : 'decision is empty: no classification, reply_decision, follow_up_items, or should_write_to_sheet']
     };
+  }
+
+  if (options.requireOwnerCase === true && !Object.hasOwn(decision, 'owner_case')) {
+    errors.push('owner_case is required for v2 human work');
+  } else if (Object.hasOwn(decision, 'owner_case')) {
+    errors.push(...ownerCaseContractErrors(decision.owner_case));
   }
 
   if (Array.isArray(decision.follow_up_items) && decision.follow_up_items.length
@@ -2285,6 +2364,12 @@ export function buildFollowUpRows(decision, job = {}) {
         })).filter((message) => message.message)
       : []
   };
+  const ownerCase = decision?.owner_case && ownerCaseContractErrors(decision.owner_case).length === 0
+    ? decision.owner_case
+    : null;
+  const ownerCaseContextStatus = decision?.owner_case_context_status === 'available'
+    ? 'available'
+    : 'unavailable';
   return items
     .filter((item) => item && typeof item === 'object')
     .map((item) => {
@@ -2329,6 +2414,15 @@ export function buildFollowUpRows(decision, job = {}) {
           business_key: text(item.businessKey || item.business_key).trim(),
           alert_level: alertLevel,
           alert_reason: alertReason,
+          ...(ownerCase ? {
+            owner_case_key: ownerCase.caseKey,
+            owner_case_title: ownerCase.title,
+            owner_request_summary: ownerCase.requestSummary,
+            owner_problem_summary: ownerCase.problemSummary,
+            owner_next_action_summary: ownerCase.nextActionSummary,
+            owner_task_key: taskKey || null,
+            owner_case_context_status: ownerCaseContextStatus
+          } : {}),
           ...conversationSnapshot
         }
       };
@@ -5016,6 +5110,7 @@ export function buildHermesPostActionPrompt({
     reason: initialDecision?.reason,
     kill_switch_observed: initialDecision?.kill_switch_observed,
     customer: initialDecision?.customer,
+    owner_case: initialDecision?.owner_case,
     safety_checks: initialDecision?.safety_checks,
     visible_messages_used: Array.isArray(initialDecision?.visible_messages_used)
       ? initialDecision.visible_messages_used.slice(-20)
@@ -5063,6 +5158,7 @@ Return a complete decision object, not a patch. Print FINAL_JSON and exactly one
   "classification": "reservation" | "price" | "faq" | "ignore" | "already_answered" | "unclear",
   "kill_switch_observed": "active" | "paused" | "price_paused" | "not_checked",
   "customer": { "name": string, "source": string, "chat_status": string | null },
+  "owner_case": { "caseKey": string, "title": string, "requestSummary": string, "problemSummary": string, "nextActionSummary": string },
   "safety_checks": {
     "kakao_conversation_opened": boolean,
     "did_not_classify_from_preview_only": boolean,
@@ -5125,7 +5221,7 @@ Interpret those facts now. End with FINAL_JSON and one valid JSON object only.`;
 }
 
 export function validateAiPostActionDecisionContract(decision = {}, report = {}) {
-  const base = validateAiDecisionContract(decision);
+  const base = validateAiDecisionContract(decision, { requireOwnerCase: true });
   const errors = [...(base.errors || [])];
   if (decision?.should_write_to_sheet !== false) {
     errors.push('post-action should_write_to_sheet must be false');
@@ -9036,6 +9132,18 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
     });
     const ragContext = (dependencies.buildReadOnlyRagContext || buildReadOnlyRagContext)(config);
     const brainContext = (dependencies.buildBrainContext || buildBrainContext)(config);
+    let ownerCaseContext = { status: 'unavailable', cases: [] };
+    if (config.workOrchestratorV2WorkItemsEnabled === true) {
+      try {
+        const loadOwnerCaseContext = dependencies.loadOwnerCaseContext || (async (input) => {
+          const store = workOrchestratorV2Store({ config, dependencies });
+          return store.listOwnerCaseContext(input);
+        });
+        ownerCaseContext = compactOwnerCaseContext(await loadOwnerCaseContext({ roomKey, limit: 20 }));
+      } catch {
+        ownerCaseContext = { status: 'unavailable', cases: [] };
+      }
+    }
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
     const recentBotSends = (dependencies.buildRecentBotSendsPromptText || buildRecentBotSendsPromptText)(config, job);
@@ -9046,6 +9154,7 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
       navigationContext: snapshot.navigation,
       ragContext,
       brainContext,
+      ownerCaseContext,
       recentBotSends,
       corrections,
       terminalAckHint: capture?.terminalAcknowledgement,
@@ -9080,6 +9189,7 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
         lookupContext,
         ragContext,
         brainContext,
+        ownerCaseContext,
         recentBotSends,
         corrections,
         terminalAcknowledgement: capture?.terminalAcknowledgement || null
@@ -10074,7 +10184,9 @@ export async function prepareKakaoGatewayDecision({
     }
   }
   if (decision) {
-    const validation = validateAiDecisionContract(decision);
+    const validation = validateAiDecisionContract(decision, {
+      requireOwnerCase: config.workOrchestratorV2WorkItemsEnabled === true
+    });
     if (!validation.valid) safetyFailures.push('invalid_gateway_decision');
     if (decision.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object') {
       const mutationValidation = validateStaffConfirmedMutation(decision.staff_confirmed_mutation, { roomRevision });
@@ -10084,6 +10196,11 @@ export async function prepareKakaoGatewayDecision({
       }
     }
     decision = stripAgentSuppliedReceiptFields(decision);
+    if (Object.hasOwn(decision, 'owner_case')) {
+      decision.owner_case_context_status = internal?.ownerCaseContext?.status === 'available'
+        ? 'available'
+        : 'unavailable';
+    }
     if (!text(decision.kill_switch_observed).trim() && internal?.lookupContext?.kill_switch?.status) {
       decision.kill_switch_observed = internal.lookupContext.kill_switch.status;
     }
@@ -10402,7 +10519,12 @@ export async function prepareKakaoDecisionFromSnapshot({
       reportHandoffPhase('initial_hermes_in_flight');
       let hermesDecision;
       try {
-        hermesDecision = await runHermesDecision(prompt, config, { signal: freshnessGuard.signal });
+        hermesDecision = await runHermesDecision(prompt, config, {
+          signal: freshnessGuard.signal,
+          validateDecisionImpl: (candidate) => validateAiDecisionContract(candidate, {
+            requireOwnerCase: config.workOrchestratorV2WorkItemsEnabled === true
+          })
+        });
       } finally {
         reportHandoffPhase('initial_hermes_finished');
       }
@@ -10505,6 +10627,11 @@ export async function prepareKakaoDecisionFromSnapshot({
     timings.mark('sheetAndReconciliation');
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
+    if (Object.hasOwn(decision, 'owner_case')) {
+      decision.owner_case_context_status = internal?.ownerCaseContext?.status === 'available'
+        ? 'available'
+        : 'unavailable';
+    }
     const baseFollowUpRows = [
       ...buildFollowUpRows(decision, job),
       ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)

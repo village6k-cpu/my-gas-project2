@@ -37,7 +37,14 @@ const PAYLOAD_STRING_LIMITS = Object.freeze({
   alert_reason: 1000,
   blocking_reason: 1000,
   due_hint: 100,
-  recommended_action: 1200
+  recommended_action: 1200,
+  owner_case_key: 160,
+  owner_case_title: 120,
+  owner_request_summary: 500,
+  owner_problem_summary: 500,
+  owner_next_action_summary: 500,
+  owner_task_key: 160,
+  owner_case_context_status: 20
 });
 const LIFECYCLE_PAYLOAD_STRING_LIMITS = Object.freeze({ p0_acknowledged_at: 40 });
 const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;

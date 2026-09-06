@@ -73,6 +73,32 @@ test('work candidate builder never independently suppresses a reply obligation',
   assert.deepEqual(candidates.map((item) => item.work_key), ['room:1:reply', 'trade:1:tax-invoice']);
 });
 
+test('semantic owner case fields survive the reviewed work payload boundary', () => {
+  const ownerPayload = {
+    owner_case_key: 'jeong:2026-09-03:applebox-pickup-missing',
+    owner_case_title: '정원근 애플박스 반출 누락',
+    owner_request_summary: '예약한 애플박스 풀과 풀세트를 무인 반출하려는 문의입니다.',
+    owner_problem_summary: '현장에는 풀 하나만 있고 계약서도 확인되지 않았습니다.',
+    owner_next_action_summary: '전화 안내 후 누락 장비와 계약서를 확인하세요.',
+    owner_task_key: 'applebox-pickup-recovery',
+    owner_case_context_status: 'available'
+  };
+  const [candidate] = buildHumanWorkCandidates({
+    now: NOW,
+    followUpRows: [{
+      work_key: 'room:jeong:applebox-pickup-recovery',
+      room_key: 'room:jeong',
+      type: 'schedule_check',
+      title: '정원근 애플박스 누락 확인',
+      summary: '같은 반출 건의 후속 문의',
+      requires_human_action: true,
+      payload: { requires_human_action: true, ...ownerPayload }
+    }]
+  });
+
+  assert.deepEqual(Object.fromEntries(Object.keys(ownerPayload).map((key) => [key, candidate.payload[key]])), ownerPayload);
+});
+
 test('verified auto reply without an exact key keeps two distinct reply obligations', () => {
   const candidates = buildHumanWorkCandidates({
     now: NOW,

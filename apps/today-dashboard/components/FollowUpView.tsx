@@ -32,6 +32,9 @@ type InquiryCase = {
   priority: Priority;
   title: string;
   ownerBrief: string;
+  requestSummary: string;
+  problemSummary: string;
+  nextActionSummary: string;
   receivedAt: string;
   updatedAt: string;
   categories: CategoryKey[];
@@ -130,6 +133,23 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
   const [unavailable, setUnavailable] = useState(false);
   const [notice, setNotice] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
+  const sheetDragStartY = useRef<number | null>(null);
+
+  const closeMobileDetail = useCallback(() => setMobileDetailOpen(false), []);
+
+  useEffect(() => {
+    if (!mobileDetailOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMobileDetail();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [closeMobileDetail, mobileDetailOpen]);
 
   const load = useCallback(async (filter: FilterState) => {
     const requestId = ++requestIdRef.current;
@@ -302,12 +322,25 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
       </main>
 
       {mobileDetailOpen && selected && (
-        <section className="fixed inset-x-0 bottom-0 z-50 max-h-[86vh] overflow-y-auto rounded-t-[24px] bg-white p-3 pb-[calc(env(safe-area-inset-bottom)+12px)] shadow-2xl ring-1 ring-line lg:hidden">
-          <div className="sticky top-0 z-10 mb-2 flex justify-center bg-white pb-2">
-            <button type="button" onClick={() => setMobileDetailOpen(false)} aria-label="상세 닫기" className="h-1.5 w-12 rounded-full bg-line" />
-          </div>
-          <CaseDetail caseItem={selected} disabled={mutationDisabled} busy={actionBusy} onAction={submitAction} />
-        </section>
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <button type="button" aria-label="상세 배경 닫기" onClick={closeMobileDetail} className="absolute inset-0 bg-ink/35" />
+          <section role="dialog" aria-modal="true" aria-label={`${selected.title} 상세`} className="absolute inset-x-0 bottom-0 max-h-[86vh] overflow-y-auto rounded-t-[24px] bg-white p-3 pb-[calc(env(safe-area-inset-bottom)+12px)] shadow-2xl ring-1 ring-line">
+            <div
+              className="sticky top-0 z-10 mb-2 flex touch-none items-center justify-between bg-white pb-2"
+              onPointerDown={(event) => { sheetDragStartY.current = event.clientY; }}
+              onPointerUp={(event) => {
+                const startY = sheetDragStartY.current;
+                sheetDragStartY.current = null;
+                if (startY !== null && event.clientY - startY >= 72) closeMobileDetail();
+              }}
+              onPointerCancel={() => { sheetDragStartY.current = null; }}
+            >
+              <span aria-hidden="true" className="ml-auto h-1.5 w-12 rounded-full bg-line" />
+              <button type="button" onClick={closeMobileDetail} aria-label="상세 닫기" className="tap ml-auto rounded-full px-3 py-1.5 text-[13px] font-extrabold text-ink-soft ring-1 ring-line">닫기</button>
+            </div>
+            <CaseDetail caseItem={selected} disabled={mutationDisabled} busy={actionBusy} onAction={submitAction} />
+          </section>
+        </div>
       )}
     </div>
   );
@@ -327,7 +360,7 @@ function CaseRow({ caseItem, selected, onSelect }: { caseItem: InquiryCase; sele
             <span className="rounded-full bg-white/85 px-2 py-0.5 text-[11px] font-bold text-ink-mute ring-1 ring-line/60">{caseItem.progressLabel}</span>
           </div>
           <h3 className="text-[17px] font-extrabold leading-snug text-ink [word-break:keep-all]">{caseItem.title}</h3>
-          <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-ink-soft">{caseItem.ownerBrief}</p>
+          <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-ink-soft">{caseItem.problemSummary}</p>
         </div>
         <span className="shrink-0 text-[12px] font-bold text-ink-mute">{CASE_STATE_LABELS[caseItem.state]}</span>
       </div>
@@ -356,13 +389,21 @@ function CaseDetail({ caseItem, disabled, busy, onAction }: { caseItem: InquiryC
         <span className="font-extrabold text-brand-600">{caseItem.ageLabel}</span>
       </div>
 
-      <DetailSection title="요청 요약">
-        <p className="text-[14px] leading-relaxed text-ink-soft">{caseItem.ownerBrief}</p>
+      <DetailSection title="고객 요청">
+        <p className="text-[14px] leading-relaxed text-ink-soft">{caseItem.requestSummary}</p>
+      </DetailSection>
+
+      <DetailSection title="현재 문제">
+        <p className="text-[14px] leading-relaxed text-ink-soft">{caseItem.problemSummary}</p>
+      </DetailSection>
+
+      <DetailSection title="처리할 일">
+        <p className="text-[14px] font-semibold leading-relaxed text-ink">{caseItem.nextActionSummary}</p>
       </DetailSection>
 
       <section className="mt-4">
         <div className="mb-2 flex items-center justify-between">
-          <h3 className="text-[13px] font-extrabold text-ink">처리할 일</h3>
+          <h3 className="text-[13px] font-extrabold text-ink">세부 업무</h3>
           <span className="text-[12px] font-bold text-ink-mute">{caseItem.progressLabel}</span>
         </div>
         <ol className="space-y-2.5">

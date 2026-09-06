@@ -48,7 +48,7 @@ const V2_ITEM_KEYS = [
   "title", "summary", "recommendedAction", "dueAt", "snoozedUntil", "firstOpenedAt", "updatedAt",
 ];
 const V2_CASE_KEYS = [
-  "categories", "completedStepCount", "id", "ownerBrief", "priority", "receivedAt", "state",
+  "categories", "completedStepCount", "id", "nextActionSummary", "ownerBrief", "priority", "problemSummary", "receivedAt", "requestSummary", "state",
   "steps", "title", "totalStepCount", "updatedAt",
 ];
 const V2_CASE_STEP_KEYS = [
@@ -216,9 +216,13 @@ function validateCase(value: unknown, query: { view: string; category: string | 
   if (!exactKeys(value, V2_CASE_KEYS)
     || typeof value.id !== "string" || !V2_UUID.test(value.id)
     || value.state !== query.view || !V2_VIEWS.has(value.state) || !V2_PRIORITIES.has(value.priority)
-    || typeof value.title !== "string" || !value.title || value.title !== value.title.trim() || value.title.length > 40
+    || typeof value.title !== "string" || !value.title || value.title !== value.title.trim() || value.title.length > 120
     || typeof value.ownerBrief !== "string" || !value.ownerBrief || value.ownerBrief !== value.ownerBrief.trim()
-    || value.ownerBrief.length > 160 || V2_UNSAFE_OWNER_TEXT.test(value.title) || V2_UNSAFE_OWNER_TEXT.test(value.ownerBrief)
+    || value.ownerBrief.length > 160
+    || typeof value.requestSummary !== "string" || !value.requestSummary || value.requestSummary !== value.requestSummary.trim() || value.requestSummary.length > 500
+    || typeof value.problemSummary !== "string" || !value.problemSummary || value.problemSummary !== value.problemSummary.trim() || value.problemSummary.length > 500
+    || typeof value.nextActionSummary !== "string" || !value.nextActionSummary || value.nextActionSummary !== value.nextActionSummary.trim() || value.nextActionSummary.length > 500
+    || [value.title, value.ownerBrief, value.requestSummary, value.problemSummary, value.nextActionSummary].some((text) => V2_UNSAFE_OWNER_TEXT.test(text))
     || !Array.isArray(value.categories) || value.categories.length < 1 || value.categories.length > V2_CATEGORIES.size
     || new Set(value.categories).size !== value.categories.length
     || value.categories.some((category: unknown) => typeof category !== "string" || !V2_CATEGORIES.has(category))
