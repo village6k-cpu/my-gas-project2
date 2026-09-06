@@ -22,8 +22,8 @@ for (const retired of [
 }
 
 assert(
-  /<WorkDetail item=\{selected\}/.test(view),
-  'the selected work item must open the owner action detail'
+  /<CaseDetail caseItem=\{selected\}/.test(view),
+  'the selected inquiry case must open the owner action detail'
 );
 
 assert(
