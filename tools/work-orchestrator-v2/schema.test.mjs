@@ -20,6 +20,19 @@ const semanticOwnerCaseAclMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_semantic_owner_case_acl\.sql$/.test(name));
 const heybilliFreshStartMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_fresh_start\.sql$/.test(name));
+const ownerLanguageMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_owner_language\.sql$/.test(name));
+
+test('owner-language migration rejects internal workflow jargon from representative cards', () => {
+  assert.equal(ownerLanguageMigrationFiles.length, 1, 'exactly one CLI-generated owner-language migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, ownerLanguageMigrationFiles[0]), 'utf8');
+  assert.match(sql, /create or replace function work_orchestrator_private\.is_owner_case_payload_v2\(\s*p_payload jsonb\s*\)/i);
+  for (const forbidden of ['RQ', '거래', 'confirmation_request', '네', 'bridge', 'gateway']) {
+    assert.match(sql, new RegExp(forbidden, 'i'));
+  }
+  assert.match(sql, /revoke execute on function work_orchestrator_private\.is_owner_case_payload_v2\(jsonb\)\s+from public, anon, authenticated, service_role/i);
+  assert.match(sql, /grant execute on function work_orchestrator_private\.is_owner_case_payload_v2\(jsonb\) to service_role/i);
+});
 
 test('Heybilli fresh-start migration removes only pre-launch cards and preserves source receipts', () => {
   assert.equal(heybilliFreshStartMigrationFiles.length, 1, 'exactly one CLI-generated Heybilli fresh-start migration must exist');

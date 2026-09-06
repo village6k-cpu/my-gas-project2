@@ -27,6 +27,9 @@ test('owner case reconciliation rejects private or malformed assignment text bef
   for (const invalid of [
     [{ ...assignments[0], expectedVersion: 0 }],
     [{ ...assignments[0], problemSummary: '연락처 010-1111-2222' }],
+    [{ ...assignments[0], requestSummary: 'RQ와 거래ID를 확인합니다.' }],
+    [{ ...assignments[0], problemSummary: 'confirmation_request_conflict 상태입니다.' }],
+    [{ ...assignments[0], requestSummary: '네' }],
     [{ ...assignments[0], extra: true }]
   ]) await assert.rejects(reconciliation.runOwnerCaseReconciliation({ store, assignments: invalid }), /invalid/i);
   assert.equal(called, false);
