@@ -639,7 +639,7 @@ export function buildHermesPrompt(job, options = {}) {
     ? `\nBROWSER NAVIGATION RESULT:\n${JSON.stringify(options.navigationContext, null, 2)}\n\nThis was deterministic UI navigation and live AX text capture only. If status is opened_target_chat and conversation_evidence.hint_matched is true, treat conversation_evidence.visible_static_text_tail as current Kakao screen evidence to inspect first; do not spend extra actions re-opening the chat list unless the evidence is insufficient or mismatched. Do not treat the navigation step itself as business classification evidence; the AI must still judge from the visible Kakao evidence.\n`
     : '';
   const ownerCaseContextText = Object.hasOwn(options, 'ownerCaseContext')
-    ? `\nOWNER CASE CONTEXT:\n${JSON.stringify(compactOwnerCaseContext(options.ownerCaseContext), null, 2)}\n\n- 같은 문의면 표현이 달라도 기존 caseKey를 정확히 재사용한다.\n- 같은 업무면 표현이 달라도 기존 taskKey를 정확히 재사용한다.\n- 같은 고객방이어도 목적이 다르면 별도 caseKey를 만들고, 시간이나 방 이름만으로 합치지 않는다.\n- 한 문의의 여러 조치는 한 case의 중복 없는 task로 정리한다. context가 unavailable이면 현재 의미를 나타내는 안정적인 새 키를 만든다.\n- owner_case는 대표가 카드만 보고 이해하는 짧은 업무 보고다. title은 고객과 구체 주제를 식별하고, requestSummary에는 확인된 장비·날짜·수량을 가능한 만큼 넣으며, problemSummary에는 아직 막힌 구체 사실, nextActionSummary에는 대상과 행동을 쓴다.\n- '문의', '예약 확인', '스케줄 확인', '확인 필요' 같은 한두 단어 요약은 금지한다. 모르는 사실은 만들지 말고, 확인된 구체 정보만 사용한다.\n`
+    ? `\nOWNER CASE CONTEXT:\n${JSON.stringify(compactOwnerCaseContext(options.ownerCaseContext), null, 2)}\n\n- 같은 문의면 표현이 달라도 기존 caseKey를 정확히 재사용한다.\n- 같은 업무면 표현이 달라도 기존 taskKey를 정확히 재사용한다.\n- 같은 고객방이어도 목적이 다르면 별도 caseKey를 만들고, 시간이나 방 이름만으로 합치지 않는다.\n- 한 문의의 여러 조치는 한 case의 중복 없는 task로 정리한다. context가 unavailable이면 현재 의미를 나타내는 안정적인 새 키를 만든다.\n- owner_case는 대표가 카드만 보고 이해하는 짧은 업무 보고다. title은 고객과 구체 주제를 식별하고, requestSummary에는 확인된 장비·날짜·수량을 가능한 만큼 넣으며, problemSummary에는 아직 막힌 구체 사실, nextActionSummary에는 대상과 행동을 쓴다.\n- '문의', '예약 확인', '스케줄 확인', '확인 필요' 같은 한두 단어 요약은 금지한다. 모르는 사실은 만들지 말고, 확인된 구체 정보만 사용한다.\n- RQ, 거래ID, 자동화/bridge/gateway 상태, confirmation_request, bare 네 같은 내부 표현은 대표용 문구에 금지한다. 고객이 요청한 사실, 아직 결정되지 않은 사실, 사람이 할 다음 행동으로 바꿔 쓴다.\n`
     : '';
   const recentBotSendsText = options.recentBotSends || '';
   const correctionsText = options.corrections || '';
@@ -965,7 +965,7 @@ const OWNER_CASE_TEXT_LIMITS = Object.freeze({
   problemSummary: 500,
   nextActionSummary: 500
 });
-const UNSAFE_OWNER_CASE_TEXT = /(?:\b(?:automation|worker|payload|stack|trace|exception|internal)[_-]?(?:error|failure)?\b|\bRQ-\d|(?:\+?82[- ]?)?0\d{1,2}[- ]?\d{3,4}[- ]?\d{4})/i;
+const UNSAFE_OWNER_CASE_TEXT = /(?:(?:automation|worker|payload|stack|trace|exception|internal|bridge|gateway)(?:[_ -]?(?:error|failure))?|confirmation_request|\bRQ(?:\b|[-/])|거래\s*ID|\bbare\b|(?:\+?82[- ]?)?0\d{1,2}[- ]?\d{3,4}[- ]?\d{4})/i;
 const GENERIC_OWNER_CASE_TEXT = /^(?:\S+\s+)?(?:p0\s+)?(?:문의|예약 확인|스케줄 확인|일정 확인|확인 필요|처리 필요|확인하세요)[.!]?$/i;
 const CUSTOMER_DOCUMENT_ATTACHMENT_KEYS = new Set([
   'village_bankbook_copy',

@@ -24,6 +24,8 @@ const [semanticOwnerCasesMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_semantic_owner_cases\.sql$/.test(name));
 const [heybilliFreshStartMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_fresh_start\.sql$/.test(name));
+const [ownerLanguageMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_owner_language\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -91,6 +93,39 @@ async function createSemanticOwnerCasesDatabase() {
   await db.exec(readFileSync(join(migrationsDirectory, semanticOwnerCasesMigrationName), 'utf8'));
   return db;
 }
+
+async function createOwnerLanguageDatabase() {
+  const db = await createSemanticOwnerCasesDatabase();
+  assert.ok(ownerLanguageMigrationName, 'the CLI-generated owner-language migration must exist');
+  await db.exec(readFileSync(join(migrationsDirectory, ownerLanguageMigrationName), 'utf8'));
+  return db;
+}
+
+test('owner-language validator rejects internal workflow jargon before it reaches representative cards', async () => {
+  const db = await createOwnerLanguageDatabase();
+  const valid = {
+    owner_case_key: 'customer-sep6-booking',
+    owner_case_title: '고객 9/6 장비 예약 확정',
+    owner_request_summary: '9/6 카메라와 렌즈 예약을 요청',
+    owner_problem_summary: '요청 수량 중 메모리 카드 한 개가 부족함',
+    owner_next_action_summary: '대체 메모리를 안내한 뒤 예약을 확정',
+    owner_task_key: 'finalize-booking',
+    owner_case_context_status: 'available'
+  };
+  for (const payload of [
+    { ...valid, owner_request_summary: 'RQ와 거래ID를 확인합니다.' },
+    { ...valid, owner_problem_summary: 'confirmation_request_conflict 상태입니다.' },
+    { ...valid, owner_request_summary: '직원이 bare 네로 수락했습니다.' },
+    { ...valid, owner_next_action_summary: 'bridge와 gateway 상태를 확인합니다.' }
+  ]) {
+    const result = await db.query(
+      'select work_orchestrator_private.is_owner_case_payload_v2($1::jsonb) as valid',
+      [JSON.stringify(payload)]
+    );
+    assert.equal(result.rows[0].valid, false, JSON.stringify(payload));
+  }
+  await db.close();
+});
 
 test('Heybilli fresh start deletes pre-launch cards but keeps today cards and source receipts', async () => {
   const db = await createSemanticOwnerCasesDatabase();
