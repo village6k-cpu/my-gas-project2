@@ -22,6 +22,8 @@ const [heybilliCasesMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_cases\.sql$/.test(name));
 const [semanticOwnerCasesMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_semantic_owner_cases\.sql$/.test(name));
+const [heybilliFreshStartMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_heybilli_fresh_start\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -89,6 +91,50 @@ async function createSemanticOwnerCasesDatabase() {
   await db.exec(readFileSync(join(migrationsDirectory, semanticOwnerCasesMigrationName), 'utf8'));
   return db;
 }
+
+test('Heybilli fresh start deletes pre-launch cards but keeps today cards and source receipts', async () => {
+  const db = await createSemanticOwnerCasesDatabase();
+  const oldOpenId = '64000000-0000-4000-8000-000000000001';
+  const oldDoneId = '64000000-0000-4000-8000-000000000002';
+  const boundaryId = '64000000-0000-4000-8000-000000000003';
+  const todayId = '64000000-0000-4000-8000-000000000004';
+  const receiptId = '64000000-0000-4000-8000-000000000005';
+  try {
+    await db.query(`insert into public.work_items_v2 (
+      id, work_key, source_event_keys, room_key, title, summary, work_type, priority, state,
+      actionable_at, first_opened_at, last_activity_at, payload, created_at, updated_at
+    ) values
+      ($1::uuid,'reset:old-open',array['event:old'],'room:reset','과거 진행','과거 진행','schedule_check','normal','open',
+        '2026-09-05T14:59:59.999Z','2026-09-05T14:59:59.999Z','2026-09-05T14:59:59.999Z','{"requires_human_action":true}','2026-09-05T14:59:59.999Z','2026-09-05T14:59:59.999Z'),
+      ($2::uuid,'reset:old-done',array[]::text[],'room:reset','과거 완료','과거 완료','schedule_check','normal','resolved',
+        '2026-09-05T14:00:00Z','2026-09-05T14:00:00Z','2026-09-05T14:00:00Z','{"requires_human_action":true}','2026-09-05T14:00:00Z','2026-09-05T14:00:00Z'),
+      ($3::uuid,'reset:boundary',array[]::text[],'room:reset','오늘 경계','오늘 경계','schedule_check','normal','open',
+        '2026-09-05T15:00:00Z','2026-09-05T15:00:00Z','2026-09-05T15:00:00Z','{"requires_human_action":true}','2026-09-05T15:00:00Z','2026-09-05T15:00:00Z'),
+      ($4::uuid,'reset:today',array[]::text[],'room:reset','오늘 카드','오늘 카드','schedule_check','normal','open',
+        '2026-09-06T01:00:00Z','2026-09-06T01:00:00Z','2026-09-06T01:00:00Z','{"requires_human_action":true}','2026-09-06T01:00:00Z','2026-09-06T01:00:00Z')`,
+      [oldOpenId, oldDoneId, boundaryId, todayId]);
+    await db.query(`insert into public.message_notification_receipts (
+      id, source, source_event_key, room_key, received_at, notification_state,
+      client_message_id, cleanup_state, cleanup_work_id, cleanup_work_version, payload
+    ) values ($1::uuid,'kakao','event:old','room:reset','2026-09-05T14:59:59.999Z','pending',
+      gen_random_uuid(),'idle',$2::uuid,1,'{}'::jsonb)`, [receiptId, oldOpenId]);
+
+    assert.ok(heybilliFreshStartMigrationName, 'the additive Heybilli fresh-start migration must exist');
+    await db.exec(readFileSync(join(migrationsDirectory, heybilliFreshStartMigrationName), 'utf8'));
+
+    const work = await db.query(`select id::text,title,state from public.work_items_v2 order by id`);
+    assert.deepEqual(work.rows, [
+      { id: boundaryId, title: '오늘 경계', state: 'open' },
+      { id: todayId, title: '오늘 카드', state: 'open' }
+    ]);
+    const membership = await db.query(`select count(*)::int as count from public.notice_cleanup_work_sources_v2 where work_id=$1::uuid`, [oldOpenId]);
+    assert.equal(membership.rows[0].count, 0);
+    const receipt = await db.query(`select id::text,cleanup_work_id,cleanup_work_version from public.message_notification_receipts where id=$1::uuid`, [receiptId]);
+    assert.deepEqual(receipt.rows, [{ id: receiptId, cleanup_work_id: null, cleanup_work_version: null }]);
+  } finally {
+    await db.close();
+  }
+});
 
 test('foundation migration executes and exposes only service-role access in PostgreSQL', async () => {
   assert.ok(migrationName, 'the CLI-generated foundation migration must exist');

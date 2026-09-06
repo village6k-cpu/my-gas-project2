@@ -44,6 +44,7 @@ type InquiryCase = {
   receivedLabel: string;
   ageLabel: string;
   progressLabel: string;
+  previewLines: { label: "요청" | "문제" | "할 일"; text: string }[];
 };
 type InboxPayload = {
   ok: true;
@@ -360,7 +361,14 @@ function CaseRow({ caseItem, selected, onSelect }: { caseItem: InquiryCase; sele
             <span className="rounded-full bg-white/85 px-2 py-0.5 text-[11px] font-bold text-ink-mute ring-1 ring-line/60">{caseItem.progressLabel}</span>
           </div>
           <h3 className="text-[17px] font-extrabold leading-snug text-ink [word-break:keep-all]">{caseItem.title}</h3>
-          <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-ink-soft">{caseItem.problemSummary}</p>
+          <div className="mt-2.5 space-y-1.5 rounded-lg bg-white/65 px-2.5 py-2">
+            {caseItem.previewLines.map((line) => (
+              <p key={line.label} className="grid grid-cols-[2.5rem_minmax(0,1fr)] gap-1.5 text-[12.5px] leading-relaxed">
+                <span className="font-extrabold text-ink-mute">{line.label}</span>
+                <span className="line-clamp-2 text-ink-soft">{line.text}</span>
+              </p>
+            ))}
+          </div>
         </div>
         <span className="shrink-0 text-[12px] font-bold text-ink-mute">{CASE_STATE_LABELS[caseItem.state]}</span>
       </div>

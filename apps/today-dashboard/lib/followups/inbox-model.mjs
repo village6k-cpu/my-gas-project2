@@ -131,6 +131,11 @@ function safeCase(value, { view, category, now }) {
     receivedAt,
     updatedAt,
     steps,
+    previewLines: [
+      { label: "요청", text: value.requestSummary },
+      { label: "문제", text: value.problemSummary },
+      { label: "할 일", text: value.nextActionSummary },
+    ],
     ...formatInquiryTiming(receivedAt, now),
     progressLabel: `${value.completedStepCount}/${value.totalStepCount} 완료`,
   };

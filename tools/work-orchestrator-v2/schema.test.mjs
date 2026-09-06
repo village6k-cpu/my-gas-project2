@@ -18,6 +18,17 @@ const semanticOwnerCasesMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_semantic_owner_cases\.sql$/.test(name));
 const semanticOwnerCaseAclMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_semantic_owner_case_acl\.sql$/.test(name));
+const heybilliFreshStartMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_heybilli_fresh_start\.sql$/.test(name));
+
+test('Heybilli fresh-start migration removes only pre-launch cards and preserves source receipts', () => {
+  assert.equal(heybilliFreshStartMigrationFiles.length, 1, 'exactly one CLI-generated Heybilli fresh-start migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, heybilliFreshStartMigrationFiles[0]), 'utf8');
+  assert.match(sql, /first_opened_at\s*<\s*'2026-09-05T15:00:00\.000Z'::timestamptz/i);
+  assert.match(sql, /update public\.message_notification_receipts[\s\S]*?cleanup_work_id\s*=\s*null[\s\S]*?cleanup_work_version\s*=\s*null/i);
+  assert.match(sql, /delete from public\.work_items_v2/i);
+  assert.doesNotMatch(sql, /delete from public\.message_notification_receipts|truncate|drop table/i);
+});
 
 test('semantic owner case private validator is callable only by service_role', () => {
   assert.equal(semanticOwnerCaseAclMigrationFiles.length, 1, 'exactly one semantic owner case ACL migration must exist');
