@@ -27,7 +27,7 @@ test('owner-language migration rejects internal workflow jargon from representat
   assert.equal(ownerLanguageMigrationFiles.length, 1, 'exactly one CLI-generated owner-language migration must exist');
   const sql = readFileSync(join(migrationsDirectory, ownerLanguageMigrationFiles[0]), 'utf8');
   assert.match(sql, /create or replace function work_orchestrator_private\.is_owner_case_payload_v2\(\s*p_payload jsonb\s*\)/i);
-  for (const forbidden of ['RQ', '거래', 'confirmation_request', 'bare', 'bridge', 'gateway']) {
+  for (const forbidden of ['RQ', '거래', 'confirmation_request', '네', 'bridge', 'gateway']) {
     assert.match(sql, new RegExp(forbidden, 'i'));
   }
   assert.match(sql, /revoke execute on function work_orchestrator_private\.is_owner_case_payload_v2\(jsonb\)\s+from public, anon, authenticated, service_role/i);

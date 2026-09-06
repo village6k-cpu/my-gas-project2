@@ -29,10 +29,10 @@ create or replace function work_orchestrator_private.is_owner_case_payload_v2(
     and length(p_payload->>'owner_task_key') between 1 and 160
     and btrim(p_payload->>'owner_task_key') = p_payload->>'owner_task_key'
     and p_payload->>'owner_case_context_status' in ('available','unavailable')
-    and (p_payload->>'owner_case_title') !~* '(오류|실패|충돌|timeout|error|exception|automation|worker|payload|stack|trace|internal|bridge|gateway|confirmation_request|\mrq\M|rq[-/]|거래[[:space:]]*id|\mbare\M|01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4})'
-    and (p_payload->>'owner_request_summary') !~* '(timeout|error|exception|automation|worker|payload|stack|trace|internal|bridge|gateway|confirmation_request|\mrq\M|rq[-/]|거래[[:space:]]*id|\mbare\M|01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4})'
-    and (p_payload->>'owner_problem_summary') !~* '(timeout|error|exception|automation|worker|payload|stack|trace|internal|bridge|gateway|confirmation_request|\mrq\M|rq[-/]|거래[[:space:]]*id|\mbare\M|01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4})'
-    and (p_payload->>'owner_next_action_summary') !~* '(timeout|error|exception|automation|worker|payload|stack|trace|internal|bridge|gateway|confirmation_request|\mrq\M|rq[-/]|거래[[:space:]]*id|\mbare\M|01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4})';
+    and (p_payload->>'owner_case_title') !~* '(오류|실패|충돌|timeout|error|exception|automation|worker|payload|stack|trace|internal|bridge|gateway|confirmation_request|\mrq\M|rq[-/]|거래[[:space:]]*id|^네[.!]?$|01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4})'
+    and (p_payload->>'owner_request_summary') !~* '(timeout|error|exception|automation|worker|payload|stack|trace|internal|bridge|gateway|confirmation_request|\mrq\M|rq[-/]|거래[[:space:]]*id|^네[.!]?$|01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4})'
+    and (p_payload->>'owner_problem_summary') !~* '(timeout|error|exception|automation|worker|payload|stack|trace|internal|bridge|gateway|confirmation_request|\mrq\M|rq[-/]|거래[[:space:]]*id|^네[.!]?$|01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4})'
+    and (p_payload->>'owner_next_action_summary') !~* '(timeout|error|exception|automation|worker|payload|stack|trace|internal|bridge|gateway|confirmation_request|\mrq\M|rq[-/]|거래[[:space:]]*id|^네[.!]?$|01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4})';
 $$;
 
 revoke execute on function work_orchestrator_private.is_owner_case_payload_v2(jsonb)

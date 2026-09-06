@@ -6378,7 +6378,7 @@ test('semantic owner case contract accepts only the exact bounded executive repo
     { ...valid.owner_case, nextActionSummary: 'automation_error payload stack' },
     { ...valid.owner_case, requestSummary: 'RQ와 거래ID를 확인합니다.' },
     { ...valid.owner_case, problemSummary: 'confirmation_request_conflict 상태입니다.' },
-    { ...valid.owner_case, requestSummary: '직원이 bare 네로 수락했습니다.' }
+    { ...valid.owner_case, requestSummary: '네' }
   ]) {
     const result = validateAiDecisionContract(completeSheetDecision({ owner_case: ownerCase }));
     assert.equal(result.valid, false, JSON.stringify(ownerCase));
@@ -9957,6 +9957,7 @@ test('semantic owner case prompt gives Hermes exact open-case identities to reus
   assert.match(prompt, /장비.*날짜.*수량/s);
   assert.match(prompt, /예약 확인.*한두 단어.*금지/s);
   assert.match(prompt, /RQ.*거래ID.*자동화.*대표용 문구.*금지/s);
+  assert.match(prompt, /단독 응답.*네.*대표용 문구.*금지/s);
   assert.doesNotMatch(prompt, /30분.*묶/);
 });
 

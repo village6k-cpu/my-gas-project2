@@ -762,7 +762,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 ${currentConfirmedPolicyText}
-  ${navigationContextText}${ownerCaseContextText}${terminalAckHintText}${recentBotSendsText}${correctionsText}
+  ${navigationContextText}${ownerCaseContextText.replace('bare 네', "단독 응답 '네'")}${terminalAckHintText}${recentBotSendsText}${correctionsText}
 ${lookupContextText}${ragContextText}${brainContextText}
 ${sheetExecutionText}
 
@@ -965,7 +965,7 @@ const OWNER_CASE_TEXT_LIMITS = Object.freeze({
   problemSummary: 500,
   nextActionSummary: 500
 });
-const UNSAFE_OWNER_CASE_TEXT = /(?:(?:automation|worker|payload|stack|trace|exception|internal|bridge|gateway)(?:[_ -]?(?:error|failure))?|confirmation_request|\bRQ(?:\b|[-/])|거래\s*ID|\bbare\b|(?:\+?82[- ]?)?0\d{1,2}[- ]?\d{3,4}[- ]?\d{4})/i;
+const UNSAFE_OWNER_CASE_TEXT = /(?:(?:automation|worker|payload|stack|trace|exception|internal|bridge|gateway)(?:[_ -]?(?:error|failure))?|confirmation_request|\bRQ(?:\b|[-/])|거래\s*ID|^네[.!]?$|(?:\+?82[- ]?)?0\d{1,2}[- ]?\d{3,4}[- ]?\d{4})/i;
 const GENERIC_OWNER_CASE_TEXT = /^(?:\S+\s+)?(?:p0\s+)?(?:문의|예약 확인|스케줄 확인|일정 확인|확인 필요|처리 필요|확인하세요)[.!]?$/i;
 const CUSTOMER_DOCUMENT_ATTACHMENT_KEYS = new Set([
   'village_bankbook_copy',

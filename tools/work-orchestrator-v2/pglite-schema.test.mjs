@@ -120,7 +120,7 @@ test('owner-language validator rejects internal workflow jargon before it reache
   for (const payload of [
     { ...valid, owner_request_summary: 'RQ와 거래ID를 확인합니다.' },
     { ...valid, owner_problem_summary: 'confirmation_request_conflict 상태입니다.' },
-    { ...valid, owner_request_summary: '직원이 bare 네로 수락했습니다.' },
+    { ...valid, owner_request_summary: '네' },
     { ...valid, owner_next_action_summary: 'bridge와 gateway 상태를 확인합니다.' }
   ]) {
     const result = await db.query(

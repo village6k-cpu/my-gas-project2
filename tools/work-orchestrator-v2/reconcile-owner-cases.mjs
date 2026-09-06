@@ -3,7 +3,7 @@ const ASSIGNMENT_KEYS = [
   'problemSummary', 'nextActionSummary', 'taskKey'
 ];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const UNSAFE = /(01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4}|\brq(?:\b|[-/])|거래\s*id|confirmation_request|automation|worker|bridge|gateway|\bbare\b|timeout|exception|stack|payload|raw log)/i;
+const UNSAFE = /(01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4}|\brq(?:\b|[-/])|거래\s*id|confirmation_request|automation|worker|bridge|gateway|^네[.!]?$|timeout|exception|stack|payload|raw log)/i;
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
