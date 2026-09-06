@@ -112,6 +112,11 @@ test('owner-language validator rejects internal workflow jargon before it reache
     owner_task_key: 'finalize-booking',
     owner_case_context_status: 'available'
   };
+  const accepted = await db.query(
+    'select work_orchestrator_private.is_owner_case_payload_v2($1::jsonb) as valid',
+    [JSON.stringify(valid)]
+  );
+  assert.equal(accepted.rows[0].valid, true);
   for (const payload of [
     { ...valid, owner_request_summary: 'RQ와 거래ID를 확인합니다.' },
     { ...valid, owner_problem_summary: 'confirmation_request_conflict 상태입니다.' },
