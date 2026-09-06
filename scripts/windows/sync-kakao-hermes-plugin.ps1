@@ -144,6 +144,37 @@ function Get-ReviewedManifest {
     return $manifest
 }
 
+function Assert-RegisteredReservationChangeCapability {
+    param([Parameter(Mandatory = $true)][string]$SourceRoot)
+
+    $initPath = Join-Path $SourceRoot '__init__.py'
+    $clientPath = Join-Path $SourceRoot 'http_client.py'
+    $toolPath = Join-Path $SourceRoot 'registered_change_tool.py'
+    foreach ($requiredPath in @($initPath, $clientPath, $toolPath)) {
+        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+            throw "Registered reservation change capability is incomplete: '$([IO.Path]::GetFileName($requiredPath))' is missing."
+        }
+    }
+
+    $initSource = [IO.File]::ReadAllText($initPath, [Text.Encoding]::UTF8)
+    $clientSource = [IO.File]::ReadAllText($clientPath, [Text.Encoding]::UTF8)
+    $toolSource = [IO.File]::ReadAllText($toolPath, [Text.Encoding]::UTF8)
+    $requiredMarkers = @(
+        [pscustomobject]@{ source = $initSource; marker = 'from .registered_change_tool import handle_registered_reservation_change' },
+        [pscustomobject]@{ source = $initSource; marker = 'name="village_registered_reservation_change"' },
+        [pscustomobject]@{ source = $initSource; marker = 'register_registered_change_tool(ctx)' },
+        [pscustomobject]@{ source = $clientSource; marker = '/hermes/v1/tools/registered-reservation-change' },
+        [pscustomobject]@{ source = $toolSource; marker = 'def handle_registered_reservation_change' },
+        [pscustomobject]@{ source = $toolSource; marker = 'village-registered-reservation-change-request/v1' },
+        [pscustomobject]@{ source = $toolSource; marker = 'village-registered-reservation-change-receipt/v1' }
+    )
+    foreach ($required in $requiredMarkers) {
+        if (-not $required.source.Contains($required.marker)) {
+            throw "Registered reservation change capability is incomplete: required marker '$($required.marker)' is missing."
+        }
+    }
+}
+
 function Assert-CleanGitSource {
     param([Parameter(Mandatory = $true)][string]$SourceRoot)
     $repoOutput = @(& git -C $SourceRoot rev-parse --show-toplevel 2>&1)
@@ -398,6 +429,7 @@ Assert-NoReparsePoint -Path $sourceRoot -Recurse
 [void](Assert-CleanGitSource -SourceRoot $sourceRoot)
 Assert-TargetAncestorsSafe -Target $targetRoot -ProfileRoot $profileRoot
 $manifest = @(Get-ReviewedManifest -SourceRoot $sourceRoot)
+Assert-RegisteredReservationChangeCapability -SourceRoot $sourceRoot
 $manifestSha = Get-ManifestDigest -Manifest $manifest
 $configContent = if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     [IO.File]::ReadAllText($configPath, [Text.Encoding]::UTF8)

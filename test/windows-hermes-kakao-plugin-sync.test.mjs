@@ -27,8 +27,28 @@ function makeFixture() {
   mkdirSync(path.join(source, 'tests'), { recursive: true });
   mkdirSync(profile, { recursive: true });
   writeFileSync(path.join(source, 'plugin.yaml'), 'name: kakao_village\nkind: platform\nversion: 0.1.0\n');
-  writeFileSync(path.join(source, '__init__.py'), 'def register(ctx):\n    return ctx\n');
+  writeFileSync(path.join(source, '__init__.py'), [
+    'from .registered_change_tool import handle_registered_reservation_change',
+    'def register_registered_change_tool(ctx):',
+    '    ctx.register_tool(name="village_registered_reservation_change", handler=handle_registered_reservation_change)',
+    'def register(ctx):',
+    '    register_registered_change_tool(ctx)',
+    ''
+  ].join('\n'));
   writeFileSync(path.join(source, 'adapter.py'), 'VALUE = "fixture"\n');
+  writeFileSync(path.join(source, 'http_client.py'), [
+    'class BridgeClient:',
+    '    def registered_reservation_change(self, payload):',
+    '        return self._post("/hermes/v1/tools/registered-reservation-change", payload)',
+    ''
+  ].join('\n'));
+  writeFileSync(path.join(source, 'registered_change_tool.py'), [
+    'REGISTERED_CHANGE_REQUEST_SCHEMA_TAG = "village-registered-reservation-change-request/v1"',
+    'REGISTERED_CHANGE_RECEIPT_SCHEMA_TAG = "village-registered-reservation-change-receipt/v1"',
+    'def handle_registered_reservation_change(**kwargs):',
+    '    return kwargs',
+    ''
+  ].join('\n'));
   writeFileSync(path.join(source, 'README.md'), '# fixture\n');
   writeFileSync(path.join(source, 'tests', 'not-shipped.py'), 'raise AssertionError("must not ship")\n');
   writeFileSync(path.join(profile, 'config.yaml'), [
@@ -82,7 +102,7 @@ test('PlanOnly reports the exact reviewed manifest and merged config without cre
   assert.equal(result.configPlan.platforms.slack.enabled, true);
   assert.deepEqual(result.configPlan.platformToolsets.kakao_village, ['skills', 'village']);
   assert.deepEqual(result.fileManifest.map((entry) => entry.relativePath).sort(), [
-    'README.md', '__init__.py', 'adapter.py', 'plugin.yaml'
+    'README.md', '__init__.py', 'adapter.py', 'http_client.py', 'plugin.yaml', 'registered_change_tool.py'
   ].sort());
   for (const entry of result.fileManifest) {
     const bytes = readFileSync(path.join(fixture.source, entry.relativePath));
@@ -155,6 +175,29 @@ test('sync refuses missing descriptors, binaries, secrets, and source reparse es
       symlinkSync(outside, path.join(fixture.source, 'escape'), 'junction');
     }
     assert.match(runSync({ ...fixture, expectOk: false }), /descriptor|binary|executable|secret|reparse|unsafe/i);
+  }
+});
+
+test('sync refuses a source that would remove the registered reservation change capability', () => {
+  for (const incomplete of ['missing_tool', 'missing_registration', 'missing_route']) {
+    const fixture = makeFixture();
+    if (incomplete === 'missing_tool') {
+      execFileSync('git', ['rm', path.join('migration', 'hermes', 'plugins', 'kakao_village', 'registered_change_tool.py')], {
+        cwd: fixture.sourceRepo,
+      });
+    } else if (incomplete === 'missing_registration') {
+      writeFileSync(path.join(fixture.source, '__init__.py'), 'def register(ctx):\n    return ctx\n');
+      git(fixture.sourceRepo, 'add', '.');
+    } else {
+      writeFileSync(path.join(fixture.source, 'http_client.py'), 'class BridgeClient:\n    pass\n');
+      git(fixture.sourceRepo, 'add', '.');
+    }
+    git(fixture.sourceRepo, 'commit', '-m', `remove registered capability: ${incomplete}`);
+
+    assert.match(
+      runSync({ ...fixture, planOnly: true, expectOk: false }),
+      /registered reservation change capability|registered_change_tool|village_registered_reservation_change/i,
+    );
   }
 });
 
