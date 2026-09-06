@@ -28,6 +28,27 @@ assert.deepEqual(
 
 assert.deepEqual(
   JSON.parse(JSON.stringify(context._normalizeConfirmRequestSchedule_({
+    반출일: '2026-09-07',
+    반출시간: '08:30',
+    반납일: '',
+    반납시간: '',
+    일정미완성: true,
+    장비: [{ 이름: '소니 A7S3 바디세트', 수량: 1 }]
+  }))),
+  {
+    반출일: '2026-09-07',
+    반출시간: '08:00',
+    반납일: '',
+    반납시간: '',
+    일정미완성: true,
+    장비: [{ 이름: '소니 A7S3 바디세트', 수량: 1 }],
+    입력모드: 'full_plan'
+  },
+  'missing schedule fields must stay blank while known fields are normalized'
+);
+
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context._normalizeConfirmRequestSchedule_({
     반출일: '2026-06-01',
     반출시간: '12:59',
     반납일: '2026-06-02',

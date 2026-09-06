@@ -11488,11 +11488,10 @@ function _confirmRequestSameIdentity_(group, reqName, reqPhone) {
 }
 
 function _confirmRequestSamePeriod_(group, reqDate, reqStartTime, reqEndDate, reqEndTime) {
-  if (group.startDate !== reqDate) return false;
-  if (reqStartTime && group.startTime && reqStartTime !== group.startTime) return false;
-  if (reqEndDate && group.endDate && group.endDate !== reqEndDate) return false;
-  if (reqEndTime && group.endTime && reqEndTime !== group.endTime) return false;
-  return true;
+  return group.startDate === reqDate
+    && group.startTime === reqStartTime
+    && group.endDate === reqEndDate
+    && group.endTime === reqEndTime;
 }
 
 function _isMutableConfirmRequestGroup_(group) {
@@ -11604,7 +11603,7 @@ function _findDuplicateConfirmRequest_(sheet, req, requestedEquipItems) {
   var reqEndDate = _confirmRequestDateKey_(req.반납일);
   var reqEndTime = _confirmRequestTimeKey_(req.반납시간);
   var reqPhone = _confirmRequestPhoneKey_(req.연락처);
-  if (!reqName || !reqDate || !requestedEquipItems || requestedEquipItems.length === 0) return null;
+  if ((!reqName && !reqPhone) || !requestedEquipItems || requestedEquipItems.length === 0) return null;
 
   var groups = _buildConfirmRequestGroups_(sheet);
   for (var gi = 0; gi < groups.length; gi++) {
@@ -11615,6 +11614,31 @@ function _findDuplicateConfirmRequest_(sheet, req, requestedEquipItems) {
     return group;
   }
   return null;
+}
+
+function _findCompletableConfirmRequestGroups_(sheet, req, requestedEquipItems) {
+  var reqName = String(req.예약자명 || "").trim();
+  var reqPhone = _confirmRequestPhoneKey_(req.연락처);
+  var requestedPeriod = {
+    startDate: _confirmRequestDateKey_(req.반출일),
+    startTime: _confirmRequestTimeKey_(req.반출시간),
+    endDate: _confirmRequestDateKey_(req.반납일),
+    endTime: _confirmRequestTimeKey_(req.반납시간)
+  };
+  if ((!reqName && !reqPhone) || !requestedEquipItems || requestedEquipItems.length === 0) return [];
+  if (!requestedPeriod.startDate || !requestedPeriod.startTime || !requestedPeriod.endDate || !requestedPeriod.endTime) return [];
+
+  return _buildConfirmRequestGroups_(sheet).filter(function(group) {
+    if (!_isMutableConfirmRequestGroup_(group)) return false;
+    if (!_confirmRequestSameIdentity_(group, reqName, reqPhone)) return false;
+    if (!_confirmRequestEquipListEquivalent_(group.topLevelEquipItems, requestedEquipItems)) return false;
+    var groupPeriod = [group.startDate, group.startTime, group.endDate, group.endTime];
+    if (groupPeriod.every(Boolean)) return false;
+    return (!group.startDate || group.startDate === requestedPeriod.startDate)
+      && (!group.startTime || group.startTime === requestedPeriod.startTime)
+      && (!group.endDate || group.endDate === requestedPeriod.endDate)
+      && (!group.endTime || group.endTime === requestedPeriod.endTime);
+  });
 }
 
 function _findReplaceableConfirmRequestGroups_(sheet, req, requestedEquipItems) {
@@ -11750,7 +11774,35 @@ function _normalizeConfirmRequestSchedule_(request) {
   var endDate = _confirmRequestStrictDate_(req.반납일);
   var pickup = _confirmRequestTimeParts_(req.반출시간);
   var returned = _confirmRequestTimeParts_(req.반납시간);
-  if (!startDate || !endDate || !pickup || !returned || pickup.hour === 24) {
+  var hasCompleteSchedule = !!(startDate && endDate && pickup && returned && pickup.hour !== 24);
+  if (!hasCompleteSchedule && req.일정미완성 === true) {
+    if ((req.반출일 && !startDate) || (req.반납일 && !endDate) ||
+        (req.반출시간 && (!pickup || pickup.hour === 24)) || (req.반납시간 && !returned)) {
+      throw new Error("확인요청에 제공된 반출·반납 일시는 YYYY-MM-DD HH:MM 형식이어야 합니다.");
+    }
+    req.반출일 = startDate || "";
+    req.반출시간 = pickup ? String(pickup.hour).padStart(2, "0") + ":00" : "";
+    req.반납일 = endDate || "";
+    req.반납시간 = "";
+    if (returned) {
+      if (returned.hour === 24) {
+        if (!endDate) throw new Error("반납일 없이 24:00을 확인요청에 입력할 수 없습니다.");
+        req.반납일 = _confirmRequestAddDays_(endDate, 1);
+        req.반납시간 = "00:00";
+      } else if (returned.minute > 0 && returned.hour < 23) {
+        req.반납시간 = String(returned.hour + 1).padStart(2, "0") + ":00";
+      } else if (returned.minute > 0 && endDate) {
+        req.반납일 = _confirmRequestAddDays_(endDate, 1);
+        req.반납시간 = "00:00";
+      } else {
+        req.반납시간 = String(returned.hour).padStart(2, "0") + ":" + String(returned.minute).padStart(2, "0");
+      }
+    }
+    req.입력모드 = "full_plan";
+    req.일정미완성 = true;
+    return req;
+  }
+  if (!hasCompleteSchedule) {
     throw new Error("확인요청 반출·반납 일시는 YYYY-MM-DD HH:MM 형식이어야 합니다.");
   }
 
@@ -11770,6 +11822,7 @@ function _normalizeConfirmRequestSchedule_(request) {
   req.반납일 = endDate;
   req.반납시간 = String(returnHour).padStart(2, "0") + ":00";
   req.입력모드 = "full_plan";
+  delete req.일정미완성;
 
   var startMs = Date.parse(req.반출일 + "T" + req.반출시간 + ":00Z");
   var endMs = Date.parse(req.반납일 + "T" + req.반납시간 + ":00Z");
@@ -11930,6 +11983,35 @@ function _insertAndCheckRequest(req) {
     };
   }
 
+  var completableRequests = req.일정미완성 === true
+    ? []
+    : _findCompletableConfirmRequestGroups_(sheet, reqForDedupe, requestedEquipItems);
+  if (completableRequests.length > 1) {
+    throw new Error("일정을 보강할 수 있는 미완성 확인요청이 여러 건이라 자동 수정을 중단했습니다.");
+  }
+  if (completableRequests.length === 1) {
+    var completable = completableRequests[0];
+    var firstExistingRow = completable.rows[0];
+    sheet.getRange(firstExistingRow, 2, 1, 4).setNumberFormat("@").setValues([[
+      req.반출일, req.반출시간, req.반납일, req.반납시간
+    ]]);
+    if (!completable.phone && resolvedPhone) sheet.getRange(firstExistingRow, 12).setValue(resolvedPhone);
+    if (resolvedDiscount) sheet.getRange(firstExistingRow, 13).setValue(resolvedDiscount);
+    completable.rows.forEach(function(existingRow) {
+      sheet.getRange(existingRow, 8, 1, 3).clearContent();
+    });
+    sheet.getRange(firstExistingRow, 8).setValue("확인");
+    SpreadsheetApp.flush();
+    _processByReqID(sheet, firstExistingRow);
+    SpreadsheetApp.flush();
+    return {
+      reqID: completable.reqID,
+      completedExisting: true,
+      scheduleComplete: true,
+      results: _collectConfirmRequestResultsByReqID_(sheet, completable.reqID)
+    };
+  }
+
   var reqName = String(req.예약자명 || "").trim();
   var reqDate = _confirmRequestDateKey_(req.반출일);
   if (reqName && reqDate && requestedEquipNames.length > 0) {
@@ -12042,10 +12124,25 @@ function _insertAndCheckRequest(req) {
   }
   SpreadsheetApp.flush();
 
-  // 가용확인 실행
-  sheet.getRange(startRow, 8).setValue("확인");
-  SpreadsheetApp.flush();
-  _processByReqID(sheet, startRow);
+  var missingScheduleFields = [];
+  if (!req.반출일) missingScheduleFields.push("반출일");
+  if (!req.반출시간) missingScheduleFields.push("반출시간");
+  if (!req.반납일) missingScheduleFields.push("반납일");
+  if (!req.반납시간) missingScheduleFields.push("반납시간");
+  if (req.일정미완성 === true) {
+    var missingScheduleDetail = missingScheduleFields.join("·") + " 확인 필요";
+    for (var incompleteIndex = 0; incompleteIndex < items.length; incompleteIndex++) {
+      sheet.getRange(startRow + incompleteIndex, 8, 1, 3).setValues([[
+        "", "❓ 일정 확인 필요", missingScheduleDetail
+      ]]);
+    }
+    SpreadsheetApp.flush();
+  } else {
+    // 일정이 완전한 요청만 자동 가용확인을 실행한다.
+    sheet.getRange(startRow, 8).setValue("확인");
+    SpreadsheetApp.flush();
+    _processByReqID(sheet, startRow);
+  }
 
   // 가용확인 결과 읽기 — 세트 전개로 행이 늘어날 수 있으므로 reqID 기준으로 전체 읽기
   SpreadsheetApp.flush();
@@ -12077,7 +12174,12 @@ function _insertAndCheckRequest(req) {
     });
   }
 
-  var response = { reqID: reqID, results: results };
+  var response = {
+    reqID: reqID,
+    results: results,
+    scheduleComplete: req.일정미완성 !== true,
+    missingScheduleFields: missingScheduleFields
+  };
   if (replacedReqIDs.length > 0) {
     response.replacedReqIDs = replacedReqIDs;
     response.replacedRows = replacedRows;

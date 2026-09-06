@@ -117,6 +117,28 @@ assert.equal(
   '최상위 장비와 수량이 완전히 같으면 기존 RQ를 중복으로 재사용해야 한다'
 );
 
+const partialSheet = new FakeSheet([
+  requestRow({
+    reqID: 'RQ-partial', start: '2026-09-07', startTime: '08:00', end: '', endTime: '',
+    equip: '소니 A7S3 바디세트', qty: 1, name: '김성윤', phone: '010-6323-3116'
+  })
+]);
+const completeInquiry = {
+  예약자명: '김성윤', 연락처: '010-6323-3116',
+  반출일: '2026-09-07', 반출시간: '08:00', 반납일: '2026-09-08', 반납시간: '08:00'
+};
+assert.equal(
+  context._findDuplicateConfirmRequest_(partialSheet, completeInquiry, [{ name: '소니 A7S3 바디세트', qty: 1 }]),
+  null,
+  'a completed inquiry must not leave an exact partial duplicate unchanged'
+);
+assert.deepEqual(
+  context._findCompletableConfirmRequestGroups_(partialSheet, completeInquiry, [{ name: '소니 A7S3 바디세트', qty: 1 }])
+    .map((group) => group.reqID),
+  ['RQ-partial'],
+  'one compatible partial inquiry must be selected for in-place schedule completion'
+);
+
 const registeredSheet = new FakeSheet([
   requestRow({ reqID: 'RQ-registered', equip: '어퓨처 600X', qty: 1, name: '김재우', phone: '010-6403-9315', register: '등록', status: '등록완료', tradeId: '260622-999' })
 ]);

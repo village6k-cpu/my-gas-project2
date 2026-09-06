@@ -35,9 +35,12 @@ The rule applies to:
 - equipment replacements;
 - pickup or return date/time changes.
 
-A customer request without a later staff confirmation remains read-only: Hermes
-may check availability and prepare a draft or owner follow-up, but it must not
-mutate a reservation.
+For an existing RQ or registered trade, a customer-requested change without a
+later staff confirmation remains read-only: Hermes may check availability and
+prepare a draft or owner follow-up, but it must not mutate that existing record.
+This gate never applies to the initial intake of a new customer equipment
+inquiry: that inquiry must be captured in 확인요청 immediately, with unknown
+schedule fields left blank rather than waiting for a staff reply.
 
 ## AI-first boundary
 

@@ -47,8 +47,9 @@ function configureVillageApiInternalKeyV1(value) {
 function getConfirmationRequestSchema_() {
   return {
     fieldLanguage: "korean",
-    required: ["반출일", "반출시간", "반납일", "반납시간", "예약자명", "장비"],
-    optional: ["연락처", "할인유형", "업체명", "비고", "추가요청", "장비명원문보존"],
+    required: ["예약자명", "장비"],
+    optional: ["반출일", "반출시간", "반납일", "반납시간", "일정미완성", "연락처", "할인유형", "업체명", "비고", "추가요청", "장비명원문보존"],
+    schedulePolicy: "장비 문의는 일정이 불완전해도 일정미완성=true와 빈 필드로 먼저 저장. 네 일정 필드가 모두 있을 때만 가용확인 실행",
     formats: {
       반출일: "YYYY-MM-DD",
       반출시간: "HH:MM (두 자리, 예: 07:00)",
@@ -1623,6 +1624,9 @@ function runFunction(funcName, params) {
         executionTime: (new Date() - startTime) + "ms"
       };
       if (result.duplicate) response.duplicate = true;
+      if (result.completedExisting) response.completedExisting = true;
+      if (typeof result.scheduleComplete === "boolean") response.scheduleComplete = result.scheduleComplete;
+      if (Array.isArray(result.missingScheduleFields)) response.missingScheduleFields = result.missingScheduleFields;
       if (result.message) response.message = result.message;
       if (Array.isArray(result.replacedReqIDs)) {
         response.replacedReqIDs = result.replacedReqIDs.map(function(reqID) {

@@ -885,13 +885,14 @@ function scheduleDecisionFixture(overrides = {}) {
   });
 }
 
-test('staff-confirmed mutation prompt keeps customer-only requests read-only and selects the scope-specific native tool', () => {
+test('staff-confirmed mutation prompt captures initial customer inquiries immediately and selects the scope-specific mutation tool', () => {
   const prompt = buildHermesPrompt(
     { id: 'job-staff-confirmed-mutation', preview_text: '등록 예약 장비 변경' },
     { gatewayConfirmationToolAvailable: true }
   );
 
-  assert.match(prompt, /customer request without a later staff confirmation[\s\S]*staff_confirmed_mutation=null/i);
+  assert.match(prompt, /모든 고객 장비 문의[\s\S]*직원 답변을 기다리지 말고 즉시[\s\S]*village_confirmation_request/s);
+  assert.match(prompt, /최초 확인요청 입력에는 staff_confirmed_mutation이 필요 없다/s);
   assert.match(prompt, /pending_request[\s\S]*equipment_add[\s\S]*village_confirmation_request[\s\S]*additions_only/i);
   assert.match(prompt, /pending_request[\s\S]*(equipment_remove|equipment_replace|equipment_quantity_change)[\s\S]*replace_full_plan/i);
   assert.match(prompt, /registered_trade[\s\S]*village_registered_reservation_change[\s\S]*exactly once[\s\S]*before FINAL_JSON/i);
@@ -4441,7 +4442,7 @@ test('buildHermesPrompt keeps code as plumbing and requires AI-visible Kakao ver
   assert.match(prompt, /DevTools\/CDP.*bridge API/is);
   assert.doesNotMatch(prompt, /computer_use/i);
   assert.match(prompt, /코드.*판단.*금지/s);
-  assert.match(prompt, /Google Sheets.*API/s);
+  assert.match(prompt, /GAS.*API/s);
   assert.match(prompt, /FINAL_JSON/);
   assert.match(prompt, /job-1/);
 });
@@ -4805,12 +4806,12 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   assert.match(prompt, /할인유형: 고객DB I열이 카톡보다 우선/s);
   assert.match(prompt, /학생.*개인사업자\/프리랜서.*단골.*제휴.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
-  assert.match(prompt, /genuinely new.*예약형식.*should_write_to_sheet=true/is);
+  assert.match(prompt, /모든 고객 장비 문의.*확인요청 입력이 기본/s);
   assert.match(prompt, /기존 등록.*기존 RQ.*staff_confirmed_mutation/s);
   assert.doesNotMatch(prompt, /예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다/);
   assert.match(prompt, /불확실한 장비명.*AI가 카탈로그 전체를 비교해 판단/s);
   assert.match(prompt, /연락처.*고객DB.*확인요청 생성은 막지 말고/s);
-  assert.match(prompt, /missing phone is NOT a sheet-write blocker/s);
+  assert.match(prompt, /일정 일부\/연락처\/모델 세부가 부족해도.*버리지 않는다/s);
 });
 
 test('buildHermesPrompt makes the native confirmation tool verify both writes and claimed existing RQs', () => {
@@ -4820,8 +4821,10 @@ test('buildHermesPrompt makes the native confirmation tool verify both writes an
   );
 
   assert.match(prompt, /Gateway.*FINAL_JSON.*바깥 워커.*확인요청.*입력하지 않는다/s);
-  assert.match(prompt, /should_write_to_sheet=true.*village_confirmation_request.*반드시.*먼저 호출/s);
-  assert.match(prompt, /완성된.*decision.*should_write_to_sheet=true/s);
+  assert.match(prompt, /should_write_to_sheet=true.*village_confirmation_request.*한 번 호출한 뒤 FINAL_JSON/s);
+  assert.match(prompt, /모든 고객 장비 문의.*즉시.*village_confirmation_request/s);
+  assert.match(prompt, /일정.*불완전.*빈칸.*확인요청/s);
+  assert.doesNotMatch(prompt, /customer request without a later staff confirmation is read-only/i);
   assert.match(prompt, /existing_confirm_request_ids.*village_confirmation_request.*검증/s);
   assert.match(prompt, /should_write_to_sheet=false.*기존 RQ.*실재 여부/s);
   assert.match(prompt, /no_action.*입력 성공.*아니다/s);
@@ -6323,7 +6326,7 @@ test('validateAiDecisionContract rejects missing AI semantics instead of reconst
   const validation = validateAiDecisionContract(invalid);
 
   assert.equal(validation.valid, false);
-  assert.ok(validation.errors.includes('sheet_row_candidate.plan_complete must be true'));
+  assert.ok(validation.errors.some((error) => error.includes('sheet_row_candidate.plan_complete must be true')));
   assert.ok(validation.errors.some((error) => error.includes('start_date')));
   assert.ok(validation.errors.some((error) => error.includes('pickup_time')));
   assert.ok(validation.errors.some((error) => error.includes('discount_type')));
@@ -6378,7 +6381,7 @@ test('confirmation execution preflight rejects a complete sheet row when require
   });
 });
 
-test('staff-confirmed confirmation preflight names the missing duplicate evidence and accepts a repaired decision', () => {
+test('staff-confirmed unregistered equipment inquiry reaches the authoritative GAS duplicate boundary', () => {
   const decision = completeSheetDecision({
     safety_checks: {
       latest_customer_message_after_last_staff_reply: false,
@@ -6403,20 +6406,14 @@ test('staff-confirmed confirmation preflight names the missing duplicate evidenc
     }
   });
 
-  const missing = workerModule.validateVillageConfirmationExecutionDecision(decision);
-  assert.equal(missing.valid, false);
-  assert.match(missing.errors.join('|'), /duplicate check/i);
-
-  decision.safety_checks.duplicate_checked_contract_master = true;
-  decision.safety_checks.duplicate_checked_schedule_detail = true;
-  decision.safety_checks.duplicate_checked_request_sheet = true;
   assert.deepEqual(workerModule.validateVillageConfirmationExecutionDecision(decision), {
     valid: true,
     errors: []
   });
+  assert.equal(buildSheetAppendPayload(decision, { apiKey: 'secret' }).func, 'insertAndCheckRequest');
 });
 
-test('customer-turn confirmation writes require all three authoritative duplicate checks', () => {
+test('customer equipment inquiry reaches the authoritative GAS duplicate boundary without staff confirmation', () => {
   const unchecked = completeSheetDecision({
     safety_checks: {
       duplicate_checked_contract_master: false,
@@ -6425,17 +6422,37 @@ test('customer-turn confirmation writes require all three authoritative duplicat
     }
   });
   const validation = workerModule.validateVillageConfirmationExecutionDecision(unchecked);
-  assert.equal(validation.valid, false);
-  assert.match(validation.errors.join('|'), /contract master|schedule detail|request sheet|duplicate check/i);
-  assert.equal(buildSheetAppendPayload(unchecked, { apiKey: 'secret' }), null);
+  assert.deepEqual(validation, { valid: true, errors: [] });
+  assert.equal(buildSheetAppendPayload(unchecked, { apiKey: 'secret' }).func, 'insertAndCheckRequest');
+});
 
-  unchecked.safety_checks.duplicate_checked_contract_master = true;
-  unchecked.safety_checks.duplicate_checked_schedule_detail = true;
-  unchecked.safety_checks.duplicate_checked_request_sheet = true;
-  assert.deepEqual(workerModule.validateVillageConfirmationExecutionDecision(unchecked), {
+test('customer equipment inquiry with a missing return time builds one incomplete schedule intake without inventing it', () => {
+  const inquiry = completeSheetDecision({
+    safety_checks: {
+      duplicate_checked_contract_master: false,
+      duplicate_checked_schedule_detail: false,
+      duplicate_checked_request_sheet: false
+    },
+    sheet_row_candidate: {
+      plan_complete: false,
+      start_date: '2026-09-07',
+      pickup_time: '08:00',
+      end_date: '',
+      return_time: ''
+    }
+  });
+
+  assert.deepEqual(workerModule.validateVillageConfirmationExecutionDecision(inquiry), {
     valid: true,
     errors: []
   });
+  const payload = buildSheetAppendPayload(inquiry, { apiKey: 'secret' });
+  assert.equal(payload.func, 'insertAndCheckRequest');
+  assert.equal(payload.args.반출일, '2026-09-07');
+  assert.equal(payload.args.반출시간, '08:00');
+  assert.equal(payload.args.반납일, '');
+  assert.equal(payload.args.반납시간, '');
+  assert.equal(payload.args.일정미완성, true);
 });
 
 test('already_answered unregistered reservation stays valid when an actionable schedule follow-up preserves the work', () => {
@@ -6580,8 +6597,8 @@ test('buildHermesPrompt requires sender separation and customer turn clustering'
   assert.match(prompt, /latest customer\/inbound message or a cluster/s);
   assert.match(prompt, /안녕하세요.*27일날.*fx3 가능한가요/s);
   assert.match(prompt, /latest_customer_message_after_last_staff_reply/);
-  assert.match(prompt, /staff-confirmed-unregistered case/);
-  assert.match(prompt, /reservation_inquiry\.confirmed=true/);
+  assert.match(prompt, /직원 답변과 무관하게 누락된 최초 입력을 즉시 catch-up/);
+  assert.match(prompt, /should_write_to_sheet=true.*already_registered=false.*replyMode=no_reply.*no_auto_reply_sent=true/s);
   assert.match(prompt, /conversation_turns/);
 });
 
@@ -7242,7 +7259,7 @@ test('untyped additions-only registered booking never builds a confirmation payl
   assert.equal(payload, null);
 });
 
-test('buildSheetAppendPayload blocks reservation writes until every duplicate source is checked', () => {
+test('buildSheetAppendPayload delegates authoritative duplicate fencing to GAS', () => {
   const decision = {
     should_write_to_sheet: true,
     safety_checks: {
@@ -7270,7 +7287,8 @@ test('buildSheetAppendPayload blocks reservation writes until every duplicate so
   };
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
-  assert.equal(payload, null);
+  assert.equal(payload?.func, 'insertAndCheckRequest');
+  assert.deepEqual(payload?.args?.장비, [{ 이름: 'FX6', 수량: 1 }]);
 });
 
 test('buildSheetAppendPayload trusts an exact set-master name over the customer request phrase', () => {

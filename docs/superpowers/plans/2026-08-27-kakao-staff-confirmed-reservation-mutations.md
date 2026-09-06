@@ -568,7 +568,7 @@ Expected: generated cache directories are not staged.
 
 Require these behaviors in the prompt and validator:
 
-- customer request without a later staff confirmation: `staff_confirmed_mutation:null`, no mutation tool;
+- existing-RQ/registered change without a later staff confirmation: `staff_confirmed_mutation:null`, no mutation tool; this does not block immediate 확인요청 intake for a new customer equipment inquiry, even when schedule fields are missing;
 - pending request addition: existing `village_confirmation_request` with `additions_only`;
 - pending request removal/replacement/reduction: existing `village_confirmation_request` with `replace_full_plan`;
 - registered trade mutation: one `village_registered_reservation_change` call before final JSON;

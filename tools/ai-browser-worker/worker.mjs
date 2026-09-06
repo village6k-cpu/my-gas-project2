@@ -658,12 +658,12 @@ export function buildHermesPrompt(job, options = {}) {
   const sheetExecutionText = options.gatewayConfirmationToolAvailable
     ? `GATEWAY NATIVE SHEET EXECUTION CONTRACT:
 - In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
-- If a complete genuinely new or exact typed pending decision has should_write_to_sheet=true, call village_confirmation_request 반드시 먼저 호출하고, only then emit FINAL_JSON.
-- For that authorized write, call it with the 완성된 decision and complete sheet_row_candidate.
+- 모든 고객 장비 문의는 직원 답변을 기다리지 말고 즉시 should_write_to_sheet=true로 village_confirmation_request를 한 번 호출한 뒤 FINAL_JSON을 낸다. GAS가 확인요청/계약/스케줄 중복을 lock 안에서 판정한다.
+- 일정이 불완전해도 값을 추측하지 말고 모르는 date/time은 빈칸, plan_complete=false로 확인요청에 먼저 남긴다. 일정이 완전할 때만 가용확인이 실행된다.
 - When existing_confirm_request_ids names an unchanged existing RQ, call village_confirmation_request once with should_write_to_sheet=false to 검증 기존 RQ 실재 여부; never pre-verify a write.
 - Typed pending-RQ addition: one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only"; the executor verifies the exact RQ and merges the authoritative plan. Never pre-read with the operation fence.
 - Typed pending-RQ replacement: one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ.
-- A customer request without a later staff confirmation is read-only: set staff_confirmed_mutation=null and call no mutation tool.
+- 고객 장비 문의의 최초 확인요청 입력에는 staff_confirmed_mutation이 필요 없다. 직원 답변은 누락된 최초 입력의 read-catchup 또는 기존 예약 변경을 보강하는 후속 증거일 뿐이다.
 - For target_scope="pending_request" and kind="equipment_add", call village_confirmation_request once with additions_only. For pending_request equipment_remove, equipment_replace, equipment_quantity_change, or date_time_change, call village_confirmation_request once with replace_full_plan.
 - Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use only village_registered_reservation_change exactly once before FINAL_JSON. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
 - A registered_trade mutation must not call village_confirmation_request and must never claim that a new RQ is the registered change.
@@ -685,7 +685,7 @@ export function buildHermesPrompt(job, options = {}) {
 CRITICAL RULES:
 - This is AI-first. 코드의 역할은 queue/claim/API 호출 같은 plumbing뿐이다.
 - 코드가 고객 의도, 예약 여부, 날짜/시간/장비를 최종 판단하면 안 된다. 코드 판단 금지: AI가 화면과 맥락을 보고 판단하고, 코드는 queue/claim/API write만 수행한다.
-- Outer code will validate your typed decision but will never infer names/dates/equipment, merge a different equipment list, synthesize reply prose, choose attachments, bypass RAG, or reroute follow-ups from keywords. If a required field is incomplete, Hermes is asked to repair it.
+- Outer code will validate your typed decision but will never infer names/dates/equipment, merge a different equipment list, synthesize reply prose, choose attachments, bypass RAG, or reroute follow-ups from keywords. Never fabricate missing schedule data: capture a new equipment inquiry with blank unknown date/time fields.
 - 카카오 Channel Manager의 실제 대화 맥락은 outer worker가 제공한 live DevTools/CDP DOM 및 bridge API evidence로 확인하고, 화면에서 확인된 맥락을 우선한다.
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
@@ -695,8 +695,7 @@ CRITICAL RULES:
 - 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 일반 가격·환불정책·파손규정·세금 안내는 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
 - 예외(항상 사장 확인): 고객이 현재 대여/수령 장비의 기스·흠집·스크래치·파손·고장·작동이상·분실을 알린 실제 사고, 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의는 근거가 있어도 auto_send 금지. 계속 사용/그대로 수령/교체/배상 여부를 임의로 승인하지 말고 draft_only + owner_review_required=true + urgent damage_repair로 올린다.
 - follow_up_items의 alertLevel은 네 판단이다. 사장을 깨워야 하거나 즉시 확인하지 않으면 고객·금전·장비 피해가 커지는 사건만 "p0"로 하고 구체적인 alertReason을 쓴다. 단순히 priority가 urgent이거나 특정 단어가 있다는 이유만으로 p0로 올리지 않는다. 나머지는 "none"이다.
-- 예약 확정, 재고 가능 단정, 가격 확정은 근거 없이 단정하지 않는다. Genuinely new 예약형식만 확인요청 입력을 적극 수행한다.
-- Google Sheets API 입력에서 충분한 genuinely new 예약형식은 should_write_to_sheet=true가 기본이다.
+- 모든 신규 고객 장비 문의는 일정·연락처 완성도나 직원 답변 여부와 무관하게 should_write_to_sheet=true로 확인요청에 먼저 남긴다. 모르는 일정은 빈칸이며 재고 가능은 단정하지 않는다.
 
 CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 최근 1시간 내 새 메시지 후보라도 반드시 채팅방을 열고, 화면에서 보이는 메시지 + 가능하면 최근 24시간 맥락을 확인한다.
@@ -722,9 +721,9 @@ SENDER AND TURN-TAKING POLICY:
 - Customer/inbound is the chat customer/nickname side, determined from the Kakao room title, bubble side/labels, and surrounding message order. A nickname like hellodesk may be a customer if it is the room/customer side; do not assume from text alone.
 - The actionable trigger is normally the latest customer/inbound message or a cluster of consecutive customer/inbound messages after the last staff/outbound reply.
 - For read-catchup/backstop jobs, a short later bubble ("네", "감사합니다", "견적서 부탁드립니다") must not erase an earlier unresolved reservation-format request in the same post-staff customer cluster.
-- If newest meaningful message is staff/outbound, no new reply. Exception: staff-confirmed-unregistered case = customer reservation + staff confirmation + not found in contract/schedule/request; then set should_write_to_sheet=true, reservation_inquiry.confirmed=true, already_registered=false, replyMode=no_reply, no_auto_reply_sent=true.
+- If newest meaningful message is staff/outbound, no new reply. 앞선 고객 장비 문의가 확인요청/계약/스케줄 어디에도 없으면 직원 답변과 무관하게 누락된 최초 입력을 즉시 catch-up한다: should_write_to_sheet=true, already_registered=false, replyMode=no_reply, no_auto_reply_sent=true.
 - Customers often split one thought across several bubbles. Merge consecutive customer/inbound messages within the same recent turn before classification, e.g. "안녕하세요" + "27일날" + "fx3 가능한가요?" = one reservation/availability question.
-- For Sheets append, safety_checks.latest_customer_message_after_last_staff_reply must be true except for the staff-confirmed-unregistered case above. If sender order is unclear, set it false and should_write_to_sheet=false.
+- For Sheets append, safety_checks.latest_customer_message_after_last_staff_reply is true on the customer inquiry turn. A later staff/outbound turn may use false only for the exact unresolved customer equipment inquiry catch-up above. If sender order itself is unclear, do not mutate.
 - RECENT_BOT_SENDS에 없는 빌리지측 버블은 사장(사람)의 수동 응대다. 사장이 다룬 주제는 재답변·재확인 금지(no_reply), 사장 안내와 모순 금지.
 - 고객이 전화/오프라인으로 해결됐다고 말하면("전화로 안내받았습니다", "직원분께 확인 받았습니다", "이미 수령했습니다") 재확인 질문을 만들지 마라. 남은 실질 질문에만 답한다.
 - RECENT_BOT_SENDS와 같은 내용의 재발송 금지. 이미 물어본 질문은 반복 말고 no_reply 또는 후속카드로 넘겨라.
@@ -749,7 +748,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 할인유형: 고객DB I열이 카톡보다 우선. DB 값(학생/개인사업자/프리랜서/단골/제휴/일반)이 있으면 sheet_row_candidate.discount_type에 그대로 쓰고, 없을 때만 카톡에서 학생/개사프/일반 추론.
 - 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리한다. 없거나 동명이인이어도 확인요청 생성은 막지 말고 sheet_row_candidate.phone=""로 둔다. 연락처는 등록 단계 필수라 follow_up/답장에서는 연락처 요청을 남긴다.
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
-- 기존 레코드가 없는 genuinely new 예약형식만 확인요청 입력이 기본이다. 장비마다 matched+정확 카탈로그명 또는 explicit unmatched가 필요하다. 중복확인/연락처 없음은 신규 입력의 차단 사유가 아니다. F열은 matched면 정확명, unmatched면 고객 원문; Q/R에는 AI 설명 금지. 연락처 없으면 L열 공란.
+- 모든 고객 장비 문의는 기존 exact RQ/등록 거래가 확인되지 않으면 확인요청 입력이 기본이다. 일정 일부/연락처/모델 세부가 부족해도 장비 문의 자체를 버리지 않는다. 장비마다 matched+정확 카탈로그명 또는 explicit unmatched가 필요하다. 모델이 접근할 수 없는 중복조회 플래그는 쓰기 선행조건이 아니며 GAS가 lock 안에서 계약마스터·스케줄상세·확인요청 중복을 판정한다. F열은 matched면 정확명, unmatched면 고객 원문; Q/R에는 AI 설명 금지. 연락처 없으면 L열 공란.
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
 - 확인요청은 보수적인 정시 경계만 쓴다. 반출은 해당 시각의 시(hour)로 내림(12:59→12:00), 반납은 다음 시로 올림(18:01→19:00), 정시 HH:00은 그대로 둔다. 날짜와 함께 적힌 \`27일 24:00\`은 다음 날인 \`28일 00:00\`으로 정규화한다. 이 결과 반납이 반출 이후가 아니면 추측해서 쓰지 말고 확인 질문/후속조치를 만든다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
@@ -777,10 +776,10 @@ TASK:
 9-1. For FAQ/procedure/policy/components auto_send, use CURRENT_CONFIRMED_POLICY first, otherwise call RAG and fill rag_usage. Outer worker verifies current-policy match or high-confidence retrieved support. Never use RAG for current stock/booking/schedule truth.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 10-1. Doc types은 서류 생성/발송/발행만. 확인요청/예약/가용/스케줄/파손/반납/정산은 견적서 단어가 섞여도 doc 아님; primary item에 합친다.
-11. For genuinely new reservation-format requests with no registered trade/RQ, missing phone is NOT a sheet-write blocker. Search 고객DB by name; use one exact phone or leave phone="". 고객DB I열 discount_type outranks Kakao. Put missing equipment/duplicate lookup/phone in follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or unchanged duplicate. If newest is staff/outbound, write only staff-confirmed-unregistered.
+11. For every customer equipment inquiry with no exact registered trade/RQ, missing schedule fields, phone, or model detail are NOT sheet-write blockers. Search 고객DB by name; use one exact phone or leave phone="". 고객DB I열 discount_type outranks Kakao. Put missing details in follow_up/evidence, not Q/R. Set false only for non-equipment inquiry, unopened/mismatched chat, unclear sender order, or an authoritatively verified unchanged duplicate. If newest is staff/outbound, catch up the unresolved inquiry without sending a duplicate reply.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
-11-2. Separate top-level equipment. Genuinely new="full_plan"+complete plan; exact typed pending additions="additions_only"+delta; exact typed pending remove/replace/reduce="replace_full_plan"+final plan. Registered changes use the native route, never equipment_write_mode. Otherwise no write + one review.
-11-3. sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM. Village uses literal 24-hour time: 오전/오후 표시가 없는 \`5시\` means \`05:00\` and \`17시\` means \`17:00\`; only explicit \`오후 5시\` means \`17:00\`. 맥락을 추측해 12시간을 더하지 마라. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If the normalized return is not later than pickup, set should_write_to_sheet=false and create one review follow-up instead of guessing.
+11-2. Separate top-level equipment. New inquiry="full_plan"+all currently requested equipment; its schedule may be incomplete. exact typed pending additions="additions_only"+delta; exact typed pending remove/replace/reduce="replace_full_plan"+final plan. Registered changes use the native route, never equipment_write_mode. Otherwise no write + one review.
+11-3. Provided sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM; unknown components must be "" and plan_complete=false, never guessed. Village uses literal 24-hour time: 오전/오후 표시가 없는 \`5시\` means \`05:00\` and \`17시\` means \`17:00\`; only explicit \`오후 5시\` means \`17:00\`. 맥락을 추측해 12시간을 더하지 마라. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If a complete normalized range is impossible or contradictory, leave the uncertain component blank, capture the inquiry as incomplete, and create one review follow-up instead of dropping it or guessing.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
 12-1. For real-world mutations set requiresHumanAction=true, allowed actionFamily, stable businessKey; otherwise false, "none", "".
@@ -1128,11 +1127,21 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
     const row = decision.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'
       ? decision.sheet_row_candidate
       : {};
-    if (row.plan_complete !== true) errors.push('sheet_row_candidate.plan_complete must be true');
-    if (!isStrictIsoDate(row.start_date)) errors.push('sheet_row_candidate.start_date must be YYYY-MM-DD');
-    if (!isStrictIsoDate(row.end_date)) errors.push('sheet_row_candidate.end_date must be YYYY-MM-DD');
-    if (!isStrictConfirmRequestTime(row.pickup_time)) errors.push('sheet_row_candidate.pickup_time must be HH:MM');
-    if (!isStrictConfirmRequestTime(row.return_time)) errors.push('sheet_row_candidate.return_time must be HH:MM');
+    const incompleteNewInquiry = isIncompleteNewInquiryCapture(decision, row);
+    if (!incompleteNewInquiry && row.plan_complete !== true) {
+      errors.push('sheet_row_candidate.plan_complete must be true unless this is a new incomplete equipment inquiry');
+    }
+    for (const [field, validator, expected] of [
+      ['start_date', isStrictIsoDate, 'YYYY-MM-DD'],
+      ['end_date', isStrictIsoDate, 'YYYY-MM-DD'],
+      ['pickup_time', isStrictConfirmRequestTime, 'HH:MM'],
+      ['return_time', isStrictConfirmRequestTime, 'HH:MM']
+    ]) {
+      const value = text(row[field]).trim();
+      if ((!incompleteNewInquiry || value) && !validator(value)) {
+        errors.push(`sheet_row_candidate.${field} must be ${expected}${incompleteNewInquiry ? ' when provided' : ''}`);
+      }
+    }
     const customerTimeSource = text(decision.latest_customer_message_cluster).trim()
       || (Array.isArray(decision.conversation_turns)
         ? decision.conversation_turns
@@ -1447,10 +1456,7 @@ export function canAutoSendCustomerDocumentAssets(decision = {}, config = {}) {
 const REQUIRED_SHEET_SAFETY_CHECKS = [
   'kakao_conversation_opened',
   'did_not_classify_from_preview_only',
-  'latest_customer_message_after_last_staff_reply',
-  'duplicate_checked_contract_master',
-  'duplicate_checked_schedule_detail',
-  'duplicate_checked_request_sheet'
+  'latest_customer_message_after_last_staff_reply'
 ];
 
 function isStaffConfirmedUnregisteredSheetCandidate(decision = {}) {
@@ -1458,17 +1464,13 @@ function isStaffConfirmedUnregisteredSheetCandidate(decision = {}) {
   const reservation = decision?.reservation_inquiry || {};
   const equipment = Array.isArray(reservation.equipment_requested) ? reservation.equipment_requested : [];
   const hasReservationEvidence = reservation.is_reservation_inquiry === true || equipment.length > 0;
-  const duplicateChecked = checks.duplicate_checked_contract_master === true
-    && checks.duplicate_checked_schedule_detail === true
-    && checks.duplicate_checked_request_sheet === true;
   return checks.kakao_conversation_opened === true
     && checks.did_not_classify_from_preview_only === true
     && checks.latest_customer_message_after_last_staff_reply === false
     && checks.no_auto_reply_sent === true
     && hasReservationEvidence
     && reservation.confirmed === true
-    && reservation.already_registered === false
-    && duplicateChecked;
+    && reservation.already_registered === false;
 }
 
 function hasRequiredSheetSafetyChecks(decision) {
@@ -1489,11 +1491,6 @@ function sheetSafetyValidationErrors(decision = {}) {
   if (checks.did_not_classify_from_preview_only !== true) {
     errors.push('sheet writes require safety_checks.did_not_classify_from_preview_only=true');
   }
-  if (checks.duplicate_checked_contract_master !== true
-    || checks.duplicate_checked_schedule_detail !== true
-    || checks.duplicate_checked_request_sheet !== true) {
-    errors.push('sheet writes require contract master, schedule detail, and request sheet duplicate checks');
-  }
   if (checks.latest_customer_message_after_last_staff_reply === false) {
     if (checks.no_auto_reply_sent !== true) {
       errors.push('staff-confirmed sheet writes require safety_checks.no_auto_reply_sent=true');
@@ -1511,6 +1508,28 @@ function sheetSafetyValidationErrors(decision = {}) {
     errors.push('sheet writes require an explicit boolean safety_checks.latest_customer_message_after_last_staff_reply');
   }
   return errors.length ? errors : ['sheet writes require explicit safety_checks that prove the Kakao conversation state'];
+}
+
+function isIncompleteNewInquiryCapture(decision = {}, row = {}) {
+  const reservation = decision?.reservation_inquiry || {};
+  const equipment = Array.isArray(reservation.equipment_requested) ? reservation.equipment_requested : [];
+  const planned = Array.isArray(row.equipment) ? row.equipment : [];
+  const existingIds = Array.isArray(decision.existing_confirm_request_ids)
+    ? decision.existing_confirm_request_ids.filter((value) => text(value).trim())
+    : [];
+  const mode = text(row.equipment_write_mode).trim();
+  const hasMissingScheduleField = [row.start_date, row.pickup_time, row.end_date, row.return_time]
+    .some((value) => !text(value).trim());
+  return decision.should_write_to_sheet === true
+    && row.plan_complete === false
+    && hasMissingScheduleField
+    && reservation.is_reservation_inquiry === true
+    && reservation.already_registered === false
+    && equipment.length > 0
+    && planned.length > 0
+    && existingIds.length === 0
+    && !decision.staff_confirmed_mutation
+    && (!mode || mode === 'full_plan');
 }
 
 export function resolveEquipmentCatalogDecision(decision = {}, catalogSnapshot = {}) {
@@ -1708,6 +1727,42 @@ export function normalizeConfirmRequestWindowForSheet(row = {}) {
   return normalized;
 }
 
+function partialConfirmRequestWindowForSheet(row = {}) {
+  const raw = {
+    start_date: text(row.start_date).trim(),
+    pickup_time: text(row.pickup_time).trim(),
+    end_date: text(row.end_date).trim(),
+    return_time: text(row.return_time).trim()
+  };
+  if (raw.start_date && !strictConfirmRequestDate(raw.start_date)) return null;
+  if (raw.end_date && !strictConfirmRequestDate(raw.end_date)) return null;
+  const pickup = raw.pickup_time ? confirmRequestTimeParts(raw.pickup_time) : null;
+  const returned = raw.return_time ? confirmRequestTimeParts(raw.return_time) : null;
+  if ((raw.pickup_time && (!pickup || pickup.hour === 24)) || (raw.return_time && !returned)) return null;
+
+  const normalized = {
+    start_date: raw.start_date,
+    pickup_time: pickup ? `${String(pickup.hour).padStart(2, '0')}:00` : '',
+    end_date: raw.end_date,
+    return_time: ''
+  };
+  if (returned) {
+    if (returned.hour === 24) {
+      if (!normalized.end_date) return null;
+      normalized.end_date = addDaysToYmd(normalized.end_date, 1);
+      normalized.return_time = '00:00';
+    } else if (returned.minute > 0 && returned.hour < 23) {
+      normalized.return_time = `${String(returned.hour + 1).padStart(2, '0')}:00`;
+    } else if (returned.minute > 0 && normalized.end_date) {
+      normalized.end_date = addDaysToYmd(normalized.end_date, 1);
+      normalized.return_time = '00:00';
+    } else {
+      normalized.return_time = `${String(returned.hour).padStart(2, '0')}:${String(returned.minute).padStart(2, '0')}`;
+    }
+  }
+  return normalized;
+}
+
 const CONFIRM_REQUEST_INTERNAL_NOTE_PATTERN = /(?:카카오|원문|고객\s*메시지|메시지에서|예약형식|가용\s*확인|가용확인|확인요청|계약마스터|스케줄상세|고객DB|중복|정규화|세트마스터|장비마스터|모델\s*선택|미등록|AI|자동화|worker|reason|evidence|follow[_\s-]*up|후속|검토\s*필요|안내\s*필요|고객에게|답변|시트|등록\s*대상|작성\s*필요)/i;
 
 function sanitizeConfirmRequestFreeText(value = '', { maxLength = 180 } = {}) {
@@ -1737,7 +1792,9 @@ export function buildSheetAppendPayload(decision, options = {}) {
   const row = decision.sheet_row_candidate || {};
   const equipment = normalizeSheetEquipmentItems(decision);
   if (!equipment.length) return null;
-  const requestWindow = normalizeConfirmRequestWindowForSheet(row);
+  const incompleteSchedule = isIncompleteNewInquiryCapture(decision, row);
+  const requestWindow = normalizeConfirmRequestWindowForSheet(row)
+    || (incompleteSchedule ? partialConfirmRequestWindowForSheet(row) : null);
   if (!requestWindow) return null;
   const memo = sanitizeConfirmRequestFreeText(row.memo || '', { maxLength: 180 });
   const extra = sanitizeConfirmRequestFreeText(row.extra_request || '', { maxLength: 180 });
@@ -1759,6 +1816,7 @@ export function buildSheetAppendPayload(decision, options = {}) {
     장비명원문보존: true,
     장비: equipment.map((item) => ({ 이름: item.item, 수량: item.quantity }))
   };
+  if (incompleteSchedule) args.일정미완성 = true;
   const pendingMutation = decision?.staff_confirmed_mutation?.target_scope === 'pending_request'
     ? decision.staff_confirmed_mutation
     : null;
