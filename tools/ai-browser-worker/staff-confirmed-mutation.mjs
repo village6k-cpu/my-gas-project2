@@ -189,7 +189,11 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
   const registered = scope === 'registered_trade';
   if (registered) {
     if (!TRADE_ID.test(text(mutation.trade_id))) errors.push('trade_id is invalid');
-    if (Object.hasOwn(mutation, 'request_id')) errors.push('request_id is forbidden for registered_trade');
+    if (mutation.kind === 'date_time_change') {
+      if (Object.hasOwn(mutation, 'request_id')) errors.push('request_id is forbidden for registered date_time_change');
+    } else if (!REQUEST_ID.test(text(mutation.request_id))) {
+      errors.push('registered equipment mutation requires one exact request_id');
+    }
     validatePeriod(mutation.expected_period, 'expected_period', errors);
     const expectedInstant = periodInstant(mutation.expected_period);
     if (expectedInstant && expectedInstant.end <= expectedInstant.start) {
@@ -227,6 +231,7 @@ export function buildRegisteredTradeCorrectionInput(mutation, operationId) {
   return {
     tradeId: mutation.trade_id,
     operationId: normalizedOperationId,
+    ...(mutation.kind === 'date_time_change' ? {} : { sourceRequestId: mutation.request_id }),
     expectedPeriod: {
       startDate: mutation.expected_period.start_date,
       startTime: mutation.expected_period.start_time,
@@ -307,11 +312,22 @@ export async function executeVillageRegisteredReservationChange(request = {}, op
     await assertCurrentClaim();
     const result = await runner({ config, input });
     const authoritativeReadback = result?.authoritativeReadback;
+    const requestFinalization = result?.requestFinalization;
+    const requiresRequestFinalization = mutation.kind !== 'date_time_change';
+    const hasExactRequestFinalization = !requiresRequestFinalization || (
+      isRecord(requestFinalization)
+      && requestFinalization.requestId === mutation.request_id
+      && requestFinalization.tradeId === mutation.trade_id
+      && requestFinalization.status === '등록완료(기존거래 보강)'
+      && isRecord(authoritativeReadback?.requestFinalization)
+      && JSON.stringify(authoritativeReadback.requestFinalization) === JSON.stringify(requestFinalization)
+    );
     const hasExactAuthoritativeEnvelope = isRecord(authoritativeReadback)
       && isRecord(authoritativeReadback.before)
       && isRecord(authoritativeReadback.after)
       && isRecord(result?.readback)
-      && JSON.stringify(authoritativeReadback.after) === JSON.stringify(result.readback);
+      && JSON.stringify(authoritativeReadback.after) === JSON.stringify(result.readback)
+      && hasExactRequestFinalization;
     if (result?.ok !== true || result?.verified !== true || text(result.tradeId) !== mutation.trade_id || !hasExactAuthoritativeEnvelope) {
       const appliedStages = Array.isArray(result?.appliedStages) ? result.appliedStages : [];
       return buildReceipt({

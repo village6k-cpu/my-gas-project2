@@ -11921,7 +11921,6 @@ function _insertAndCheckRequest(req) {
     if (!matchedName) return null;
     return { name: matchedName, qty: e.수량 || 1 };
   }).filter(function(item) { return item && item.name; });
-  var requestedEquipNames = requestedEquipItems.map(function(item) { return item.name; });
   var staffConfirmedPendingFence = _resolveStaffConfirmedPendingRequestFence_(
     sheet,
     req.staff_confirmed_pending_mutation
@@ -11963,24 +11962,24 @@ function _insertAndCheckRequest(req) {
   var resolvedDiscount = _resolveConfirmRequestDiscountOrBlank_(req.할인유형 || req.업체명, dbDiscount);
   var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone, 할인유형: resolvedDiscount });
 
-  // 장비목록이 달라도 같은 실제 고객의 exact 대여기간에 이미 등록 거래가 있으면
-  // 새 확인요청이 아니라 registered_reservation_change 경로여야 한다.
+  // 같은 고객/기간의 등록 거래가 있어도 고객의 새 장비 문의는 먼저 확인요청에 남긴다.
+  // 기존 스케줄을 실제로 바꾸는 것은 이후 직원확정 registered_reservation_change가
+  // 이 RQ를 exact sourceRequestId로 다시 검증한 뒤에만 수행한다.
   var registeredTradeId = _findRegisteredTradeForConfirmRequest_(ss, reqForDedupe);
-  if (registeredTradeId) {
-    throw new Error("기존 등록 예약 변경은 확인요청으로 입력할 수 없습니다 (거래ID: " + registeredTradeId + ")");
-  }
 
   // ── 중복 체크: 같은 예약자명/연락처 + 반출·반납창 + 같은 최상위 장비/수량 ──
   var duplicateRequest = staffConfirmedPendingFence
     ? null
     : _findDuplicateConfirmRequest_(sheet, reqForDedupe, requestedEquipItems);
   if (duplicateRequest) {
-    return {
+    var duplicateResponse = {
       reqID: duplicateRequest.reqID,
       duplicate: true,
       message: "중복 요청: 동일한 예약자/반출일시/장비 조합이 이미 존재합니다 (" + duplicateRequest.reqID + ")",
       results: _collectConfirmRequestResultsByReqID_(sheet, duplicateRequest.reqID)
     };
+    if (registeredTradeId) duplicateResponse.matchedRegisteredTradeId = registeredTradeId;
+    return duplicateResponse;
   }
 
   var completableRequests = req.일정미완성 === true
@@ -12004,22 +12003,14 @@ function _insertAndCheckRequest(req) {
     SpreadsheetApp.flush();
     _processByReqID(sheet, firstExistingRow);
     SpreadsheetApp.flush();
-    return {
+    var completedResponse = {
       reqID: completable.reqID,
       completedExisting: true,
       scheduleComplete: true,
       results: _collectConfirmRequestResultsByReqID_(sheet, completable.reqID)
     };
-  }
-
-  var reqName = String(req.예약자명 || "").trim();
-  var reqDate = _confirmRequestDateKey_(req.반출일);
-  if (reqName && reqDate && requestedEquipNames.length > 0) {
-    // 스케줄상세(등록 완료된 건)에서도 중복 체크
-    var dupTid = checkDuplicateRequest(ss, reqName, reqDate, requestedEquipNames, resolvedPhone);
-    if (dupTid) {
-      throw new Error("중복 요청: 동일 건이 이미 예약 등록되어 있습니다 (거래ID: " + dupTid + ")");
-    }
+    if (registeredTradeId) completedResponse.matchedRegisteredTradeId = registeredTradeId;
+    return completedResponse;
   }
 
   // 요청ID는 stale/등록완료 행이 삭제된 뒤에도 Script Properties의 날짜별 상한을
@@ -12180,6 +12171,7 @@ function _insertAndCheckRequest(req) {
     scheduleComplete: req.일정미완성 !== true,
     missingScheduleFields: missingScheduleFields
   };
+  if (registeredTradeId) response.matchedRegisteredTradeId = registeredTradeId;
   if (replacedReqIDs.length > 0) {
     response.replacedReqIDs = replacedReqIDs;
     response.replacedRows = replacedRows;
@@ -16152,6 +16144,7 @@ function _findRegisteredTradeForConfirmRequest_(ss, req) {
   if ((!reqName && !reqPhone) || !reqStartDate || !reqStartTime || !reqEndDate || !reqEndTime) return null;
 
   var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getValues();
+  var matchedTradeIds = {};
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
     var tradeId = String(row[0] || "").trim();
@@ -16167,9 +16160,12 @@ function _findRegisteredTradeForConfirmRequest_(ss, req) {
         || _confirmRequestTimeKey_(row[5]) !== reqStartTime
         || _confirmRequestDateKey_(row[6]) !== reqEndDate
         || _confirmRequestTimeKey_(row[7]) !== reqEndTime) continue;
-    return tradeId;
+    matchedTradeIds[tradeId] = true;
   }
-  return null;
+  var exactTradeIds = Object.keys(matchedTradeIds);
+  // 한 문의를 어느 등록 거래에 반영할지 유일하게 증명될 때만 연결한다.
+  // 복수 후보는 확인요청 자체는 남기되 자동 등록변경을 fail-closed 한다.
+  return exactTradeIds.length === 1 ? exactTradeIds[0] : null;
 }
 
 /**
@@ -18327,17 +18323,23 @@ function parseWithClaude(text, imageBase64, imageMediaType) {
 }
 function normalizeRegisteredTradeCorrection_(args) {
   args = args || {};
-  var allowed = { tradeId: true, operationId: true, expectedPeriod: true, dateChange: true, remove: true, add: true };
+  var allowed = { tradeId: true, operationId: true, sourceRequestId: true, expectedPeriod: true, dateChange: true, remove: true, add: true };
   Object.keys(args).forEach(function(key) {
     if (!allowed[key]) throw new Error('지원하지 않거나 금지된 등록거래 보정 필드: ' + key);
   });
   var tradeId = String(args.tradeId || '').trim();
   var operationId = String(args.operationId || '').trim();
+  var sourceRequestId = args.sourceRequestId === undefined
+    ? null
+    : String(args.sourceRequestId || '').trim().toUpperCase();
   if (!/^\d{6}-\d{3,}$/.test(tradeId)) throw new Error('tradeId는 YYMMDD-NNN 형식이어야 합니다');
   // Internal stage ids append ':add' or ':remove'; keep the longest derived id
   // within normalizeDashboardMutationId_'s 120-character boundary.
   if (operationId.length < 8 || operationId.length > 113 || !/^[A-Za-z0-9_.:-]+$/.test(operationId)) {
     throw new Error('operationId 형식이 올바르지 않습니다');
+  }
+  if (sourceRequestId !== null && !/^RQ-\d{6}-\d{3}$/.test(sourceRequestId)) {
+    throw new Error('sourceRequestId는 RQ-YYMMDD-NNN 형식이어야 합니다');
   }
 
   function validDate_(value, label) {
@@ -18439,7 +18441,241 @@ function normalizeRegisteredTradeCorrection_(args) {
   });
   if (add.length > 100) throw new Error('add는 최대 100개입니다');
   if (!dateChange && !remove.length && !add.length) throw new Error('날짜·제거·추가 중 하나 이상이 필요합니다');
-  return { tradeId: tradeId, operationId: operationId, expectedPeriod: expectedPeriod, dateChange: dateChange, remove: remove, add: add };
+  if (sourceRequestId && !remove.length && !add.length) {
+    throw new Error('sourceRequestId는 장비 추가·삭제·교체 변경에만 사용할 수 있습니다');
+  }
+  return {
+    tradeId: tradeId,
+    operationId: operationId,
+    sourceRequestId: sourceRequestId,
+    expectedPeriod: expectedPeriod,
+    dateChange: dateChange,
+    remove: remove,
+    add: add
+  };
+}
+
+function _registeredTradeSourceRequestPlan_(correction) {
+  var sourceRows = correction.add.length ? correction.add.map(function(row) {
+    return { name: row.name, qty: row.qty };
+  }) : correction.remove.map(function(row) {
+    return { name: row.expectedName, qty: row.expectedQty || 1 };
+  });
+  if (!sourceRows.length) throw new Error('sourceRequestId 장비 변경 plan이 비어 있습니다');
+  return sourceRows;
+}
+
+function _registeredTradeSourceRequestFingerprint_(group) {
+  return JSON.stringify({
+    requestId: String(group.reqID || '').trim().toUpperCase(),
+    rows: (group.rows || []).slice(),
+    name: String(group.name || '').trim(),
+    phone: _confirmRequestPhoneKey_(group.phone),
+    period: [group.startDate, group.startTime, group.endDate, group.endTime],
+    equipment: _confirmRequestEquipListSignature_(group.topLevelEquipItems)
+  });
+}
+
+/**
+ * 등록 변경의 source RQ를 첫 ScriptLock 안에서 exact 거래/기간/장비 delta로 검증한다.
+ * 유사 고객, 유사 기간, 다른 RQ를 추측해서 연결하지 않는다.
+ */
+function _resolveRegisteredTradeSourceRequest_(ss, correction, options) {
+  options = options || {};
+  if (!correction.sourceRequestId) return null;
+  var sheet = ss.getSheetByName('확인요청');
+  if (!sheet) throw new Error('sourceRequestId 확인요청 시트를 찾을 수 없습니다');
+  var groups = _buildConfirmRequestGroups_(sheet).filter(function(group) {
+    return String(group.reqID || '').trim().toUpperCase() === correction.sourceRequestId;
+  });
+  if (groups.length !== 1) {
+    throw new Error('sourceRequestId 확인요청을 정확히 1건 찾을 수 없습니다: ' + correction.sourceRequestId);
+  }
+  var group = groups[0];
+  if (!_isMutableConfirmRequestGroup_(group)) {
+    var recoveryStatus = '등록완료(기존거래 보강)';
+    var exactlyFinalized = options.allowExactFinalized === true &&
+      group.rows.length > 0 &&
+      group.registerActions.length === group.rows.length &&
+      group.statuses.length === group.rows.length &&
+      group.tradeIds.length === group.rows.length &&
+      group.registerActions.every(function(value) { return value === '등록'; }) &&
+      group.statuses.every(function(value) { return value === recoveryStatus; }) &&
+      group.tradeIds.every(function(value) { return value === correction.tradeId; });
+    if (!exactlyFinalized) {
+      throw new Error('sourceRequestId 확인요청은 이미 처리 중이거나 종결되었습니다: ' + correction.sourceRequestId);
+    }
+  }
+  var linkedTradeId = _findRegisteredTradeForConfirmRequest_(ss, {
+    예약자명: group.name,
+    연락처: group.phone,
+    반출일: group.startDate,
+    반출시간: group.startTime,
+    반납일: group.endDate,
+    반납시간: group.endTime
+  });
+  if (linkedTradeId !== correction.tradeId) {
+    throw new Error('sourceRequestId의 고객/기간이 대상 등록거래와 정확히 일치하지 않습니다');
+  }
+  var sourcePlan = _registeredTradeSourceRequestPlan_(correction);
+  if (!_confirmRequestEquipListEquivalent_(group.topLevelEquipItems, sourcePlan)) {
+    throw new Error('sourceRequestId 장비 plan이 등록 변경 delta와 정확히 일치하지 않습니다');
+  }
+  return {
+    requestId: correction.sourceRequestId,
+    sheet: sheet,
+    fingerprint: _registeredTradeSourceRequestFingerprint_(group),
+    rowCount: group.rows.length,
+    alreadyFinalized: !_isMutableConfirmRequestGroup_(group)
+  };
+}
+
+/**
+ * 계약서 재생성과 최종 스케줄 readback 뒤, 두 번째 ScriptLock 안에서 source RQ를 종결한다.
+ * 첫 preflight 이후 RQ가 조금이라도 바뀌면 쓰지 않고 partial/human-review로 남긴다.
+ */
+function _finalizeRegisteredTradeSourceRequest_(ss, correction, sourceFence) {
+  var current = _resolveRegisteredTradeSourceRequest_(ss, correction);
+  if (!current || current.requestId !== sourceFence.requestId ||
+      current.fingerprint !== sourceFence.fingerprint || current.rowCount !== sourceFence.rowCount) {
+    throw new Error('sourceRequestId 확인요청이 preflight 이후 변경되었습니다');
+  }
+  var sheet = current.sheet;
+  var lastRow = sheet.getLastRow();
+  var allData = lastRow >= 2 ? sheet.getRange(2, 1, lastRow - 1, 18).getValues() : [];
+  var statusLabel = '등록완료(기존거래 보강)';
+  markRequestRegistered_(sheet, allData, current.requestId, correction.tradeId, statusLabel);
+  SpreadsheetApp.flush();
+  var finalized = _buildConfirmRequestGroups_(sheet).filter(function(group) {
+    return String(group.reqID || '').trim().toUpperCase() === current.requestId;
+  });
+  if (finalized.length !== 1 || finalized[0].rows.length !== current.rowCount ||
+      finalized[0].registerActions.length !== current.rowCount ||
+      finalized[0].statuses.length !== current.rowCount ||
+      finalized[0].tradeIds.length !== current.rowCount ||
+      finalized[0].registerActions.some(function(value) { return value !== '등록'; }) ||
+      finalized[0].statuses.some(function(value) { return value !== statusLabel; }) ||
+      finalized[0].tradeIds.some(function(value) { return value !== correction.tradeId; })) {
+    throw new Error('sourceRequestId 확인요청 종결 readback이 일치하지 않습니다');
+  }
+  return {
+    requestId: current.requestId,
+    tradeId: correction.tradeId,
+    status: statusLabel,
+    rowCount: current.rowCount
+  };
+}
+
+function _normalizeRegisteredTradeSourceRequestRecovery_(args) {
+  args = args || {};
+  var allowed = {
+    tradeId: true, sourceRequestId: true, expectedPeriod: true,
+    expectedSourcePlan: true, expectedTopLevelQuantities: true
+  };
+  Object.keys(args).forEach(function(key) {
+    if (!allowed[key]) throw new Error('지원하지 않거나 금지된 source RQ 복구 필드: ' + key);
+  });
+  var sourceRequestId = String(args.sourceRequestId || '').trim().toUpperCase();
+  var correction = normalizeRegisteredTradeCorrection_({
+    tradeId: args.tradeId,
+    operationId: 'source-rq-recovery:' + sourceRequestId,
+    sourceRequestId: sourceRequestId,
+    expectedPeriod: args.expectedPeriod,
+    remove: [],
+    add: args.expectedSourcePlan
+  });
+  var rawQuantities = args.expectedTopLevelQuantities;
+  if (!rawQuantities || typeof rawQuantities !== 'object' || Array.isArray(rawQuantities)) {
+    throw new Error('expectedTopLevelQuantities는 정확한 최상위 품목 수량 객체여야 합니다');
+  }
+  var names = Object.keys(rawQuantities);
+  if (!names.length || names.length > 200) {
+    throw new Error('expectedTopLevelQuantities는 1~200개 품목이어야 합니다');
+  }
+  var expectedTopLevelQuantities = {};
+  names.forEach(function(rawName) {
+    var name = String(rawName || '').trim();
+    var qty = rawQuantities[rawName];
+    if (!name || name.length > 160 || name !== rawName) {
+      throw new Error('expectedTopLevelQuantities 장비명이 정확하지 않습니다');
+    }
+    if (typeof qty !== 'number' || !Number.isInteger(qty) || qty < 1 || qty > 999) {
+      throw new Error('expectedTopLevelQuantities 수량은 1~999 정수여야 합니다: ' + name);
+    }
+    expectedTopLevelQuantities[name] = qty;
+  });
+  return { correction: correction, expectedTopLevelQuantities: expectedTopLevelQuantities };
+}
+
+function _registeredTradeTopLevelQuantitySignature_(quantities) {
+  return Object.keys(quantities || {}).filter(function(name) {
+    return Number(quantities[name]) > 0;
+  }).sort().map(function(name) {
+    return name + '=' + Number(quantities[name]);
+  }).join('|');
+}
+
+/**
+ * 스케줄 변경은 이미 성공했지만 source RQ 종결 영수증만 유실된 경우의 운영 복구 경계.
+ * 현재 등록거래 전체 수량/기간과 exact RQ plan을 한 ScriptLock 안에서 재검증하며,
+ * 스케줄·계약서·고객 메시지는 절대 재실행하지 않는다.
+ */
+function finalizeRegisteredTradeSourceRequestRecovery(args) {
+  var normalized = _normalizeRegisteredTradeSourceRequestRecovery_(args);
+  var correction = normalized.correction;
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(1500)) {
+    return {
+      success: false, code: 'BUSY', retryable: false,
+      error: '다른 변경 작업이 진행 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.',
+      customerNotificationSent: false
+    };
+  }
+  try {
+    var current = readRegisteredTradeCorrectionState_(correction.tradeId, false);
+    var expected = correction.expectedPeriod;
+    var periodKey = [expected.startDate, expected.startTime, expected.endDate, expected.endTime].join('|');
+    if (current.contract.startDate !== expected.startDate ||
+        current.contract.startTime !== expected.startTime ||
+        current.contract.endDate !== expected.endDate ||
+        current.contract.endTime !== expected.endTime ||
+        current.schedule.periods.length !== 1 || current.schedule.periods[0] !== periodKey) {
+      throw new Error('source RQ 복구 baseline period mismatch');
+    }
+    var actualQuantities = current.schedule.topLevelQuantities || {};
+    if (_registeredTradeTopLevelQuantitySignature_(actualQuantities) !==
+        _registeredTradeTopLevelQuantitySignature_(normalized.expectedTopLevelQuantities)) {
+      throw new Error('source RQ 복구 최상위 품목 수량 readback 불일치');
+    }
+    correction.add.forEach(function(entry) {
+      if (Number(actualQuantities[entry.name]) < entry.qty) {
+        throw new Error('source RQ 장비가 현재 등록거래에 반영되지 않았습니다: ' + entry.name);
+      }
+    });
+    var sourceFence = _resolveRegisteredTradeSourceRequest_(
+      SpreadsheetApp.getActiveSpreadsheet(), correction, { allowExactFinalized: true }
+    );
+    var requestFinalization = sourceFence.alreadyFinalized
+      ? {
+        requestId: sourceFence.requestId, tradeId: correction.tradeId,
+        status: '등록완료(기존거래 보강)', rowCount: sourceFence.rowCount
+      }
+      : _finalizeRegisteredTradeSourceRequest_(
+        SpreadsheetApp.getActiveSpreadsheet(), correction, sourceFence
+      );
+    if (typeof invalidateConfirmListCache_ === 'function') invalidateConfirmListCache_();
+    return {
+      success: true,
+      status: 'SOURCE_REQUEST_FINALIZED',
+      tradeId: correction.tradeId,
+      requestFinalization: requestFinalization,
+      alreadyFinalized: sourceFence.alreadyFinalized === true,
+      recoveredWithoutScheduleReplay: true,
+      customerNotificationSent: false
+    };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // JSON/HTTP 입력으로는 위조할 수 없는 동일 런타임 객체 capability다. 반납완료 거래의
@@ -18744,6 +18980,7 @@ function correctRegisteredTrade(args) {
   }
   var stages = [];
   var lockedBaseline = null;
+  var sourceRequestFence = null;
   var removalPlan = { success: true, scheduleIds: [] };
   var addPlan = null;
   var addResult = null;
@@ -18763,6 +19000,9 @@ function correctRegisteredTrade(args) {
     )) {
       throw new Error('baseline period mismatch');
     }
+    sourceRequestFence = _resolveRegisteredTradeSourceRequest_(
+      SpreadsheetApp.getActiveSpreadsheet(), correction
+    );
     // ScriptLock does not cover the HTTP portions of checkout/return/setup/aux
     // transitions. Their durable lease is the cross-operation exclusion signal.
     var correctionLeaseBlock = dashboardTradeMutationLeaseError_(
@@ -19005,7 +19245,16 @@ function correctRegisteredTrade(args) {
   stages.push('regenerateContract');
   attemptedStage = '';
   var verifiedState = null;
+  var requestFinalization = null;
+  var finalizationLock = null;
   try {
+    if (sourceRequestFence) {
+      finalizationLock = LockService.getScriptLock();
+      if (!finalizationLock.tryLock(1500)) {
+        throw new Error('sourceRequestId 종결 잠금을 획득하지 못했습니다');
+      }
+    }
+    attemptedStage = 'finalReadback';
     SpreadsheetApp.flush();
     var finalState = readRegisteredTradeCorrectionState_(correction.tradeId);
     verifiedState = verifyRegisteredTradeCorrectionState_(
@@ -19015,10 +19264,22 @@ function correctRegisteredTrade(args) {
       regeneration,
       { addPlan: addPlan, removalPlan: removalPlan, add: addResult, remove: removeResult }
     );
+    attemptedStage = '';
+    if (sourceRequestFence) {
+      attemptedStage = 'finalizeSourceRequest';
+      requestFinalization = _finalizeRegisteredTradeSourceRequest_(
+        SpreadsheetApp.getActiveSpreadsheet(), correction, sourceRequestFence
+      );
+      stages.push('finalizeSourceRequest');
+      attemptedStage = '';
+    }
   } catch (verificationError) {
-    attemptedStage = 'finalReadback';
     return partialResult_(verificationError);
+  } finally {
+    if (finalizationLock) finalizationLock.releaseLock();
   }
+  var authoritativeReadback = { before: lockedBaseline, after: verifiedState };
+  if (requestFinalization) authoritativeReadback.requestFinalization = requestFinalization;
   return {
     success: true,
     status: 'CORRECTED',
@@ -19027,7 +19288,8 @@ function correctRegisteredTrade(args) {
     stages: stages,
     contractRegeneration: regeneration,
     readback: verifiedState,
-    authoritativeReadback: { before: lockedBaseline, after: verifiedState },
+    authoritativeReadback: authoritativeReadback,
+    requestFinalization: requestFinalization,
     customerNotificationSent: false
   };
 }

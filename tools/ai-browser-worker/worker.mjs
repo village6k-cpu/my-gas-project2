@@ -668,8 +668,8 @@ export function buildHermesPrompt(job, options = {}) {
 - Typed pending-RQ replacement: one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ.
 - 고객 장비 문의의 최초 확인요청 입력에는 staff_confirmed_mutation이 필요 없다. 직원 답변은 누락된 최초 입력의 read-catchup 또는 기존 예약 변경을 보강하는 후속 증거일 뿐이다.
 - For target_scope="pending_request" and kind="equipment_add", call village_confirmation_request once with additions_only. For pending_request equipment_remove, equipment_replace, equipment_quantity_change, or date_time_change, call village_confirmation_request once with replace_full_plan.
-- Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use only village_registered_reservation_change exactly once before FINAL_JSON. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
-- A registered_trade mutation must not call village_confirmation_request and must never claim that a new RQ is the registered change.
+- Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use only village_registered_reservation_change exactly once before FINAL_JSON. Equipment changes must carry the exact existing inquiry request_id and the same single ID in existing_confirm_request_ids; date_time_change must carry neither. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
+- A registered_trade mutation must not call village_confirmation_request again: the equipment inquiry RQ was created on the customer turn, and the registered tool atomically links/finalizes that exact RQ only after authoritative schedule readback.
 - Do not parse RQ or trade IDs from prose. Only exact typed fields backed by authoritative lookups count.
 - For ambiguous target, catalog, or staff evidence: set staff_confirmed_mutation=null, call no mutation tool, make no customer success claim, and create one urgent owner-review follow-up.
 - blocked, failed, partial_success, or contradictory registered readback is draft-only/no-send owner review. Never call either mutation tool again to replay it.
@@ -693,7 +693,7 @@ CRITICAL RULES:
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
 - Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
-- 기존 등록/기존 RQ customer-only 변경은 read-only다. 정확한 이후 직원 확인과 일치하는 typed staff_confirmed_mutation만 허용하며, registered changes use the native route.
+- 고객의 모든 새 장비 문의는 기존 등록 여부와 무관하게 확인요청에 즉시 기록한다. 단, 기존 등록 스케줄 자체의 변경은 customer-only 단계에서 read-only이며 정확한 이후 직원 확인과 일치하는 typed staff_confirmed_mutation만 native registered route로 허용한다.
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때 근거가 확보된 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
 - 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 일반 가격·환불정책·파손규정·세금 안내는 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
 - 예외(항상 사장 확인): 고객이 현재 대여/수령 장비의 기스·흠집·스크래치·파손·고장·작동이상·분실을 알린 실제 사고, 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의는 근거가 있어도 auto_send 금지. 계속 사용/그대로 수령/교체/배상 여부를 임의로 승인하지 말고 draft_only + owner_review_required=true + urgent damage_repair로 올린다.
@@ -1118,8 +1118,12 @@ function staffConfirmedMutationDecisionErrors(decision, mutation, options = {}) 
     if (safetyChecks.no_auto_reply_sent !== true) {
       errors.push('registered staff_confirmed_mutation requires safety_checks.no_auto_reply_sent=true');
     }
-    if (existingIds.length > 0) {
-      errors.push('registered staff_confirmed_mutation must not claim a confirmation request ID');
+    if (mutation.kind === 'date_time_change') {
+      if (existingIds.length > 0 || Object.hasOwn(mutation, 'request_id')) {
+        errors.push('registered date_time_change must not claim a confirmation request ID');
+      }
+    } else if (existingIds.length !== 1 || existingIds[0] !== mutation.request_id) {
+      errors.push('registered equipment mutation requires one exact matching existing_confirm_request_ids entry');
     }
     return errors;
   }
@@ -1154,7 +1158,14 @@ function existingRecordWriteGateErrors(decision, options = {}) {
     ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
     : [];
   if (inquiry.already_registered === true) {
-    return ['existing registered booking writes require the typed registered mutation route with should_write_to_sheet=false'];
+    const mutation = decision?.staff_confirmed_mutation;
+    if (mutation && typeof mutation === 'object' && !Array.isArray(mutation)) {
+      return ['existing registered booking mutations require should_write_to_sheet=false and the typed registered route'];
+    }
+    if (existingIds.length > 0) {
+      return ['a registered-booking inquiry capture must not claim an existing confirmation request ID'];
+    }
+    return [];
   }
   if (!existingIds.length) return [];
   const mutation = decision?.staff_confirmed_mutation;
@@ -1268,8 +1279,8 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
       ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
       : [];
     const hasExistingBookingEvidence = inquiry.already_registered === true || existingIds.length > 0;
-    if (inquiry.already_registered === true && equipmentWriteMode !== 'additions_only') {
-      errors.push('existing booking equipment writes must use additions_only and must not repeat existing equipment');
+    if (inquiry.already_registered === true && equipmentWriteMode !== 'full_plan') {
+      errors.push('a new inquiry for an existing booking must capture only the current customer inquiry as full_plan');
     }
     if (existingIds.length > 0 && inquiry.already_registered !== true
       && !['additions_only', 'replace_full_plan'].includes(equipmentWriteMode)) {
@@ -9721,6 +9732,15 @@ function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
     tradeId: text(mutation?.trade_id).trim(), requireLedger: true
   });
   if (!before || !after) return false;
+  if (mutation?.kind === 'date_time_change') {
+    if (Object.hasOwn(authoritative || {}, 'requestFinalization')) return false;
+  } else {
+    const finalization = authoritative?.requestFinalization;
+    if (!finalization || typeof finalization !== 'object' || Array.isArray(finalization)
+      || text(finalization.requestId).trim().toUpperCase() !== text(mutation?.request_id).trim().toUpperCase()
+      || text(finalization.tradeId).trim() !== text(mutation?.trade_id).trim()
+      || text(finalization.status).trim() !== '등록완료(기존거래 보강)') return false;
+  }
   const expectedPeriod = {
     startDate: mutation?.expected_period?.start_date,
     startTime: mutation?.expected_period?.start_time,

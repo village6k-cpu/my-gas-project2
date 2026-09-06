@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 
 const ALLOWED_INPUT_FIELDS = new Set([
-  'tradeId', 'operationId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate'
+  'tradeId', 'operationId', 'sourceRequestId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate'
 ]);
 const ALLOWED_DATE_FIELDS = new Set([
   'newStartDate', 'newEndDate', 'startTime', 'endTime', 'allowConflicts'
@@ -36,6 +36,7 @@ function correctionFailureDetails(payload) {
     appliedStages: Array.isArray(payload.appliedStages) ? payload.appliedStages.slice() : [],
     readback: payload.readback ?? null,
     authoritativeReadback: payload.authoritativeReadback ?? null,
+    requestFinalization: payload.requestFinalization ?? null,
     readbackError: String(payload.readbackError || ''),
     customerNotificationSent: payload.customerNotificationSent,
   };
@@ -146,6 +147,12 @@ function normalizeCorrectionInput(input) {
   if (!/^[a-f0-9-]{16,80}$/i.test(operationId)) {
     throw new Error('operationId must be a 16-80 character hex/hyphen identifier');
   }
+  const sourceRequestId = input.sourceRequestId === undefined
+    ? null
+    : requiredText(input.sourceRequestId, 'sourceRequestId', 20).toUpperCase();
+  if (sourceRequestId !== null && !/^RQ-\d{6}-\d{3}$/.test(sourceRequestId)) {
+    throw new Error('sourceRequestId must use RQ-YYMMDD-NNN format');
+  }
 
   const removeInput = input.remove === undefined ? [] : input.remove;
   if (!Array.isArray(removeInput) || removeInput.length > 50) {
@@ -204,6 +211,7 @@ function normalizeCorrectionInput(input) {
   const normalized = {
     tradeId,
     operationId,
+    sourceRequestId,
     expectedPeriod: normalizeExpectedPeriod(input.expectedPeriod),
     dateChange: normalizeDateChange(input.dateChange),
     remove,
@@ -212,6 +220,9 @@ function normalizeCorrectionInput(input) {
   };
   if (!normalized.dateChange && remove.length === 0 && add.length === 0 && !normalized.sendEstimate) {
     throw new Error('At least one correction or send must be requested');
+  }
+  if (normalized.sourceRequestId && remove.length === 0 && add.length === 0) {
+    throw new Error('sourceRequestId is allowed only for an equipment correction');
   }
   return normalized;
 }
@@ -327,6 +338,7 @@ async function runRegisteredTradeCorrection({
     const args = {
       tradeId: normalized.tradeId,
       operationId: normalized.operationId,
+      ...(normalized.sourceRequestId ? { sourceRequestId: normalized.sourceRequestId } : {}),
       ...(normalized.expectedPeriod ? { expectedPeriod: normalized.expectedPeriod } : {}),
       ...(normalized.dateChange ? { dateChange: normalized.dateChange } : {}),
       ...(normalized.remove.length ? { remove: normalized.remove } : {}),
@@ -360,17 +372,27 @@ async function runRegisteredTradeCorrection({
       && correctionPayload.contractRegeneration.success === true
       && correctionPayload.contractRegeneration.url
       && correctionPayload.contractRegeneration.fileId;
+    const requestFinalization = correctionPayload.requestFinalization;
+    const validRequestFinalization = !normalized.sourceRequestId || (
+      requestFinalization
+      && requestFinalization.requestId === normalized.sourceRequestId
+      && requestFinalization.tradeId === normalized.tradeId
+      && requestFinalization.status === '등록완료(기존거래 보강)'
+      && authoritativeReadback.requestFinalization
+      && JSON.stringify(authoritativeReadback.requestFinalization) === JSON.stringify(requestFinalization)
+    );
     if (
       returnedTradeId !== normalized.tradeId
       || returnedOperationId !== normalized.operationId
       || !validReadback
       || !validAuthoritativeReadback
       || !validRegeneration
+      || !validRequestFinalization
       || correctionPayload.customerNotificationSent !== false
     ) {
       throw new CorrectionStageError(
         'scheduleCorrectRegisteredTrade',
-        'scheduleCorrectRegisteredTrade returned incomplete or mismatched authoritative before/after readback',
+        'scheduleCorrectRegisteredTrade returned incomplete or mismatched authoritative before/after readback or request finalization',
         {
           outcomeUnknown: true,
           appliedStages,
@@ -420,7 +442,8 @@ async function runRegisteredTradeCorrection({
       : null,
     send,
     readback: correctionPayload?.readback || null,
-    authoritativeReadback: correctionPayload?.authoritativeReadback || null
+    authoritativeReadback: correctionPayload?.authoritativeReadback || null,
+    requestFinalization: correctionPayload?.requestFinalization || null
   };
 }
 

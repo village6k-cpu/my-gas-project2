@@ -11,6 +11,7 @@ const MUTATION = {
   confirmed: true,
   kind: 'equipment_replace',
   target_scope: 'registered_trade',
+  request_id: 'RQ-260827-001',
   trade_id: '260824-008',
   source_evidence: {
     customer_request: '28-135 취소하고 sony 70-200 gm 2.8 로 부탁드립니당',
@@ -61,6 +62,7 @@ function registeredMutation(kind) {
   } else if (kind === 'equipment_quantity_change') {
     mutation.desired_after = [{ name: mutation.expected_before[0].name, quantity: 2 }];
   } else if (kind === 'date_time_change') {
+    delete mutation.request_id;
     mutation.expected_before = [];
     mutation.desired_after = [];
     mutation.date_change = {
@@ -91,6 +93,10 @@ function authoritativeState({
 }
 
 function request(overrides = {}) {
+  const finalization = {
+    requestId: 'RQ-260827-001', tradeId: '260824-008',
+    status: '등록완료(기존거래 보강)', rowCount: 1
+  };
   return {
     config: { internalKey: 'test-key' },
     job: { job_id: 'job-260827-001', room_key: 'room-123', room_revision: 8 },
@@ -112,13 +118,15 @@ function request(overrides = {}) {
           after: authoritativeState({ rows: [
             { scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false },
             { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false }
-          ] })
+          ] }),
+          requestFinalization: finalization
         },
         readback: authoritativeState({ rows: [
           { scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false },
           { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false }
         ] }),
         contractRegeneration: { success: true, url: 'https://example.test/contract', fileId: 'file-1' },
+        requestFinalization: finalization,
         send: { attempted: false, accepted: false }
       }),
       randomUUID: () => 'receipt-260827-001',
@@ -128,7 +136,7 @@ function request(overrides = {}) {
   };
 }
 
-function installAuthenticatedCorrectionFetch(t, { before, after, events = [] }) {
+function installAuthenticatedCorrectionFetch(t, { before, after, events = [], sourceRequestId = 'RQ-260827-001' }) {
   const previousFetch = globalThis.fetch;
   const calls = [];
   t.after(() => { globalThis.fetch = previousFetch; });
@@ -154,7 +162,18 @@ function installAuthenticatedCorrectionFetch(t, { before, after, events = [] }) 
           fileId: 'contract-260824-008'
         },
         readback: after,
-        authoritativeReadback: { before, after },
+        authoritativeReadback: {
+          before,
+          after,
+          ...(sourceRequestId ? { requestFinalization: {
+            requestId: sourceRequestId, tradeId: '260824-008',
+            status: '등록완료(기존거래 보강)', rowCount: 1
+          } } : {})
+        },
+        ...(sourceRequestId ? { requestFinalization: {
+          requestId: sourceRequestId, tradeId: '260824-008',
+          status: '등록완료(기존거래 보강)', rowCount: 1
+        } } : {}),
         customerNotificationSent: false
       })
     };
@@ -262,7 +281,7 @@ test('rejects null fields belonging to the other mutation scope and a baseline f
 
 test('projects a registered mutation with exact expected period and quantities', () => {
   assert.deepEqual(buildRegisteredTradeCorrectionInput(MUTATION, 'operation-260827-001'), {
-    tradeId: '260824-008', operationId: 'operation-260827-001',
+    tradeId: '260824-008', operationId: 'operation-260827-001', sourceRequestId: 'RQ-260827-001',
     expectedPeriod: { startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00' },
     remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
     add: [{ name: '소니 GM 70-200mm II', qty: 1 }],
@@ -271,9 +290,26 @@ test('projects a registered mutation with exact expected period and quantities',
   assert.throws(() => buildRegisteredTradeCorrectionInput(PENDING_MUTATION, 'operation-260827-001'));
 });
 
+test('registered equipment mutation carries one exact source RQ into the correction boundary', () => {
+  const mutation = { ...clone(MUTATION), request_id: 'RQ-260906-013' };
+  assert.deepEqual(valid(mutation), { valid: true, errors: [] });
+  const projected = buildRegisteredTradeCorrectionInput(mutation, 'operation-260906-013');
+  assert.equal(projected.sourceRequestId, 'RQ-260906-013');
+
+  const missingRequest = clone(MUTATION);
+  delete missingRequest.request_id;
+  assert.equal(valid(missingRequest).valid, false);
+
+  const dateOnly = registeredMutation('date_time_change');
+  delete dateOnly.request_id;
+  assert.deepEqual(valid(dateOnly), { valid: true, errors: [] });
+  assert.equal(Object.hasOwn(buildRegisteredTradeCorrectionInput(dateOnly, 'operation-date-only'), 'sourceRequestId'), false);
+});
+
 test('projects a registered date change with the exact new date-time field names', () => {
   const mutation = clone(MUTATION);
   mutation.kind = 'date_time_change';
+  delete mutation.request_id;
   mutation.expected_before = [];
   mutation.desired_after = [];
   mutation.date_change = {
@@ -306,6 +342,7 @@ test('equipment mutation crosses the real correction runner seam once without an
   assert.deepEqual(calls[0].args, {
     tradeId: '260824-008',
     operationId: REAL_RUNNER_OPERATION_ID,
+    sourceRequestId: 'RQ-260827-001',
     expectedPeriod: { startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00' },
     remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
     add: [{ name: '소니 GM 70-200mm II', qty: 1 }]
@@ -314,7 +351,14 @@ test('equipment mutation crosses the real correction runner seam once without an
   assert.equal(receipt.status, 'ok');
   assert.equal(receipt.trade_id, '260824-008');
   assert.equal(receipt.customer_reply, 'no_reply');
-  assert.deepEqual(receipt.authoritative_result, { before, after });
+  assert.deepEqual(receipt.authoritative_result, {
+    before,
+    after,
+    requestFinalization: {
+      requestId: 'RQ-260827-001', tradeId: '260824-008',
+      status: '등록완료(기존거래 보강)', rowCount: 1
+    }
+  });
 });
 
 test('date-time mutation crosses the real correction runner seam once with the exact date change', async (t) => {
@@ -323,7 +367,7 @@ test('date-time mutation crosses the real correction runner seam once with the e
     startDate: '2026-08-28', startTime: '07:00', endDate: '2026-08-28', endTime: '19:00'
   });
   const events = [];
-  const calls = installAuthenticatedCorrectionFetch(t, { before, after, events });
+  const calls = installAuthenticatedCorrectionFetch(t, { before, after, events, sourceRequestId: null });
   const mutation = registeredMutation('date_time_change');
 
   const receipt = await executeVillageRegisteredReservationChange(

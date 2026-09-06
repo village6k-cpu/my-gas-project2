@@ -1560,6 +1560,7 @@ function runFunction(funcName, params) {
     "normalizeConfirmRequestDates",
     "recoverPendingRegistrations",
     "recoverPartiallyRegisteredRequests",
+    "finalizeRegisteredTradeSourceRequestRecovery",
     "repairMissingTradeLedgerRow",
     "autoClearRequests",
     "setupAutoClearTrigger",
@@ -1628,6 +1629,10 @@ function runFunction(funcName, params) {
       if (typeof result.scheduleComplete === "boolean") response.scheduleComplete = result.scheduleComplete;
       if (Array.isArray(result.missingScheduleFields)) response.missingScheduleFields = result.missingScheduleFields;
       if (result.message) response.message = result.message;
+      var matchedRegisteredTradeId = String(result.matchedRegisteredTradeId || "").trim();
+      if (/^\d{6}-\d{3}$/.test(matchedRegisteredTradeId)) {
+        response.matchedRegisteredTradeId = matchedRegisteredTradeId;
+      }
       if (Array.isArray(result.replacedReqIDs)) {
         response.replacedReqIDs = result.replacedReqIDs.map(function(reqID) {
           return String(reqID || "").trim().toUpperCase();
@@ -1762,6 +1767,18 @@ function runFunction(funcName, params) {
       var repairArgs = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
       var repairResult = repairMissingTradeLedgerRow(repairArgs || {});
       return { success: !!repairResult.success, function: funcName, result: repairResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "finalizeRegisteredTradeSourceRequestRecovery") {
+      var sourceRequestRecoveryArgs = params.args
+        ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args)
+        : params;
+      var sourceRequestRecoveryResult = finalizeRegisteredTradeSourceRequestRecovery(sourceRequestRecoveryArgs || {});
+      return {
+        success: !!sourceRequestRecoveryResult.success,
+        function: funcName,
+        result: sourceRequestRecoveryResult,
+        executionTime: (new Date() - startTime) + "ms"
+      };
     }
     if (funcName === "extendRegisteredTrade") {
       var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;

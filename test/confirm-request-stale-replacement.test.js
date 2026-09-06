@@ -191,7 +191,7 @@ assert.strictEqual(
     반출일: '2026-09-05', 반출시간: '06:00', 반납일: '2026-09-06', 반납시간: '06:00'
   }),
   '260902-009',
-  '같은 고객과 exact 기간의 등록 거래는 장비목록과 무관하게 새 RQ 입력을 차단해야 한다'
+  '같은 고객과 exact 기간의 등록 거래는 장비목록과 무관하게 새 RQ의 후속 변경 대상으로 연결해야 한다'
 );
 assert.strictEqual(
   context._findRegisteredTradeForConfirmRequest_(registeredPeriodSs, {
@@ -208,6 +208,28 @@ assert.strictEqual(
   }),
   null,
   '반납시각이 다르면 exact 등록 기간으로 간주하지 않아야 한다'
+);
+
+const ambiguousRegisteredPeriodSs = new FakeSpreadsheet({
+  '계약마스터': new FakeSheet([
+    makeRow(),
+    makeRow({
+      1: '260902-009', 2: '테스트 고객', 3: '010-4047-3867',
+      5: '2026-09-05', 6: '06:00', 7: '2026-09-06', 8: '06:00', 10: '예약'
+    }),
+    makeRow({
+      1: '260902-010', 2: '테스트 고객', 3: '010-4047-3867',
+      5: '2026-09-05', 6: '06:00', 7: '2026-09-06', 8: '06:00', 10: '예약'
+    })
+  ])
+});
+assert.strictEqual(
+  context._findRegisteredTradeForConfirmRequest_(ambiguousRegisteredPeriodSs, {
+    예약자명: '테스트 고객', 연락처: '010-4047-3867',
+    반출일: '2026-09-05', 반출시간: '06:00', 반납일: '2026-09-06', 반납시간: '06:00'
+  }),
+  null,
+  '같은 고객과 exact 기간의 활성 등록 거래가 둘 이상이면 임의의 첫 거래를 변경 대상으로 선택하면 안 된다'
 );
 
 assert.match(

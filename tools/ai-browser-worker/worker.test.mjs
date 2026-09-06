@@ -597,6 +597,7 @@ function registeredMutationFixture(kind = 'equipment_replace', overrides = {}) {
     confirmed: true,
     kind,
     target_scope: 'registered_trade',
+    request_id: 'RQ-260827-001',
     trade_id: '260824-008',
     source_evidence: {
       customer_request: '28-135 취소하고 sony 70-200 gm 2.8 로 부탁드립니당',
@@ -619,6 +620,7 @@ function registeredMutationFixture(kind = 'equipment_replace', overrides = {}) {
     base.expected_before = [{ schedule_id: '260824-008-07', name: '소니 FE 28-135mm', quantity: 1 }];
     base.desired_after = [{ name: '소니 FE 28-135mm', quantity: 2 }];
   } else if (kind === 'date_time_change') {
+    delete base.request_id;
     base.expected_before = [];
     base.desired_after = [];
     base.date_change = {
@@ -661,7 +663,7 @@ function registeredDecisionFixture(overrides = {}) {
       already_registered: true,
       equipment_requested: []
     },
-    existing_confirm_request_ids: [],
+    existing_confirm_request_ids: mutation.kind === 'date_time_change' ? [] : [mutation.request_id],
     safety_checks: {
       duplicate_checked_contract_master: true,
       duplicate_checked_schedule_detail: true,
@@ -713,6 +715,21 @@ function registeredReceiptFixture(job, overrides = {}) {
     operation_id: '11111111-2222-4333-8444-555555555555',
     ...overrides
   };
+  if (receipt.mutation_kind !== 'date_time_change'
+    && receipt.authoritative_result
+    && !Object.hasOwn(receipt.authoritative_result, 'requestFinalization')) {
+    receipt.authoritative_result.requestFinalization = {
+      requestId: receipt.authorized_mutation?.request_id || 'RQ-260827-001',
+      tradeId: receipt.trade_id,
+      status: '등록완료(기존거래 보강)',
+      rowCount: 1
+    };
+  }
+  if (receipt.mutation_kind === 'date_time_change'
+    && receipt.authoritative_result
+    && !Object.hasOwn(overrides, 'authoritative_result')) {
+    delete receipt.authoritative_result.requestFinalization;
+  }
   if (receipt.authorized_mutation && !Object.hasOwn(overrides, 'request_digest')) {
     receipt.request_digest = registeredReservationChangeRequestDigest({
       schema: 'village-registered-reservation-change-request/v1',
@@ -3381,8 +3398,8 @@ test('validateAiDecisionContract accepts every typed registered mutation kind an
   });
   assert.equal(validateAiDecisionContract(missingAuthority).valid, false);
 
-  const claimsNewRq = registeredDecisionFixture({ existing_confirm_request_ids: ['RQ-260827-001'] });
-  assert.equal(validateAiDecisionContract(claimsNewRq).valid, false);
+  const wrongSourceRq = registeredDecisionFixture({ existing_confirm_request_ids: ['RQ-260827-999'] });
+  assert.equal(validateAiDecisionContract(wrongSourceRq).valid, false);
 });
 
 test('validateAiDecisionContract requires an exact pending RQ and sheet plan for staff-confirmed pending changes', () => {
@@ -4020,18 +4037,8 @@ test('executeVillageConfirmationRequest returns a typed validation failure witho
   assert.ok(receipt.error.validation_errors.length > 0);
 });
 
-test('executeVillageConfirmationRequest rejects untyped existing-record writes before catalog lookup or append even for legacy validators', async () => {
+test('executeVillageConfirmationRequest rejects untyped pending-RQ writes before catalog lookup or append even for legacy validators', async () => {
   const cases = [
-    {
-      name: 'registered addition',
-      decision: completeSheetDecision({
-        reservation_inquiry: { is_reservation_inquiry: true, already_registered: true },
-        sheet_row_candidate: {
-          equipment_write_mode: 'additions_only',
-          equipment: [{ item: '로닌 링그립', quantity: 1 }]
-        }
-      })
-    },
     {
       name: 'pending addition',
       decision: completeSheetDecision({
@@ -4092,6 +4099,40 @@ test('executeVillageConfirmationRequest rejects untyped existing-record writes b
     assert.ok(receipt.error.validation_errors.some((error) => /staff_confirmed_mutation|registered mutation route/i.test(error)), name);
     assert.deepEqual(calls, { catalog: 0, existing: 0, discount: 0, append: 0 }, name);
   }
+});
+
+test('executeVillageConfirmationRequest captures an existing-booking customer inquiry once without mutating the registered schedule', async () => {
+  const decision = completeSheetDecision({
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: true },
+    existing_confirm_request_ids: [],
+    staff_confirmed_mutation: null,
+    sheet_row_candidate: {
+      equipment_write_mode: 'full_plan',
+      equipment: [{ item: '강풍기', quantity: 1 }]
+    }
+  });
+  let appendCalls = 0;
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-registered-inquiry', roomKey: 'room-registered-inquiry', roomRevision: 7 },
+    roomRevision: 7,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async (_config, payload) => {
+        appendCalls += 1;
+        assert.deepEqual(payload.args.장비, [{ 이름: '강풍기', 수량: 1 }]);
+        return { success: true, reqID: 'RQ-260906-013', matchedRegisteredTradeId: '260902-003', results: [] };
+      },
+      randomUUID: () => 'receipt-registered-inquiry',
+      now: () => new Date('2026-09-06T00:00:00.000Z')
+    }
+  });
+  assert.equal(appendCalls, 1);
+  assert.equal(receipt.status, 'ok');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260906-013');
 });
 
 test('executeVillageConfirmationRequest rejects stale correlation and stale freshness before mutation', async () => {
@@ -6648,11 +6689,11 @@ test('buildHermesPrompt requires sender separation and customer turn clustering'
   assert.match(prompt, /conversation_turns/);
 });
 
-test('buildHermesPrompt keeps existing-record changes read-only until the exact typed staff-confirmed route', () => {
+test('buildHermesPrompt captures every inquiry but keeps the registered schedule read-only until exact staff confirmation', () => {
   const prompt = buildHermesPrompt({ id: 'job-addon', preview_text: '기존 예약에 렌즈 하나 추가해주세요' });
   assert.match(prompt, /equipment_write_mode/);
-  assert.match(prompt, /genuinely new.*full_plan/is);
-  assert.match(prompt, /기존.*read-only.*staff_confirmed_mutation/is);
+  assert.match(prompt, /모든 새 장비 문의.*기존 등록 여부와 무관하게.*확인요청/is);
+  assert.match(prompt, /기존 등록 스케줄 자체의 변경.*customer-only.*read-only.*staff_confirmed_mutation/is);
   assert.match(prompt, /registered changes.*native route/is);
   assert.doesNotMatch(prompt, /An existing booking with newly added or increased equipment is not a duplicate/);
 });
@@ -6664,7 +6705,7 @@ test('buildHermesPrompt treats a requested set option as a component selection, 
   assert.match(prompt, /never add.*top-level equipment/i);
 });
 
-test('untyped existing-record writes are rejected while a genuinely new request remains writable', () => {
+test('every equipment inquiry is writable while typed fences remain required for pending-RQ mutation', () => {
   const repeated = completeSheetDecision({
     reservation_inquiry: {
       is_reservation_inquiry: true,
@@ -6714,12 +6755,12 @@ test('untyped existing-record writes are rejected while a genuinely new request 
   });
 
   const repeatedValidation = validateAiDecisionContract(repeated);
-  assert.equal(repeatedValidation.valid, false);
-  assert.ok(repeatedValidation.errors.some((error) => error.includes('additions_only')));
+  assert.deepEqual(repeatedValidation, { valid: true, errors: [] });
+  assert.notEqual(buildSheetAppendPayload(repeated, { apiKey: 'secret' }), null);
   for (const decision of [addition, pendingAddition, pendingReplacement]) {
     const validation = validateAiDecisionContract(decision);
     assert.equal(validation.valid, false);
-    assert.ok(validation.errors.some((error) => /staff_confirmed_mutation|registered mutation route/i.test(error)));
+    assert.ok(validation.errors.some((error) => /staff_confirmed_mutation|registered mutation route|full_plan/i.test(error)));
     assert.equal(buildSheetAppendPayload(decision, { apiKey: 'secret' }), null);
   }
   assert.deepEqual(validateAiDecisionContract(genuinelyNew), { valid: true, errors: [] });
@@ -6727,6 +6768,57 @@ test('untyped existing-record writes are rejected while a genuinely new request 
     buildSheetAppendPayload(genuinelyNew, { apiKey: 'secret' }).args.장비,
     [{ 이름: '소니 GM 24-70mm II', 수량: 1 }]
   );
+});
+
+test('a new equipment inquiry is captured as an RQ even when the same customer and period already have a registered trade', () => {
+  const inquiryCapture = completeSheetDecision({
+    existing_confirm_request_ids: [],
+    staff_confirmed_mutation: null,
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      confirmed: false,
+      already_registered: true,
+      equipment_requested: [{
+        raw_text: '강풍기', normalized_guess: '강풍기', exact_name_from_equipment_catalog: '강풍기',
+        exact_name_from_set_master: null, catalog_match_status: 'matched', quantity: 1, confidence: 'high'
+      }]
+    },
+    sheet_row_candidate: {
+      equipment_write_mode: 'full_plan',
+      equipment: [{ item: '강풍기', quantity: 1 }]
+    }
+  });
+
+  assert.deepEqual(validateAiDecisionContract(inquiryCapture), { valid: true, errors: [] });
+  assert.deepEqual(
+    buildSheetAppendPayload(inquiryCapture, { apiKey: 'secret' }).args.장비,
+    [{ 이름: '강풍기', 수량: 1 }]
+  );
+});
+
+test('registered equipment mutations require the exact source RQ while date-only changes do not invent one', () => {
+  const equipmentMutation = registeredMutationFixture('equipment_add', { request_id: 'RQ-260906-013' });
+  const equipmentDecision = registeredDecisionFixture({
+    staff_confirmed_mutation: equipmentMutation,
+    existing_confirm_request_ids: ['RQ-260906-013']
+  });
+  assert.deepEqual(validateAiDecisionContract(equipmentDecision), { valid: true, errors: [] });
+
+  const missingRqMutation = registeredMutationFixture('equipment_add');
+  delete missingRqMutation.request_id;
+  const missingRq = registeredDecisionFixture({ staff_confirmed_mutation: missingRqMutation });
+  assert.equal(validateAiDecisionContract(missingRq).valid, false);
+
+  const wrongRq = structuredClone(equipmentDecision);
+  wrongRq.existing_confirm_request_ids = ['RQ-260906-014'];
+  assert.equal(validateAiDecisionContract(wrongRq).valid, false);
+
+  const dateMutation = registeredMutationFixture('date_time_change');
+  delete dateMutation.request_id;
+  assert.deepEqual(validateAiDecisionContract(registeredDecisionFixture({
+    staff_confirmed_mutation: dateMutation,
+    existing_confirm_request_ids: []
+  })), { valid: true, errors: [] });
 });
 
 test('typed pending RQ replacement accepts one complete final plan and rejects unsafe replacement scopes', () => {

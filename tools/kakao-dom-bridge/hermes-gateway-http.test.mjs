@@ -63,6 +63,7 @@ function registeredMutation(overrides = {}) {
     confirmed: true,
     kind: 'equipment_replace',
     target_scope: 'registered_trade',
+    request_id: 'RQ-260824-021',
     trade_id: '260824-008',
     source_evidence: {
       customer_request: '기존 렌즈 대신 다른 렌즈를 요청함',
@@ -277,7 +278,8 @@ test('registered change digest is lease-correlated, complete, and invariant to o
       source_evidence: {
         conversation_revision: 3, staff_confirmation: '직원이 교체 확정함', customer_request: '기존 렌즈 대신 다른 렌즈를 요청함'
       },
-      trade_id: '260824-008', target_scope: 'registered_trade', kind: 'equipment_replace', confirmed: true
+      trade_id: '260824-008', request_id: 'RQ-260824-021',
+      target_scope: 'registered_trade', kind: 'equipment_replace', confirmed: true
     },
     lease_id: leaseId, room_revision: 3, room_key: 'room-1', job_id: 'job-1',
     schema: 'village-registered-reservation-change-request/v1'

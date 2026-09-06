@@ -152,6 +152,43 @@ test('normalizes an exact baseline period and removal quantity', () => {
   assert.equal(normalized.expectedPeriod.startTime, '06:00');
 });
 
+test('carries an exact source request ID and requires its authoritative finalization evidence', async () => {
+  const input = {
+    tradeId: '260810-003',
+    operationId,
+    sourceRequestId: 'RQ-260906-013',
+    add: [{ name: '강풍기', qty: 1 }],
+    sendEstimate: false,
+  };
+  const normalized = normalizeCorrectionInput(input);
+  assert.equal(normalized.sourceRequestId, 'RQ-260906-013');
+
+  const fixture = createFetchFixture({
+    responseByAction: {
+      scheduleCorrectRegisteredTrade: (() => {
+        const finalization = {
+          requestId: 'RQ-260906-013', tradeId: '260810-003', status: '등록완료(기존거래 보강)'
+        };
+        const payload = correctedPayload();
+        return {
+          ...payload,
+          requestFinalization: finalization,
+          authoritativeReadback: { ...payload.authoritativeReadback, requestFinalization: finalization }
+        };
+      })()
+    }
+  });
+  const result = await runRegisteredTradeCorrection({ config, input, fetchImpl: fixture.fetchImpl, timeoutMs: 1_000 });
+  assert.equal(fixture.calls[0].body.args.sourceRequestId, 'RQ-260906-013');
+  assert.equal(result.requestFinalization.requestId, 'RQ-260906-013');
+
+  const missingEvidence = createFetchFixture();
+  await assert.rejects(
+    runRegisteredTradeCorrection({ config, input, fetchImpl: missingEvidence.fetchImpl, timeoutMs: 1_000 }),
+    /request.*finalization|finalization.*request/i,
+  );
+});
+
 test('rejects invalid supplied baseline expectations without narrowing legacy CLI inputs', () => {
   const base = {
     tradeId: '260824-008',

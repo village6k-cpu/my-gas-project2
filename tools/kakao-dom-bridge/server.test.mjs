@@ -571,6 +571,7 @@ function task7Mutation(overrides = {}) {
     confirmed: true,
     kind: 'equipment_replace',
     target_scope: 'registered_trade',
+    request_id: TASK7_INCIDENT.request_id,
     trade_id: TASK7_INCIDENT.trade_id,
     source_evidence: {
       customer_request: TASK7_INCIDENT.customer_change_text,
@@ -599,7 +600,7 @@ function task7HermesDecision(mutation) {
       already_registered: true,
       equipment_requested: []
     },
-    existing_confirm_request_ids: [],
+    existing_confirm_request_ids: [mutation.request_id],
     safety_checks: {
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
@@ -670,6 +671,15 @@ function task7AuthoritativeBeforeReadback() {
       topLevelQuantities: { [expected.name]: expected.quantity }
     },
     ledger: null
+  };
+}
+
+function task7RequestFinalization() {
+  return {
+    requestId: TASK7_INCIDENT.request_id,
+    tradeId: TASK7_INCIDENT.trade_id,
+    status: '등록완료(기존거래 보강)',
+    rowCount: 1
   };
 }
 
@@ -1287,7 +1297,8 @@ test('server registered change executor maps authenticated worker config into th
     state: 'reserved', created_at: '2026-08-27T00:00:00.000Z', receipt_id: null, completed_at: null
   };
   const mutation = {
-    confirmed: true, kind: 'equipment_replace', target_scope: 'registered_trade', trade_id: '260824-008',
+    confirmed: true, kind: 'equipment_replace', target_scope: 'registered_trade',
+    request_id: 'RQ-260824-021', trade_id: '260824-008',
     source_evidence: { customer_request: '교체 요청', staff_confirmation: '교체 확정', conversation_revision: 8 },
     expected_period: { start_date: '2026-08-28', start_time: '09:00', end_date: '2026-08-29', end_time: '18:00' },
     expected_before: [{ schedule_id: '260824-008-07', name: '기존 렌즈', quantity: 1 }],
@@ -1295,6 +1306,12 @@ test('server registered change executor maps authenticated worker config into th
   };
   const runnerCalls = [];
   const authoritativeAfter = { contract: {}, schedule: {}, ledger: {} };
+  const requestFinalization = {
+    requestId: mutation.request_id,
+    tradeId: mutation.trade_id,
+    status: '등록완료(기존거래 보강)',
+    rowCount: 1
+  };
   const executor = createGatewayRegisteredReservationChangeExecutor({
     getConfig: () => ({
       gasApiUrl: 'https://script.google.com/macros/s/internal-only/exec',
@@ -1308,7 +1325,12 @@ test('server registered change executor maps authenticated worker config into th
         verified: true,
         tradeId: mutation.trade_id,
         readback: authoritativeAfter,
-        authoritativeReadback: { before: { contract: {}, schedule: {} }, after: authoritativeAfter },
+        authoritativeReadback: {
+          before: { contract: {}, schedule: {} },
+          after: authoritativeAfter,
+          requestFinalization
+        },
+        requestFinalization,
         appliedStages: ['scheduleCorrectRegisteredTrade']
       };
     }
@@ -1333,6 +1355,7 @@ test('server registered change executor maps authenticated worker config into th
     input: {
       tradeId: '260824-008',
       operationId: 'registered-operation-1',
+      sourceRequestId: 'RQ-260824-021',
       expectedPeriod: {
         startDate: '2026-08-28', startTime: '09:00', endDate: '2026-08-29', endTime: '18:00'
       },
@@ -1375,6 +1398,7 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
       assert.deepEqual(input, {
         tradeId: TASK7_INCIDENT.trade_id,
         operationId: input.operationId,
+        sourceRequestId: TASK7_INCIDENT.request_id,
         expectedPeriod: {
           startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00'
         },
@@ -1383,13 +1407,16 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
         sendEstimate: false
       });
       assert.match(input.operationId, /^[0-9a-f-]{36}$/i);
+      const requestFinalization = task7RequestFinalization();
       return {
         ok: true, verified: true, tradeId: TASK7_INCIDENT.trade_id,
         readback: task7AuthoritativeReadback(),
         authoritativeReadback: {
           before: task7AuthoritativeBeforeReadback(),
-          after: task7AuthoritativeReadback()
+          after: task7AuthoritativeReadback(),
+          requestFinalization
         },
+        requestFinalization,
         appliedStages: ['scheduleCorrectRegisteredTrade']
       };
     }
@@ -1401,7 +1428,8 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
     assert.equal(receipt.status, 'ok');
     assert.deepEqual(receipt.authoritative_result, {
       before: task7AuthoritativeBeforeReadback(),
-      after: task7AuthoritativeReadback()
+      after: task7AuthoritativeReadback(),
+      requestFinalization: task7RequestFinalization()
     });
     await replay.completeHermesFinal({
       replyMode: 'no_reply', should_write_to_sheet: false, no_auto_reply_sent: true,

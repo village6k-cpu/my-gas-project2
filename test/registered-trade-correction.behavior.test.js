@@ -61,6 +61,8 @@ function harness({
   historicalProjectionError = '',
   finalState = null,
   useRealVerification = false,
+  sourceEquipment = null,
+  sourceDriftsBeforeFinalize = false,
 } = {}) {
   const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
   const body = section(
@@ -75,8 +77,10 @@ function harness({
     removeEntries: [],
     durableCheckoutReads: 0, historicalProjectionCalls: [],
     addHistoricalToken: null, removeHistoricalToken: null,
+    sourceGroupReads: 0, sourceFinalizations: 0, events: [],
   };
   let lockHeld = false;
+  let sourceFinalized = false;
   const effectiveBaselineRows = baselineRows || [
     { scheduleId: '260813-005-01', setName: '', name: 'FX9', qty: 1, isComponent: false },
   ];
@@ -106,7 +110,17 @@ function harness({
     },
     SpreadsheetApp: {
       flush() {},
-      getActiveSpreadsheet() { return {}; },
+      getActiveSpreadsheet() {
+        return {
+          getSheetByName(name) {
+            if (name !== '확인요청') return null;
+            return {
+              getLastRow: () => 2,
+              getRange: () => ({ getValues: () => [['RQ-260906-013']] }),
+            };
+          },
+        };
+      },
     },
     PropertiesService: {
       getScriptProperties() {
@@ -171,6 +185,7 @@ function harness({
       assert.equal(options.lockAlreadyHeld, true);
       assert.equal(options.deferContractRegeneration, true);
       calls.mutate.push('date');
+      calls.events.push('mutate:date');
       return { success: true, status: 'CHANGED', requested: args };
     },
     dashboardAddEquipments(_tid, _entries, options) {
@@ -199,6 +214,7 @@ function harness({
       assert.equal(options.deferContractRegeneration, true);
       calls.addHistoricalToken = options.historicalCorrectionToken || null;
       calls.mutate.push('add');
+      calls.events.push('mutate:add');
       return addMutationError ? { error: addMutationError } : {
         success: true,
         addedRows: _entries.length,
@@ -217,6 +233,7 @@ function harness({
       assert.equal(options.deferContractRegeneration, true);
       calls.removeHistoricalToken = options.historicalCorrectionToken || null;
       calls.mutate.push('remove');
+      calls.events.push('mutate:remove');
       calls.removeEntries = _entries.map((entry) => ({ ...entry }));
       return {
         success: true,
@@ -227,6 +244,7 @@ function harness({
     regenerateContractById() {
       calls.regenerations += 1;
       calls.lockHeldDuringRegeneration = lockHeld;
+      calls.events.push('regenerate');
       return {
         success: true,
         url: 'https://docs.example/contract',
@@ -241,8 +259,40 @@ function harness({
     ensureDashboardStructureProjectionTrigger_() {
       calls.triggerLockStates.push(lockHeld);
     },
+    _confirmRequestPhoneKey_: (value) => String(value || '').replace(/\D/g, ''),
+    _confirmRequestEquipListSignature_(items) {
+      return (items || []).map((row) => `${String(row.name || '').trim()}::${Number(row.qty) || 1}`).sort().join('|');
+    },
+    _confirmRequestEquipListEquivalent_(left, right) {
+      return context._confirmRequestEquipListSignature_(left) === context._confirmRequestEquipListSignature_(right);
+    },
+    _isMutableConfirmRequestGroup_: () => !sourceFinalized,
+    _findRegisteredTradeForConfirmRequest_: () => input.tradeId,
+    _buildConfirmRequestGroups_() {
+      calls.sourceGroupReads += 1;
+      const equipment = sourceEquipment || [{ name: 'BURANO 8K', qty: 1 }];
+      const drifted = sourceDriftsBeforeFinalize && calls.sourceGroupReads === 2;
+      return [{
+        reqID: 'RQ-260906-013', rows: [2], name: '테스트 고객', phone: '010-0000-0000',
+        startDate: input.expectedPeriod.startDate, startTime: input.expectedPeriod.startTime,
+        endDate: input.expectedPeriod.endDate, endTime: input.expectedPeriod.endTime,
+        topLevelEquipItems: drifted ? [{ name: '다른 장비', qty: 1 }] : equipment,
+        registerActions: sourceFinalized ? ['등록'] : [],
+        statuses: sourceFinalized ? ['등록완료(기존거래 보강)'] : [],
+        tradeIds: sourceFinalized ? [input.tradeId] : [],
+      }];
+    },
+    markRequestRegistered_(_sheet, _allData, requestId, tradeId, status) {
+      assert.equal(lockHeld, true, 'source RQ finalization must run under the second lock');
+      assert.equal(requestId, 'RQ-260906-013');
+      assert.equal(tradeId, input.tradeId);
+      assert.equal(status, '등록완료(기존거래 보강)');
+      sourceFinalized = true;
+      calls.sourceFinalizations += 1;
+      calls.events.push('finalize-rq');
+    },
   };
-  vm.runInNewContext(`${body}\nthis.correct = correctRegisteredTrade; this.normalize = normalizeRegisteredTradeCorrection_;`, context);
+  vm.runInNewContext(`${body}\nthis.correct = correctRegisteredTrade; this.normalize = normalizeRegisteredTradeCorrection_; this.recoverSourceRequest = finalizeRegisteredTradeSourceRequestRecovery;`, context);
   const verifyActual = context.verifyRegisteredTradeCorrectionState_;
 
   context.readRegisteredTradeCorrectionState_ = () => {
@@ -433,6 +483,94 @@ test('one correction preflights all item deltas, locks once, adds before remove,
   assert.deepEqual(result.authoritativeReadback.after, result.readback);
   assert.equal(result.authoritativeReadback.before.schedule.topLevelQuantities.FX9, 1);
   assert.equal(result.authoritativeReadback.after.schedule.topLevelQuantities['BURANO 8K'], 1);
+});
+
+test('an exact source RQ is fenced before writes and finalized only after contract and final readback', () => {
+  const { context, calls } = harness();
+  const result = context.correct({ ...input, sourceRequestId: 'RQ-260906-013' });
+
+  assert.equal(result.success, true);
+  assert.equal(calls.lockTries, 2);
+  assert.equal(calls.lockReleases, 2);
+  assert.equal(calls.sourceFinalizations, 1);
+  assert.deepEqual(calls.events, ['mutate:date', 'mutate:add', 'mutate:remove', 'regenerate', 'finalize-rq']);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.requestFinalization)), {
+    requestId: 'RQ-260906-013', tradeId: input.tradeId,
+    status: '등록완료(기존거래 보강)', rowCount: 1,
+  });
+  assert.equal(
+    JSON.stringify(result.authoritativeReadback.requestFinalization),
+    JSON.stringify(result.requestFinalization),
+  );
+});
+
+test('a source RQ plan mismatch blocks before any registered schedule write', () => {
+  const { context, calls } = harness({ sourceEquipment: [{ name: '다른 장비', qty: 1 }] });
+  assert.throws(
+    () => context.correct({ ...input, sourceRequestId: 'RQ-260906-013' }),
+    /sourceRequestId 장비 plan/i,
+  );
+  assertNoWriteSideEffects(calls);
+  assert.equal(calls.sourceFinalizations, 0);
+});
+
+test('source RQ drift after schedule mutation returns partial state and never marks a different request', () => {
+  const { context, calls } = harness({ sourceDriftsBeforeFinalize: true });
+  const result = context.correct({ ...input, sourceRequestId: 'RQ-260906-013' });
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'PARTIAL_STATE');
+  assert.equal(result.attemptedStage, 'finalizeSourceRequest');
+  assert.deepEqual(calls.mutate, ['date', 'add', 'remove']);
+  assert.equal(calls.sourceFinalizations, 0);
+});
+
+test('an exact recovery finalizes an already-applied source RQ without replaying schedule or contract writes', () => {
+  const { context, calls, baseline } = harness({
+    baselineRows: [{ scheduleId: '260813-005-01', setName: '', name: '강풍기', qty: 1, isComponent: false }],
+    sourceEquipment: [{ name: '강풍기', qty: 1 }],
+  });
+  context.readRegisteredTradeCorrectionState_ = () => baseline;
+  const recoveryInput = {
+    tradeId: input.tradeId,
+    sourceRequestId: 'RQ-260906-013',
+    expectedPeriod: input.expectedPeriod,
+    expectedSourcePlan: [{ name: '강풍기', qty: 1 }],
+    expectedTopLevelQuantities: { 강풍기: 1 },
+  };
+  const result = context.recoverSourceRequest(recoveryInput);
+
+  assert.equal(result.success, true);
+  assert.equal(result.recoveredWithoutScheduleReplay, true);
+  assert.equal(result.customerNotificationSent, false);
+  assert.equal(calls.sourceFinalizations, 1);
+  assert.deepEqual(calls.mutate, []);
+  assert.equal(calls.regenerations, 0);
+  const retry = context.recoverSourceRequest(recoveryInput);
+  assert.equal(retry.success, true);
+  assert.equal(retry.alreadyFinalized, true);
+  assert.equal(calls.sourceFinalizations, 1);
+  assert.equal(calls.lockTries, 2);
+  assert.equal(calls.lockReleases, 2);
+});
+
+test('source RQ recovery rejects a stale full schedule fingerprint before touching the request', () => {
+  const { context, calls } = harness({
+    baselineRows: [{ scheduleId: '260813-005-01', setName: '', name: '강풍기', qty: 1, isComponent: false }],
+    sourceEquipment: [{ name: '강풍기', qty: 1 }],
+  });
+
+  assert.throws(() => context.recoverSourceRequest({
+    tradeId: input.tradeId,
+    sourceRequestId: 'RQ-260906-013',
+    expectedPeriod: input.expectedPeriod,
+    expectedSourcePlan: [{ name: '강풍기', qty: 1 }],
+    expectedTopLevelQuantities: { 강풍기: 2 },
+  }), /top-level quantities|최상위 품목/i);
+
+  assert.equal(calls.sourceFinalizations, 0);
+  assert.deepEqual(calls.mutate, []);
+  assert.equal(calls.regenerations, 0);
 });
 
 test('BUSY is terminal for this invocation and never spins or mutates', () => {
