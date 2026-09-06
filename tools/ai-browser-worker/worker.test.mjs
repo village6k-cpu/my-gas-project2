@@ -4382,6 +4382,13 @@ function completePostActionDecision(overrides = {}) {
     reason: '확인요청의 실제 가용 결과를 반영함',
     kill_switch_observed: 'active',
     customer: { name: '홍길동', source: 'Kakao Channel Manager', chat_status: 'open' },
+    owner_case: {
+      caseKey: 'hong:2026-07-24:fx3-reservation',
+      title: '홍길동 FX3 예약 확인',
+      requestSummary: 'FX3 바디세트 예약 가능 여부 문의입니다.',
+      problemSummary: '가용 결과를 고객에게 아직 안내하지 않았습니다.',
+      nextActionSummary: '가용 결과를 검토해 고객에게 안내하세요.'
+    },
     safety_checks: {
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
@@ -6340,6 +6347,38 @@ test('validateAiDecisionContract rejects missing AI semantics instead of reconst
   assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].summary')));
 });
 
+test('semantic owner case contract accepts only the exact bounded executive report shape', () => {
+  const valid = completeSheetDecision({
+    owner_case: {
+      caseKey: 'hong:2026-07-24:fx3-reservation',
+      title: '홍길동 FX3 예약 확인',
+      requestSummary: '7월 24일 FX3 바디세트 예약 요청입니다.',
+      problemSummary: '예약 가능 여부를 아직 확정하지 않았습니다.',
+      nextActionSummary: '가용 여부를 확인한 뒤 고객에게 안내하세요.'
+    }
+  });
+  assert.equal(validateAiDecisionContract(valid).valid, true);
+  const missing = completeSheetDecision();
+  const required = validateAiDecisionContract(missing, { requireOwnerCase: true });
+  assert.equal(required.valid, false);
+  assert.match(required.errors.join('|'), /owner_case/);
+
+  for (const ownerCase of [
+    null,
+    { ...valid.owner_case, extra: 'raw' },
+    { ...valid.owner_case, caseKey: ' padded ' },
+    { ...valid.owner_case, title: '' },
+    { ...valid.owner_case, title: 'x'.repeat(121) },
+    { ...valid.owner_case, requestSummary: 'x'.repeat(501) },
+    { ...valid.owner_case, problemSummary: 'customer phone 010-1111-2222' },
+    { ...valid.owner_case, nextActionSummary: 'automation_error payload stack' }
+  ]) {
+    const result = validateAiDecisionContract(completeSheetDecision({ owner_case: ownerCase }));
+    assert.equal(result.valid, false, JSON.stringify(ownerCase));
+    assert.match(result.errors.join('|'), /owner_case/);
+  }
+});
+
 test('confirmation execution validation rejects incomplete catalog decisions before the native tool reservation', () => {
   const missingStatus = completeSheetDecision();
   delete missingStatus.reservation_inquiry.equipment_requested[0].catalog_match_status;
@@ -7620,6 +7659,7 @@ test('buildHermesPostActionPrompt delegates result interpretation and reply pros
   assert.match(prompt, /소니 FX3 바디세트/);
   assert.match(prompt, /outer code.*must not author customer-facing prose/is);
   assert.match(prompt, /"should_write_to_sheet": false/);
+  assert.match(prompt, /"owner_case":/);
   assert.match(prompt, /replyMode="draft_only"/);
   assert.match(prompt, /owner_review_required.*true/is);
   assert.doesNotMatch(prompt, /may choose replyMode="auto_send"/);
@@ -9881,6 +9921,118 @@ test('buildFollowUpRows uses the AI taskKey for repeated FAQ follow-ups without 
 
   assert.equal(first[0].follow_up_key, second[0].follow_up_key);
   assert.match(first[0].follow_up_key, /discount_policy/);
+});
+
+test('semantic owner case prompt gives Hermes exact open-case identities to reuse', () => {
+  const prompt = buildHermesPrompt({
+    id: 'semantic-owner-case-prompt',
+    roomKey: 'chat:jeong',
+    preview_text: '애플박스가 없고 전화 부탁드립니다'
+  }, {
+    ownerCaseContext: {
+      status: 'available',
+      cases: [{
+        caseKey: 'jeong:2026-09-03:applebox-pickup-missing',
+        title: '정원근 애플박스 반출 누락',
+        requestSummary: '예약한 애플박스 풀과 풀세트를 무인 반출하려는 문의',
+        problemSummary: '현장에는 풀 하나만 있고 계약서도 확인되지 않음',
+        nextActionSummary: '전화 안내 후 누락 장비와 계약서를 확인',
+        tasks: [{ taskKey: 'applebox-pickup-recovery', taskLabel: '누락 장비와 계약서 확인' }]
+      }]
+    }
+  });
+
+  assert.match(prompt, /OWNER CASE CONTEXT/);
+  assert.match(prompt, /jeong:2026-09-03:applebox-pickup-missing/);
+  assert.match(prompt, /applebox-pickup-recovery/);
+  assert.match(prompt, /같은 문의.*caseKey.*정확히 재사용/s);
+  assert.match(prompt, /같은 업무.*taskKey.*정확히 재사용/s);
+  assert.doesNotMatch(prompt, /30분.*묶/);
+});
+
+test('Gateway turn loads only the exact-room owner case context and marks unavailable reads', async () => {
+  const job = {
+    jobId: 'semantic-context-job', roomKey: 'chat:semantic-context', roomRevision: 3,
+    detectedAt: '2026-09-06T01:00:00.000Z', previewText: '애플박스가 없습니다'
+  };
+  const snapshot = createGatewayReadySnapshot(job, '2026-09-06T01:00:01.000Z');
+  const calls = [];
+  const turn = await workerModule.buildKakaoGatewayTurn({
+    config: { workOrchestratorV2WorkItemsEnabled: true },
+    job,
+    capture: { snapshot },
+    dependencies: {
+      buildReadOnlyLookupContext: async () => ({}),
+      buildReadOnlyRagContext: () => null,
+      buildBrainContext: () => null,
+      buildRecentBotSendsPromptText: () => '',
+      buildCorrectionsPromptText: () => '',
+      loadOwnerCaseContext: async (input) => {
+        calls.push(input);
+        return { status: 'available', cases: [] };
+      },
+      gatewayConfirmationToolAvailable: false
+    },
+    freshnessGuard: confirmationFreshnessGuard()
+  });
+  assert.deepEqual(calls, [{ roomKey: job.roomKey, limit: 20 }]);
+  assert.deepEqual(turn.internal.ownerCaseContext, { status: 'available', cases: [] });
+
+  const unavailable = await workerModule.buildKakaoGatewayTurn({
+    config: { workOrchestratorV2WorkItemsEnabled: true }, job, capture: { snapshot },
+    dependencies: {
+      buildReadOnlyLookupContext: async () => ({}),
+      buildReadOnlyRagContext: () => null,
+      buildBrainContext: () => null,
+      buildRecentBotSendsPromptText: () => '',
+      buildCorrectionsPromptText: () => '',
+      loadOwnerCaseContext: async () => { throw new Error('private backend detail'); },
+      gatewayConfirmationToolAvailable: false
+    },
+    freshnessGuard: confirmationFreshnessGuard()
+  });
+  assert.deepEqual(unavailable.internal.ownerCaseContext, { status: 'unavailable', cases: [] });
+  assert.doesNotMatch(unavailable.event.prompt, /private backend detail/);
+});
+
+test('semantic owner case metadata survives the reviewed follow-up row boundary', () => {
+  const decision = {
+    classification: 'reservation',
+    confidence: 'high',
+    customer: { name: '정원근' },
+    owner_case: {
+      caseKey: 'jeong:2026-09-03:applebox-pickup-missing',
+      title: '정원근 애플박스 반출 누락',
+      requestSummary: '예약한 애플박스 풀과 풀세트를 무인 반출하려는 문의입니다.',
+      problemSummary: '현장에는 풀 하나만 있고 계약서도 확인되지 않았습니다.',
+      nextActionSummary: '전화 안내 후 누락 장비와 계약서를 확인하세요.'
+    },
+    follow_up_items: [{
+      type: 'schedule_check',
+      route: 'inventory',
+      taskKey: 'applebox-pickup-recovery',
+      requiresHumanAction: true,
+      priority: 'urgent',
+      status: 'open',
+      title: '정원근 애플박스 누락·전화·계약서 확인',
+      customer_name: '정원근',
+      summary: '같은 반출 건에 대한 연속 문의입니다.',
+      recommended_action: '누락 장비와 계약서를 확인하세요.'
+    }]
+  };
+
+  const [row] = buildFollowUpRows(decision, {
+    jobId: 'semantic-owner-case-row',
+    roomKey: 'chat:jeong'
+  });
+
+  assert.equal(row.payload.owner_case_key, decision.owner_case.caseKey);
+  assert.equal(row.payload.owner_case_title, decision.owner_case.title);
+  assert.equal(row.payload.owner_request_summary, decision.owner_case.requestSummary);
+  assert.equal(row.payload.owner_problem_summary, decision.owner_case.problemSummary);
+  assert.equal(row.payload.owner_next_action_summary, decision.owner_case.nextActionSummary);
+  assert.equal(row.payload.owner_task_key, 'applebox-pickup-recovery');
+  assert.equal(row.payload.owner_case_context_status, 'unavailable');
 });
 
 test('filterFollowUpRowsAgainstClosedHistory suppresses already dismissed topic tasks', () => {

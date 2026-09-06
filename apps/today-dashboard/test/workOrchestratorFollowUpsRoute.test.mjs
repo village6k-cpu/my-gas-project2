@@ -180,6 +180,9 @@ test("v2 GET reads grouped inquiry cases and never returns raw work evidence", a
       cases: [{
         id: "11111111-1111-4111-8111-111111111111", state: "now", priority: "urgent",
         title: "김OO 문의", ownerBrief: "직원이 문의를 확인해 처리할 일 2개로 정리했습니다.",
+        requestSummary: "고객이 FX3 예약 가능 여부를 문의했습니다.",
+        problemSummary: "예약 가능 여부를 아직 확인하지 못했습니다.",
+        nextActionSummary: "일정과 재고를 확인해 고객에게 안내하세요.",
         receivedAt: "2026-09-05T08:00:00.000Z", updatedAt: "2026-09-05T08:30:00.000Z",
         categories: ["schedule", "settlement"], completedStepCount: 0, totalStepCount: 2,
         steps: [{
@@ -207,7 +210,7 @@ test("v2 GET reads grouped inquiry cases and never returns raw work evidence", a
   assert.equal(body.source, "work_items_v2_cases");
   assert.equal(body.cases[0].steps.length, 2);
   assert.deepEqual(Object.keys(body.cases[0]).sort(), [
-    "categories", "completedStepCount", "id", "ownerBrief", "priority", "receivedAt", "state",
+    "categories", "completedStepCount", "id", "nextActionSummary", "ownerBrief", "priority", "problemSummary", "receivedAt", "requestSummary", "state",
     "steps", "title", "totalStepCount", "updatedAt",
   ].sort());
   assert.equal(body.nextCursor, Buffer.from(JSON.stringify(nextCursor), "utf8").toString("base64url"));
@@ -268,6 +271,7 @@ test("the deployed owner inbox defaults to v2 when the dashboard flag is absent"
         cases: [{
           id: "11111111-1111-4111-8111-111111111111", state: "now", priority: "normal",
           title: "고객 문의", ownerBrief: "직원이 문의를 확인해 처리할 일 1개로 정리했습니다.",
+          requestSummary: "고객이 일정 확인을 요청했습니다.", problemSummary: "일정이 미확인 상태입니다.", nextActionSummary: "일정을 확인하세요.",
           receivedAt: "2026-09-05T08:00:00.000Z", updatedAt: "2026-09-05T08:30:00.000Z",
           categories: ["schedule"], completedStepCount: 0, totalStepCount: 1,
           steps: [{

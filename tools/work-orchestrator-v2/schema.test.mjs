@@ -14,6 +14,22 @@ const heybilliInboxMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_inbox\.sql$/.test(name));
 const heybilliCasesMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_cases\.sql$/.test(name));
+const semanticOwnerCasesMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_semantic_owner_cases\.sql$/.test(name));
+
+test('semantic owner case migration defines exact-room service-only context and semantic grouping', () => {
+  assert.equal(semanticOwnerCasesMigrationFiles.length, 1, 'exactly one semantic owner case migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, semanticOwnerCasesMigrationFiles[0]), 'utf8');
+  assert.match(sql, /create (?:or replace )?function public\.list_heybilli_owner_case_context_v2\(\s*p_room_key text,\s*p_limit integer\s*\)/i);
+  assert.match(sql, /security invoker set search_path = ''/i);
+  assert.match(sql, /payload->>'owner_case_key'/i);
+  assert.doesNotMatch(sql, /interval\s+'30 minutes'/i);
+  assert.match(sql, /revoke execute on function public\.list_heybilli_owner_case_context_v2\(text,integer\)\s+from public, anon, authenticated, service_role/i);
+  assert.match(sql, /grant execute on function public\.list_heybilli_owner_case_context_v2\(text,integer\)\s+to service_role/i);
+  assert.match(sql, /create (?:or replace )?function public\.reconcile_heybilli_owner_cases_v2\(\s*p_assignments jsonb,\s*p_apply boolean default false\s*\)/i);
+  assert.match(sql, /revoke execute on function public\.reconcile_heybilli_owner_cases_v2\(jsonb,boolean\)\s+from public, anon, authenticated, service_role/i);
+  assert.match(sql, /grant execute on function public\.reconcile_heybilli_owner_cases_v2\(jsonb,boolean\)\s+to service_role/i);
+});
 
 test('foundation migration enforces the private service-role schema contract', () => {
   assert.equal(migrationFiles.length, 1, 'exactly one foundation migration must exist');

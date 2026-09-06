@@ -20,6 +20,8 @@ const [heybilliInboxMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_inbox\.sql$/.test(name));
 const [heybilliCasesMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_cases\.sql$/.test(name));
+const [semanticOwnerCasesMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_semantic_owner_cases\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -78,6 +80,13 @@ async function createHeybilliCasesDatabase() {
   const db = await createHeybilliInboxDatabase();
   assert.ok(heybilliCasesMigrationName, 'the additive Heybilli case migration must exist');
   await db.exec(readFileSync(join(migrationsDirectory, heybilliCasesMigrationName), 'utf8'));
+  return db;
+}
+
+async function createSemanticOwnerCasesDatabase() {
+  const db = await createHeybilliCasesDatabase();
+  assert.ok(semanticOwnerCasesMigrationName, 'the additive semantic owner case migration must exist');
+  await db.exec(readFileSync(join(migrationsDirectory, semanticOwnerCasesMigrationName), 'utf8'));
   return db;
 }
 
@@ -4030,6 +4039,115 @@ test('Heybilli inquiry cases merge a continuous conversation into one safe actio
         has_function_privilege('service_role', 'public.list_heybilli_owner_cases_v2(timestamptz,text,text,integer,jsonb)', 'execute') as service_execute
     `);
     assert.deepEqual(privileges.rows[0], { anon_execute: false, authenticated_execute: false, service_execute: true });
+  } finally {
+    await db.close();
+  }
+});
+
+test('semantic owner cases group only reviewed case keys and expose bounded exact-room context', async () => {
+  const db = await createSemanticOwnerCasesDatabase();
+  const ids = [1, 2, 3, 4].map((value) => `62000000-0000-4000-8000-${String(value).padStart(12, '0')}`);
+  const shared = {
+    owner_case_key: 'jeong:2026-09-03:applebox-pickup-missing',
+    owner_case_title: '정원근 애플박스 반출 누락',
+    owner_request_summary: '예약한 애플박스 풀과 풀세트를 무인 반출하려는 문의입니다.',
+    owner_problem_summary: '현장에는 풀 하나만 있고 계약서도 확인되지 않았습니다.',
+    owner_next_action_summary: '전화 안내 후 누락 장비와 계약서를 확인하세요.',
+    owner_case_context_status: 'available'
+  };
+  try {
+    for (const [index, row] of [
+      { id: ids[0], workKey: 'jeong:applebox:first-wording', caseData: shared, task: 'applebox-pickup-recovery', opened: '2026-09-03T12:00:00Z' },
+      { id: ids[1], workKey: 'jeong:applebox:second-wording', caseData: shared, task: 'applebox-pickup-recovery', opened: '2026-09-03T13:00:00Z' },
+      { id: ids[2], workKey: 'jeong:nuc-slider', caseData: { ...shared, owner_case_key: 'jeong:2026-09-03:nuc-slider-booking', owner_case_title: '정원근 뉴클·슬라이더 예약 확인', owner_request_summary: '뉴클과 슬라이더 예약 가능 여부 문의', owner_problem_summary: '예약 가능 여부를 아직 확인하지 않음', owner_next_action_summary: '재고와 일정을 확인해 안내' }, task: 'nuc-slider-booking', opened: '2026-09-03T12:05:00Z' }
+      ,{ id: ids[3], workKey: 'other-room:applebox', room: 'room:other', caseData: shared, task: 'applebox-pickup-recovery', opened: '2026-09-03T12:02:00Z' }
+    ].entries()) {
+      await db.query(`insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, payload, created_at, updated_at
+      ) values ($1::uuid,$2,$3,$4,$5,'schedule_check','urgent','open',$6,$6,$6,$7::jsonb,$6,$6)`, [
+        row.id, row.workKey, row.room || 'room:jeong', row.caseData.owner_case_title, row.caseData.owner_problem_summary, row.opened,
+        JSON.stringify({ requires_human_action: true, ...row.caseData, owner_task_key: row.task })
+      ]);
+    }
+    const context = (await db.query(`select public.list_heybilli_owner_case_context_v2('room:jeong',20) as result`)).rows[0].result;
+    assert.equal(context.status, 'available');
+    assert.deepEqual(context.cases.map((entry) => entry.caseKey), [shared.owner_case_key, 'jeong:2026-09-03:nuc-slider-booking']);
+    assert.equal(context.cases[0].tasks.length, 1, 'same semantic task key must be deduplicated');
+    const result = (await db.query(`select public.list_heybilli_owner_cases_v2('2026-09-06T00:00:00Z','now',null,20,null) as result`)).rows[0].result;
+    assert.equal(result.cases.length, 3, 'same room/minute is not a grouping rule, >30m is not a split rule, and rooms never merge');
+    assert.equal(result.cases[0].requestSummary.length > 10, true);
+    assert.equal(JSON.stringify(result).includes('room:jeong'), false);
+    const privileges = await db.query(`select
+      has_function_privilege('anon','public.list_heybilli_owner_case_context_v2(text,integer)','execute') as anon_execute,
+      has_function_privilege('authenticated','public.list_heybilli_owner_case_context_v2(text,integer)','execute') as authenticated_execute,
+      has_function_privilege('service_role','public.list_heybilli_owner_case_context_v2(text,integer)','execute') as service_execute`);
+    assert.deepEqual(privileges.rows[0], { anon_execute: false, authenticated_execute: false, service_execute: true });
+  } finally {
+    await db.close();
+  }
+});
+
+test('semantic owner reconciliation is dry-run first, version fenced, and preserves work lifecycle', async () => {
+  const db = await createSemanticOwnerCasesDatabase();
+  const ids = [
+    '63000000-0000-4000-8000-000000000001',
+    '63000000-0000-4000-8000-000000000002'
+  ];
+  const assignments = ids.map((id, index) => ({
+    id,
+    expectedVersion: index === 0 ? 4 : 7,
+    caseKey: 'jeong:2026-09-03:applebox-pickup-missing',
+    title: '정원근 애플박스 반출 누락',
+    requestSummary: '예약한 애플박스 풀과 풀세트를 무인 반출하려는 문의입니다.',
+    problemSummary: '현장에는 풀 하나만 있고 계약서도 확인되지 않았습니다.',
+    nextActionSummary: '전화 안내 후 누락 장비와 계약서를 확인하세요.',
+    taskKey: 'applebox-pickup-recovery'
+  }));
+  try {
+    await db.query(`insert into public.work_items_v2 (
+      id, work_key, room_key, title, summary, work_type, priority, state,
+      actionable_at, snoozed_until, first_opened_at, last_activity_at,
+      digest_inclusion_count, consecutive_unhandled_digests, version, payload,
+      created_at, updated_at
+    ) values
+      ($1::uuid,'jeong:applebox:a','room:jeong','old A','old A','schedule_check','p0','open',
+        '2026-09-03T12:00:00Z',null,'2026-09-03T12:00:00Z','2026-09-03T12:00:00Z',3,2,4,
+        '{"requires_human_action":true,"legacy_marker":"keep-a"}'::jsonb,
+        '2026-09-03T12:00:00Z','2026-09-03T12:00:00Z'),
+      ($2::uuid,'jeong:applebox:b','room:jeong','old B','old B','schedule_check','urgent','snoozed',
+        '2026-09-03T12:01:00Z','2026-09-07T12:00:00Z','2026-09-03T12:01:00Z','2026-09-03T12:01:00Z',1,1,7,
+        '{"requires_human_action":true,"legacy_marker":"keep-b"}'::jsonb,
+        '2026-09-03T12:01:00Z','2026-09-03T12:01:00Z')`, ids);
+
+    const before = (await db.query(`select id::text,state,priority,version,snoozed_until,
+      digest_inclusion_count,consecutive_unhandled_digests,payload->>'legacy_marker' as legacy_marker,
+      payload ? 'owner_case_key' as has_case from public.work_items_v2 where id=any($1::uuid[]) order by id`, [ids])).rows;
+    const dry = (await db.query(`select public.reconcile_heybilli_owner_cases_v2($1::jsonb,false) as result`, [JSON.stringify(assignments)])).rows[0].result;
+    assert.deepEqual(dry, { applied: false, planned: 2, updated: 0, stale: 0, rows: [] });
+    assert.deepEqual((await db.query(`select id::text,state,priority,version,snoozed_until,
+      digest_inclusion_count,consecutive_unhandled_digests,payload->>'legacy_marker' as legacy_marker,
+      payload ? 'owner_case_key' as has_case from public.work_items_v2 where id=any($1::uuid[]) order by id`, [ids])).rows, before);
+
+    const applied = (await db.query(`select public.reconcile_heybilli_owner_cases_v2($1::jsonb,true) as result`, [JSON.stringify(assignments)])).rows[0].result;
+    assert.equal(applied.applied, true);
+    assert.equal(applied.planned, 2);
+    assert.equal(applied.updated, 2);
+    assert.equal(applied.stale, 0);
+    assert.deepEqual(applied.rows.map((row) => [row.id, row.version, row.caseKey, row.taskKey]), [
+      [ids[0], 5, assignments[0].caseKey, assignments[0].taskKey],
+      [ids[1], 8, assignments[1].caseKey, assignments[1].taskKey]
+    ]);
+    const after = (await db.query(`select id::text,state,priority,version,snoozed_until,
+      digest_inclusion_count,consecutive_unhandled_digests,payload->>'legacy_marker' as legacy_marker,
+      payload->>'owner_case_key' as case_key from public.work_items_v2 where id=any($1::uuid[]) order by id`, [ids])).rows;
+    assert.deepEqual(after.map((row) => ({ ...row, snoozed_until: row.snoozed_until?.toISOString?.() || row.snoozed_until })), [
+      { id: ids[0], state: 'open', priority: 'p0', version: 5, snoozed_until: null, digest_inclusion_count: 3, consecutive_unhandled_digests: 2, legacy_marker: 'keep-a', case_key: assignments[0].caseKey },
+      { id: ids[1], state: 'snoozed', priority: 'urgent', version: 8, snoozed_until: '2026-09-07T12:00:00.000Z', digest_inclusion_count: 1, consecutive_unhandled_digests: 1, legacy_marker: 'keep-b', case_key: assignments[1].caseKey }
+    ]);
+
+    const stale = (await db.query(`select public.reconcile_heybilli_owner_cases_v2($1::jsonb,true) as result`, [JSON.stringify(assignments)])).rows[0].result;
+    assert.deepEqual(stale, { applied: true, planned: 2, updated: 0, stale: 2, rows: [] });
   } finally {
     await db.close();
   }

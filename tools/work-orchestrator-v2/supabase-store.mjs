@@ -1,5 +1,6 @@
 import { assertNotificationTransition } from './contracts.mjs';
 import { validateWorkOrchestratorHealthAggregate } from './observability.mjs';
+import { normalizeOwnerCaseAssignments } from './reconcile-owner-cases.mjs';
 import { describeOwnerWorkType, OWNER_WORK_TYPES } from './work-taxonomy.mjs';
 
 const REQUEST_ERROR_PREFIX = 'Work Orchestrator Supabase request failed';
@@ -48,17 +49,30 @@ const WORK_PAYLOAD_TEXT_LIMITS = Object.freeze({
   alert_reason: 1000,
   blocking_reason: 1000,
   due_hint: 100,
-  recommended_action: 1200
+  recommended_action: 1200,
+  owner_case_key: 160,
+  owner_case_title: 120,
+  owner_request_summary: 500,
+  owner_problem_summary: 500,
+  owner_next_action_summary: 500,
+  owner_task_key: 160,
+  owner_case_context_status: 20
 });
 const WORK_ACTIONS = new Set(['progress', 'snooze', 'ack_p0', 'request_resolve', 'dismiss']);
 const HEYBILLI_VIEWS = new Set(['now', 'snoozed', 'completed']);
 const HEYBILLI_CATEGORIES = new Set(['schedule', 'quote', 'settlement', 'customer', 'operations']);
+const OWNER_CASE_CONTEXT_KEYS = ['status', 'cases'];
+const OWNER_CASE_CONTEXT_CASE_KEYS = ['caseKey', 'title', 'requestSummary', 'problemSummary', 'nextActionSummary', 'tasks'];
+const OWNER_CASE_CONTEXT_TASK_KEYS = ['taskKey', 'taskLabel'];
+const OWNER_CASE_RECONCILIATION_KEYS = ['applied', 'planned', 'rows', 'stale', 'updated'];
+const OWNER_CASE_RECONCILIATION_ROW_KEYS = ['caseKey', 'id', 'taskKey', 'version'];
 const HEYBILLI_ITEM_KEYS = [
   'id', 'version', 'category', 'workType', 'workTypeLabel', 'priority', 'state',
   'title', 'summary', 'recommendedAction', 'dueAt', 'snoozedUntil', 'firstOpenedAt', 'updatedAt'
 ];
 const HEYBILLI_CASE_KEYS = [
-  'id', 'state', 'priority', 'title', 'ownerBrief', 'receivedAt', 'updatedAt',
+  'id', 'state', 'priority', 'title', 'ownerBrief', 'requestSummary', 'problemSummary',
+  'nextActionSummary', 'receivedAt', 'updatedAt',
   'categories', 'completedStepCount', 'totalStepCount', 'steps'
 ];
 const HEYBILLI_CASE_STEP_KEYS = [
@@ -689,6 +703,60 @@ function normalizeHeybilliQuery(input) {
   };
 }
 
+function ownerCaseContextResponse(data, limit) {
+  if (!exactKeys(data, OWNER_CASE_CONTEXT_KEYS) || data.status !== 'available'
+    || !Array.isArray(data.cases) || data.cases.length > limit) throw heybilliResponseInvalid();
+  const caseKeys = new Set();
+  const cases = data.cases.map((entry) => {
+    if (!exactKeys(entry, OWNER_CASE_CONTEXT_CASE_KEYS) || !Array.isArray(entry.tasks) || entry.tasks.length > 20) {
+      throw heybilliResponseInvalid();
+    }
+    for (const [key, max] of [['caseKey', 160], ['title', 120], ['requestSummary', 500], ['problemSummary', 500], ['nextActionSummary', 500]]) {
+      responseText(entry[key], max);
+      if (entry[key] !== entry[key].trim()) throw heybilliResponseInvalid();
+    }
+    if (caseKeys.has(entry.caseKey)) throw heybilliResponseInvalid();
+    caseKeys.add(entry.caseKey);
+    const taskKeys = new Set();
+    const tasks = entry.tasks.map((task) => {
+      if (!exactKeys(task, OWNER_CASE_CONTEXT_TASK_KEYS)) throw heybilliResponseInvalid();
+      responseText(task.taskKey, 160);
+      responseText(task.taskLabel, 240);
+      if (task.taskKey !== task.taskKey.trim() || task.taskLabel !== task.taskLabel.trim()
+        || taskKeys.has(task.taskKey)) throw heybilliResponseInvalid();
+      taskKeys.add(task.taskKey);
+      return task;
+    });
+    return { ...entry, tasks };
+  });
+  return { status: 'available', cases };
+}
+
+function ownerCaseReconciliationResponse(data, input) {
+  if (!exactKeys(data, OWNER_CASE_RECONCILIATION_KEYS)
+    || data.applied !== input.apply
+    || !Number.isSafeInteger(data.planned) || data.planned !== input.assignments.length
+    || !Number.isSafeInteger(data.updated) || data.updated < 0
+    || !Number.isSafeInteger(data.stale) || data.stale < 0
+    || !Array.isArray(data.rows) || data.rows.length !== data.updated
+    || data.updated + data.stale > data.planned
+    || input.apply && data.updated + data.stale !== data.planned
+    || !input.apply && (data.updated !== 0 || data.rows.length !== 0)) throw responseInvalid();
+  const assignments = new Map(input.assignments.map((item) => [item.id, item]));
+  const seen = new Set();
+  for (const row of data.rows) {
+    if (!exactKeys(row, OWNER_CASE_RECONCILIATION_ROW_KEYS)) throw responseInvalid();
+    const id = responseUuid(row.id);
+    const assignment = assignments.get(id);
+    if (!assignment || seen.has(id) || !Number.isSafeInteger(row.version)
+      || row.version !== assignment.expectedVersion + 1
+      || responseText(row.caseKey, 160) !== assignment.caseKey
+      || responseText(row.taskKey, 160) !== assignment.taskKey) throw responseInvalid();
+    seen.add(id);
+  }
+  return data;
+}
+
 function heybilliItemResponse(item, input) {
   if (!exactKeys(item, HEYBILLI_ITEM_KEYS)) throw heybilliResponseInvalid();
   const id = responseUuid(item.id);
@@ -779,9 +847,13 @@ function heybilliCaseResponse(entry, input) {
     || !Number.isSafeInteger(entry.totalStepCount) || entry.totalStepCount !== entry.steps.length
     || entry.completedStepCount > entry.totalStepCount) throw heybilliResponseInvalid();
   const id = responseUuid(entry.id);
-  responseText(entry.title, 40);
+  responseText(entry.title, 120);
   responseText(entry.ownerBrief, 160);
-  if (HEYBILLI_UNSAFE_OWNER_TEXT.test(entry.title) || HEYBILLI_UNSAFE_OWNER_TEXT.test(entry.ownerBrief)) {
+  responseText(entry.requestSummary, 500);
+  responseText(entry.problemSummary, 500);
+  responseText(entry.nextActionSummary, 500);
+  if ([entry.title, entry.ownerBrief, entry.requestSummary, entry.problemSummary, entry.nextActionSummary]
+    .some((value) => HEYBILLI_UNSAFE_OWNER_TEXT.test(value))) {
     throw heybilliResponseInvalid();
   }
   const receivedAt = canonicalHeybilliTimestamp(entry.receivedAt);
@@ -1858,6 +1930,37 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         })
       });
       return heybilliCasesResponse(data, query);
+    },
+    listOwnerCaseContext: async (input = {}) => {
+      let roomKey;
+      let limit;
+      try {
+        if (!exactKeys(input, ['roomKey', 'limit'])) throw invalidInput();
+        roomKey = exactText(input.roomKey, 500);
+        limit = input.limit;
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw invalidInput();
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/list_heybilli_owner_case_context_v2', {
+        method: 'POST', body: safeJson({ p_room_key: roomKey, p_limit: limit })
+      });
+      return ownerCaseContextResponse(data, limit);
+    },
+    reconcileOwnerCases: async (input = {}) => {
+      let assignments;
+      let apply;
+      try {
+        if (!exactKeys(input, ['assignments', 'apply']) || typeof input.apply !== 'boolean') throw invalidInput();
+        assignments = normalizeOwnerCaseAssignments(input.assignments);
+        apply = input.apply;
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/reconcile_heybilli_owner_cases_v2', {
+        method: 'POST', body: safeJson({ p_assignments: assignments, p_apply: apply })
+      });
+      return ownerCaseReconciliationResponse(data, { assignments, apply });
     },
     resolveWorkItem: async (input = {}) => transitionWorkAutomation(input, { resolve: true }),
     markAutomationState: async (input = {}) => transitionWorkAutomation(input),
