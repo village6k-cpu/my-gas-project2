@@ -4088,6 +4088,32 @@ test('semantic owner cases group only reviewed case keys and expose bounded exac
   }
 });
 
+test('semantic owner case RPCs execute as service_role through their private validator', async () => {
+  const db = await createSemanticOwnerCasesDatabase();
+  try {
+    const aclMigrationName = readdirSync(migrationsDirectory)
+      .find((name) => /^\d+_work_orchestrator_v2_semantic_owner_case_acl\.sql$/.test(name));
+    assert.ok(aclMigrationName, 'the additive semantic owner case ACL migration must exist');
+    await db.exec(readFileSync(join(migrationsDirectory, aclMigrationName), 'utf8'));
+
+    await db.exec('set role service_role');
+    const cases = await db.query(`
+      select public.list_heybilli_owner_cases_v2(
+        '2026-09-06T00:00:00Z'::timestamptz, 'now', null, 20, null
+      ) as result
+    `);
+    const context = await db.query(`
+      select public.list_heybilli_owner_case_context_v2('room:empty', 20) as result
+    `);
+    await db.exec('reset role');
+
+    assert.deepEqual(cases.rows[0].result.cases, []);
+    assert.deepEqual(context.rows[0].result, { status: 'available', cases: [] });
+  } finally {
+    await db.close();
+  }
+});
+
 test('semantic owner reconciliation is dry-run first, version fenced, and preserves work lifecycle', async () => {
   const db = await createSemanticOwnerCasesDatabase();
   const ids = [
