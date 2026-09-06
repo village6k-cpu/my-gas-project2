@@ -11163,17 +11163,23 @@ function _sanitizeConfirmRequestFreeText_(value, maxLength) {
 
 function _confirmRequestDateKey_(v, displayValue) {
   var display = String(displayValue || "").trim();
+  if (!display && v instanceof Date) {
+    return isNaN(v.getTime()) ? "" : Utilities.formatDate(v, "Asia/Seoul", "yyyy-MM-dd");
+  }
   var s = display || String(v || "").trim();
-  if (!s && !v) return "";
+  if (!s) return "";
   var m = s.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
   if (m) return m[1] + "-" + String(m[2]).padStart(2, "0") + "-" + String(m[3]).padStart(2, "0");
-  if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "yyyy-MM-dd");
   return s;
 }
 
 function _confirmRequestTimeKey_(v, displayValue) {
-  var s = String(displayValue || "").trim() || String(v || "").trim();
-  if (!s && !v) return "";
+  var display = String(displayValue || "").trim();
+  if (!display && v instanceof Date) {
+    return isNaN(v.getTime()) ? "" : Utilities.formatDate(v, "Asia/Seoul", "HH:mm");
+  }
+  var s = display || String(v || "").trim();
+  if (!s) return "";
   var isPm = /오후|\bPM\b/i.test(s);
   var isAm = /오전|\bAM\b/i.test(s);
   var m = s.match(/(\d{1,2})(?::(\d{2}))?/);
@@ -11186,7 +11192,6 @@ function _confirmRequestTimeKey_(v, displayValue) {
       return String(hour).padStart(2, "0") + ":" + String(minute).padStart(2, "0");
     }
   }
-  if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "HH:mm");
   return s;
 }
 
@@ -16143,23 +16148,26 @@ function _findRegisteredTradeForConfirmRequest_(ss, req) {
   var reqEndTime = _confirmRequestTimeKey_(req.반납시간);
   if ((!reqName && !reqPhone) || !reqStartDate || !reqStartTime || !reqEndDate || !reqEndTime) return null;
 
-  var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getValues();
+  var contractRange = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10);
+  var rows = contractRange.getValues();
+  var displayRows = contractRange.getDisplayValues();
   var matchedTradeIds = {};
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
-    var tradeId = String(row[0] || "").trim();
-    var status = String(row[9] || "").trim();
+    var displayRow = displayRows[i] || [];
+    var tradeId = String(displayRow[0] || row[0] || "").trim();
+    var status = String(displayRow[9] || row[9] || "").trim();
     if (!tradeId || /^취소/.test(status)) continue;
-    var rowName = String(row[1] || "").trim();
-    var rowPhone = _confirmRequestPhoneKey_(row[2]);
+    var rowName = String(displayRow[1] || row[1] || "").trim();
+    var rowPhone = _confirmRequestPhoneKey_(displayRow[2] || row[2]);
     var sameName = !!(reqName && rowName && reqName === rowName);
     var samePhone = !!(reqPhone && rowPhone && reqPhone === rowPhone);
     if (!sameName && !samePhone) continue;
     if (sameName && !samePhone && reqPhone && rowPhone && reqPhone !== rowPhone) continue;
-    if (_confirmRequestDateKey_(row[4]) !== reqStartDate
-        || _confirmRequestTimeKey_(row[5]) !== reqStartTime
-        || _confirmRequestDateKey_(row[6]) !== reqEndDate
-        || _confirmRequestTimeKey_(row[7]) !== reqEndTime) continue;
+    if (_confirmRequestDateKey_(row[4], displayRow[4]) !== reqStartDate
+        || _confirmRequestTimeKey_(row[5], displayRow[5]) !== reqStartTime
+        || _confirmRequestDateKey_(row[6], displayRow[6]) !== reqEndDate
+        || _confirmRequestTimeKey_(row[7], displayRow[7]) !== reqEndTime) continue;
     matchedTradeIds[tradeId] = true;
   }
   var exactTradeIds = Object.keys(matchedTradeIds);

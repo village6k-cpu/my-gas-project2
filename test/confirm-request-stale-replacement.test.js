@@ -7,32 +7,42 @@ const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
 
 class FakeRange {
-  constructor(values) {
+  constructor(values, displayValues = null) {
     this.values = values;
+    this.displayValues = displayValues;
   }
   getValues() {
     return this.values;
   }
   getDisplayValues() {
-    return this.values.map((row) => row.map((value) => String(value ?? '')));
+    return this.displayValues || this.values.map((row) => row.map((value) => String(value ?? '')));
   }
 }
 
 class FakeSheet {
-  constructor(rows) {
+  constructor(rows, displayRows = null) {
     this.rows = rows;
+    this.displayRows = displayRows;
   }
   getLastRow() {
     return this.rows.length;
   }
   getRange(row, col, numRows, numCols) {
     const values = [];
+    const displayValues = [];
     for (let r = 0; r < numRows; r++) {
       const out = [];
-      for (let c = 0; c < numCols; c++) out.push((this.rows[row - 1 + r] || [])[col - 1 + c] || '');
+      const displayOut = [];
+      for (let c = 0; c < numCols; c++) {
+        out.push((this.rows[row - 1 + r] || [])[col - 1 + c] || '');
+        displayOut.push(this.displayRows
+          ? String((this.displayRows[row - 1 + r] || [])[col - 1 + c] ?? '')
+          : String(out[c] ?? ''));
+      }
       values.push(out);
+      displayValues.push(displayOut);
     }
-    return new FakeRange(values);
+    return new FakeRange(values, displayValues);
   }
 }
 
@@ -42,8 +52,22 @@ const makeRow = (values = {}) => {
   return row;
 };
 
-const context = { console };
+const context = { console, Date };
 vm.runInNewContext(source, context);
+context.Utilities = {
+  formatDate(value, timezone, format) {
+    assert.strictEqual(timezone, 'Asia/Seoul');
+    const options = format === 'yyyy-MM-dd'
+      ? { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }
+      : { timeZone: timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-CA', options).formatToParts(value).map((part) => [part.type, part.value])
+    );
+    return format === 'yyyy-MM-dd'
+      ? `${parts.year}-${parts.month}-${parts.day}`
+      : `${parts.hour}:${parts.minute}`;
+  }
+};
 
 const req = {
   예약자명: '전찬영',
@@ -208,6 +232,37 @@ assert.strictEqual(
   }),
   null,
   '반납시각이 다르면 exact 등록 기간으로 간주하지 않아야 한다'
+);
+
+const registeredDateObjectSs = new FakeSpreadsheet({
+  '계약마스터': new FakeSheet(
+    [
+      makeRow(),
+      makeRow({
+        1: '260902-011', 2: '테스트 고객', 3: '010-4047-3867',
+        5: new Date('2026-09-05T00:00:00+09:00'),
+        6: new Date('1899-12-31T06:00:00+09:00'),
+        7: new Date('2026-09-06T00:00:00+09:00'),
+        8: new Date('1899-12-31T18:00:00+09:00'),
+        10: '예약'
+      })
+    ],
+    [
+      makeRow(),
+      makeRow({
+        1: '260902-011', 2: '테스트 고객', 3: '010-4047-3867',
+        5: '2026-09-05', 6: '06:00', 7: '2026-09-06', 8: '18:00', 10: '예약'
+      })
+    ]
+  )
+});
+assert.strictEqual(
+  context._findRegisteredTradeForConfirmRequest_(registeredDateObjectSs, {
+    예약자명: '테스트 고객', 연락처: '010-4047-3867',
+    반출일: '2026-09-05', 반출시간: '06:00', 반납일: '2026-09-06', 반납시간: '18:00'
+  }),
+  '260902-011',
+  '계약마스터의 실제 Date 셀은 문자열 정규식보다 먼저 Asia/Seoul 날짜·시간으로 해석해야 한다'
 );
 
 const ambiguousRegisteredPeriodSs = new FakeSpreadsheet({
