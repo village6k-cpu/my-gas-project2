@@ -104,6 +104,52 @@ function heybilliInbox(overrides = {}) {
   };
 }
 
+function heybilliCaseStep(overrides = {}) {
+  return {
+    id: WORK_ID,
+    version: 7,
+    category: 'schedule',
+    workTypeLabel: '스케줄 확인',
+    priority: 'urgent',
+    state: 'open',
+    taskLabel: '김OO 촬영 일정 확인',
+    dueAt: null,
+    snoozedUntil: null,
+    updatedAt: '2026-09-05T08:30:00.000Z',
+    ...overrides
+  };
+}
+
+function heybilliCase(overrides = {}) {
+  return {
+    id: WORK_ID,
+    state: 'now',
+    priority: 'urgent',
+    title: '김OO 문의',
+    ownerBrief: '직원이 문의를 확인해 처리할 일 1개로 정리했습니다.',
+    receivedAt: '2026-09-05T08:00:00.000Z',
+    updatedAt: '2026-09-05T08:30:00.000Z',
+    categories: ['schedule'],
+    completedStepCount: 0,
+    totalStepCount: 1,
+    steps: [heybilliCaseStep()],
+    ...overrides
+  };
+}
+
+function heybilliCases(overrides = {}) {
+  return {
+    summary: {
+      now: 1, snoozed: 0, completed: 0, p0: 0,
+      byCategory: { schedule: 1, quote: 0, settlement: 1, customer: 0, operations: 0 }
+    },
+    cases: [heybilliCase({ categories: ['schedule', 'settlement'] })],
+    nextCursor: null,
+    omittedCount: 0,
+    ...overrides
+  };
+}
+
 function digestRow(overrides = {}) {
   const row = {
     id: DIGEST_ID,
@@ -657,6 +703,37 @@ test('listHeybilliOwnerWork sends the exact read RPC input and returns the safe 
     p_now: '2026-09-05T09:00:00.000Z', p_view: 'now', p_category: 'schedule', p_limit: 100, p_after: null
   });
   assert.equal(JSON.stringify(result).includes('room_key'), false);
+});
+
+test('listHeybilliOwnerCases uses the grouped RPC and accepts overlapping case category counts', async () => {
+  const fetch = createFetch([response({ data: heybilliCases() })]);
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+  const input = {
+    now: '2026-09-05T09:00:00.000Z', view: 'now', category: 'schedule', limit: 100, after: null
+  };
+
+  assert.deepEqual(await store.listHeybilliOwnerCases(input), heybilliCases());
+  assert.equal(fetch.requests[0].url, 'https://supabase.example/rest/v1/rpc/list_heybilli_owner_cases_v2');
+  assert.deepEqual(JSON.parse(fetch.requests[0].init.body), {
+    p_now: input.now, p_view: input.view, p_category: input.category, p_limit: input.limit, p_after: null
+  });
+});
+
+test('listHeybilliOwnerCases rejects raw, malformed, duplicate, and request-inconsistent case data', async (t) => {
+  const input = { now: '2026-09-05T09:00:00.000Z', view: 'now', category: null, limit: 100, after: null };
+  for (const [name, data] of [
+    ['raw extra field', heybilliCases({ cases: [heybilliCase({ summary: 'private raw evidence' })] })],
+    ['duplicate step', heybilliCases({ cases: [heybilliCase({ totalStepCount: 2, steps: [heybilliCaseStep(), heybilliCaseStep()] })] })],
+    ['wrong total', heybilliCases({ cases: [heybilliCase({ totalStepCount: 2 })] })],
+    ['wrong category filter', heybilliCases({ cases: [heybilliCase({ categories: ['quote'] })] })],
+    ['unsafe brief', heybilliCases({ cases: [heybilliCase({ ownerBrief: '비공개 연락처 error timeout' })] })]
+  ]) {
+    await t.test(name, async () => {
+      const fetch = createFetch([response({ data })]);
+      const store = createWorkOrchestratorStore({ supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl });
+      await assert.rejects(store.listHeybilliOwnerCases(input), /response invalid/i);
+    });
+  }
 });
 
 test('listHeybilliOwnerWork rejects malformed, inconsistent, or content-bearing responses generically', async () => {

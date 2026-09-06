@@ -8,29 +8,43 @@ import { actionBody, buildInboxView } from "@/lib/followups/inbox-model.mjs";
 
 type ViewKey = "now" | "snoozed" | "completed";
 type CategoryKey = "schedule" | "quote" | "settlement" | "customer" | "operations";
+type WorkState = "open" | "in_progress" | "snoozed" | "resolved" | "dismissed";
+type Priority = "p0" | "urgent" | "normal" | "low";
 type FilterState = { view: ViewKey; category: CategoryKey | null };
 type WorkAction =
   | { type: "progress" | "ack_p0" | "request_resolve" | "dismiss" }
   | { type: "snooze"; snoozedUntil: string };
-type WorkItem = {
+type WorkStep = {
   id: string;
   version: number;
   category: CategoryKey;
-  workType: string;
   workTypeLabel: string;
-  priority: "p0" | "urgent" | "normal" | "low";
-  state: "open" | "in_progress" | "snoozed" | "resolved" | "dismissed";
-  title: string;
-  summary: string;
-  recommendedAction: string;
+  priority: Priority;
+  state: WorkState;
+  taskLabel: string;
   dueAt: string | null;
   snoozedUntil: string | null;
-  firstOpenedAt: string;
   updatedAt: string;
+};
+type InquiryCase = {
+  id: string;
+  state: ViewKey;
+  priority: Priority;
+  title: string;
+  ownerBrief: string;
+  receivedAt: string;
+  updatedAt: string;
+  categories: CategoryKey[];
+  completedStepCount: number;
+  totalStepCount: number;
+  steps: WorkStep[];
+  receivedLabel: string;
+  ageLabel: string;
+  progressLabel: string;
 };
 type InboxPayload = {
   ok: true;
-  source: "work_items_v2";
+  source: "work_items_v2_cases";
   summary: {
     now: number;
     snoozed: number;
@@ -38,15 +52,15 @@ type InboxPayload = {
     p0: number;
     byCategory: Record<CategoryKey, number>;
   };
-  items: WorkItem[];
+  cases: InquiryCase[];
   nextCursor: string | null;
   omittedCount: number;
 };
 type InboxModel = {
   tabs: { key: ViewKey; label: string; count: number }[];
   categories: { key: CategoryKey; label: string; count: number }[];
-  rows: WorkItem[];
-  selected: WorkItem | null;
+  rows: InquiryCase[];
+  selected: InquiryCase | null;
   emptyLabel: string;
 };
 type Snapshot = { filterKey: string; model: InboxModel; payload: InboxPayload };
@@ -63,14 +77,19 @@ const CATEGORY_LABELS: Record<CategoryKey, string> = {
   customer: "고객 응대",
   operations: "운영·예외",
 };
-const STATE_LABELS: Record<WorkItem["state"], string> = {
+const CASE_STATE_LABELS: Record<ViewKey, string> = {
+  now: "처리 필요",
+  snoozed: "미뤄둠",
+  completed: "완료",
+};
+const STEP_STATE_LABELS: Record<WorkState, string> = {
   open: "대기",
   in_progress: "진행 중",
   snoozed: "미뤄둠",
   resolved: "완료",
   dismissed: "업무 아님",
 };
-const PRIORITY_LABELS: Record<WorkItem["priority"], string> = {
+const PRIORITY_LABELS: Record<Priority, string> = {
   p0: "즉시 확인",
   urgent: "긴급",
   normal: "보통",
@@ -92,9 +111,11 @@ function oneHourLater() {
   return new Date(Date.now() + 60 * 60 * 1000).toISOString();
 }
 
-function rowTone(item: WorkItem) {
-  if (item.priority === "p0") return "border-attention-ring bg-attention-bg/70";
-  if (item.dueAt && Date.parse(item.dueAt) <= Date.now()) return "border-warn-ring bg-warn-bg/55";
+function caseTone(caseItem: InquiryCase) {
+  if (caseItem.priority === "p0") return "border-attention-ring bg-attention-bg/55";
+  if (caseItem.steps.some((stepItem) => stepItem.dueAt && Date.parse(stepItem.dueAt) <= Date.now())) {
+    return "border-warn-ring bg-warn-bg/45";
+  }
   return "border-line bg-white";
 }
 
@@ -163,7 +184,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
   const model = snapshot?.model || null;
   const dataIsCurrent = snapshot?.filterKey === currentFilterKey(status);
   const selected = useMemo(
-    () => model?.rows.find((item) => item.id === selectedId) || model?.rows[0] || null,
+    () => model?.rows.find((caseItem) => caseItem.id === selectedId) || model?.rows[0] || null,
     [model, selectedId],
   );
 
@@ -180,7 +201,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
     setNotice("");
   }, []);
 
-  const submitAction = useCallback(async (item: WorkItem, action: WorkAction) => {
+  const submitAction = useCallback(async (stepItem: WorkStep, action: WorkAction) => {
     if (unavailable || actionBusy) return;
     setActionBusy(true);
     setNotice("");
@@ -188,7 +209,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
       const response = await authFetch("/api/follow-ups", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(actionBody(item, action)),
+        body: JSON.stringify(actionBody(stepItem, action)),
       });
       const payload = await response.json().catch(() => null);
       if (response.status === 409) {
@@ -250,32 +271,32 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
 
         {model && model.rows.length > 0 ? (
           <div className="lg:grid lg:grid-cols-[minmax(320px,0.9fr)_minmax(420px,1.1fr)] lg:gap-4">
-            <section aria-label={`${VIEW_LABELS[status.view]} 목록`} className="min-w-0 space-y-2">
+            <section aria-label={`${VIEW_LABELS[status.view]} 목록`} className="min-w-0 space-y-2.5">
               <div className="flex items-end justify-between px-1 pb-1">
                 <div>
                   <h2 className="text-[15px] font-extrabold text-ink">{VIEW_LABELS[status.view]}</h2>
-                  <p className="mt-0.5 text-[12px] text-ink-mute">중요한 순서대로 정리했습니다.</p>
+                  <p className="mt-0.5 text-[12px] text-ink-mute">고객 문의별로 처리할 일을 묶었습니다.</p>
                 </div>
                 <span className="text-[12px] font-bold tabular-nums text-ink-mute">{model.rows.length}건</span>
               </div>
-              {model.rows.map((item) => <WorkRow key={item.id} item={item} selected={selected?.id === item.id} onSelect={() => selectRow(item.id)} />)}
+              {model.rows.map((caseItem) => <CaseRow key={caseItem.id} caseItem={caseItem} selected={selected?.id === caseItem.id} onSelect={() => selectRow(caseItem.id)} />)}
               {(snapshot?.payload.omittedCount ?? 0) > 0 && (
                 <div className="rounded-xl border border-line bg-white px-3 py-2 text-center text-[12px] font-semibold text-ink-mute">
-                  목록이 더 있습니다. 처리하면 다음 업무가 이어서 표시됩니다.
+                  문의가 더 있습니다. 처리하면 다음 항목이 이어서 표시됩니다.
                 </div>
               )}
             </section>
 
             <aside className="hidden min-w-0 lg:block">
-              <div className="lg:sticky lg:top-[188px]">{selected ? <WorkDetail item={selected} disabled={mutationDisabled} busy={actionBusy} onAction={submitAction} /> : <EmptyDetail />}</div>
+              <div className="lg:sticky lg:top-[188px]">{selected ? <CaseDetail caseItem={selected} disabled={mutationDisabled} busy={actionBusy} onAction={submitAction} /> : <EmptyDetail />}</div>
             </aside>
           </div>
         ) : loading && !model ? (
-          <div className="rounded-xl2 bg-white py-20 text-center text-[14px] font-bold text-ink-mute ring-1 ring-line/70">업무를 정리하고 있습니다…</div>
+          <div className="rounded-xl2 bg-white py-20 text-center text-[14px] font-bold text-ink-mute ring-1 ring-line/70">문의별 업무를 정리하고 있습니다…</div>
         ) : (
           <div className="rounded-xl2 border border-dashed border-line bg-white py-20 text-center">
             <div className="text-[15px] font-extrabold text-ink-soft">{model?.emptyLabel || "후속조치 정보를 불러오지 못했습니다"}</div>
-            <div className="mt-1.5 text-[13px] text-ink-mute">{model ? "필요한 업무가 생기면 여기에 표시됩니다." : "잠시 후 새로고침해 주세요."}</div>
+            <div className="mt-1.5 text-[13px] text-ink-mute">{model ? "처리할 문의가 생기면 여기에 표시됩니다." : "잠시 후 새로고침해 주세요."}</div>
           </div>
         )}
       </main>
@@ -285,7 +306,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
           <div className="sticky top-0 z-10 mb-2 flex justify-center bg-white pb-2">
             <button type="button" onClick={() => setMobileDetailOpen(false)} aria-label="상세 닫기" className="h-1.5 w-12 rounded-full bg-line" />
           </div>
-          <WorkDetail item={selected} disabled={mutationDisabled} busy={actionBusy} onAction={submitAction} />
+          <CaseDetail caseItem={selected} disabled={mutationDisabled} busy={actionBusy} onAction={submitAction} />
         </section>
       )}
     </div>
@@ -296,59 +317,101 @@ function CategoryButton({ active, label, count, onClick }: { active: boolean; la
   return <button type="button" onClick={onClick} className={`tap rounded-lg px-2.5 py-1.5 text-[12px] font-bold ${active ? "bg-brand-600 text-white" : "bg-white text-ink-soft ring-1 ring-line/70"}`}>{label}{count === undefined ? "" : ` ${count}`}</button>;
 }
 
-function WorkRow({ item, selected, onSelect }: { item: WorkItem; selected: boolean; onSelect: () => void }) {
-  const overdue = item.dueAt !== null && Date.parse(item.dueAt) <= Date.now();
+function CaseRow({ caseItem, selected, onSelect }: { caseItem: InquiryCase; selected: boolean; onSelect: () => void }) {
   return (
-    <button type="button" onClick={onSelect} className={`tap w-full rounded-xl border p-3 text-left shadow-sm transition ${rowTone(item)} ${selected ? "ring-2 ring-ink/25" : "hover:ring-2 hover:ring-line"}`}>
+    <button type="button" onClick={onSelect} className={`tap w-full rounded-xl border p-3.5 text-left shadow-sm transition ${caseTone(caseItem)} ${selected ? "ring-2 ring-ink/25" : "hover:ring-2 hover:ring-line"}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="mb-1 flex flex-wrap items-center gap-1.5">
-            <span className={`rounded-full px-2 py-0.5 text-[11px] font-extrabold ${item.priority === "p0" ? "bg-attention-fg text-white" : item.priority === "urgent" ? "bg-warn-bg text-warn-fg" : "bg-paper text-ink-mute"}`}>{PRIORITY_LABELS[item.priority]}</span>
-            {overdue && item.priority !== "p0" && <span className="rounded-full bg-attention-bg px-2 py-0.5 text-[11px] font-extrabold text-attention-fg">기한 지남</span>}
-            <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] font-bold text-ink-mute ring-1 ring-line/60">{item.workTypeLabel}</span>
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            {caseItem.priority !== "normal" && <span className={`rounded-full px-2 py-0.5 text-[11px] font-extrabold ${caseItem.priority === "p0" ? "bg-attention-fg text-white" : "bg-warn-bg text-warn-fg"}`}>{PRIORITY_LABELS[caseItem.priority]}</span>}
+            <span className="rounded-full bg-white/85 px-2 py-0.5 text-[11px] font-bold text-ink-mute ring-1 ring-line/60">{caseItem.progressLabel}</span>
           </div>
-          <h3 className="line-clamp-2 text-[15px] font-extrabold leading-snug text-ink [word-break:keep-all]">{item.title}</h3>
-          {item.summary && <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-ink-soft">{item.summary}</p>}
+          <h3 className="text-[17px] font-extrabold leading-snug text-ink [word-break:keep-all]">{caseItem.title}</h3>
+          <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-ink-soft">{caseItem.ownerBrief}</p>
         </div>
-        <span className="shrink-0 text-[12px] font-bold text-ink-mute">{STATE_LABELS[item.state]}</span>
+        <span className="shrink-0 text-[12px] font-bold text-ink-mute">{CASE_STATE_LABELS[caseItem.state]}</span>
       </div>
-      <div className="mt-2 flex items-center justify-between gap-2 text-[11.5px] font-semibold text-ink-mute">
-        <span>{CATEGORY_LABELS[item.category]}</span>
-        <span>{item.dueAt ? `기한 ${formatDateTime(item.dueAt)}` : "기한 없음"}</span>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {caseItem.categories.map((category) => <span key={category} className="rounded-full bg-white/85 px-2 py-0.5 text-[11px] font-bold text-ink-mute ring-1 ring-line/60">{CATEGORY_LABELS[category]}</span>)}
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-2 border-t border-line/50 pt-2.5 text-[11.5px] font-semibold text-ink-mute">
+        <span>{caseItem.receivedLabel}</span>
+        <span className="font-extrabold text-brand-600">{caseItem.ageLabel}</span>
       </div>
     </button>
   );
 }
 
-function WorkDetail({ item, disabled, busy, onAction }: { item: WorkItem; disabled: boolean; busy: boolean; onAction: (item: WorkItem, action: WorkAction) => Promise<void> }) {
-  const completed = item.state === "resolved" || item.state === "dismissed";
+function CaseDetail({ caseItem, disabled, busy, onAction }: { caseItem: InquiryCase; disabled: boolean; busy: boolean; onAction: (stepItem: WorkStep, action: WorkAction) => Promise<void> }) {
   return (
     <article className="rounded-xl2 bg-white p-4 shadow-card ring-1 ring-line/70">
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className={`rounded-full px-2.5 py-1 text-[11.5px] font-extrabold ${item.priority === "p0" ? "bg-attention-fg text-white" : "bg-paper text-ink-soft"}`}>{PRIORITY_LABELS[item.priority]}</span>
-        <span className="rounded-full bg-brand-50 px-2.5 py-1 text-[11.5px] font-extrabold text-brand-600">{CATEGORY_LABELS[item.category]}</span>
-        <span className="rounded-full bg-paper px-2.5 py-1 text-[11.5px] font-bold text-ink-mute">{item.workTypeLabel}</span>
+        {caseItem.priority !== "normal" && <span className={`rounded-full px-2.5 py-1 text-[11.5px] font-extrabold ${caseItem.priority === "p0" ? "bg-attention-fg text-white" : "bg-warn-bg text-warn-fg"}`}>{PRIORITY_LABELS[caseItem.priority]}</span>}
+        {caseItem.categories.map((category) => <span key={category} className="rounded-full bg-brand-50 px-2.5 py-1 text-[11.5px] font-extrabold text-brand-600">{CATEGORY_LABELS[category]}</span>)}
       </div>
-      <h2 className="mt-3 text-[20px] font-extrabold leading-snug text-ink [word-break:keep-all]">{item.title}</h2>
+      <h2 className="mt-3 text-[22px] font-extrabold leading-snug text-ink [word-break:keep-all]">{caseItem.title}</h2>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[12px] font-semibold text-ink-mute">
-        <span>상태 {STATE_LABELS[item.state]}</span>
-        <span>{item.dueAt ? `기한 ${formatDateTime(item.dueAt)}` : "기한 없음"}</span>
+        <span>{CASE_STATE_LABELS[caseItem.state]}</span>
+        <span>{caseItem.receivedLabel}</span>
+        <span className="font-extrabold text-brand-600">{caseItem.ageLabel}</span>
       </div>
-      <DetailSection title="직원이 정리한 내용"><p className="whitespace-pre-wrap text-[14px] leading-relaxed text-ink-soft">{item.summary || "추가 요약이 없습니다."}</p></DetailSection>
-      <DetailSection title="권장 처리"><p className="whitespace-pre-wrap text-[14px] font-semibold leading-relaxed text-ink">{item.recommendedAction || "내용을 확인한 뒤 처리해 주세요."}</p></DetailSection>
 
+      <DetailSection title="요청 요약">
+        <p className="text-[14px] leading-relaxed text-ink-soft">{caseItem.ownerBrief}</p>
+      </DetailSection>
+
+      <section className="mt-4">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-[13px] font-extrabold text-ink">처리할 일</h3>
+          <span className="text-[12px] font-bold text-ink-mute">{caseItem.progressLabel}</span>
+        </div>
+        <ol className="space-y-2.5">
+          {caseItem.steps.map((stepItem, index) => (
+            <StepCard key={stepItem.id} stepItem={stepItem} index={index} disabled={disabled} onAction={onAction} />
+          ))}
+        </ol>
+      </section>
+
+      <DetailSection title="접수 정보">
+        <div className="flex items-center justify-between gap-3 text-[13px] font-semibold text-ink-soft">
+          <span>{caseItem.receivedLabel}</span>
+          <span>{caseItem.ageLabel}</span>
+        </div>
+      </DetailSection>
+      {busy && <p className="mt-3 text-center text-[12px] font-semibold text-ink-mute">처리 요청 중…</p>}
+      {disabled && !busy && caseItem.state !== "completed" && <p className="mt-3 text-center text-[12px] font-semibold text-attention-fg">최신 목록을 확인한 뒤 처리할 수 있습니다.</p>}
+    </article>
+  );
+}
+
+function StepCard({ stepItem, index, disabled, onAction }: { stepItem: WorkStep; index: number; disabled: boolean; onAction: (stepItem: WorkStep, action: WorkAction) => Promise<void> }) {
+  const completed = stepItem.state === "resolved" || stepItem.state === "dismissed";
+  return (
+    <li className={`rounded-xl border p-3 ${completed ? "border-checkin-ring bg-checkin-bg/45" : "border-line bg-paper/60"}`}>
+      <div className="flex items-start gap-2.5">
+        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[12px] font-black ${completed ? "bg-checkin-fg text-white" : "bg-white text-ink-soft ring-1 ring-line"}`}>{completed ? "✓" : index + 1}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <h4 className={`text-[14px] font-extrabold leading-snug [word-break:keep-all] ${completed ? "text-ink-mute line-through" : "text-ink"}`}>{stepItem.taskLabel}</h4>
+            <span className="shrink-0 text-[11px] font-bold text-ink-mute">{STEP_STATE_LABELS[stepItem.state]}</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[11px] font-semibold text-ink-mute">
+            <span>{CATEGORY_LABELS[stepItem.category]}</span>
+            <span>{stepItem.workTypeLabel}</span>
+            {stepItem.dueAt && <span>기한 {formatDateTime(stepItem.dueAt)}</span>}
+          </div>
+        </div>
+      </div>
       {!completed && (
-        <div className="mt-4 grid grid-cols-2 gap-2">
-          {item.state !== "in_progress" && <ActionButton primary disabled={disabled} onClick={() => onAction(item, { type: "progress" })}>진행 시작</ActionButton>}
-          <ActionButton disabled={disabled} onClick={() => onAction(item, { type: "snooze", snoozedUntil: oneHourLater() })}>1시간 미루기</ActionButton>
-          {item.priority === "p0" && <ActionButton disabled={disabled} onClick={() => onAction(item, { type: "ack_p0" })}>P0 확인했어요</ActionButton>}
-          <ActionButton primary disabled={disabled} onClick={() => onAction(item, { type: "request_resolve" })}>완료 확인 요청</ActionButton>
-          <ActionButton disabled={disabled} onClick={() => onAction(item, { type: "dismiss" })}>업무 아님</ActionButton>
+        <div className="mt-3 grid grid-cols-2 gap-1.5 border-t border-line/60 pt-2.5">
+          {stepItem.state !== "in_progress" && <ActionButton primary disabled={disabled} onClick={() => onAction(stepItem, { type: "progress" })}>진행 시작</ActionButton>}
+          <ActionButton disabled={disabled} onClick={() => onAction(stepItem, { type: "snooze", snoozedUntil: oneHourLater() })}>1시간 미루기</ActionButton>
+          {stepItem.priority === "p0" && <ActionButton disabled={disabled} onClick={() => onAction(stepItem, { type: "ack_p0" })}>긴급 확인</ActionButton>}
+          <ActionButton primary disabled={disabled} onClick={() => onAction(stepItem, { type: "request_resolve" })}>완료</ActionButton>
+          <ActionButton disabled={disabled} onClick={() => onAction(stepItem, { type: "dismiss" })}>업무 아님</ActionButton>
         </div>
       )}
-      {busy && <p className="mt-3 text-center text-[12px] font-semibold text-ink-mute">처리 요청 중…</p>}
-      {disabled && !busy && !completed && <p className="mt-3 text-center text-[12px] font-semibold text-attention-fg">최신 목록을 확인한 뒤 처리할 수 있습니다.</p>}
-    </article>
+    </li>
   );
 }
 
@@ -357,9 +420,9 @@ function DetailSection({ title, children }: { title: string; children: ReactNode
 }
 
 function ActionButton({ children, disabled, onClick, primary = false }: { children: ReactNode; disabled: boolean; onClick: () => void; primary?: boolean }) {
-  return <button type="button" disabled={disabled} onClick={onClick} className={`tap min-h-[46px] rounded-xl px-3 text-[13px] font-extrabold disabled:cursor-not-allowed disabled:opacity-40 ${primary ? "bg-brand-600 text-white" : "bg-white text-ink-soft ring-1 ring-line"}`}>{children}</button>;
+  return <button type="button" disabled={disabled} onClick={onClick} className={`tap min-h-[42px] rounded-lg px-2.5 text-[12px] font-extrabold disabled:cursor-not-allowed disabled:opacity-40 ${primary ? "bg-brand-600 text-white" : "bg-white text-ink-soft ring-1 ring-line"}`}>{children}</button>;
 }
 
 function EmptyDetail() {
-  return <div className="rounded-xl2 border border-dashed border-line bg-white py-16 text-center text-[13px] font-bold text-ink-mute">왼쪽에서 업무를 선택해 주세요.</div>;
+  return <div className="rounded-xl2 border border-dashed border-line bg-white py-16 text-center text-[13px] font-bold text-ink-mute">왼쪽에서 문의를 선택해 주세요.</div>;
 }

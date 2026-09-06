@@ -160,7 +160,7 @@ test("v2 GET requires the server service-role key and never falls back to anon",
   assert.equal(fetchCalls, 0);
 });
 
-test("v2 GET reads only active allowlisted fields with service role and maps them to dashboard items", async () => {
+test("v2 GET reads grouped inquiry cases and never returns raw work evidence", async () => {
   const after = {
     p0Rank: 0, overdueRank: 1, priorityRank: 1,
     openedAt: "2026-09-05T08:00:00.000Z", id: "11111111-1111-4111-8111-111111111111",
@@ -175,15 +175,24 @@ test("v2 GET reads only active allowlisted fields with service role and maps the
     return response({
       summary: {
         now: 12, snoozed: 4, completed: 38, p0: 2,
-        byCategory: { schedule: 5, quote: 3, settlement: 2, customer: 1, operations: 5 },
+        byCategory: { schedule: 9, quote: 3, settlement: 7, customer: 4, operations: 5 },
       },
-      items: [{
-        id: "11111111-1111-4111-8111-111111111111", version: 7,
-        category: "schedule", workType: "schedule_check", workTypeLabel: "스케줄 확인",
-        priority: "urgent", state: "open", title: "김OO 촬영 일정 확인",
-        summary: "직원이 확인한 안전한 요약", recommendedAction: "후보 일정 하나를 선택",
-        dueAt: null, snoozedUntil: null,
-        firstOpenedAt: "2026-09-05T08:00:00.000Z", updatedAt: "2026-09-05T08:30:00.000Z",
+      cases: [{
+        id: "11111111-1111-4111-8111-111111111111", state: "now", priority: "urgent",
+        title: "김OO 문의", ownerBrief: "직원이 문의를 확인해 처리할 일 2개로 정리했습니다.",
+        receivedAt: "2026-09-05T08:00:00.000Z", updatedAt: "2026-09-05T08:30:00.000Z",
+        categories: ["schedule", "settlement"], completedStepCount: 0, totalStepCount: 2,
+        steps: [{
+          id: "11111111-1111-4111-8111-111111111111", version: 7,
+          category: "schedule", workTypeLabel: "스케줄 확인", priority: "urgent", state: "open",
+          taskLabel: "김OO 촬영 일정 확인", dueAt: null, snoozedUntil: null,
+          updatedAt: "2026-09-05T08:30:00.000Z",
+        }, {
+          id: "22222222-2222-4222-8222-222222222222", version: 2,
+          category: "settlement", workTypeLabel: "계약·서류 처리", priority: "normal", state: "open",
+          taskLabel: "계약서 확인", dueAt: null, snoozedUntil: null,
+          updatedAt: "2026-09-05T08:20:00.000Z",
+        }],
       }],
       nextCursor,
       omittedCount: 11,
@@ -195,17 +204,17 @@ test("v2 GET reads only active allowlisted fields with service role and maps the
   const body = await readBody(result);
 
   assert.equal(result.status, 200);
-  assert.equal(body.source, "work_items_v2");
-  assert.equal(body.items[0].workType, "schedule_check");
-  assert.deepEqual(Object.keys(body.items[0]).sort(), [
-    "category", "dueAt", "firstOpenedAt", "id", "priority", "recommendedAction", "snoozedUntil",
-    "state", "summary", "title", "updatedAt", "version", "workType", "workTypeLabel",
+  assert.equal(body.source, "work_items_v2_cases");
+  assert.equal(body.cases[0].steps.length, 2);
+  assert.deepEqual(Object.keys(body.cases[0]).sort(), [
+    "categories", "completedStepCount", "id", "ownerBrief", "priority", "receivedAt", "state",
+    "steps", "title", "totalStepCount", "updatedAt",
   ].sort());
   assert.equal(body.nextCursor, Buffer.from(JSON.stringify(nextCursor), "utf8").toString("base64url"));
   assert.equal(body.omittedCount, 11);
   assert.equal(JSON.stringify(body).includes("do-not-expose"), false);
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].url, "https://unit.test/rest/v1/rpc/list_heybilli_owner_work_v2");
+  assert.equal(requests[0].url, "https://unit.test/rest/v1/rpc/list_heybilli_owner_cases_v2");
   assert.equal(requests[0].init.method, "POST");
   assert.deepEqual(JSON.parse(requests[0].init.body), {
     p_now: JSON.parse(requests[0].init.body).p_now,
@@ -256,13 +265,17 @@ test("the deployed owner inbox defaults to v2 when the dashboard flag is absent"
           now: 1, snoozed: 0, completed: 0, p0: 0,
           byCategory: { schedule: 1, quote: 0, settlement: 0, customer: 0, operations: 0 },
         },
-        items: [{
-          id: "11111111-1111-4111-8111-111111111111", version: 7,
-          category: "schedule", workType: "schedule_check", workTypeLabel: "스케줄 확인",
-          priority: "normal", state: "open", title: "촬영 일정 확인",
-          summary: "직원이 확인한 안전한 요약", recommendedAction: "후보 일정 하나를 선택",
-          dueAt: null, snoozedUntil: null,
-          firstOpenedAt: "2026-09-05T08:00:00.000Z", updatedAt: "2026-09-05T08:30:00.000Z",
+        cases: [{
+          id: "11111111-1111-4111-8111-111111111111", state: "now", priority: "normal",
+          title: "고객 문의", ownerBrief: "직원이 문의를 확인해 처리할 일 1개로 정리했습니다.",
+          receivedAt: "2026-09-05T08:00:00.000Z", updatedAt: "2026-09-05T08:30:00.000Z",
+          categories: ["schedule"], completedStepCount: 0, totalStepCount: 1,
+          steps: [{
+            id: "11111111-1111-4111-8111-111111111111", version: 7,
+            category: "schedule", workTypeLabel: "스케줄 확인", priority: "normal", state: "open",
+            taskLabel: "촬영 일정 확인", dueAt: null, snoozedUntil: null,
+            updatedAt: "2026-09-05T08:30:00.000Z",
+          }],
         }],
         nextCursor: null,
         omittedCount: 0,
@@ -274,10 +287,10 @@ test("the deployed owner inbox defaults to v2 when the dashboard flag is absent"
   const body = await readBody(result);
 
   assert.equal(result.status, 200);
-  assert.equal(body.source, "work_items_v2");
-  assert.equal(body.items.length, 1);
+  assert.equal(body.source, "work_items_v2_cases");
+  assert.equal(body.cases.length, 1);
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].url, "https://unit.test/rest/v1/rpc/list_heybilli_owner_work_v2");
+  assert.equal(requests[0].url, "https://unit.test/rest/v1/rpc/list_heybilli_owner_cases_v2");
   assert.equal(requests[0].init.headers.apikey, "service-role-key");
 });
 
