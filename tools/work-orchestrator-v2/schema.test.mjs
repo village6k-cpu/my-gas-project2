@@ -16,6 +16,16 @@ const heybilliCasesMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_cases\.sql$/.test(name));
 const semanticOwnerCasesMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_semantic_owner_cases\.sql$/.test(name));
+const semanticOwnerCaseAclMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_semantic_owner_case_acl\.sql$/.test(name));
+
+test('semantic owner case private validator is callable only by service_role', () => {
+  assert.equal(semanticOwnerCaseAclMigrationFiles.length, 1, 'exactly one semantic owner case ACL migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, semanticOwnerCaseAclMigrationFiles[0]), 'utf8');
+  assert.match(sql, /revoke execute on function work_orchestrator_private\.is_owner_case_payload_v2\(jsonb\)\s+from public, anon, authenticated, service_role/i);
+  assert.match(sql, /grant execute on function work_orchestrator_private\.is_owner_case_payload_v2\(jsonb\)\s+to service_role/i);
+  assert.doesNotMatch(sql, /grant execute[\s\S]*?to (?:public|anon|authenticated)/i);
+});
 
 test('semantic owner case migration defines exact-room service-only context and semantic grouping', () => {
   assert.equal(semanticOwnerCasesMigrationFiles.length, 1, 'exactly one semantic owner case migration must exist');
