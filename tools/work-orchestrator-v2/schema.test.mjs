@@ -12,6 +12,8 @@ const healthAggregateMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_health_aggregate\.sql$/.test(name));
 const heybilliInboxMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_inbox\.sql$/.test(name));
+const heybilliCasesMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_heybilli_cases\.sql$/.test(name));
 
 test('foundation migration enforces the private service-role schema contract', () => {
   assert.equal(migrationFiles.length, 1, 'exactly one foundation migration must exist');
@@ -454,4 +456,21 @@ test('Heybilli owner inbox migration is private, bounded, and matches the canoni
   }
   assert.doesNotMatch(sql, /customer_message|transcript|source_event_keys|resolution_evidence/i);
   assert.doesNotMatch(sql, /security definer|grant execute[^;]+to (?:public|anon|authenticated)/i);
+});
+
+test('Heybilli inquiry-case migration groups before pagination and exposes only owner-safe fields', () => {
+  assert.equal(heybilliCasesMigrationFiles.length, 1, 'exactly one additive Heybilli case migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, heybilliCasesMigrationFiles[0]), 'utf8');
+
+  assert.match(sql, /create function public\.list_heybilli_owner_cases_v2\(\s*p_now timestamptz,\s*p_view text,\s*p_category text,\s*p_limit integer,\s*p_after jsonb default null\s*\)/i);
+  assert.match(sql, /returns jsonb language plpgsql stable security invoker set search_path = ''/i);
+  assert.match(sql, /lag\(first_opened_at\)[\s\S]*?interval '30 minutes'/i);
+  assert.match(sql, /sum\(case when[\s\S]*?new_case[\s\S]*?partition by room_partition/i);
+  assert.match(sql, /count\(\*\)[\s\S]*?limit p_limit/i, 'case counts are derived before case pagination');
+  assert.match(sql, /jsonb_agg\([\s\S]*?'steps'/i);
+  assert.match(sql, /'receivedAt'[\s\S]*?'updatedAt'/i);
+  assert.match(sql, /'categories'[\s\S]*?'completedStepCount'[\s\S]*?'totalStepCount'/i);
+  assert.match(sql, /revoke execute on function public\.list_heybilli_owner_cases_v2\(timestamptz,text,text,integer,jsonb\)\s+from public, anon, authenticated, service_role/i);
+  assert.match(sql, /grant execute on function public\.list_heybilli_owner_cases_v2\(timestamptz,text,text,integer,jsonb\)\s+to service_role/i);
+  assert.doesNotMatch(sql, /security definer|customer_message|source_event_keys|follow_up_task_key/i);
 });

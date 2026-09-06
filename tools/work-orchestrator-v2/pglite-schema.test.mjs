@@ -18,6 +18,8 @@ const [healthAggregateMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_health_aggregate\.sql$/.test(name));
 const [heybilliInboxMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_inbox\.sql$/.test(name));
+const [heybilliCasesMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_heybilli_cases\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -69,6 +71,13 @@ async function createHeybilliInboxDatabase() {
   const db = await createHealthAggregateDatabase();
   assert.ok(heybilliInboxMigrationName, 'the CLI-generated Heybilli inbox migration must exist');
   await db.exec(readFileSync(join(migrationsDirectory, heybilliInboxMigrationName), 'utf8'));
+  return db;
+}
+
+async function createHeybilliCasesDatabase() {
+  const db = await createHeybilliInboxDatabase();
+  assert.ok(heybilliCasesMigrationName, 'the additive Heybilli case migration must exist');
+  await db.exec(readFileSync(join(migrationsDirectory, heybilliCasesMigrationName), 'utf8'));
   return db;
 }
 
@@ -3940,6 +3949,87 @@ test('Heybilli owner inbox fails closed on unbounded display evidence', async ()
         /invalid Heybilli owner inbox evidence/
       );
     }
+  } finally {
+    await db.close();
+  }
+});
+
+test('Heybilli inquiry cases merge a continuous conversation into one safe actionable checklist', async () => {
+  const db = await createHeybilliCasesDatabase();
+  const now = '2026-09-06T00:00:00.000Z';
+  const ids = [1, 2, 3, 4, 5, 6].map((value) => `61000000-0000-4000-8000-${String(value).padStart(12, '0')}`);
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, due_at, snoozed_until, first_opened_at, last_activity_at,
+        payload, created_at, updated_at
+      ) values
+        ($1::uuid, 'case:1', 'room:private', '고객가 무인 반출 안내', 'PRIVATE_CONTACT', 'schedule_check', 'normal', 'open',
+          '2026-09-03T12:29:00Z', null, null, '2026-09-03T12:29:00Z', '2026-09-03T12:29:00Z',
+          '{"requires_human_action":true,"recommended_action":"원문 전체를 확인"}', '2026-09-03T12:29:00Z', '2026-09-03T12:29:00Z'),
+        ($2::uuid, 'case:2', 'room:private', '고객가 애플박스 세트 반출 누락', 'automation_error_review PRIVATE_REQUEST_ID', 'schedule_check', 'p0', 'open',
+          '2026-09-03T12:37:00Z', null, null, '2026-09-03T12:37:00Z', '2026-09-03T12:37:00Z',
+          '{"requires_human_action":true,"recommended_action":"PRIVATE_CONTACT 확인"}', '2026-09-03T12:37:00Z', '2026-09-03T12:37:00Z'),
+        ($3::uuid, 'case:3', 'room:private', '고객가 전화요청·애플박스 누락', '긴 내부 진단', 'reply_needed', 'urgent', 'in_progress',
+          '2026-09-03T12:44:00Z', null, null, '2026-09-03T12:44:00Z', '2026-09-03T12:44:00Z',
+          '{"requires_human_action":true,"recommended_action":"고객에게 답변"}', '2026-09-03T12:44:00Z', '2026-09-03T12:44:00Z'),
+        ($4::uuid, 'case:4', 'room:private', '고객가 반출누락·계약서·전화', '장비 전체 진단', 'contract_document', 'normal', 'open',
+          '2026-09-03T12:51:00Z', null, null, '2026-09-03T12:51:00Z', '2026-09-03T12:51:00Z',
+          '{"requires_human_action":true,"recommended_action":"계약서 확인"}', '2026-09-03T12:51:00Z', '2026-09-03T12:51:00Z'),
+        ($5::uuid, 'case:5', 'room:private', '고객가 새 견적 문의', '새 문의 원문', 'quote_send', 'normal', 'open',
+          '2026-09-03T13:22:00Z', null, null, '2026-09-03T13:22:00Z', '2026-09-03T13:22:00Z',
+          '{"requires_human_action":true,"recommended_action":"견적서 발송"}', '2026-09-03T13:22:00Z', '2026-09-03T13:22:00Z'),
+        ($6::uuid, 'case:technical', 'room:private', '고객가 자동 처리 확인 필요', 'raw timeout', 'automation_error_review', 'normal', 'open',
+          '2026-09-03T12:45:00Z', null, null, '2026-09-03T12:45:00Z', '2026-09-03T12:45:00Z',
+          '{"requires_human_action":true,"recommended_action":"internal"}', '2026-09-03T12:45:00Z', '2026-09-03T12:45:00Z')
+    `, ids);
+
+    const { rows } = await db.query(`
+      select public.list_heybilli_owner_cases_v2($1::timestamptz, 'now', null, 1, null) as result
+    `, [now]);
+    const first = rows[0].result;
+    assert.deepEqual(first.summary, {
+      now: 2, snoozed: 0, completed: 0, p0: 1,
+      byCategory: { schedule: 1, quote: 1, settlement: 1, customer: 1, operations: 0 }
+    });
+    assert.equal(first.cases.length, 1);
+    assert.equal(first.omittedCount, 1);
+    assert.ok(first.nextCursor);
+    assert.deepEqual(Object.keys(first.cases[0]).sort(), [
+      'categories', 'completedStepCount', 'id', 'ownerBrief', 'priority', 'receivedAt',
+      'state', 'steps', 'title', 'totalStepCount', 'updatedAt'
+    ].sort());
+    assert.equal(first.cases[0].id, ids[0]);
+    assert.equal(first.cases[0].title, '고객가 문의');
+    assert.equal(first.cases[0].ownerBrief, '스케줄 확인 외 3개 업무');
+    assert.equal(first.cases[0].receivedAt, '2026-09-03T12:29:00.000Z');
+    assert.deepEqual(first.cases[0].categories, ['schedule', 'settlement', 'customer']);
+    assert.equal(first.cases[0].completedStepCount, 0);
+    assert.equal(first.cases[0].totalStepCount, 4);
+    assert.deepEqual(first.cases[0].steps.map((step) => step.id), ids.slice(0, 4));
+    assert.deepEqual(Object.keys(first.cases[0].steps[0]).sort(), [
+      'category', 'dueAt', 'id', 'priority', 'snoozedUntil', 'state', 'taskLabel',
+      'updatedAt', 'version', 'workTypeLabel'
+    ].sort());
+    const serialized = JSON.stringify(first);
+    for (const privateEvidence of [
+      'room:private', 'PRIVATE_CONTACT', 'PRIVATE_REQUEST_ID', 'automation_error_review',
+      'customer_message', 'recommended_action', 'work_key'
+    ]) assert.ok(!serialized.includes(privateEvidence), `must hide ${privateEvidence}`);
+
+    const filtered = await db.query(`
+      select public.list_heybilli_owner_cases_v2($1::timestamptz, 'now', 'settlement', 10, null) as result
+    `, [now]);
+    assert.deepEqual(filtered.rows[0].result.cases.map((entry) => entry.id), [ids[0]]);
+
+    const privileges = await db.query(`
+      select
+        has_function_privilege('anon', 'public.list_heybilli_owner_cases_v2(timestamptz,text,text,integer,jsonb)', 'execute') as anon_execute,
+        has_function_privilege('authenticated', 'public.list_heybilli_owner_cases_v2(timestamptz,text,text,integer,jsonb)', 'execute') as authenticated_execute,
+        has_function_privilege('service_role', 'public.list_heybilli_owner_cases_v2(timestamptz,text,text,integer,jsonb)', 'execute') as service_execute
+    `);
+    assert.deepEqual(privileges.rows[0], { anon_execute: false, authenticated_execute: false, service_execute: true });
   } finally {
     await db.close();
   }

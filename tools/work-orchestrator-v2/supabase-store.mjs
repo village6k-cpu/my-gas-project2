@@ -57,6 +57,15 @@ const HEYBILLI_ITEM_KEYS = [
   'id', 'version', 'category', 'workType', 'workTypeLabel', 'priority', 'state',
   'title', 'summary', 'recommendedAction', 'dueAt', 'snoozedUntil', 'firstOpenedAt', 'updatedAt'
 ];
+const HEYBILLI_CASE_KEYS = [
+  'id', 'state', 'priority', 'title', 'ownerBrief', 'receivedAt', 'updatedAt',
+  'categories', 'completedStepCount', 'totalStepCount', 'steps'
+];
+const HEYBILLI_CASE_STEP_KEYS = [
+  'id', 'version', 'category', 'workTypeLabel', 'priority', 'state', 'taskLabel',
+  'dueAt', 'snoozedUntil', 'updatedAt'
+];
+const HEYBILLI_UNSAFE_OWNER_TEXT = /(01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4}|rq-[0-9]|confirmation_request|automation[_ ]?error|timeout|exception|stack|payload|raw log)/i;
 const HEYBILLI_CURSOR_KEYS = ['p0Rank', 'overdueRank', 'priorityRank', 'openedAt', 'id'];
 const P0_ACKNOWLEDGEMENT_TIMESTAMP = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const P0_CLIENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -741,6 +750,86 @@ function heybilliInboxResponse(data, input) {
       items.length === 0 || nextCursor.id !== items.at(-1).id || nextCursor.openedAt !== items.at(-1).firstOpenedAt
     )) throw heybilliResponseInvalid();
   return { summary: data.summary, items, nextCursor, omittedCount: data.omittedCount };
+}
+
+function heybilliCaseStepResponse(step) {
+  if (!exactKeys(step, HEYBILLI_CASE_STEP_KEYS)) throw heybilliResponseInvalid();
+  const id = responseUuid(step.id);
+  if (!LOWERCASE_UUID.test(id) || !Number.isSafeInteger(step.version) || step.version < 1
+    || !HEYBILLI_CATEGORIES.has(step.category) || !WORK_PRIORITIES.has(step.priority)
+    || !WORK_STATES.has(step.state)) throw heybilliResponseInvalid();
+  responseText(step.workTypeLabel, 40);
+  responseText(step.taskLabel, 80);
+  if (HEYBILLI_UNSAFE_OWNER_TEXT.test(step.taskLabel)) throw heybilliResponseInvalid();
+  const dueAt = canonicalHeybilliTimestamp(step.dueAt, { nullable: true });
+  const snoozedUntil = canonicalHeybilliTimestamp(step.snoozedUntil, { nullable: true });
+  const updatedAt = canonicalHeybilliTimestamp(step.updatedAt);
+  return { ...step, id, dueAt, snoozedUntil, updatedAt };
+}
+
+function heybilliCaseResponse(entry, input) {
+  if (!exactKeys(entry, HEYBILLI_CASE_KEYS)
+    || !['now', 'snoozed', 'completed'].includes(entry.state)
+    || entry.state !== input.view || !WORK_PRIORITIES.has(entry.priority)
+    || !Array.isArray(entry.categories) || entry.categories.length < 1 || entry.categories.length > HEYBILLI_CATEGORIES.size
+    || new Set(entry.categories).size !== entry.categories.length
+    || entry.categories.some((category) => !HEYBILLI_CATEGORIES.has(category))
+    || !Array.isArray(entry.steps) || entry.steps.length < 1 || entry.steps.length > 200
+    || !Number.isSafeInteger(entry.completedStepCount) || entry.completedStepCount < 0
+    || !Number.isSafeInteger(entry.totalStepCount) || entry.totalStepCount !== entry.steps.length
+    || entry.completedStepCount > entry.totalStepCount) throw heybilliResponseInvalid();
+  const id = responseUuid(entry.id);
+  responseText(entry.title, 40);
+  responseText(entry.ownerBrief, 160);
+  if (HEYBILLI_UNSAFE_OWNER_TEXT.test(entry.title) || HEYBILLI_UNSAFE_OWNER_TEXT.test(entry.ownerBrief)) {
+    throw heybilliResponseInvalid();
+  }
+  const receivedAt = canonicalHeybilliTimestamp(entry.receivedAt);
+  const updatedAt = canonicalHeybilliTimestamp(entry.updatedAt);
+  if (Date.parse(receivedAt) > Date.parse(updatedAt)
+    || input.category !== null && !entry.categories.includes(input.category)) throw heybilliResponseInvalid();
+  const steps = entry.steps.map(heybilliCaseStepResponse);
+  if (new Set(steps.map((step) => step.id)).size !== steps.length
+    || steps.some((step) => !entry.categories.includes(step.category))
+    || steps.filter((step) => ['resolved', 'dismissed'].includes(step.state)).length !== entry.completedStepCount) {
+    throw heybilliResponseInvalid();
+  }
+  const nowMs = Date.parse(input.now);
+  const hasNow = steps.some((step) => ['open', 'in_progress'].includes(step.state)
+    || step.state === 'snoozed' && step.snoozedUntil !== null && Date.parse(step.snoozedUntil) <= nowMs);
+  const hasFutureSnooze = steps.some((step) => step.state === 'snoozed'
+    && step.snoozedUntil !== null && Date.parse(step.snoozedUntil) > nowMs);
+  const allCompleted = steps.every((step) => ['resolved', 'dismissed'].includes(step.state));
+  if (entry.state === 'now' && !hasNow || entry.state === 'snoozed' && (hasNow || !hasFutureSnooze)
+    || entry.state === 'completed' && !allCompleted) throw heybilliResponseInvalid();
+  return { ...entry, id, receivedAt, updatedAt, steps };
+}
+
+function heybilliCasesResponse(data, input) {
+  if (!exactKeys(data, ['cases', 'nextCursor', 'omittedCount', 'summary'])
+    || !exactKeys(data.summary, ['byCategory', 'completed', 'now', 'p0', 'snoozed'])
+    || !exactKeys(data.summary.byCategory, ['customer', 'operations', 'quote', 'schedule', 'settlement'])
+    || !Array.isArray(data.cases) || data.cases.length > input.limit
+    || !Number.isSafeInteger(data.omittedCount) || data.omittedCount < 0) throw heybilliResponseInvalid();
+  const counts = [
+    data.summary.now, data.summary.snoozed, data.summary.completed, data.summary.p0,
+    ...Object.values(data.summary.byCategory)
+  ];
+  const activeCaseCount = data.summary.now + data.summary.snoozed;
+  if (counts.some((value) => !Number.isSafeInteger(value) || value < 0)
+    || data.summary.p0 > data.summary.now
+    || Object.values(data.summary.byCategory).some((value) => value > activeCaseCount)) {
+    throw heybilliResponseInvalid();
+  }
+  const cases = data.cases.map((entry) => heybilliCaseResponse(entry, input));
+  if (new Set(cases.map((entry) => entry.id)).size !== cases.length) throw heybilliResponseInvalid();
+  const nextCursor = data.nextCursor === null ? null : normalizeHeybilliCursor(data.nextCursor, { response: true });
+  if ((data.omittedCount > 0) !== (nextCursor !== null)
+    || data.omittedCount > 0 && cases.length !== input.limit
+    || nextCursor !== null && (
+      cases.length === 0 || nextCursor.id !== cases.at(-1).id || nextCursor.openedAt !== cases.at(-1).receivedAt
+    )) throw heybilliResponseInvalid();
+  return { summary: data.summary, cases, nextCursor, omittedCount: data.omittedCount };
 }
 
 function claimResponse(data, input) {
@@ -1750,6 +1839,25 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         })
       });
       return heybilliInboxResponse(data, query);
+    },
+    listHeybilliOwnerCases: async (input = {}) => {
+      let query;
+      try {
+        query = normalizeHeybilliQuery(input);
+      } catch {
+        throw invalidInput();
+      }
+      const { data } = await request('rpc/list_heybilli_owner_cases_v2', {
+        method: 'POST',
+        body: safeJson({
+          p_now: query.now,
+          p_view: query.view,
+          p_category: query.category,
+          p_limit: query.limit,
+          p_after: query.after
+        })
+      });
+      return heybilliCasesResponse(data, query);
     },
     resolveWorkItem: async (input = {}) => transitionWorkAutomation(input, { resolve: true }),
     markAutomationState: async (input = {}) => transitionWorkAutomation(input),

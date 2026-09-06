@@ -47,6 +47,15 @@ const V2_ITEM_KEYS = [
   "id", "version", "category", "workType", "workTypeLabel", "priority", "state",
   "title", "summary", "recommendedAction", "dueAt", "snoozedUntil", "firstOpenedAt", "updatedAt",
 ];
+const V2_CASE_KEYS = [
+  "categories", "completedStepCount", "id", "ownerBrief", "priority", "receivedAt", "state",
+  "steps", "title", "totalStepCount", "updatedAt",
+];
+const V2_CASE_STEP_KEYS = [
+  "category", "dueAt", "id", "priority", "snoozedUntil", "state", "taskLabel",
+  "updatedAt", "version", "workTypeLabel",
+];
+const V2_UNSAFE_OWNER_TEXT = /(01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4}|rq-[0-9]|confirmation_request|automation[_ ]?error|timeout|exception|stack|payload|raw log)/i;
 const V2_CURSOR_KEYS = ["p0Rank", "overdueRank", "priorityRank", "openedAt", "id"];
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -187,6 +196,80 @@ function validateInbox(value: unknown, query: { view: string; category: string |
   return { summary: value.summary, items, nextCursor, omittedCount: value.omittedCount };
 }
 
+function validateCaseStep(value: unknown) {
+  if (!exactKeys(value, V2_CASE_STEP_KEYS)
+    || typeof value.id !== "string" || !V2_UUID.test(value.id)
+    || !Number.isSafeInteger(value.version) || value.version < 1
+    || !V2_CATEGORIES.has(value.category) || !V2_PRIORITIES.has(value.priority) || !V2_STATES.has(value.state)
+    || typeof value.workTypeLabel !== "string" || !value.workTypeLabel || value.workTypeLabel.length > 40
+    || typeof value.taskLabel !== "string" || !value.taskLabel || value.taskLabel !== value.taskLabel.trim()
+    || value.taskLabel.length > 80 || V2_UNSAFE_OWNER_TEXT.test(value.taskLabel)) throw new Error("v2 response invalid");
+  return {
+    ...value,
+    dueAt: canonicalTimestamp(value.dueAt, true),
+    snoozedUntil: canonicalTimestamp(value.snoozedUntil, true),
+    updatedAt: canonicalTimestamp(value.updatedAt),
+  };
+}
+
+function validateCase(value: unknown, query: { view: string; category: string | null; now: string }): Record<string, any> & { id: string; receivedAt: string } {
+  if (!exactKeys(value, V2_CASE_KEYS)
+    || typeof value.id !== "string" || !V2_UUID.test(value.id)
+    || value.state !== query.view || !V2_VIEWS.has(value.state) || !V2_PRIORITIES.has(value.priority)
+    || typeof value.title !== "string" || !value.title || value.title !== value.title.trim() || value.title.length > 40
+    || typeof value.ownerBrief !== "string" || !value.ownerBrief || value.ownerBrief !== value.ownerBrief.trim()
+    || value.ownerBrief.length > 160 || V2_UNSAFE_OWNER_TEXT.test(value.title) || V2_UNSAFE_OWNER_TEXT.test(value.ownerBrief)
+    || !Array.isArray(value.categories) || value.categories.length < 1 || value.categories.length > V2_CATEGORIES.size
+    || new Set(value.categories).size !== value.categories.length
+    || value.categories.some((category: unknown) => typeof category !== "string" || !V2_CATEGORIES.has(category))
+    || !Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > 200
+    || !Number.isSafeInteger(value.completedStepCount) || value.completedStepCount < 0
+    || !Number.isSafeInteger(value.totalStepCount) || value.totalStepCount !== value.steps.length
+    || value.completedStepCount > value.totalStepCount) throw new Error("v2 response invalid");
+  const receivedAt = canonicalTimestamp(value.receivedAt);
+  const updatedAt = canonicalTimestamp(value.updatedAt);
+  if (receivedAt === null || updatedAt === null || Date.parse(receivedAt) > Date.parse(updatedAt)
+    || query.category !== null && !value.categories.includes(query.category)) throw new Error("v2 response invalid");
+  const steps = value.steps.map(validateCaseStep);
+  if (new Set(steps.map((step: any) => step.id)).size !== steps.length
+    || steps.some((step: any) => !value.categories.includes(step.category))
+    || steps.filter((step: any) => ["resolved", "dismissed"].includes(step.state)).length !== value.completedStepCount) {
+    throw new Error("v2 response invalid");
+  }
+  const nowMs = Date.parse(query.now);
+  const hasNow = steps.some((step: any) => ["open", "in_progress"].includes(step.state)
+    || step.state === "snoozed" && step.snoozedUntil !== null && Date.parse(step.snoozedUntil) <= nowMs);
+  const hasFutureSnooze = steps.some((step: any) => step.state === "snoozed"
+    && step.snoozedUntil !== null && Date.parse(step.snoozedUntil) > nowMs);
+  const allCompleted = steps.every((step: any) => ["resolved", "dismissed"].includes(step.state));
+  if (value.state === "now" && !hasNow || value.state === "snoozed" && (hasNow || !hasFutureSnooze)
+    || value.state === "completed" && !allCompleted) throw new Error("v2 response invalid");
+  return { ...value, id: value.id as string, receivedAt, updatedAt, steps };
+}
+
+function validateCaseInbox(value: unknown, query: { view: string; category: string | null; limit: number; now: string }) {
+  if (!exactKeys(value, ["summary", "cases", "nextCursor", "omittedCount"])
+    || !exactKeys(value.summary, ["now", "snoozed", "completed", "p0", "byCategory"])
+    || !exactKeys(value.summary.byCategory, ["schedule", "quote", "settlement", "customer", "operations"])
+    || !Array.isArray(value.cases) || value.cases.length > query.limit
+    || !Number.isSafeInteger(value.omittedCount) || value.omittedCount < 0) throw new Error("v2 response invalid");
+  const counts = [value.summary.now, value.summary.snoozed, value.summary.completed, value.summary.p0, ...Object.values(value.summary.byCategory)];
+  const activeCases = value.summary.now + value.summary.snoozed;
+  if (counts.some((count) => !Number.isSafeInteger(count) || (count as number) < 0)
+    || value.summary.p0 > value.summary.now
+    || Object.values(value.summary.byCategory).some((count: any) => count > activeCases)) throw new Error("v2 response invalid");
+  const cases = value.cases.map((entry: unknown) => validateCase(entry, query));
+  if (new Set(cases.map((entry: any) => entry.id)).size !== cases.length) throw new Error("v2 response invalid");
+  const nextCursor = value.nextCursor === null ? null : validateCursor(value.nextCursor);
+  const lastCase = cases.at(-1);
+  if ((value.omittedCount > 0) !== (nextCursor !== null)
+    || value.omittedCount > 0 && cases.length !== query.limit
+    || nextCursor !== null && (lastCase === undefined || nextCursor.id !== lastCase.id || nextCursor.openedAt !== lastCase.receivedAt)) {
+    throw new Error("v2 response invalid");
+  }
+  return { summary: value.summary, cases, nextCursor, omittedCount: value.omittedCount };
+}
+
 function parseV2Query(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   if ([...sp.keys()].some((key) => !["view", "category", "limit", "after"].includes(key))) throw new Error("invalid query");
@@ -287,16 +370,16 @@ async function getV2FollowUps(req: NextRequest) {
   let query;
   try { query = parseV2Query(req); } catch { return NextResponse.json({ error: "invalid query" }, { status: 400 }); }
   try {
-    const raw = await supaFetch("rpc/list_heybilli_owner_work_v2", {
+    const raw = await supaFetch("rpc/list_heybilli_owner_cases_v2", {
       method: "POST",
       body: JSON.stringify({
         p_now: query.now, p_view: query.view, p_category: query.category,
         p_limit: query.limit, p_after: query.after,
       }),
     });
-    const result = validateInbox(raw, query);
+    const result = validateCaseInbox(raw, query);
     return NextResponse.json({
-      ok: true, source: "work_items_v2", summary: result.summary, items: result.items,
+      ok: true, source: "work_items_v2_cases", summary: result.summary, cases: result.cases,
       nextCursor: encodeCursor(result.nextCursor), omittedCount: result.omittedCount,
     });
   } catch {
