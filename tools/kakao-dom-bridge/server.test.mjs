@@ -5,6 +5,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { Readable } from 'node:stream';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
@@ -53,6 +54,7 @@ const {
   resolveGatewayDocumentConfig,
   createGatewayApplicationFailureNotifier,
   createGatewayFailureNotificationCoordinator,
+  createKakaoAutomationAuditCoordinator,
   createGatewayResultApplicationCoordinator,
   createAiJobDispatcher,
   createErrorsAuditAppender,
@@ -1239,7 +1241,8 @@ test('Gateway health readback requires a fresh consumer and exposes only safe ag
     registered_reservation_change: {
       reserved: 2, completed: 5, failed_human_review: 1, pending_failure_notifications: 1,
       oldest_reserved_age_ms: 45_000, last_success_at: '2026-08-21T00:00:20.000Z'
-    }
+    },
+    audit_projection: { pending: 0, conflict: 0, oldest_pending_age_ms: null }
   });
   assert.equal(JSON.stringify(readback).includes('must-not-leak'), false);
   const stale = buildGatewayHealthReadback({
@@ -1926,6 +1929,367 @@ test('server default confirmation validator matches the safe sheet payload bound
     duplicate_checked_request_sheet: true
   };
   assert.deepEqual(validator({ decision }), { valid: true, errors: [] });
+});
+
+test('Kakao automation audit recovery queues exact durable evidence and projects it without business replay', async () => {
+  const order = [];
+  const durableJob = {
+    job_id: 'job-audit-recover', room_key: 'room-audit-recover', room_revision: 4, queue_order: 1,
+    event: {
+      schema: 'village-kakao-gateway-event/v1', job_id: 'job-audit-recover', room_key: 'room-audit-recover',
+      room_revision: 4, detected_at: '2026-09-07T01:00:00.000Z'
+    },
+    local_context: { job: { customerName: '복구 고객' } },
+    tool_operation: {
+      schema: 'village-tool-operation-reservation/v1', tool: 'confirmation_request',
+      job_id: 'job-audit-recover', room_key: 'room-audit-recover', room_revision: 4,
+      lease_id: 'lease-audit-recover', request_digest: 'digest-audit-recover',
+      operation_id: 'operation-audit-recover', state: 'completed', receipt_id: 'receipt-audit-recover',
+      created_at: '2026-09-07T01:00:01.000Z', completed_at: '2026-09-07T01:00:03.000Z'
+    },
+    tool_receipts: [{
+      schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-audit-recover',
+      job_id: 'job-audit-recover', room_key: 'room-audit-recover', room_revision: 4,
+      lease_id: 'lease-audit-recover', request_digest: 'digest-audit-recover',
+      operation_id: 'operation-audit-recover', status: 'ok', availability_report: [],
+      authoritative_sheet_result: { success: true, reqID: 'RQ-260907-004' },
+      created_at: '2026-09-07T01:00:02.000Z', error: null
+    }],
+    audit_projection: null
+  };
+  let current = structuredClone(durableJob);
+  const channel = {
+    async get() { return structuredClone(current); },
+    async listAuditProjectionCandidates() {
+      order.push('list_candidates');
+      return current.audit_projection ? [] : [structuredClone(current)];
+    },
+    async queueAuditProjection({ events }) {
+      order.push('queue_projection');
+      current.audit_projection = {
+        state: 'pending', events: structuredClone(events),
+        event_keys: events.map((event) => event.event_key),
+        created_at: '2026-09-07T01:00:04.000Z', delivered_at: null,
+        attempts: 0, last_attempt_at: null, error_type: null
+      };
+      return structuredClone(current);
+    },
+    async listPendingAuditProjections() {
+      order.push('list_pending');
+      return current.audit_projection?.state === 'pending' ? [structuredClone(current)] : [];
+    },
+    async markAuditProjectionDelivered() {
+      order.push('mark_delivered');
+      current.audit_projection.state = 'delivered';
+      return structuredClone(current);
+    },
+    async markAuditProjectionFailed() { order.push('unexpected_failed'); },
+    async markAuditProjectionConflict() { order.push('unexpected_conflict'); },
+    async status() {
+      return { audit_projection: { pending: 0, conflict: 0, oldest_pending_age_ms: null } };
+    }
+  };
+  const store = {
+    async insertAndReadback(events) {
+      order.push('insert_readback');
+      assert.equal(events.length, 1);
+      assert.equal(events[0].target_id, 'RQ-260907-004');
+      return { inserted: 1, existing: 0, events };
+    },
+    async recordProjectionStatus(status) {
+      order.push('record_status');
+      assert.deepEqual(status, {
+        pendingCount: 0,
+        conflictCount: 0,
+        oldestPendingAt: null,
+        lastSuccessAt: '2026-09-07T01:00:05.000Z',
+        updatedAt: '2026-09-07T01:00:05.000Z'
+      });
+      return status;
+    }
+  };
+  const coordinator = createKakaoAutomationAuditCoordinator({ channel, store, now: () => Date.parse('2026-09-07T01:00:05.000Z') });
+  const recovered = await coordinator.recover({ limit: 10, historicalImport: true });
+  assert.deepEqual(order, ['list_candidates', 'queue_projection', 'list_pending', 'insert_readback', 'mark_delivered', 'record_status']);
+  assert.equal(recovered.queued, 1);
+  assert.equal(recovered.delivered, 1);
+  assert.equal(current.audit_projection.events[0].historical_import, true);
+  assert.doesNotMatch(JSON.stringify(recovered), /복구 고객|RQ-260907-004/);
+
+  order.length = 0;
+  const duplicate = await coordinator.recover({ limit: 10, historicalImport: true });
+  assert.deepEqual(order, ['list_candidates', 'list_pending', 'record_status']);
+  assert.deepEqual(duplicate, { queued: 0, delivered: 0, pending: 0, conflict: 0 });
+});
+
+test('Kakao automation audit store outage preserves pending projection and never invokes a business path', async () => {
+  let failed = 0;
+  let businessCalls = 0;
+  const event = {
+    event_key: `kakao:auto_reply:${'a'.repeat(64)}`,
+    job_id: 'job-audit-offline', room_revision: 1, operation_id: null,
+    receipt_id: `reply-readback-${'b'.repeat(64)}`, occurred_at: '2026-09-07T01:00:00.000Z',
+    effect_type: 'auto_reply', action_type: 'send', outcome: 'success', customer_label: '감사 고객',
+    target_type: 'room', target_id: null, summary: '카카오 답변을 전송했습니다.', change_items: [],
+    outbound_text: '네, 가능합니다.', evidence: { schema: 'kakao-auto-reply-readback/v1', status: 'sent', readback: true },
+    source_message_at: '2026-09-07T00:59:00.000Z', historical_import: false
+  };
+  const projection = {
+    state: 'pending', events: [event], event_keys: [event.event_key],
+    created_at: '2026-09-07T01:00:00.000Z', delivered_at: null, attempts: 0,
+    last_attempt_at: null, error_type: null
+  };
+  const channel = {
+    async get() { businessCalls += 1; },
+    async listAuditProjectionCandidates() { return []; },
+    async queueAuditProjection() { businessCalls += 1; },
+    async listPendingAuditProjections() { return [{ job_id: 'job-audit-offline', audit_projection: structuredClone(projection) }]; },
+    async markAuditProjectionDelivered() { businessCalls += 1; },
+    async markAuditProjectionConflict() { businessCalls += 1; },
+    async markAuditProjectionFailed({ error_type }) {
+      assert.equal(error_type, 'automation_audit_store_unavailable');
+      failed += 1;
+    },
+    async status() { return { audit_projection: { pending: 1, conflict: 0, oldest_pending_age_ms: 1_000 } }; }
+  };
+  const coordinator = createKakaoAutomationAuditCoordinator({
+    channel,
+    store: { async insertAndReadback() { throw Object.assign(new Error('private database failure'), { code: 'automation_audit_store_unavailable' }); } },
+    log: (entry) => {
+      assert.deepEqual(entry, {
+        type: 'kakao_automation_audit_projection',
+        phase: 'project',
+        error_type: 'automation_audit_store_unavailable'
+      });
+    }
+  });
+  const result = await coordinator.recover({ limit: 10 });
+  assert.deepEqual(result, { queued: 0, delivered: 0, pending: 1, conflict: 0 });
+  assert.equal(failed, 1);
+  assert.equal(businessCalls, 0);
+});
+
+test('Kakao automation audit coordinator coalesces concurrent optional projection retries', async () => {
+  let listCalls = 0;
+  let statusCalls = 0;
+  let releaseStatus;
+  const statusGate = new Promise((resolve) => { releaseStatus = resolve; });
+  const channel = {
+    async get() { return null; },
+    async queueAuditProjection() {},
+    async listAuditProjectionCandidates() { return []; },
+    async listPendingAuditProjections() { listCalls += 1; return []; },
+    async markAuditProjectionDelivered() {},
+    async markAuditProjectionFailed() {},
+    async markAuditProjectionConflict() {},
+    async status() { return { audit_projection: { pending: 0, conflict: 0, oldest_pending_age_ms: null } }; }
+  };
+  const coordinator = createKakaoAutomationAuditCoordinator({
+    channel,
+    store: {
+      async insertAndReadback() { throw new Error('unexpected insert'); },
+      async recordProjectionStatus() { statusCalls += 1; await statusGate; return {}; }
+    },
+    now: () => Date.parse('2026-09-07T01:00:00.000Z')
+  });
+  const first = coordinator.projectPending({ limit: 5 });
+  const second = coordinator.projectPending({ limit: 25 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(listCalls, 1);
+  assert.equal(statusCalls, 1);
+  releaseStatus();
+  assert.deepEqual(await first, { delivered: 0, pending: 0, conflict: 0 });
+  assert.deepEqual(await second, { delivered: 0, pending: 0, conflict: 0 });
+});
+
+test('Gateway result coordinator persists exact Kakao reply readback before queuing and projection', async () => {
+  const order = [];
+  let persistedAppliedAudit = null;
+  let queuedInput = null;
+  const replyText = '네, 가능합니다.';
+  const durableJob = {
+    job_id: 'job-reply-audit', room_key: 'room-reply-audit', room_revision: 2,
+    event: {
+      schema: 'village-kakao-gateway-event/v1', job_id: 'job-reply-audit', room_key: 'room-reply-audit',
+      room_revision: 2, detected_at: '2026-09-07T01:00:00.000Z'
+    },
+    local_context: {
+      job: { jobId: 'job-reply-audit', roomKey: 'room-reply-audit', roomRevision: 2, customerName: '답변 고객' },
+      turn_internal: { snapshot: { schema: 'kakao-room-snapshot/v1' } }
+    },
+    result: { content: 'FINAL_JSON {}' }, tool_receipts: [], application: { state: 'pending' }
+  };
+  const channel = {
+    async claimApplication() {
+      return { claimed: true, application_id: 'application-reply-audit', job: structuredClone(durableJob) };
+    },
+    async beginApplication() { order.push('persist_applying'); },
+    async recordApplicationApplied({ audit }) {
+      order.push('persist_applied');
+      persistedAppliedAudit = structuredClone(audit);
+      return { ...structuredClone(durableJob), application: { state: 'applied', applied_audit: structuredClone(audit) } };
+    },
+    async finalizeApplication() { order.push('persist_finalized'); },
+    async failApplication() { throw new Error('unexpected application failure'); },
+    async listPendingApplicationFailureNotifications() { return []; },
+    async markApplicationFailureNotified() {}
+  };
+  const auditCoordinator = {
+    async queueFromEvidence(input) { order.push('queue_audit'); queuedInput = structuredClone(input); return { queued: true }; },
+    async projectPending() { order.push('project_audit'); return { delivered: 1 }; }
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel,
+    auditCoordinator,
+    getConfig: () => ({}),
+    prepare: async () => { order.push('prepare'); return { status: 'ai_prepared', snapshot: {} }; },
+    apply: async ({ prepared }) => {
+      order.push('apply');
+      return {
+        prepared,
+        autoReplyResult: {
+          attempted: true,
+          sent: true,
+          text: replyText,
+          sendResult: { sent: true, readback_confirmed: true },
+          readbackReceipt: {
+            id: `reply-readback-${'c'.repeat(64)}`,
+            confirmedAt: '2026-09-07T01:00:04.000Z'
+          }
+        }
+      };
+    },
+    finalize: async ({ applied }) => { order.push('finalize'); return { ...applied.prepared, status: 'ai_completed', autoReplyResult: applied.autoReplyResult }; },
+    record: async () => { order.push('record_business'); }
+  });
+  await coordinator.enqueue(durableJob);
+  await coordinator.idle();
+
+  assert.deepEqual(persistedAppliedAudit.auto_reply_readback, {
+    schema: 'kakao-auto-reply-readback/v1',
+    receipt_id: `reply-readback-${'c'.repeat(64)}`,
+    confirmed_at: '2026-09-07T01:00:04.000Z',
+    text: replyText,
+    text_sha256: createHash('sha256').update(replyText).digest('hex'),
+    readback_confirmed: true,
+    customer_label: '답변 고객',
+    source_message_at: '2026-09-07T01:00:00.000Z'
+  });
+  assert.equal(queuedInput.durableJob.application.applied_audit.auto_reply_readback.receipt_id, `reply-readback-${'c'.repeat(64)}`);
+  assert.deepEqual(order, [
+    'prepare', 'persist_applying', 'apply', 'persist_applied', 'finalize',
+    'record_business', 'persist_finalized', 'queue_audit', 'project_audit'
+  ]);
+});
+
+test('Gateway result coordinator never persists private Kakao reply text in durable audit proof', async () => {
+  const privateText = '우리은행 1005-404-109661로 보내주세요';
+  const durableJob = {
+    job_id: 'job-private-reply-audit', room_key: 'room-private-reply-audit', room_revision: 1,
+    event: {
+      schema: 'village-kakao-gateway-event/v1', job_id: 'job-private-reply-audit',
+      room_key: 'room-private-reply-audit', room_revision: 1,
+      detected_at: '2026-09-07T01:00:00.000Z'
+    },
+    local_context: {
+      job: { jobId: 'job-private-reply-audit', roomKey: 'room-private-reply-audit', roomRevision: 1, customerName: '감사 고객' },
+      turn_internal: { snapshot: { schema: 'kakao-room-snapshot/v1' } }
+    },
+    result: { content: 'FINAL_JSON {}' }, tool_receipts: [], application: { state: 'pending' }
+  };
+  let persistedAudit = null;
+  let queuedJob = null;
+  const channel = {
+    async claimApplication() {
+      return { claimed: true, application_id: 'application-private-reply-audit', job: structuredClone(durableJob) };
+    },
+    async beginApplication() {},
+    async recordApplicationApplied({ audit }) {
+      persistedAudit = structuredClone(audit);
+      return { ...structuredClone(durableJob), application: { state: 'applied', applied_audit: structuredClone(audit) } };
+    },
+    async finalizeApplication() {},
+    async failApplication() { throw new Error('unexpected application failure'); },
+    async listPendingApplicationFailureNotifications() { return []; },
+    async markApplicationFailureNotified() {}
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel,
+    auditCoordinator: {
+      async queueFromEvidence({ durableJob: queued }) { queuedJob = structuredClone(queued); return { queued: false }; },
+      async projectPending() { return { delivered: 0 }; }
+    },
+    getConfig: () => ({}),
+    prepare: async () => ({ status: 'ai_prepared', snapshot: {} }),
+    apply: async ({ prepared }) => ({
+      prepared,
+      autoReplyResult: {
+        attempted: true, sent: true, text: privateText,
+        sendResult: { sent: true, readback_confirmed: true },
+        readbackReceipt: { id: `reply-readback-${'d'.repeat(64)}`, confirmedAt: '2026-09-07T01:00:04.000Z' }
+      }
+    }),
+    finalize: async ({ applied }) => ({ ...applied.prepared, status: 'ai_completed', autoReplyResult: applied.autoReplyResult }),
+    record: async () => {}
+  });
+  await coordinator.enqueue(durableJob);
+  await coordinator.idle();
+
+  assert.equal(Object.hasOwn(persistedAudit, 'auto_reply_readback'), false);
+  assert.doesNotMatch(JSON.stringify(persistedAudit), /1005-404-109661/);
+  assert.doesNotMatch(JSON.stringify(queuedJob), /1005-404-109661/);
+});
+
+test('Gateway result application finalizes durably without waiting for optional audit storage', async () => {
+  const durableJob = {
+    job_id: 'job-nonblocking-audit', room_key: 'room-nonblocking-audit', room_revision: 1,
+    event: { job_id: 'job-nonblocking-audit', room_key: 'room-nonblocking-audit', room_revision: 1 },
+    local_context: {
+      job: { jobId: 'job-nonblocking-audit', roomKey: 'room-nonblocking-audit', roomRevision: 1 },
+      turn_internal: { snapshot: { schema: 'kakao-room-snapshot/v1' } }
+    },
+    result: { content: 'FINAL_JSON {}' }, tool_receipts: [], application: { state: 'pending' }
+  };
+  let finalized = false;
+  let releaseAudit;
+  const auditGate = new Promise((resolve) => { releaseAudit = resolve; });
+  let auditStarted;
+  const started = new Promise((resolve) => { auditStarted = resolve; });
+  const channel = {
+    async claimApplication() { return { claimed: true, application_id: 'application-nonblocking-audit', job: structuredClone(durableJob) }; },
+    async beginApplication() {},
+    async recordApplicationApplied({ audit }) {
+      return { ...structuredClone(durableJob), application: { state: 'applied', applied_audit: structuredClone(audit) } };
+    },
+    async finalizeApplication() { finalized = true; },
+    async failApplication() { throw new Error('unexpected application failure'); },
+    async listPendingApplicationFailureNotifications() { return []; },
+    async markApplicationFailureNotified() {}
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel,
+    auditCoordinator: {
+      async queueFromEvidence() { auditStarted(); await auditGate; return { queued: true }; },
+      async projectPending() { throw new Error('must remain detached while queue is blocked'); }
+    },
+    getConfig: () => ({}),
+    prepare: async () => ({ status: 'ai_prepared', snapshot: {} }),
+    apply: async ({ prepared }) => ({ prepared }),
+    finalize: async ({ applied }) => ({ ...applied.prepared, status: 'ai_completed' }),
+    record: async () => {}
+  });
+  try {
+    await coordinator.enqueue(durableJob);
+    await started;
+    const idleCompleted = await Promise.race([
+      coordinator.idle().then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 750))
+    ]);
+    assert.equal(idleCompleted, true);
+    assert.equal(finalized, true);
+  } finally {
+    releaseAudit();
+  }
 });
 
 test('Gateway result coordinator serializes prepare, fresh DOM apply, finalize, and audit exactly once', async () => {

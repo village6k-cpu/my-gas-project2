@@ -24,6 +24,24 @@ const ownerLanguageMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_owner_language\.sql$/.test(name));
 const heybilliCompletionMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_completion\.sql$/.test(name));
+const kakaoAutomationAuditMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_kakao_automation_audit_events\.sql$/.test(name));
+
+test('Kakao automation audit migration grants only bounded service-role access', () => {
+  assert.equal(kakaoAutomationAuditMigrationFiles.length, 1, 'exactly one Kakao automation audit migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, kakaoAutomationAuditMigrationFiles[0]), 'utf8');
+  assert.match(sql, /create table public\.kakao_automation_audit_events/i);
+  assert.match(sql, /create table public\.kakao_automation_audit_projection_status/i);
+  assert.match(sql, /alter table public\.kakao_automation_audit_events enable row level security/i);
+  assert.match(sql, /alter table public\.kakao_automation_audit_projection_status enable row level security/i);
+  assert.match(sql, /revoke all on table public\.kakao_automation_audit_events from public, anon, authenticated, service_role/i);
+  assert.match(sql, /grant select, insert on table public\.kakao_automation_audit_events to service_role/i);
+  assert.match(sql, /revoke all on table public\.kakao_automation_audit_projection_status from public, anon, authenticated, service_role/i);
+  assert.match(sql, /grant select, insert, update on table public\.kakao_automation_audit_projection_status to service_role/i);
+  assert.match(sql, /before update or delete on public\.kakao_automation_audit_events/i);
+  assert.doesNotMatch(sql, /grant [^;]+ to (?:public|anon|authenticated)/i);
+  assert.doesNotMatch(sql, /(?:insert into|update|delete from) public\.work_items_v2/i);
+});
 
 test('Heybilli completion migration exposes one service-only atomic completion RPC', () => {
   assert.equal(heybilliCompletionMigrationFiles.length, 1, 'exactly one CLI-generated completion migration must exist');

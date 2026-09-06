@@ -22,6 +22,10 @@ import {
 import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { buildGatewayHealthReadback, createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
+import {
+  buildKakaoAutomationAuditEvents,
+  createKakaoAutomationAuditStore
+} from './kakao-automation-audit.mjs';
 import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
 import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
 import {
@@ -295,6 +299,7 @@ const CONFIG = {
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   supabaseTable: process.env.SUPABASE_TABLE || '',
+  kakaoAutomationAuditEnabled: process.env.KAKAO_AUTOMATION_AUDIT_ENABLED !== 'false',
   workOrchestrator: WORK_ORCHESTRATOR_CONFIG,
   processInitialScan: process.env.PROCESS_INITIAL_SCAN !== 'false',
   ignoreShiftedRows: process.env.IGNORE_SHIFTED_ROWS === 'true',
@@ -2229,6 +2234,219 @@ export function createGatewayConfirmationValidator({
   };
 }
 
+function auditProjectionErrorType(error) {
+  const code = String(error?.code || '').trim();
+  return /^[a-z0-9_]{1,120}$/.test(code) ? code : 'automation_audit_projection_failed';
+}
+
+function cloneForAudit(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+export function createKakaoAutomationAuditCoordinator({
+  channel,
+  store,
+  now = Date.now,
+  log = () => {}
+} = {}) {
+  const channelMethods = [
+    'get',
+    'queueAuditProjection',
+    'listPendingAuditProjections',
+    'listAuditProjectionCandidates',
+    'markAuditProjectionDelivered',
+    'markAuditProjectionFailed',
+    'markAuditProjectionConflict',
+    'status'
+  ];
+  if (!channel || channelMethods.some((method) => typeof channel[method] !== 'function')) {
+    throw new Error('Kakao automation audit channel is required');
+  }
+  if (!store || typeof store.insertAndReadback !== 'function') {
+    throw new Error('Kakao automation audit store is required');
+  }
+  if (typeof now !== 'function' || typeof log !== 'function') {
+    throw new Error('Kakao automation audit dependencies are invalid');
+  }
+  let lastProjectionSuccessAt = null;
+  let projectionInFlight = null;
+
+  function currentIso() {
+    const value = now();
+    const milliseconds = value instanceof Date ? value.getTime() : Number(value);
+    if (!Number.isFinite(milliseconds)) throw Object.assign(new Error('audit clock is invalid'), { code: 'invalid_clock' });
+    return new Date(milliseconds).toISOString();
+  }
+
+  function safeLog(phase, error) {
+    const entry = {
+      type: 'kakao_automation_audit_projection',
+      phase,
+      error_type: auditProjectionErrorType(error)
+    };
+    try { log(entry); } catch {}
+  }
+
+  async function queueFromEvidence({ durableJob, jobId, prepared = null, applied = null, historicalImport = false } = {}) {
+    try {
+      const requestedId = String(jobId || durableJob?.job_id || '').trim();
+      if (!requestedId) throw Object.assign(new Error('audit job is required'), { code: 'invalid_audit_projection' });
+      const current = await channel.get(requestedId);
+      const snapshot = current || durableJob;
+      if (!snapshot) throw Object.assign(new Error('audit job was not found'), { code: 'unknown_job' });
+      const events = buildKakaoAutomationAuditEvents({
+        durableJob: snapshot,
+        prepared,
+        applied,
+        historicalImport
+      });
+      if (events.length === 0) return { queued: false, reason: 'no_authoritative_effect' };
+      await channel.queueAuditProjection({ job_id: requestedId, events });
+      return { queued: true, event_count: events.length };
+    } catch (error) {
+      safeLog('queue', error);
+      return { queued: false, reason: auditProjectionErrorType(error) };
+    }
+  }
+
+  async function projectPendingOnce({ limit = 25 } = {}) {
+    const pendingJobs = await channel.listPendingAuditProjections({ limit });
+    let delivered = 0;
+    let pending = 0;
+    let conflict = 0;
+    for (const job of pendingJobs) {
+      const projection = job?.audit_projection;
+      const eventKeys = Array.isArray(projection?.event_keys) ? projection.event_keys : [];
+      try {
+        const readback = await store.insertAndReadback(projection.events);
+        await channel.markAuditProjectionDelivered({
+          job_id: job.job_id,
+          event_keys: eventKeys,
+          audit: { inserted: readback.inserted, existing: readback.existing }
+        });
+        lastProjectionSuccessAt = currentIso();
+        delivered += 1;
+      } catch (error) {
+        const errorType = auditProjectionErrorType(error);
+        try {
+          if (errorType === 'automation_audit_projection_conflict') {
+            await channel.markAuditProjectionConflict({ job_id: job.job_id, event_keys: eventKeys });
+            conflict += 1;
+          } else {
+            await channel.markAuditProjectionFailed({
+              job_id: job.job_id,
+              event_keys: eventKeys,
+              error_type: errorType
+            });
+            pending += 1;
+          }
+        } catch (stateError) {
+          pending += 1;
+          safeLog('state', stateError);
+        }
+        safeLog('project', error);
+      }
+    }
+    if (typeof store.recordProjectionStatus === 'function') {
+      try {
+        const status = await channel.status();
+        const projectionStatus = status?.audit_projection || {};
+        const updatedAt = currentIso();
+        const nowMs = Date.parse(updatedAt);
+        const oldestAge = projectionStatus.oldest_pending_age_ms;
+        const oldestPendingAt = oldestAge === null || oldestAge === undefined
+          ? null
+          : new Date(Math.max(0, nowMs - Math.max(0, Number(oldestAge) || 0))).toISOString();
+        await store.recordProjectionStatus({
+          pendingCount: Math.max(0, Number(projectionStatus.pending) || 0),
+          conflictCount: Math.max(0, Number(projectionStatus.conflict) || 0),
+          oldestPendingAt,
+          ...(lastProjectionSuccessAt ? { lastSuccessAt: lastProjectionSuccessAt } : {}),
+          updatedAt
+        });
+      } catch (error) {
+        safeLog('status', error);
+      }
+    }
+    return { delivered, pending, conflict };
+  }
+
+  function projectPending(options = {}) {
+    if (projectionInFlight) return projectionInFlight;
+    const operation = projectPendingOnce(options);
+    projectionInFlight = operation;
+    const clear = () => {
+      if (projectionInFlight === operation) projectionInFlight = null;
+    };
+    operation.then(clear, clear);
+    return operation;
+  }
+
+  return Object.freeze({
+    queueFromEvidence,
+    projectPending,
+    async recover({ limit = 100, historicalImport = true } = {}) {
+      const candidates = await channel.listAuditProjectionCandidates({ limit });
+      let queued = 0;
+      for (const durableJob of candidates) {
+        const result = await queueFromEvidence({ durableJob, historicalImport });
+        if (result.queued) queued += 1;
+      }
+      const projection = await projectPending({ limit });
+      return { queued, ...projection };
+    }
+  });
+}
+
+const KAKAO_AUDIT_PHONE_PATTERN = /01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4}/i;
+const KAKAO_AUDIT_SECRET_PATTERN = /(bearer\s+[a-z0-9._~-]+|(?:token|secret|password|apikey|api[ _-]?key)\s*[:=])/i;
+const KAKAO_AUDIT_BANK_ACCOUNT_PATTERN = /(?:계좌|은행|account)(?:번호)?[^0-9\r\n]{0,20}[0-9][0-9 -]{7,}[0-9]/i;
+
+function containsPrivateKakaoAuditText(value) {
+  return KAKAO_AUDIT_PHONE_PATTERN.test(value)
+    || KAKAO_AUDIT_SECRET_PATTERN.test(value)
+    || KAKAO_AUDIT_BANK_ACCOUNT_PATTERN.test(value);
+}
+
+function safeKakaoAutoReplyAuditProof({ durableJob, job, prepared, applied }) {
+  const result = applied?.autoReplyResult;
+  const readback = result?.readbackReceipt;
+  const sendResult = result?.sendResult;
+  const text = typeof result?.text === 'string' ? result.text : '';
+  const receiptId = String(readback?.id || '').trim();
+  const confirmedAtMs = Date.parse(String(readback?.confirmedAt || ''));
+  const sourceMessageAtMs = Date.parse(String(durableJob?.event?.detected_at || durableJob?.event?.detectedAt || ''));
+  const customerCandidates = [
+    prepared?.decision?.customer?.name,
+    prepared?.decision?.customer_name,
+    job?.customerName,
+    job?.customer_name,
+    job?.roomTitle,
+    job?.room_title
+  ];
+  const customerLabel = customerCandidates
+    .map((value) => typeof value === 'string' ? value.trim() : '')
+    .find((value) => value && value.length <= 120 && !containsPrivateKakaoAuditText(value));
+  if (result?.sent !== true
+    || sendResult?.readback_confirmed !== true
+    || !/^reply-readback-[0-9a-f]{64}$/.test(receiptId)
+    || !Number.isFinite(confirmedAtMs)
+    || !Number.isFinite(sourceMessageAtMs)
+    || !text || text.length > 2000
+    || containsPrivateKakaoAuditText(text)
+    || !customerLabel) return null;
+  return {
+    schema: 'kakao-auto-reply-readback/v1',
+    receipt_id: receiptId,
+    confirmed_at: new Date(confirmedAtMs).toISOString(),
+    text,
+    text_sha256: crypto.createHash('sha256').update(text).digest('hex'),
+    readback_confirmed: true,
+    customer_label: customerLabel,
+    source_message_at: new Date(sourceMessageAtMs).toISOString()
+  };
+}
+
 export function createGatewayResultApplicationCoordinator({
   channel,
   getConfig,
@@ -2237,7 +2455,8 @@ export function createGatewayResultApplicationCoordinator({
   apply = applyPreparedKakaoDecision,
   finalize = finalizePreparedKakaoDecision,
   record = async () => {},
-  onFailure = async () => {}
+  onFailure = async () => {},
+  auditCoordinator = null
 } = {}) {
   if (!channel
     || typeof channel.claimApplication !== 'function'
@@ -2251,6 +2470,11 @@ export function createGatewayResultApplicationCoordinator({
   }
   if (typeof getConfig !== 'function') throw new Error('Gateway application config loader is required');
   if (typeof now !== 'function') throw new Error('Gateway application clock is required');
+  if (auditCoordinator !== null
+    && (typeof auditCoordinator?.queueFromEvidence !== 'function'
+      || typeof auditCoordinator?.projectPending !== 'function')) {
+    throw new Error('Kakao automation audit coordinator is invalid');
+  }
   let applicationTail = Promise.resolve();
 
   function currentTimeMs() {
@@ -2355,6 +2579,16 @@ export function createGatewayResultApplicationCoordinator({
     return exact;
   }
 
+  function triggerAuditProjection({ durableJob, prepared, applied }) {
+    if (!auditCoordinator) return;
+    Promise.resolve()
+      .then(async () => {
+        await auditCoordinator.queueFromEvidence({ durableJob, prepared, applied, historicalImport: false });
+        await auditCoordinator.projectPending({ limit: 25 });
+      })
+      .catch(() => {});
+  }
+
   async function runApplication(claimed) {
     const durableJob = claimed.job;
     const localContext = durableJob?.local_context;
@@ -2378,17 +2612,22 @@ export function createGatewayResultApplicationCoordinator({
     });
     durableJob.application = { ...(durableJob.application || {}), state: 'applying' };
     const applied = await apply({ config, job, prepared });
-    await channel.recordApplicationApplied({
+    const autoReplyReadback = safeKakaoAutoReplyAuditProof({ durableJob, job, prepared, applied });
+    const appliedAudit = {
+      auto_reply_attempted: applied?.autoReplyResult?.attempted === true,
+      auto_reply_sent: applied?.autoReplyResult?.sent === true,
+      snapshot_changed: applied?.snapshotChanged === true,
+      superseded: applied?.superseded === true,
+      ...(autoReplyReadback ? { auto_reply_readback: autoReplyReadback } : {})
+    };
+    const persistedAppliedJob = await channel.recordApplicationApplied({
       job_id: durableJob.job_id,
       application_id: claimed.application_id,
-      audit: {
-        auto_reply_attempted: applied?.autoReplyResult?.attempted === true,
-        auto_reply_sent: applied?.autoReplyResult?.sent === true,
-        snapshot_changed: applied?.snapshotChanged === true,
-        superseded: applied?.superseded === true
-      }
+      audit: appliedAudit
     });
-    durableJob.application = { ...(durableJob.application || {}), state: 'applied' };
+    durableJob.application = persistedAppliedJob?.application
+      ? cloneForAudit(persistedAppliedJob.application)
+      : { ...(durableJob.application || {}), state: 'applied', applied_audit: appliedAudit };
     const finalized = await finalize({ config, job, applied });
     assertGatewayFinalizationSucceeded(finalized, config);
     const finishedAt = currentTimeMs();
@@ -2404,6 +2643,7 @@ export function createGatewayResultApplicationCoordinator({
         auto_reply_sent: finalized?.autoReplyResult?.sent === true
       }
     });
+    triggerAuditProjection({ durableJob, prepared, applied });
     return finalized;
   }
 
@@ -2522,6 +2762,9 @@ const gatewayHttpHandler = createHermesGatewayHttpHandler({
     : null,
   enqueueResultApplication: gatewayTransportEnabled
     ? (completedJob) => getGatewayResultApplicationCoordinator().enqueue(completedJob)
+    : null,
+  recoverAuditProjections: gatewayTransportEnabled
+    ? () => getKakaoAutomationAuditCoordinator()?.projectPending({ limit: 5 })
     : null
 });
 
@@ -4284,6 +4527,7 @@ let kakaoPhaseScheduler = null;
 let kakaoWorkerRuntimeConfig = null;
 let gatewayResultApplicationCoordinator = null;
 let gatewayFailureNotificationCoordinator = null;
+let kakaoAutomationAuditCoordinator = null;
 let aiJobDispatcher = null;
 
 function getKakaoWorkerRuntimeConfigForTransport() {
@@ -4323,6 +4567,23 @@ function getGatewayFailureNotificationCoordinator() {
   return gatewayFailureNotificationCoordinator;
 }
 
+function getKakaoAutomationAuditCoordinator() {
+  if (!CONFIG.kakaoAutomationAuditEnabled) return null;
+  if (kakaoAutomationAuditCoordinator) return kakaoAutomationAuditCoordinator;
+  if (!String(CONFIG.supabaseUrl || '').trim() || !String(CONFIG.supabaseServiceRoleKey || '').trim()) return null;
+  const store = createKakaoAutomationAuditStore({
+    supabaseUrl: CONFIG.supabaseUrl,
+    serviceRoleKey: CONFIG.supabaseServiceRoleKey,
+    timeoutMs: CONFIG.supabaseTimeoutMs
+  });
+  kakaoAutomationAuditCoordinator = createKakaoAutomationAuditCoordinator({
+    channel: gatewayChannel,
+    store,
+    log: (entry) => appendNdjson('errors.ndjson', { at: nowIso(), ...entry })
+  });
+  return kakaoAutomationAuditCoordinator;
+}
+
 async function recordGatewayApplicationResult({ durableJob, job, finalized, elapsedMs, localApplicationElapsedMs }) {
   const audit = buildWorkerResultAudit(finalized, elapsedMs);
   audit.localApplicationElapsedMs = Math.max(0, Math.round(Number(localApplicationElapsedMs) || 0));
@@ -4354,6 +4615,7 @@ function getGatewayResultApplicationCoordinator() {
     channel: gatewayChannel,
     getConfig: () => getKakaoWorkerRuntimeConfigForTransport(),
     record: recordGatewayApplicationResult,
+    auditCoordinator: getKakaoAutomationAuditCoordinator(),
     onFailure: createGatewayApplicationFailureNotifier({
       slackEnabled: CONFIG.slackCardDeliveryEnabled,
       createFollowUp: ({ job, error, context }) => createWorkerFailureFollowUp(job, error, context),
@@ -6430,6 +6692,7 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
           ...terminalNotifications.filter((entry) => entry.notified === false)
         ];
         if (failed.length) throw new Error(`${failed.length} Gateway failure notification(s) remain pending`);
+        await getKakaoAutomationAuditCoordinator()?.recover({ limit: 100, historicalImport: true });
       })().catch((error) => {
         appendNdjson('errors.ndjson', { at: nowIso(), type: 'gateway_application_recovery', message: error.message });
       });

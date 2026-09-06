@@ -64,6 +64,30 @@ function registeredReservationChangeReceipt(claim, operationId, requestDigest = 
   };
 }
 
+function automationAuditEvent(overrides = {}) {
+  return {
+    event_key: `kakao:auto_reply:${'a'.repeat(64)}`,
+    job_id: 'job-audit-projection',
+    room_revision: 1,
+    operation_id: null,
+    receipt_id: `reply-readback-${'b'.repeat(64)}`,
+    occurred_at: '2026-08-21T00:00:01.000Z',
+    effect_type: 'auto_reply',
+    action_type: 'send',
+    outcome: 'success',
+    customer_label: '테스트 고객',
+    target_type: 'room',
+    target_id: null,
+    summary: '카카오 답변을 전송했습니다.',
+    change_items: [],
+    outbound_text: '네, 가능합니다.',
+    evidence: { schema: 'kakao-auto-reply-readback/v1', status: 'sent', readback: true },
+    source_message_at: '2026-08-21T00:00:00.000Z',
+    historical_import: false,
+    ...overrides
+  };
+}
+
 async function withChannel(run, options = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), 'hermes-gateway-channel-'));
   const clock = { now: Date.parse('2026-08-21T00:00:00.000Z') };
@@ -103,6 +127,225 @@ test('persists every job atomically under a SHA-256 name and recovers it after r
       now: () => clock.now
     });
     assert.equal((await restarted.get('job-private-1')).state, 'ready');
+  });
+});
+
+test('queues one bounded immutable audit projection and exact retries are idempotent', async () => {
+  await withChannel(async ({ channel }) => {
+    const created = await channel.enqueue(event('job-audit-projection', 'room-audit-projection', 1));
+    assert.equal(created.audit_projection, null);
+
+    const auditEvent = automationAuditEvent();
+    const queued = await channel.queueAuditProjection({
+      job_id: created.job_id,
+      events: [auditEvent]
+    });
+    assert.deepEqual(queued.audit_projection, {
+      state: 'pending',
+      events: [auditEvent],
+      event_keys: [auditEvent.event_key],
+      created_at: '2026-08-21T00:00:00.000Z',
+      delivered_at: null,
+      attempts: 0,
+      last_attempt_at: null,
+      error_type: null
+    });
+
+    const retry = await channel.queueAuditProjection({ job_id: created.job_id, events: [auditEvent] });
+    assert.deepEqual(retry.audit_projection, queued.audit_projection);
+
+    const conflicting = { ...auditEvent, summary: '같은 키의 다른 사실' };
+    await assert.rejects(
+      channel.queueAuditProjection({ job_id: created.job_id, events: [conflicting] }),
+      { code: 'audit_projection_conflict' }
+    );
+    assert.deepEqual((await channel.get(created.job_id)).audit_projection, queued.audit_projection);
+
+    await assert.rejects(channel.queueAuditProjection({
+      job_id: created.job_id,
+      events: Array.from({ length: 5 }, (_, index) => automationAuditEvent({
+        event_key: `kakao:auto_reply:${String(index + 1).repeat(64)}`
+      }))
+    }), { code: 'invalid_audit_projection' });
+  });
+});
+
+test('delivers only the exact audit projection key set and keeps business state unchanged', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-audit-projection', 'room-audit-projection', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-audit', waitMs: 0 });
+    const before = {
+      state: claim.state,
+      lease_id: claim.lease_id,
+      attempts: claim.attempts,
+      application: claim.application,
+      tool_operation: claim.tool_operation,
+      tool_receipts: claim.tool_receipts,
+      failure_notification: claim.failure_notification
+    };
+    const auditEvent = automationAuditEvent();
+    await channel.queueAuditProjection({ job_id: claim.job_id, events: [auditEvent] });
+
+    await assert.rejects(channel.markAuditProjectionDelivered({
+      job_id: claim.job_id,
+      event_keys: [`kakao:auto_reply:${'c'.repeat(64)}`],
+      audit: { inserted: 1, existing: 0 }
+    }), { code: 'stale_audit_projection' });
+
+    const delivered = await channel.markAuditProjectionDelivered({
+      job_id: claim.job_id,
+      event_keys: [auditEvent.event_key],
+      audit: { inserted: 1, existing: 0 }
+    });
+    assert.equal(delivered.audit_projection.state, 'delivered');
+    assert.equal(delivered.audit_projection.attempts, 1);
+    assert.equal(delivered.audit_projection.delivered_at, '2026-08-21T00:00:00.000Z');
+    assert.equal(delivered.audit_projection.last_attempt_at, '2026-08-21T00:00:00.000Z');
+    assert.equal(delivered.audit_projection.error_type, null);
+    assert.deepEqual({
+      state: delivered.state,
+      lease_id: delivered.lease_id,
+      attempts: delivered.attempts,
+      application: delivered.application,
+      tool_operation: delivered.tool_operation,
+      tool_receipts: delivered.tool_receipts,
+      failure_notification: delivered.failure_notification
+    }, before);
+  });
+});
+
+test('failed audit delivery remains pending across restart and a conflict is terminal only for projection', async () => {
+  await withChannel(async ({ directory, channel, clock }) => {
+    await channel.enqueue(event('job-audit-projection', 'room-audit-projection', 1));
+    const auditEvent = automationAuditEvent();
+    await channel.queueAuditProjection({ job_id: 'job-audit-projection', events: [auditEvent] });
+    clock.now += 5_000;
+    const failed = await channel.markAuditProjectionFailed({
+      job_id: 'job-audit-projection',
+      event_keys: [auditEvent.event_key],
+      error_type: 'automation_audit_store_unavailable'
+    });
+    assert.equal(failed.audit_projection.state, 'pending');
+    assert.equal(failed.audit_projection.attempts, 1);
+    assert.equal(failed.audit_projection.error_type, 'automation_audit_store_unavailable');
+
+    const restarted = createHermesGatewayChannel({
+      directory,
+      leaseMs: 1_000,
+      maxAttempts: 2,
+      now: () => clock.now
+    });
+    const pending = await restarted.listPendingAuditProjections({ limit: 10 });
+    assert.deepEqual(pending.map((job) => job.job_id), ['job-audit-projection']);
+    assert.equal(pending[0].audit_projection.attempts, 1);
+
+    const conflicted = await restarted.markAuditProjectionConflict({
+      job_id: 'job-audit-projection',
+      event_keys: [auditEvent.event_key]
+    });
+    assert.equal(conflicted.audit_projection.state, 'conflict');
+    assert.equal(conflicted.audit_projection.attempts, 2);
+    assert.equal(conflicted.state, 'ready');
+    assert.equal(conflicted.human_review_required, false);
+    assert.equal((await restarted.listPendingAuditProjections({ limit: 10 })).length, 0);
+  });
+});
+
+test('discovers exact durable tool and reply evidence that has no audit projection', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-audit-tool-candidate', 'room-audit-tool', 1), {
+      localContext: { job: { customerName: '도구 고객' } }
+    });
+    const toolClaim = await channel.claim({ consumerId: 'gateway-audit-tool', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(confirmationOperation(toolClaim));
+    const receipt = confirmationReceipt(toolClaim, reserved.reservation.operation_id);
+    receipt.authoritative_sheet_result = { success: true, reqID: 'RQ-260821-001' };
+    await channel.recordToolReceipt(receipt);
+
+    await channel.enqueue(event('job-audit-reply-candidate', 'room-audit-reply', 1), {
+      localContext: { job: { customerName: '답변 고객' } }
+    });
+    const replyClaim = await channel.claim({ consumerId: 'gateway-audit-reply', waitMs: 0 });
+    await channel.complete({
+      job_id: replyClaim.job_id,
+      room_key: replyClaim.room_key,
+      room_revision: replyClaim.room_revision,
+      lease_id: replyClaim.lease_id,
+      content: 'FINAL_JSON {"reply_decision":{"replyMode":"auto_send"}}'
+    });
+    const application = await channel.claimApplication({ jobId: replyClaim.job_id });
+    await channel.beginApplication({ job_id: replyClaim.job_id, application_id: application.application_id });
+    const text = '네, 가능합니다.';
+    await channel.recordApplicationApplied({
+      job_id: replyClaim.job_id,
+      application_id: application.application_id,
+      audit: {
+        auto_reply_readback: {
+          schema: 'kakao-auto-reply-readback/v1',
+          receipt_id: `reply-readback-${'d'.repeat(64)}`,
+          confirmed_at: '2026-08-21T00:00:00.000Z',
+          text,
+          text_sha256: createHash('sha256').update(text).digest('hex'),
+          readback_confirmed: true,
+          customer_label: '답변 고객',
+          source_message_at: '2026-08-21T00:00:00.000Z'
+        }
+      }
+    });
+
+    const first = await channel.listAuditProjectionCandidates({ limit: 1 });
+    assert.deepEqual(first.map((job) => job.job_id), ['job-audit-tool-candidate']);
+    const all = await channel.listAuditProjectionCandidates({ limit: 10 });
+    assert.deepEqual(all.map((job) => job.job_id), ['job-audit-tool-candidate', 'job-audit-reply-candidate']);
+
+    await channel.queueAuditProjection({
+      job_id: 'job-audit-tool-candidate',
+      events: [automationAuditEvent({
+        event_key: `kakao:confirmation_request:${'e'.repeat(64)}`,
+        job_id: 'job-audit-tool-candidate',
+        effect_type: 'confirmation_request',
+        action_type: 'create',
+        target_type: 'request',
+        target_id: 'RQ-260821-001',
+        outbound_text: null,
+        evidence: { schema: 'village-confirmation-receipt/v1', status: 'ok', readback: true }
+      })]
+    });
+    assert.deepEqual((await channel.listAuditProjectionCandidates({ limit: 10 })).map((job) => job.job_id), [
+      'job-audit-reply-candidate'
+    ]);
+  });
+});
+
+test('audit projection status exposes aggregates only', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('job-audit-projection', 'room-audit-projection', 1));
+    const firstEvent = automationAuditEvent();
+    await channel.queueAuditProjection({ job_id: 'job-audit-projection', events: [firstEvent] });
+    clock.now += 3_000;
+
+    await channel.enqueue(event('job-audit-conflict', 'room-audit-conflict', 1));
+    const secondEvent = automationAuditEvent({
+      event_key: `kakao:auto_reply:${'f'.repeat(64)}`,
+      job_id: 'job-audit-conflict',
+      customer_label: '다른 고객'
+    });
+    await channel.queueAuditProjection({ job_id: 'job-audit-conflict', events: [secondEvent] });
+    await channel.markAuditProjectionConflict({
+      job_id: 'job-audit-conflict',
+      event_keys: [secondEvent.event_key]
+    });
+
+    const status = await channel.status();
+    assert.deepEqual(status.audit_projection, {
+      pending: 1,
+      conflict: 1,
+      oldest_pending_age_ms: 3_000
+    });
+    const serialized = JSON.stringify(status);
+    assert.equal(serialized.includes('테스트 고객'), false);
+    assert.equal(serialized.includes(firstEvent.event_key), false);
+    assert.equal(serialized.includes(firstEvent.summary), false);
   });
 });
 

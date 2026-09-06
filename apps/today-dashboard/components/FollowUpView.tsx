@@ -5,8 +5,10 @@ import { authFetch } from "@/lib/data/authFetch";
 import { ViewHeader } from "@/components/ViewHeader";
 import { Refresh } from "@/components/icons";
 import { actionBody, buildInboxView } from "@/lib/followups/inbox-model.mjs";
+import { AutomationAuditView } from "@/components/AutomationAuditView";
 
 type ViewKey = "now" | "snoozed" | "completed";
+type FollowUpSection = ViewKey | "automation";
 type CategoryKey = "schedule" | "quote" | "settlement" | "customer" | "operations";
 type WorkState = "open" | "in_progress" | "snoozed" | "resolved" | "dismissed";
 type Priority = "p0" | "urgent" | "normal" | "low";
@@ -124,6 +126,7 @@ function caseTone(caseItem: InquiryCase) {
 }
 
 export function FollowUpView({ active: paneActive = true }: { active?: boolean }) {
+  const [section, setSection] = useState<FollowUpSection>("now");
   const [status, setStatus] = useState<FilterState>({ view: "now", category: null });
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -134,6 +137,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
   const [unavailable, setUnavailable] = useState(false);
   const [notice, setNotice] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
+  const [auditRefreshVersion, setAuditRefreshVersion] = useState(0);
   const sheetDragStartY = useRef<number | null>(null);
 
   const closeMobileDetail = useCallback(() => setMobileDetailOpen(false), []);
@@ -186,6 +190,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
 
   useEffect(() => {
     if (!paneActive) return;
+    if (section === "automation") return;
     load(status);
     const tick = () => {
       if (typeof document !== "undefined" && document.hidden) return;
@@ -216,10 +221,21 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
   }, []);
 
   const changeFilter = useCallback((next: FilterState) => {
+    setSection(next.view);
     setStatus(next);
     setMobileDetailOpen(false);
     setUnavailable(false);
     setNotice("");
+  }, []);
+
+  const changeSection = useCallback((next: FollowUpSection) => {
+    setMobileDetailOpen(false);
+    setUnavailable(false);
+    setNotice("");
+    setSection(next);
+    // status identity also owns the existing polling lifecycle, so changing to the
+    // independent audit section tears down the work poll without adding a second poll.
+    setStatus((current) => next === "automation" ? { ...current } : { ...current, view: next });
   }, []);
 
   const submitAction = useCallback(async (stepItem: WorkStep, action: WorkAction) => {
@@ -259,36 +275,36 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
     <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 border-b border-line/70 bg-paper/95 backdrop-blur-md">
         <ViewHeader title="후속조치">
-          <button type="button" onClick={() => load(status)} aria-label="새로고침" className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink-soft ring-1 ring-line/70 ${loading ? "animate-spin" : ""}`}>
+          <button type="button" onClick={() => section === "automation" ? setAuditRefreshVersion((value) => value + 1) : load(status)} aria-label="새로고침" className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink-soft ring-1 ring-line/70 ${loading ? "animate-spin" : ""}`}>
             <Refresh className="h-4 w-4" />
           </button>
         </ViewHeader>
 
         <div className="overflow-x-auto px-3 pb-2">
           <div className="flex min-w-max gap-1.5">
-            {(model?.tabs || ([
+            {[...(model?.tabs || ([
               { key: "now", label: "지금 할 일", count: 0 },
               { key: "snoozed", label: "미뤄둔 일", count: 0 },
               { key: "completed", label: "완료", count: 0 },
-            ] as InboxModel["tabs"])).map((tab) => (
-              <button type="button" key={tab.key} onClick={() => changeFilter({ view: tab.key, category: status.category })} className={`tap rounded-full px-3 py-2 text-[13px] font-extrabold ${status.view === tab.key ? "bg-ink text-white" : "bg-white text-ink-soft ring-1 ring-line/70"}`}>
-                {tab.label} <span className="ml-1 tabular-nums opacity-70">{tab.count}</span>
+            ] as InboxModel["tabs"])), { key: "automation" as const, label: "자동처리", count: null }].map((tab) => (
+              <button type="button" key={tab.key} onClick={() => changeSection(tab.key)} className={`tap rounded-full px-3 py-2 text-[13px] font-extrabold ${section === tab.key ? "bg-ink text-white" : "bg-white text-ink-soft ring-1 ring-line/70"}`}>
+                {tab.label}{tab.count === null ? null : <span className="ml-1 tabular-nums opacity-70">{tab.count}</span>}
               </button>
             ))}
           </div>
         </div>
 
-        <div className="overflow-x-auto border-t border-line/50 px-3 py-2">
+        {section !== "automation" && <div className="overflow-x-auto border-t border-line/50 px-3 py-2">
           <div className="flex min-w-max gap-1.5">
             <CategoryButton active={status.category === null} label="전체" onClick={() => changeFilter({ ...status, category: null })} />
             {(model?.categories || (Object.entries(CATEGORY_LABELS).map(([key, label]) => ({ key, label, count: 0 })) as InboxModel["categories"])).map((category) => (
               <CategoryButton key={category.key} active={status.category === category.key} label={category.label} count={category.count} onClick={() => changeFilter({ ...status, category: category.key })} />
             ))}
           </div>
-        </div>
+        </div>}
       </header>
 
-      <main className="flex-1 p-3 pb-24 lg:p-4">
+      {section === "automation" ? <AutomationAuditView active={paneActive && section === "automation"} refreshVersion={auditRefreshVersion} /> : <main className="flex-1 p-3 pb-24 lg:p-4">
         {notice && (
           <div className={`mb-3 rounded-xl px-3.5 py-2.5 text-[13px] font-semibold ring-1 ${unavailable ? "bg-attention-bg text-attention-fg ring-attention-ring" : "bg-checkin-bg text-checkin-fg ring-checkin-ring"}`}>
             {notice}
@@ -325,9 +341,9 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
             <div className="mt-1.5 text-[13px] text-ink-mute">{model ? "처리할 문의가 생기면 여기에 표시됩니다." : "잠시 후 새로고침해 주세요."}</div>
           </div>
         )}
-      </main>
+      </main>}
 
-      {mobileDetailOpen && selected && (
+      {section !== "automation" && mobileDetailOpen && selected && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <button type="button" aria-label="상세 배경 닫기" onClick={closeMobileDetail} className="absolute inset-0 bg-ink/35" />
           <section role="dialog" aria-modal="true" aria-label={`${selected.title} 상세`} className="absolute inset-x-0 bottom-0 max-h-[86vh] overflow-y-auto rounded-t-[24px] bg-white p-3 pb-[calc(env(safe-area-inset-bottom)+12px)] shadow-2xl ring-1 ring-line">

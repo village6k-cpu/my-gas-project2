@@ -161,6 +161,7 @@ function makeChannel() {
           reserved: 1, completed: 2, failed_human_review: 3, pending_failure_notifications: 4,
           oldest_reserved_age_ms: 5678, last_success_at: '2026-08-20T23:59:00.000Z'
         },
+        audit_projection: { pending: 2, conflict: 1, oldest_pending_age_ms: 4321 },
         token: 'must-not-leak', prompt: 'must-not-leak', local_context: { secret: true }
       };
     }
@@ -1432,6 +1433,9 @@ test('Gateway HTTP status exposes only gateway-safe queue health', async () => {
       registered_reservation_change: {
         reserved: 1, completed: 2, failed_human_review: 3, pending_failure_notifications: 4,
         oldest_reserved_age_ms: 5678, last_success_at: '2026-08-20T23:59:00.000Z'
+      },
+      audit_projection: {
+        pending: 2, conflict: 1, oldest_pending_age_ms: 4321
       }
     });
   } finally {
@@ -1456,6 +1460,62 @@ test('Gateway HTTP runs durable failure-notification recovery after terminal out
     assert.equal(events.status, 200);
     assert.equal(recoveries, 2);
   } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP opportunistically recovers audit projections without changing protocol responses', async () => {
+  const channel = makeChannel();
+  let recoveries = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token,
+    channel,
+    transport: 'gateway',
+    recoverAuditProjections: async () => { recoveries += 1; }
+  }));
+  try {
+    const outcome = await gatewayFetch(app.url, '/hermes/v1/outcomes', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId, outcome: 'no_final' })
+    });
+    assert.equal(outcome.status, 200);
+    assert.deepEqual(await outcome.json(), { ok: true });
+    const events = await gatewayFetch(app.url, '/hermes/v1/events?consumer_id=gateway-1&wait_ms=0');
+    assert.equal(events.status, 200);
+    assert.equal(recoveries, 2);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP never waits for optional audit projection recovery before answering Hermes', async () => {
+  const channel = makeChannel();
+  let releaseRecovery;
+  const recoveryGate = new Promise((resolve) => { releaseRecovery = resolve; });
+  let recoveryStarted;
+  const started = new Promise((resolve) => { recoveryStarted = resolve; });
+  const app = await start(createHermesGatewayHttpHandler({
+    token,
+    channel,
+    transport: 'gateway',
+    recoverAuditProjections: async () => {
+      recoveryStarted();
+      await recoveryGate;
+    }
+  }));
+  try {
+    const request = gatewayFetch(app.url, '/hermes/v1/outcomes', {
+      method: 'POST',
+      signal: AbortSignal.timeout(1_000),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId, outcome: 'no_final' })
+    });
+    await started;
+    const response = await request;
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+  } finally {
+    releaseRecovery();
     await app.close();
   }
 });

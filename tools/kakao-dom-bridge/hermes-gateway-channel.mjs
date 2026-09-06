@@ -9,6 +9,8 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 
+import { normalizeKakaoAutomationAuditEvent } from './kakao-automation-audit.mjs';
+
 const TERMINAL_STATES = new Set(['completed', 'superseded', 'failed']);
 const JOB_STATES = new Set(['ready', 'claimed', 'completed', 'superseded', 'retry_wait', 'failed']);
 const TOOL_OPERATION_STATES = new Set(['reserved', 'completed']);
@@ -19,6 +21,7 @@ const TOOL_RECEIPT_SCHEMAS = new Map([
 ]);
 const APPLICATION_STATES = new Set(['pending', 'claimed', 'applying', 'applied', 'finalized', 'failed']);
 const FAILURE_NOTIFICATION_STATES = new Set(['pending', 'delivered']);
+const AUDIT_PROJECTION_STATES = new Set(['pending', 'delivered', 'conflict']);
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const iso = (value) => new Date(value).toISOString();
@@ -182,6 +185,80 @@ function validatePersistedFailureNotification(job) {
   }
 }
 
+function normalizeAuditProjectionEvents(events, job) {
+  if (!Array.isArray(events) || events.length < 1 || events.length > 4) {
+    throw channelError('invalid_audit_projection', 'audit projection must contain one to four events');
+  }
+  let normalized;
+  try {
+    normalized = events.map(normalizeKakaoAutomationAuditEvent);
+  } catch {
+    throw channelError('invalid_audit_projection', 'audit projection event is invalid');
+  }
+  if (normalized.some((event) => event.job_id !== job.job_id || event.room_revision !== job.room_revision)) {
+    throw channelError('invalid_audit_projection', 'audit projection does not match its job');
+  }
+  normalized.sort((left, right) => left.event_key.localeCompare(right.event_key));
+  if (new Set(normalized.map((event) => event.event_key)).size !== normalized.length) {
+    throw channelError('invalid_audit_projection', 'audit projection event keys must be unique');
+  }
+  return normalized;
+}
+
+function validatePersistedAuditProjection(job) {
+  const projection = job?.audit_projection;
+  if (projection === undefined || projection === null) return;
+  if (!AUDIT_PROJECTION_STATES.has(projection.state)
+    || !isValidIso(projection.created_at)
+    || !(projection.delivered_at === null || isValidIso(projection.delivered_at))
+    || !Number.isSafeInteger(projection.attempts)
+    || projection.attempts < 0
+    || !(projection.last_attempt_at === null || isValidIso(projection.last_attempt_at))
+    || !(projection.error_type === null
+      || (typeof projection.error_type === 'string' && /^[a-z0-9_]{1,120}$/.test(projection.error_type)))) {
+    throw channelError('invalid_persisted_job', 'persisted audit projection is invalid');
+  }
+  const events = normalizeAuditProjectionEvents(projection.events, job);
+  const keys = events.map((event) => event.event_key);
+  if (!Array.isArray(projection.event_keys)
+    || !sameResult(projection.event_keys, keys)
+    || (projection.state === 'delivered' && !isValidIso(projection.delivered_at))
+    || (projection.state !== 'delivered' && projection.delivered_at !== null)) {
+    throw channelError('invalid_persisted_job', 'persisted audit projection keys are invalid');
+  }
+}
+
+function boundedListLimit(value, fallback = 50) {
+  const limit = value === undefined ? fallback : Number(value);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw channelError('invalid_audit_projection', 'audit projection limit must be between 1 and 100');
+  }
+  return limit;
+}
+
+function exactProjectionKeys(projection, values) {
+  if (!Array.isArray(values) || values.length < 1 || values.some((value) => typeof value !== 'string')) {
+    throw channelError('stale_audit_projection', 'audit projection keys are required');
+  }
+  const keys = [...new Set(values)].sort();
+  if (keys.length !== values.length || !sameResult(keys, projection?.event_keys)) {
+    throw channelError('stale_audit_projection', 'audit projection keys are no longer current');
+  }
+  return keys;
+}
+
+function exactReplyReadbackForAudit(job) {
+  const proof = job?.application?.applied_audit?.auto_reply_readback;
+  return proof?.schema === 'kakao-auto-reply-readback/v1'
+    && proof.readback_confirmed === true
+    && typeof proof.receipt_id === 'string'
+    && typeof proof.text === 'string'
+    && typeof proof.text_sha256 === 'string'
+    && isValidIso(proof.confirmed_at)
+    ? proof
+    : null;
+}
+
 export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAttempts = 2, now = Date.now, storage = {} } = {}) {
   const queueDirectory = path.join(requiredString(directory, 'directory'), 'hermes-gateway');
   const leaseDuration = Number(leaseMs);
@@ -235,6 +312,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       validatePersistedToolOperation(job);
       validatePersistedApplication(job);
       validatePersistedFailureNotification(job);
+      validatePersistedAuditProjection(job);
       jobs.set(job.job_id, job);
       queueOrder = Math.max(queueOrder, Number(job.queue_order) || 0);
     }
@@ -512,7 +590,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           lease_expires_at_ms: null, claimed_at: null, claimed_at_ms: null,
           superseded_by: null, superseded_lease_id: null, tool_receipts: [], result: null,
           tool_operation: null, outcome: null, error: null, human_review_required: false,
-          failure_notification: null, local_context: localContext === null ? null : clone(localContext), application: null
+          failure_notification: null, local_context: localContext === null ? null : clone(localContext), application: null,
+          audit_projection: null
         };
         await persist(job);
         jobs.set(job.job_id, job);
@@ -818,6 +897,149 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       });
     },
 
+    async queueAuditProjection({ job_id: jobId, jobId: camelJobId, events } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id', 'invalid_audit_projection'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const normalizedEvents = normalizeAuditProjectionEvents(events, job);
+        if (job.audit_projection) {
+          if (!sameResult(job.audit_projection.events, normalizedEvents)) {
+            throw channelError('audit_projection_conflict', 'job already has different audit projection facts');
+          }
+          return clone(job);
+        }
+        const createdAt = iso(currentTime());
+        return clone(await update(job, {
+          audit_projection: {
+            state: 'pending',
+            events: normalizedEvents,
+            event_keys: normalizedEvents.map((event) => event.event_key),
+            created_at: createdAt,
+            delivered_at: null,
+            attempts: 0,
+            last_attempt_at: null,
+            error_type: null
+          }
+        }));
+      });
+    },
+
+    async listPendingAuditProjections({ limit } = {}) {
+      return mutate(async () => [...jobs.values()]
+        .filter((job) => job.audit_projection?.state === 'pending')
+        .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
+        .slice(0, boundedListLimit(limit))
+        .map(clone));
+    },
+
+    async listAuditProjectionCandidates({ limit } = {}) {
+      return mutate(async () => [...jobs.values()]
+        .filter((job) => (job.audit_projection === undefined || job.audit_projection === null)
+          && Boolean(exactReceiptForToolOperation(job) || exactReplyReadbackForAudit(job)))
+        .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
+        .slice(0, boundedListLimit(limit))
+        .map(clone));
+    },
+
+    async markAuditProjectionDelivered({
+      job_id: jobId,
+      jobId: camelJobId,
+      event_keys: eventKeys,
+      eventKeys: camelEventKeys,
+      audit
+    } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id', 'stale_audit_projection'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const projection = job.audit_projection;
+        exactProjectionKeys(projection, eventKeys ?? camelEventKeys);
+        const auditKeys = audit && typeof audit === 'object' && !Array.isArray(audit)
+          ? Object.keys(audit).sort()
+          : [];
+        const inserted = Number(audit?.inserted);
+        const existing = Number(audit?.existing);
+        if (!sameResult(auditKeys, ['existing', 'inserted'])
+          || !Number.isSafeInteger(inserted) || inserted < 0
+          || !Number.isSafeInteger(existing) || existing < 0
+          || inserted + existing !== projection.event_keys.length) {
+          throw channelError('invalid_audit_projection', 'audit projection delivery result is invalid');
+        }
+        if (projection.state === 'delivered') return clone(job);
+        if (projection.state !== 'pending') {
+          throw channelError('stale_audit_projection', 'audit projection is no longer pending');
+        }
+        const attemptedAt = iso(currentTime());
+        return clone(await update(job, {
+          audit_projection: {
+            ...projection,
+            state: 'delivered',
+            delivered_at: attemptedAt,
+            attempts: projection.attempts + 1,
+            last_attempt_at: attemptedAt,
+            error_type: null
+          }
+        }));
+      });
+    },
+
+    async markAuditProjectionFailed({
+      job_id: jobId,
+      jobId: camelJobId,
+      event_keys: eventKeys,
+      eventKeys: camelEventKeys,
+      error_type: errorType,
+      errorType: camelErrorType
+    } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id', 'stale_audit_projection'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const projection = job.audit_projection;
+        exactProjectionKeys(projection, eventKeys ?? camelEventKeys);
+        const normalizedError = requiredString(errorType ?? camelErrorType, 'error_type', 'invalid_audit_projection');
+        if (!/^[a-z0-9_]{1,120}$/.test(normalizedError)) {
+          throw channelError('invalid_audit_projection', 'audit projection error_type is invalid');
+        }
+        if (projection.state !== 'pending') {
+          throw channelError('stale_audit_projection', 'audit projection is no longer pending');
+        }
+        return clone(await update(job, {
+          audit_projection: {
+            ...projection,
+            attempts: projection.attempts + 1,
+            last_attempt_at: iso(currentTime()),
+            error_type: normalizedError
+          }
+        }));
+      });
+    },
+
+    async markAuditProjectionConflict({
+      job_id: jobId,
+      jobId: camelJobId,
+      event_keys: eventKeys,
+      eventKeys: camelEventKeys
+    } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id', 'stale_audit_projection'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const projection = job.audit_projection;
+        exactProjectionKeys(projection, eventKeys ?? camelEventKeys);
+        if (projection.state === 'conflict') return clone(job);
+        if (projection.state !== 'pending') {
+          throw channelError('stale_audit_projection', 'audit projection is no longer pending');
+        }
+        return clone(await update(job, {
+          audit_projection: {
+            ...projection,
+            state: 'conflict',
+            attempts: projection.attempts + 1,
+            last_attempt_at: iso(currentTime()),
+            error_type: 'automation_audit_projection_conflict'
+          }
+        }));
+      });
+    },
+
     async reapExpiredLeases() { return mutate(reapExpiredLeasesInternal); },
     async listPendingFailureNotifications() {
       return mutate(async () => [...jobs.values()]
@@ -864,6 +1086,11 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           oldest_reserved_age_ms: null,
           last_success_at: null
         };
+        const auditProjection = {
+          pending: 0,
+          conflict: 0,
+          oldest_pending_age_ms: null
+        };
         let registeredLastSuccessAtMs = null;
         const nowMs = currentTime();
         for (const job of jobs.values()) {
@@ -880,6 +1107,18 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
             }
           }
           if (job.state === 'completed' && (!lastCompleted || job.updated_at > lastCompleted.updated_at)) lastCompleted = job;
+          if (job.audit_projection?.state === 'pending') {
+            auditProjection.pending += 1;
+            const createdAtMs = Date.parse(job.audit_projection.created_at);
+            if (Number.isFinite(createdAtMs)) {
+              const age = Math.max(0, nowMs - createdAtMs);
+              auditProjection.oldest_pending_age_ms = auditProjection.oldest_pending_age_ms === null
+                ? age
+                : Math.max(auditProjection.oldest_pending_age_ms, age);
+            }
+          } else if (job.audit_projection?.state === 'conflict') {
+            auditProjection.conflict += 1;
+          }
           if (job.tool_operation?.tool === 'registered_reservation_change') {
             const operation = job.tool_operation;
             const exactReceipt = exactReceiptForToolOperation(job);
@@ -928,7 +1167,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           last_completed_job_id: lastCompleted?.job_id ?? null,
           last_consumer_id: lastConsumerId,
           last_consumer_seen_at: lastConsumerSeenAt,
-          registered_reservation_change: registeredReservationChange
+          registered_reservation_change: registeredReservationChange,
+          audit_projection: auditProjection
         };
       });
     }

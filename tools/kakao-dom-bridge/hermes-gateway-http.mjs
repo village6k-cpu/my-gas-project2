@@ -279,6 +279,9 @@ export function buildGatewayHealthReadback({
     && typeof status.registered_reservation_change === 'object'
     ? status.registered_reservation_change
     : {};
+  const auditProjection = status?.audit_projection && typeof status.audit_projection === 'object'
+    ? status.audit_projection
+    : {};
   const oldestClaimAge = status?.oldest_lease_age_ms === null || status?.oldest_lease_age_ms === undefined
     ? null
     : Number(status.oldest_lease_age_ms);
@@ -321,6 +324,14 @@ export function buildGatewayHealthReadback({
       last_success_at: Number.isFinite(registeredLastSuccessAtMs)
         ? new Date(registeredLastSuccessAtMs).toISOString()
         : null
+    },
+    audit_projection: {
+      pending: safeNonNegativeInteger(auditProjection.pending),
+      conflict: safeNonNegativeInteger(auditProjection.conflict),
+      oldest_pending_age_ms: auditProjection.oldest_pending_age_ms === null
+        || auditProjection.oldest_pending_age_ms === undefined
+        ? null
+        : safeNonNegativeInteger(auditProjection.oldest_pending_age_ms)
     }
   };
 }
@@ -328,13 +339,20 @@ export function buildGatewayHealthReadback({
 export function createHermesGatewayHttpHandler({
   token, channel, executeConfirmation, validateConfirmation, executeDocument, validateDocument,
   executeRegisteredReservationChange,
-  enqueueResultApplication, recoverFailureNotifications,
+  enqueueResultApplication, recoverFailureNotifications, recoverAuditProjections,
   transport = 'cli', now = Date.now, consumerFreshnessMs = 600_000
 } = {}) {
   const gatewayConfigured = GATEWAY_TRANSPORTS.has(transport) && Boolean(String(token || '').trim()) && Boolean(channel);
   const confirmationInFlight = new Map();
   const documentInFlight = new Map();
   const registeredReservationChangeInFlight = new Map();
+
+  function triggerOptionalAuditProjectionRecovery() {
+    if (typeof recoverAuditProjections !== 'function') return;
+    Promise.resolve()
+      .then(() => recoverAuditProjections())
+      .catch(() => {});
+  }
 
   return async function handleHermesGatewayRequest(req, res, url) {
     if (!url.pathname.startsWith('/hermes/v1/')) return false;
@@ -356,6 +374,7 @@ export function createHermesGatewayHttpHandler({
         if (typeof recoverFailureNotifications === 'function') {
           await Promise.resolve(recoverFailureNotifications()).catch(() => {});
         }
+        triggerOptionalAuditProjectionRecovery();
         if (!claimed) {
           sendJson(res, 200, { event: null });
           return true;
@@ -394,6 +413,7 @@ export function createHermesGatewayHttpHandler({
         if (typeof recoverFailureNotifications === 'function') {
           await Promise.resolve(recoverFailureNotifications()).catch(() => {});
         }
+        triggerOptionalAuditProjectionRecovery();
         sendJson(res, 200, { ok: true });
         return true;
       }
