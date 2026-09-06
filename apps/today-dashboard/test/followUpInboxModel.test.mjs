@@ -138,6 +138,11 @@ test("case selection is stable and actions target the exact checklist step versi
     expectedVersion: 7,
     action: { type: "snooze", snoozedUntil: "2026-09-06T01:00:00.000Z" },
   });
+  assert.deepEqual(actionBody(orderedCases[0].steps[1], { type: "complete" }), {
+    id: orderedCases[0].steps[1].id,
+    expectedVersion: 7,
+    action: { type: "complete" },
+  });
 });
 
 test("semantic inquiry report keeps request problem and next action facts", async () => {
@@ -190,4 +195,6 @@ test("FollowUpView is a semantic inquiry report with mobile detail dismissal", (
   assert.match(source, /document\.body\.style\.overflow/);
   assert.match(source, /onPointerDown/);
   assert.match(source, /onPointerUp/);
+  assert.match(source, /onAction\(stepItem, \{ type: "complete" \}\)/);
+  assert.match(source, /setMobileDetailOpen\(false\)[\s\S]*?setNotice\("완료 처리했습니다\."\)/);
 });

@@ -26,6 +26,8 @@ const [heybilliFreshStartMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_fresh_start\.sql$/.test(name));
 const [ownerLanguageMigrationName] = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_owner_language\.sql$/.test(name));
+const [heybilliCompletionMigrationName] = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_heybilli_completion\.sql$/.test(name));
 
 async function createFoundationDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -100,6 +102,103 @@ async function createOwnerLanguageDatabase() {
   await db.exec(readFileSync(join(migrationsDirectory, ownerLanguageMigrationName), 'utf8'));
   return db;
 }
+
+async function createHeybilliCompletionDatabase() {
+  const db = await createOwnerLanguageDatabase();
+  assert.ok(heybilliCompletionMigrationName, 'the CLI-generated Heybilli completion migration must exist');
+  await db.exec(readFileSync(join(migrationsDirectory, heybilliCompletionMigrationName), 'utf8'));
+  return db;
+}
+
+test('Heybilli completion atomically resolves one exact active version and clears a stranded resolution request', async () => {
+  const db = await createHeybilliCompletionDatabase();
+  const id = '90000000-0000-4000-8000-000000000001';
+  const blockedId = '90000000-0000-4000-8000-000000000002';
+  const actor = 'heybilli:550e8400-e29b-41d4-a716-446655440000';
+  try {
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, summary, work_type, priority, state,
+        actionable_at, first_opened_at, last_activity_at, pending_action, version, payload,
+        created_at, updated_at
+      ) values (
+        $1::uuid, 'heybilli:complete', 'private-room', '예약 확인', '대표 완료 대기',
+        'schedule_check', 'normal', 'open', '2026-09-06T07:00:00Z',
+        '2026-09-06T07:00:00Z', '2026-09-06T07:00:00Z',
+        '{"type":"request_resolve","action":{"type":"request_resolve"},"status":"pending","requested_at":"2026-09-06T07:30:00Z","requested_by":"heybilli:550e8400-e29b-41d4-a716-446655440000","expected_version":1}',
+        2, '{"requires_human_action":true}', '2026-09-06T07:00:00Z', '2026-09-06T07:30:00Z'
+      )
+    `, [id]);
+
+    const completed = (await db.query(`
+      select public.complete_heybilli_work_item_v2($1::uuid, 2, $2::text) as result
+    `, [id, actor])).rows[0].result;
+    assert.equal(completed.applied, true);
+    assert.equal(completed.row.id, id);
+    assert.equal(completed.row.version, 3);
+    assert.equal(completed.row.state, 'resolved');
+    assert.equal(completed.row.resolution_kind, 'owner_completed');
+    assert.equal(completed.row.resolved_by, actor);
+    assert.deepEqual(completed.row.pending_action, {});
+    assert.match(new Date(completed.row.resolved_at).toISOString(), /^2026-/);
+
+    const stale = (await db.query(`select public.complete_heybilli_work_item_v2($1::uuid, 2, $2::text) as result`, [id, actor])).rows[0].result;
+    assert.deepEqual(stale, { applied: false, row: null });
+
+    await db.query(`
+      insert into public.work_items_v2 (
+        id, work_key, room_key, title, work_type, state, actionable_at,
+        first_opened_at, last_activity_at, payload, created_at, updated_at
+      ) values (
+        $1::uuid, 'heybilli:prepared', 'private-room', '준비된 다이제스트 카드',
+        'schedule_check', 'open', '2026-09-06T07:00:00Z', '2026-09-06T07:00:00Z',
+        '2026-09-06T07:00:00Z', '{"requires_human_action":true}',
+        '2026-09-06T07:00:00Z', '2026-09-06T07:00:00Z'
+      )
+    `, [blockedId]);
+    await db.query(`
+      insert into public.digest_runs (
+        id, window_started_at, window_ended_at, scheduled_at, state, destination_key,
+        item_snapshot, manifest_prepared_at, lease_owner, lease_token, lease_expires_at
+      ) values (
+        '90000000-0000-4000-8000-000000000010', '2026-09-06T06:00:00Z',
+        '2026-09-06T07:00:00Z', '2026-09-06T07:00:00Z', 'building', 'slack:test',
+        jsonb_build_array(jsonb_build_object('id', $1::text, 'version', 1)),
+        '2026-09-06T07:00:01Z', 'test-owner',
+        '90000000-0000-4000-8000-000000000011', '2099-01-01T00:00:00Z'
+      )
+    `, [blockedId]);
+    await db.query(`
+      insert into public.digest_message_parts (
+        id, digest_run_id, part_kind, part_number, part_count, item_ids,
+        payload_hash, client_message_id, delivery_state
+      ) values (
+        '90000000-0000-4000-8000-000000000012',
+        '90000000-0000-4000-8000-000000000010', 'ordinary', 1, 1,
+        array[$1::uuid], repeat('a', 64), '90000000-0000-5000-8000-000000000013', 'planned'
+      )
+    `, [blockedId]);
+    const prepared = (await db.query(`
+      select public.complete_heybilli_work_item_v2($1::uuid, 1, $2::text) as result
+    `, [blockedId, actor])).rows[0].result;
+    assert.deepEqual(prepared, { applied: false, row: null });
+
+    await assert.rejects(
+      db.query(`select public.complete_heybilli_work_item_v2($1::uuid, 3, 'UFORGED')`, [id]),
+      /invalid Heybilli completion/
+    );
+
+    const privileges = await db.query(`
+      select
+        has_function_privilege('anon', 'public.complete_heybilli_work_item_v2(uuid,integer,text)', 'execute') as anon,
+        has_function_privilege('authenticated', 'public.complete_heybilli_work_item_v2(uuid,integer,text)', 'execute') as authenticated,
+        has_function_privilege('service_role', 'public.complete_heybilli_work_item_v2(uuid,integer,text)', 'execute') as service_role
+    `);
+    assert.deepEqual(privileges.rows[0], { anon: false, authenticated: false, service_role: true });
+  } finally {
+    await db.close();
+  }
+});
 
 test('owner-language validator rejects internal workflow jargon before it reaches representative cards', async () => {
   const db = await createOwnerLanguageDatabase();

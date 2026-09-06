@@ -289,7 +289,7 @@ function parseV2Query(req: NextRequest) {
 }
 
 type V2Action =
-  | { type: "progress" | "ack_p0" | "request_resolve" | "dismiss" }
+  | { type: "progress" | "ack_p0" | "request_resolve" | "complete" | "dismiss" }
   | { type: "snooze"; snoozedUntil: string };
 
 function sameJson(left: unknown, right: unknown): boolean {
@@ -320,7 +320,7 @@ function parseV2ActionBody(value: unknown, now: string) {
     if (snoozedUntil === null || Date.parse(snoozedUntil) <= Date.parse(now)) throw new Error("invalid work action");
     return { id: value.id, expectedVersion: value.expectedVersion, action: { type, snoozedUntil } as V2Action };
   }
-  if (!["progress", "ack_p0", "request_resolve", "dismiss"].includes(type)
+  if (!["progress", "ack_p0", "request_resolve", "complete", "dismiss"].includes(type)
     || !exactKeys(value.action, ["type"])) throw new Error("invalid work action");
   return { id: value.id, expectedVersion: value.expectedVersion, action: { type } as V2Action };
 }
@@ -365,6 +365,29 @@ function safeV2ItemFromActionRow(
     dueAt: normalizeDatabaseTimestamp(row.due_at, true),
     snoozedUntil: normalizeDatabaseTimestamp(row.snoozed_until, true),
     firstOpenedAt: normalizeDatabaseTimestamp(row.first_opened_at),
+    updatedAt: normalizeDatabaseTimestamp(row.updated_at),
+  };
+}
+
+function safeV2CompletedItemFromRow(
+  row: unknown,
+  request: { id: string; expectedVersion: number },
+  completedBy: string,
+) {
+  if (!isRecord(row)
+    || row.id !== request.id
+    || row.version !== request.expectedVersion + 1
+    || row.state !== "resolved"
+    || row.resolution_kind !== "owner_completed"
+    || row.resolved_by !== completedBy
+    || !exactKeys(row.pending_action, [])) {
+    throw new Error("v2 response invalid");
+  }
+  return {
+    id: row.id,
+    version: row.version,
+    state: row.state,
+    resolvedAt: normalizeDatabaseTimestamp(row.resolved_at),
     updatedAt: normalizeDatabaseTimestamp(row.updated_at),
   };
 }
@@ -430,9 +453,16 @@ export async function PATCH(req: NextRequest) {
     }
     const requestedBy = `heybilli:${authUserId}`;
     try {
-      const raw = await supaFetch("rpc/request_work_item_action_v2", {
+      const isCompletion = request.action.type === "complete";
+      const raw = await supaFetch(isCompletion
+        ? "rpc/complete_heybilli_work_item_v2"
+        : "rpc/request_work_item_action_v2", {
         method: "POST",
-        body: JSON.stringify({
+        body: JSON.stringify(isCompletion ? {
+          p_id: request.id,
+          p_expected_version: request.expectedVersion,
+          p_completed_by: requestedBy,
+        } : {
           p_id: request.id,
           p_expected_version: request.expectedVersion,
           p_action: request.action,
@@ -446,7 +476,12 @@ export async function PATCH(req: NextRequest) {
         if (raw.row !== null) throw new Error("v2 response invalid");
         return NextResponse.json({ error: "다른 곳에서 이미 변경되었습니다" }, { status: 409 });
       }
-      return NextResponse.json({ ok: true, item: safeV2ItemFromActionRow(raw.row, request, requestedBy) });
+      return NextResponse.json({
+        ok: true,
+        item: isCompletion
+          ? safeV2CompletedItemFromRow(raw.row, request, requestedBy)
+          : safeV2ItemFromActionRow(raw.row, request, requestedBy),
+      });
     } catch {
       return NextResponse.json({ error: "후속조치를 변경하지 못했습니다" }, { status: 503 });
     }

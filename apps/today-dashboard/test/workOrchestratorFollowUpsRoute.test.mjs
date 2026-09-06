@@ -353,3 +353,68 @@ test("v2 PATCH returns conflict for stale work and rejects extra browser-owned a
   assert.deepEqual(await readBody(extra), { error: "invalid work action" });
   assert.equal(requests.length, 1);
 });
+
+test("v2 PATCH completes the exact active work item immediately with the authenticated Heybilli actor", async () => {
+  const requests = [];
+  const completedAt = "2026-09-06T08:00:05.000Z";
+  const { PATCH } = loadRoute({ fetchImpl: async (url, init) => {
+    requests.push({ url, init });
+    return response({ applied: true, row: {
+      id: "11111111-1111-4111-8111-111111111111",
+      version: 9,
+      state: "resolved",
+      resolution_kind: "owner_completed",
+      resolved_at: completedAt,
+      resolved_by: `heybilli:${AUTH_USER_ID}`,
+      pending_action: {},
+      updated_at: completedAt,
+      payload: { raw_customer_message: "must-not-leak" },
+    } });
+  } });
+
+  const result = await PATCH({ async json() {
+    return { id: "11111111-1111-4111-8111-111111111111", expectedVersion: 8, action: { type: "complete" } };
+  } });
+  const body = await readBody(result);
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(body, { ok: true, item: {
+    id: "11111111-1111-4111-8111-111111111111",
+    version: 9,
+    state: "resolved",
+    resolvedAt: completedAt,
+    updatedAt: completedAt,
+  } });
+  assert.equal(JSON.stringify(body).includes("must-not-leak"), false);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://unit.test/rest/v1/rpc/complete_heybilli_work_item_v2");
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    p_id: "11111111-1111-4111-8111-111111111111",
+    p_expected_version: 8,
+    p_completed_by: `heybilli:${AUTH_USER_ID}`,
+  });
+});
+
+test("v2 PATCH completion returns conflict for a stale version and rejects forged completion fields", async () => {
+  const requests = [];
+  const { PATCH } = loadRoute({ fetchImpl: async (url, init) => {
+    requests.push({ url, init });
+    return response({ applied: false, row: null });
+  } });
+
+  const stale = await PATCH({ async json() {
+    return { id: "11111111-1111-4111-8111-111111111111", expectedVersion: 8, action: { type: "complete" } };
+  } });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await readBody(stale), { error: "다른 곳에서 이미 변경되었습니다" });
+
+  const forged = await PATCH({ async json() {
+    return {
+      id: "11111111-1111-4111-8111-111111111111",
+      expectedVersion: 8,
+      action: { type: "complete", completedBy: "heybilli:forged" },
+    };
+  } });
+  assert.equal(forged.status, 400);
+  assert.equal(requests.length, 1);
+});
