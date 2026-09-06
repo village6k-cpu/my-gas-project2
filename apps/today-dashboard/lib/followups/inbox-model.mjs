@@ -189,7 +189,7 @@ export function actionBody(item, action) {
     || typeof action.type !== "string") throw new Error("Heybilli work action invalid");
   const expected = action.type === "snooze" ? ["snoozedUntil", "type"] : ["type"];
   if (!exactKeys(action, expected)
-    || !["progress", "snooze", "ack_p0", "request_resolve", "dismiss"].includes(action.type)) {
+    || !["progress", "snooze", "ack_p0", "request_resolve", "complete", "dismiss"].includes(action.type)) {
     throw new Error("Heybilli work action invalid");
   }
   if (action.type === "snooze") {

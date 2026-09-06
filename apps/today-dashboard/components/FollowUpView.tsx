@@ -12,7 +12,7 @@ type WorkState = "open" | "in_progress" | "snoozed" | "resolved" | "dismissed";
 type Priority = "p0" | "urgent" | "normal" | "low";
 type FilterState = { view: ViewKey; category: CategoryKey | null };
 type WorkAction =
-  | { type: "progress" | "ack_p0" | "request_resolve" | "dismiss" }
+  | { type: "progress" | "ack_p0" | "request_resolve" | "complete" | "dismiss" }
   | { type: "snooze"; snoozedUntil: string };
 type WorkStep = {
   id: string;
@@ -240,7 +240,12 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
       }
       if (!response.ok || !payload?.ok || !payload.item) throw new Error("mutation failed");
       await load(status);
-      setNotice("처리 요청을 접수했습니다.");
+      if (action.type === "complete") {
+        setMobileDetailOpen(false);
+        setNotice("완료 처리했습니다.");
+      } else {
+        setNotice("처리 요청을 접수했습니다.");
+      }
     } catch {
       setNotice("처리 요청을 반영하지 못했습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
@@ -456,7 +461,7 @@ function StepCard({ stepItem, index, disabled, onAction }: { stepItem: WorkStep;
           {stepItem.state !== "in_progress" && <ActionButton primary disabled={disabled} onClick={() => onAction(stepItem, { type: "progress" })}>진행 시작</ActionButton>}
           <ActionButton disabled={disabled} onClick={() => onAction(stepItem, { type: "snooze", snoozedUntil: oneHourLater() })}>1시간 미루기</ActionButton>
           {stepItem.priority === "p0" && <ActionButton disabled={disabled} onClick={() => onAction(stepItem, { type: "ack_p0" })}>긴급 확인</ActionButton>}
-          <ActionButton primary disabled={disabled} onClick={() => onAction(stepItem, { type: "request_resolve" })}>완료</ActionButton>
+          <ActionButton primary disabled={disabled} onClick={() => onAction(stepItem, { type: "complete" })}>완료</ActionButton>
           <ActionButton disabled={disabled} onClick={() => onAction(stepItem, { type: "dismiss" })}>업무 아님</ActionButton>
         </div>
       )}

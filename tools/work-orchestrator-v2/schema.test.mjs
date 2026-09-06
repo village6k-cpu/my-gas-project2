@@ -22,6 +22,20 @@ const heybilliFreshStartMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_heybilli_fresh_start\.sql$/.test(name));
 const ownerLanguageMigrationFiles = readdirSync(migrationsDirectory)
   .filter((name) => /^\d+_work_orchestrator_v2_owner_language\.sql$/.test(name));
+const heybilliCompletionMigrationFiles = readdirSync(migrationsDirectory)
+  .filter((name) => /^\d+_work_orchestrator_v2_heybilli_completion\.sql$/.test(name));
+
+test('Heybilli completion migration exposes one service-only atomic completion RPC', () => {
+  assert.equal(heybilliCompletionMigrationFiles.length, 1, 'exactly one CLI-generated completion migration must exist');
+  const sql = readFileSync(join(migrationsDirectory, heybilliCompletionMigrationFiles[0]), 'utf8');
+  assert.match(sql, /create function public\.complete_heybilli_work_item_v2\(\s*p_id uuid,\s*p_expected_version integer,\s*p_completed_by text\s*\)/i);
+  assert.match(sql, /security invoker set search_path = ''/i);
+  assert.match(sql, /state\s*=\s*'resolved'[\s\S]*?resolution_kind\s*=\s*'owner_completed'[\s\S]*?pending_action\s*=\s*'\{\}'::jsonb[\s\S]*?version\s*=\s*version\s*\+\s*1/i);
+  assert.match(sql, /where id\s*=\s*p_id[\s\S]*?version\s*=\s*p_expected_version[\s\S]*?state in \('open','in_progress','snoozed'\)/i);
+  assert.match(sql, /revoke execute on function public\.complete_heybilli_work_item_v2\(uuid,integer,text\)\s+from public, anon, authenticated, service_role/i);
+  assert.match(sql, /grant execute on function public\.complete_heybilli_work_item_v2\(uuid,integer,text\)\s+to service_role/i);
+  assert.doesNotMatch(sql, /security definer|grant execute[^;]+to (?:public|anon|authenticated)/i);
+});
 
 test('owner-language migration rejects internal workflow jargon from representative cards', () => {
   assert.equal(ownerLanguageMigrationFiles.length, 1, 'exactly one CLI-generated owner-language migration must exist');
