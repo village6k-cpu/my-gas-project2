@@ -2070,7 +2070,7 @@ const gatewayChannel = gatewayTransportEnabled
 export function createGatewayConfirmationExecutor({ getConfig, executeOperation = executeVillageConfirmationRequest } = {}) {
   if (typeof getConfig !== 'function') throw new Error('Gateway confirmation config loader is required');
   if (typeof executeOperation !== 'function') throw new Error('Gateway confirmation operation is required');
-  return async (request, { assertCurrentClaim, operationFence } = {}) => executeOperation({
+  return async (request, { assertCurrentClaim, operationFence, roomSnapshot } = {}) => executeOperation({
     config: getConfig(),
     job: {
       jobId: request.job_id,
@@ -2080,7 +2080,7 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
     },
     roomRevision: request.room_revision,
     decision: request.decision,
-    dependencies: { assertCurrentClaim, operationFence }
+    dependencies: { assertCurrentClaim, operationFence, roomSnapshot }
   });
 }
 
@@ -2228,8 +2228,8 @@ export function createGatewayConfirmationValidator({
   if (typeof validateDecision !== 'function') throw new Error('Gateway confirmation validator is required');
   if (typeof getConfig !== 'function') throw new Error('Gateway confirmation config loader is required');
   if (typeof fetchExistingRequest !== 'function') throw new Error('Gateway existing confirmation lookup is required');
-  return (request = {}) => {
-    const validation = validateDecision(request.decision);
+  return (request = {}, options = {}) => {
+    const validation = validateDecision(request.decision, { roomRevision: request.room_revision, ...options });
     if (!validation?.valid) return validation;
     const decision = request?.decision && typeof request.decision === 'object' ? request.decision : {};
     const claimedRequestIds = Array.from(new Set(

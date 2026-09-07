@@ -516,6 +516,13 @@ export function createHermesGatewayHttpHandler({
         }
         if (durable.reservation) throw requestError(409, 'confirmation_operation_unresolved');
         if (!exactClaimForConfirmation(claimedJob, body, leaseId, currentTime())) throw requestError(409, 'stale_lease');
+        const roomSnapshot = claimedJob?.local_context?.turn_internal?.snapshot || null;
+        if (typeof validateConfirmation === 'function') {
+          const validation = await validateConfirmation(body, { roomSnapshot });
+          if (!validation?.valid) throw requestError(422, 'invalid_confirmation_request', {
+            validationErrors: (validation?.errors || []).slice(0, 20)
+          });
+        }
         if (typeof executeConfirmation !== 'function') throw requestError(503, 'confirmation_unavailable');
         const operation = Promise.resolve().then(async () => {
             const reserved = await channel.reserveToolOperation({
@@ -531,7 +538,7 @@ export function createHermesGatewayHttpHandler({
             }
             const operationFence = reserved.reservation;
             await assertCurrentClaim();
-            const receipt = await executeConfirmation(body, { assertCurrentClaim, operationFence });
+            const receipt = await executeConfirmation(body, { assertCurrentClaim, operationFence, roomSnapshot });
             if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) throw requestError(502, 'invalid_confirmation_receipt');
             if (String(receipt.job_id || '') !== String(body.job_id || '')
               || String(receipt.room_key || '') !== String(body.room_key || '')
