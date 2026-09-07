@@ -244,6 +244,7 @@ export async function lookupCustomerDbDiscountForRequest({ customerName = '', ph
   const textBody = await response.text();
   if (!response.ok) throw new Error(`Customer DB lookup failed HTTP ${response.status}: ${textBody.slice(0, 300)}`);
   const parsed = parseGvizResponse(textBody);
+  if (parsed?.status === 'error' || !Array.isArray(parsed?.table?.rows)) throw new Error('Customer DB lookup returned no valid table');
   const rows = Array.isArray(parsed?.table?.rows) ? parsed.table.rows : [];
   const mapped = rows.map((row) => {
     const cells = Array.isArray(row?.c) ? row.c : [];
@@ -644,7 +645,7 @@ export function buildHermesPrompt(job, options = {}) {
         lookup_tool: options.lookupContext.lookup_tool
       }
     : null;
-  const lookupContextText = lookupPromptContext
+  const lookupContextText = lookupPromptContext && !options.gatewayConfirmationToolAvailable
     ? `\nREAD-ONLY VILLAGE LIVE LOOKUP:\n${JSON.stringify(lookupPromptContext, null, 2)}\nAfter reading the Kakao evidence, the AI chooses all necessary queries and interprets every returned row. Send those queries together in one batch through the read-only wrapper; do not hand-compose raw GAS/curl/PowerShell requests or repeat a successful query. A failed batch item is an evidence gap, not permission to guess or mutate. write/insert/register/send APIs are 금지.\n`
     : '';
   const navigationContextText = options.navigationContext
@@ -673,6 +674,10 @@ export function buildHermesPrompt(job, options = {}) {
   const sheetExecutionText = options.gatewayConfirmationToolAvailable
     ? `GATEWAY NATIVE SHEET EXECUTION CONTRACT:
 - In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
+- village_read is the native read-only tool; use it in this turn instead of unavailable terminal/file tools. request.kind=catalog with query finds exact 세트마스터 names and G-column prices; customer with name/phone reads 고객DB; reservations with query=customer name reads contracts and RQs; request/trade with query=exact ID reads that record. Results can be truncated: narrow the query before deciding absence or completeness. Reads do not consume the mutation lease.
+- For a price question, resolve the exact billable equipment and period from conversation plus village_read, then call kind=quote with quote={source:"catalog",customer_name,phone,discount_type,start_date,start_time,end_date,end_time,items:[{name,quantity}]}. Dates are YYYY-MM-DD, times HH:mm, phone may be empty, and items contain every billable set/standalone item once (not included accessories). Or use quote={source:"request"|"trade",id:the exact live ID}. The tool applies customerDB discount first, rental days, long-term discount and VAT; copy that exact quote object into FINAL_JSON.price_quote for fresh send-time verification.
+- If quote.complete=true, answer the customer's actual price question now using totalVatIncluded, clearly saying 부가세 포함. Use classification="price", sensitive_commitment, authoritative_sheet, requiresRag=false. Do not substitute "확인해볼게요/견적 확인 후 안내드릴게요" for a lookup you can do in this turn, or repeat an earlier empty acknowledgement. If a billable item/period is genuinely unresolved, ask the one specific missing question; never present a partial sum as the total. Sending a quote document still requires village_document_send; a computed price is not proof of delivery.
+- A successful inquiry receipt can require schedule review while its independent, complete price answer is still auto-sendable with price_quote. Keep the schedule review follow-up, but do not claim availability or registration in the price reply. Failed/partial mutations still require no-send owner review.
 - INQUIRY LIFECYCLE에 따라 genuinely new 또는 아직 미반영인 변경 문의만 village_confirmation_request로 접수한다. 이미 처리된 예약/품목, 거절된 요청, 단순 보유 질문은 입력하지 않는다.
 - 일정은 먼저 대화/기존 예약/명시된 1회차 운영 기준으로 해석한다. 그래도 모르는 필드만 빈칸, plan_complete=false로 접수한다.
 - Verify unchanged existing RQs with read-only lookup. Reserve village_confirmation_request for the chosen inquiry write; never consume its operation lease to pre-verify.
@@ -810,6 +815,7 @@ TASK:
 
 FINAL OUTPUT FORMAT:
 Print a line containing FINAL_JSON, then a fenced json object.
+owner_case requires all five fields as non-empty trimmed strings. If nothing remains blocked, problemSummary should briefly state the verified resolution, rather than an empty string or an invented problem. If the answer resolves the only task, use follow_up_items=[] and shouldCreateTask=false. Retain a follow-up only for real remaining work; requiresHumanAction=true requires actionFamily to be one of invoice_issue, reservation_change, payment_reconcile, inventory_check, document_approval (not "none").
 The JSON schema:
 {
   "should_write_to_sheet": boolean,
@@ -819,6 +825,7 @@ The JSON schema:
   "reason": string,
   "confidence": "low" | "medium" | "high",
   "classification": "reservation" | "price" | "faq" | "ignore" | "already_answered" | "unclear",
+  "price_quote": object | null,
   "kill_switch_observed": "active" | "paused" | "price_paused" | "not_checked",
   "customer": { "name": string, "source": "Kakao Channel Manager", "chat_status": string | null },
   "owner_case": {"caseKey":string,"title":string,"requestSummary":string,"problemSummary":string,"nextActionSummary":string},
@@ -2856,6 +2863,7 @@ async function fetchSetMasterPrice(config = {}, name = '') {
   const rows = results.map((entry) => Array.isArray(entry?.data) ? entry.data : []);
   const exact = rows.filter((row) => text(row[0]).trim() === query && parseNumber(row[6], 0) > 0);
   const exactStandalone = exact.find((row) => !text(row[1]).trim());
+  if (new Set(exact.map(row => parseNumber(row[6], 0))).size > 1) return null;
   // GAS search is substring-like: searching a component bundle such as
   // "메모리*1 / 배터리*2 / ..." can return its parent set row (e.g. 소니 Z90).
   // For calculation enrichment, do not price non-exact hits as separate billable
@@ -2920,7 +2928,7 @@ async function buildContractCalculation(config = {}, tradeId = '') {
 }
 
 async function fetchConfirmRequestRows(config = {}, reqID = '') {
-  const tq = `SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE A='${String(reqID).replace(/'/g, "\\'")}' LIMIT 30`;
+  const tq = `SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE A='${String(reqID).replace(/'/g, "\\'")}'`;
   return fetchGvizRows(config, '확인요청', tq);
 }
 
@@ -2928,10 +2936,19 @@ async function buildConfirmRequestCalculation(config = {}, reqID = '') {
   const rows = await fetchConfirmRequestRows(config, reqID);
   if (!rows.length) return null;
   const first = rows.find((row) => row['반출일'] || row['반납일']) || rows[0];
+  if (['반출일','반출시간','반납일','반납시간'].some(key => !text(first[key]).trim())) {
+    return { kind: 'confirm_request', reqID, error: 'incomplete_quote_period' };
+  }
+  const start = parseLocalDateTime(first['반출일'], first['반출시간']);
+  const end = parseLocalDateTime(first['반납일'], first['반납시간']);
+  if (!start || !end || end <= start) return { kind: 'confirm_request', reqID, error: 'incomplete_quote_period' };
   const days = calcRentalDaysForQuote(first['반출일'], first['반출시간'], first['반납일'], first['반납시간']);
   const items = [];
   const unresolved = [];
   for (const row of rows) {
+    // Q is the authoritative parent-set marker; expanded accessories are not
+    // additional billable lines even when they have their own catalog price.
+    if (text(row['비고'] ?? row.Q).trim().startsWith('[세트]')) continue;
     const name = text(row['장비or세트명']).trim();
     if (!name) continue;
     const qty = parseNumber(row['수량'], 1) || 1;
@@ -2990,9 +3007,117 @@ function priceVerificationReferenceText(decision = {}) {
   ].map(text).join(' ').normalize('NFKC');
 }
 
+function requireReadKeys(value, allowed, required = allowed) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some(key => !allowed.includes(key))
+    || required.some(key => !Object.hasOwn(value, key))) throw new Error('invalid_read_request');
+}
+
+function requireReadText(value, limit = 120, allowEmpty = false) {
+  if (typeof value !== 'string' || value !== value.trim() || value.length > limit
+    || (!allowEmpty && !value) || /[\u0000-\u001f]/.test(value)) throw new Error('invalid_read_request');
+  return value;
+}
+
+// Only fixed read operations are exposed to native Hermes. Credentials and API
+// selection stay in the bridge; the model chooses the business query/quote plan.
+export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
+  if (request.kind === 'quote') {
+    requireReadKeys(request, ['kind', 'quote']);
+    const quote = request.quote;
+    let calculation;
+    if (quote?.source === 'trade' || quote?.source === 'request') {
+      requireReadKeys(quote, ['source', 'id']);
+      const pattern = quote.source === 'trade' ? /^\d{6}-\d{3}$/ : /^RQ-\d{6}-\d{3}$/;
+      if (!pattern.test(quote.id)) throw new Error('invalid_price_reference');
+      calculation = quote.source === 'trade'
+        ? await buildContractCalculation(config, quote.id)
+        : await buildConfirmRequestCalculation(config, quote.id);
+    } else {
+      requireReadKeys(quote, ['source','customer_name','phone','discount_type','start_date','start_time','end_date','end_time','items']);
+      if (quote.source !== 'catalog') throw new Error('invalid_quote_source');
+      requireReadText(quote.customer_name);
+      requireReadText(quote.phone, 30, true);
+      if (quote.phone && !/^\+?[0-9 -]{7,20}$/.test(quote.phone)) throw new Error('invalid_customer_phone');
+      if (!['학생','개인사업자/프리랜서','단골','제휴','일반'].includes(quote.discount_type)) throw new Error('invalid_discount_type');
+      const dates = ['start','end'].map(prefix => {
+        const date = quote[prefix + '_date'], time = quote[prefix + '_time'];
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('invalid_quote_period');
+        const value = date + 'T' + time + ':00.000Z';
+        const parsed = new Date(value);
+        if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) throw new Error('invalid_quote_period');
+        return parsed.getTime();
+      });
+      if (dates[1] <= dates[0]) throw new Error('invalid_quote_period');
+      if (!Array.isArray(quote.items) || !quote.items.length || quote.items.length > 40) throw new Error('invalid_quote_items');
+      for (const item of quote.items) {
+        requireReadKeys(item, ['name','quantity']);
+        requireReadText(item.name);
+        if (!Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 999) throw new Error('invalid_quote_quantity');
+      }
+      if (new Set(quote.items.map(item => item.name)).size !== quote.items.length) throw new Error('duplicate_quote_item');
+      const customer = await lookupCustomerDbDiscountForRequest({customerName:quote.customer_name,phone:quote.phone}, config);
+      if (customer.ambiguous) throw new Error('ambiguous_customer');
+      const discount = customer.discountType || quote.discount_type;
+      const days = calcRentalDaysForQuote(quote.start_date,quote.start_time,quote.end_date,quote.end_time);
+      const pricedItems = [], unresolvedItems = [];
+      for (let offset = 0; offset < quote.items.length; offset += 4) {
+        const batch = quote.items.slice(offset, offset + 4);
+        const prices = await Promise.all(batch.map(item => fetchSetMasterPrice(config, item.name)));
+        batch.forEach((item, index) => {
+          const price = prices[index];
+          if (price?.price > 0) pricedItems.push({name:item.name,qty:item.quantity,price:price.price});
+          else unresolvedItems.push({name:item.name,qty:item.quantity});
+        });
+      }
+      const baseAmount = pricedItems.reduce((sum,item) => sum + item.qty * item.price * days, 0);
+      calculation = {kind:'catalog',customer:quote.customer_name,discountType:discount,
+        customerDiscountSource:customer.discountType ? 'customer_db' : 'conversation',
+        pricedItems,unresolvedItems,
+        payment:unresolvedItems.length ? null : calculateVillagePayment(baseAmount,days,discount)};
+    }
+    const unresolved = (calculation?.unresolvedItems || []).map(item => item.name + ' x' + item.qty);
+    const complete = Boolean(calculation && !calculation.error && calculation.payment
+      && !unresolved.length && calculation.payment.finalVatIncluded > 0);
+    return {complete,reason:complete ? 'authoritative_price_verified' : 'authoritative_price_incomplete',
+      calculations:calculation ? [calculation] : [],unresolved,
+      totalVatIncluded:complete ? calculation.payment.finalVatIncluded : null};
+  }
+  if (request.kind === 'customer') {
+    requireReadKeys(request,['kind','name','phone'],['kind','name']);
+    requireReadText(request.name);
+    if (request.phone !== undefined) requireReadText(request.phone,30,true);
+    return lookupCustomerDbDiscountForRequest({customerName:request.name,phone:request.phone || ''},config);
+  }
+  requireReadKeys(request,['kind','query']);
+  requireReadText(request.query);
+  const lookups = {
+    catalog:[['세트마스터',1],['장비마스터',2]],
+    reservations:[['계약마스터',2],['확인요청',11]],
+    request:[['확인요청',1]],
+    trade:[['계약마스터',1],['스케줄상세',2]]
+  };
+  const targets = lookups[request.kind];
+  if (!targets) throw new Error('invalid_read_kind');
+  if (request.kind === 'request' && !/^RQ-\d{6}-\d{3}$/.test(request.query)
+    || request.kind === 'trade' && !/^\d{6}-\d{3}$/.test(request.query)) throw new Error('invalid_read_id');
+  const sources = await Promise.all(targets.map(async ([sheet,col]) => {
+    const rows = await fetchGasSearch(config,sheet,col,request.query);
+    return {sheet,rows:rows.slice(0,100),truncated:rows.length>100};
+  }));
+  return {sources};
+}
+
 export async function buildAuthoritativePriceVerification(config = {}, decision = {}) {
   if (replySafetyClass(decision) !== 'sensitive_commitment') {
     return { required: false, complete: true, reason: 'not_numeric_price_commitment' };
+  }
+  if (decision.price_quote) {
+    try {
+      return { required: true, ...await executeVillageReadOnlyLookup(config, { kind: 'quote', quote: decision.price_quote }) };
+    } catch {
+      return { required: true, complete: false, reason: 'price_quote_lookup_failed', totalVatIncluded: null };
+    }
   }
   const referenceText = priceVerificationReferenceText(decision);
   const tradeIds = extractTradeIdsFromFollowUp({ summary: referenceText });
@@ -7347,8 +7472,10 @@ function currencyAmountsInReply(value = '') {
 
 export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
-  if (decision?.post_action_reconciled === true
-    || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object')) {
+  const typedPriceReply = decision.classification === 'price' && Boolean(decision.price_quote)
+    && replySafetyClass(decision) === 'sensitive_commitment' && replyGrounding(decision) === 'authoritative_sheet';
+  if (!typedPriceReply && (decision?.post_action_reconciled === true
+    || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object'))) {
     return { allowed: false, reason: 'schedule_result_requires_owner_review' };
   }
   if (customerEquipmentIncidentRisk(decision).risk) {
@@ -7401,6 +7528,9 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
   if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
   if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
   if (decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };
+  if (typedPriceReply && /(?:예약|대여|재고|장비)\s*(?:가능|확정|완료)|가능(?:합니다|해요)/.test(textValue)) {
+    return { allowed: false, reason: 'price_reply_contains_unverified_availability' };
+  }
   const sensitiveCommitmentPattern = /(refund|환불|분실|파손|손상|결제\s*취소|예약\s*확정|재고\s*가능|가능\s*확정|(?:대여|예약)?\s*가능(?:합니다|하세요|하십니다|해요|함)?|확정|[0-9,]+\s*(?:원|만원)|입금|계좌|금액)/i;
   if (sensitiveCommitmentPattern.test(textValue)) {
     const explicitSensitiveAllowance = new Set([
@@ -10722,7 +10852,7 @@ function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, 
   };
 }
 
-function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason, receipt = null, authoritativeSheetResult = undefined } = {}) {
+function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason, receipt = null, authoritativeSheetResult = undefined, preservePriceReply = false } = {}) {
   const originalFollowUps = (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : []).map((item) => {
     if (!receipt || !item || typeof item !== 'object' || Array.isArray(item)) return item;
     const {
@@ -10750,7 +10880,7 @@ function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason,
     classification: text(safeBase.classification).trim() || (schedule ? 'reservation' : 'human_review'),
     confidence: text(safeBase.confidence).trim() || 'low',
     should_write_to_sheet: false,
-    owner_review_required: true,
+    owner_review_required: !preservePriceReply,
     safety_checks: {
       ...(safeBase.safety_checks && typeof safeBase.safety_checks === 'object' ? safeBase.safety_checks : {}),
       latest_customer_message_after_last_staff_reply:
@@ -10761,7 +10891,7 @@ function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason,
     follow_up_items: followUpItems,
     suggested_reply_draft: text(safeBase.suggested_reply_draft || decisionReply(safeBase).text),
     ...(authoritativeSheetResult !== undefined ? { authoritative_sheet_result: authoritativeSheetResult } : {}),
-    reply_decision: {
+    reply_decision: preservePriceReply ? decisionReply(safeBase) : {
       ...decisionReply(safeBase),
       replyMode: 'draft_only',
       text: text(decisionReply(safeBase).text || safeBase.suggested_reply_draft),
@@ -11176,7 +11306,10 @@ export async function prepareKakaoGatewayDecision({
     sheetResult = sheetResultFromTrustedReceipt(trustedConfirmationReceipt);
     const receiptFailed = trustedConfirmationReceipt.status === 'failed' || trustedConfirmationReceipt.error !== null;
     const report = buildSheetAvailabilityReport(sheetResult, null);
-    const postActionValidation = parsedDecisionValid
+    const independentPriceReply = parsedDecisionValid && decision.classification === 'price' && Boolean(decision.price_quote)
+      && replySafetyClass(decision) === 'sensitive_commitment' && replyGrounding(decision) === 'authoritative_sheet'
+      && decision.owner_review_required !== true && decision.ownerReviewRequired !== true;
+    const postActionValidation = independentPriceReply ? {valid:true,errors:[]} : parsedDecisionValid
       ? validateAiPostActionDecisionContract(decision, report || {})
       : { valid: false, errors: ['invalid base decision'] };
     const finalAuthority = decision?.authoritative_sheet_result;
@@ -11188,9 +11321,12 @@ export async function prepareKakaoGatewayDecision({
     reason = receiptFailed
       ? '권위 있는 확인요청 작업이 실패 또는 부분 실패하여 사장 확인이 필요합니다.'
       : '권위 있는 확인요청 결과는 사장 확인 후에만 고객에게 안내할 수 있습니다.';
+    // A pending schedule review does not invalidate a separate price question.
+    // The final send still re-reads prices and verifies the quoted total.
+    const preservePriceReply = !receiptFailed && independentPriceReply && exactTurn && safetyFailures.length === 0;
     decision = forceGatewayOwnerReviewDecision(decision || {}, {
       job, schedule: true, reason, receipt: trustedConfirmationReceipt,
-      authoritativeSheetResult: trustedConfirmationReceipt.authoritative_sheet_result
+      authoritativeSheetResult: trustedConfirmationReceipt.authoritative_sheet_result, preservePriceReply
     });
     decision.post_action_reconciled = !receiptFailed && !safetyFailures.includes('trusted_receipt_decision_contradiction');
     decision.trusted_confirmation_receipt = trustedConfirmationReceipt;
