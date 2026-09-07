@@ -29,15 +29,19 @@ function makeFixture() {
   writeFileSync(path.join(source, 'plugin.yaml'), 'name: kakao_village\nkind: platform\nversion: 0.1.0\n');
   writeFileSync(path.join(source, '__init__.py'), [
     'from .registered_change_tool import handle_registered_reservation_change',
+    'from .read_tool import handle_read',
     'def register_registered_change_tool(ctx):',
     '    ctx.register_tool(name="village_registered_reservation_change", handler=handle_registered_reservation_change)',
     'def register(ctx):',
     '    register_registered_change_tool(ctx)',
+    '    ctx.register_tool(name="village_read", handler=handle_read)',
     ''
   ].join('\n'));
   writeFileSync(path.join(source, 'adapter.py'), 'VALUE = "fixture"\n');
   writeFileSync(path.join(source, 'http_client.py'), [
     'class BridgeClient:',
+    '    def read(self, payload):',
+    '        return self._post("/hermes/v1/tools/read", payload)',
     '    def registered_reservation_change(self, payload):',
     '        return self._post("/hermes/v1/tools/registered-reservation-change", payload)',
     ''
@@ -50,6 +54,7 @@ function makeFixture() {
     ''
   ].join('\n'));
   writeFileSync(path.join(source, 'README.md'), '# fixture\n');
+  writeFileSync(path.join(source, 'read_tool.py'), 'ACTIVE_TURN_FENCE = None\nSCHEMA = "village-read-result/v1"\ndef handle_read(**kwargs):\n    return kwargs\n');
   writeFileSync(path.join(source, 'tests', 'not-shipped.py'), 'raise AssertionError("must not ship")\n');
   writeFileSync(path.join(profile, 'config.yaml'), [
     'plugins:',
@@ -102,7 +107,7 @@ test('PlanOnly reports the exact reviewed manifest and merged config without cre
   assert.equal(result.configPlan.platforms.slack.enabled, true);
   assert.deepEqual(result.configPlan.platformToolsets.kakao_village, ['skills', 'village']);
   assert.deepEqual(result.fileManifest.map((entry) => entry.relativePath).sort(), [
-    'README.md', '__init__.py', 'adapter.py', 'http_client.py', 'plugin.yaml', 'registered_change_tool.py'
+    'README.md', '__init__.py', 'adapter.py', 'http_client.py', 'plugin.yaml', 'registered_change_tool.py', 'read_tool.py'
   ].sort());
   for (const entry of result.fileManifest) {
     const bytes = readFileSync(path.join(fixture.source, entry.relativePath));
@@ -199,6 +204,13 @@ test('sync refuses a source that would remove the registered reservation change 
       /registered reservation change capability|registered_change_tool|village_registered_reservation_change/i,
     );
   }
+});
+
+test('sync refuses a reviewed plugin that silently drops native business reads', () => {
+  const fixture = makeFixture();
+  execFileSync('git', ['rm', path.join('migration', 'hermes', 'plugins', 'kakao_village', 'read_tool.py')], {cwd:fixture.sourceRepo});
+  git(fixture.sourceRepo, 'commit', '-m', 'remove read capability');
+  assert.match(runSync({...fixture,planOnly:true,expectOk:false}), /native read capability/i);
 });
 
 test('sync refuses a target whose profile plugin parent escapes through a reparse point', () => {

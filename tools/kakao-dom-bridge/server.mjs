@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import dns from 'node:dns';
 import { isSharedHermesGatewayIdle } from '../ai-browser-worker/shared-hermes-browser.mjs';
 import { spawn, spawnSync } from 'node:child_process';
-import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
+import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, executeVillageReadOnlyLookup, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
 import {
   applyPreparedKakaoDecision,
   buildKakaoGatewayTurn,
@@ -2795,6 +2795,7 @@ const gatewayHttpHandler = createHermesGatewayHttpHandler({
   transport: CONFIG.hermesTransport,
   consumerFreshnessMs: Math.max(60_000, CONFIG.hermesLeaseMs * 2),
   executeConfirmation: gatewayConfirmationExecutor,
+  executeRead: request => executeVillageReadOnlyLookup(getKakaoWorkerRuntimeConfigForTransport(),request),
   validateConfirmation: gatewayConfirmationValidator,
   executeDocument: gatewayDocumentExecutor,
   executeRegisteredReservationChange: gatewayRegisteredReservationChangeExecutor,
@@ -6615,6 +6616,7 @@ const server = http.createServer(async (req, res) => {
           workerEnabled: Boolean(CONFIG.workerCommand),
           hermesTransport: CONFIG.hermesTransport,
           gatewayConfigured: gatewayTransportEnabled,
+          nativeReadConfigured: gatewayTransportEnabled,
           documentExecutionConfigured: Boolean(
             documentExecutionConfig.documentApiBaseUrl && documentExecutionConfig.documentApiKey
           ),

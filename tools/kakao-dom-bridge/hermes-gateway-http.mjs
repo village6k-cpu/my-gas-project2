@@ -369,7 +369,7 @@ export function buildGatewayHealthReadback({
 }
 
 export function createHermesGatewayHttpHandler({
-  token, channel, executeConfirmation, validateConfirmation, executeDocument, validateDocument,
+  token, channel, executeConfirmation, validateConfirmation, executeDocument, validateDocument, executeRead,
   executeRegisteredReservationChange, executeConfirmedReservationCommit,
   enqueueResultApplication, recoverFailureNotifications, recoverAuditProjections,
   transport = 'cli', now = Date.now, consumerFreshnessMs = 600_000
@@ -448,6 +448,28 @@ export function createHermesGatewayHttpHandler({
         }
         triggerOptionalAuditProjectionRecovery();
         sendJson(res, 200, { ok: true });
+        return true;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/hermes/v1/tools/read') {
+        const body = await readJsonBody(req);
+        const leaseId = requiredLeaseId(body);
+        if (body.schema !== 'village-read-request/v1') throw requestError(400,'invalid_read_schema');
+        if (typeof executeRead !== 'function' || typeof channel.get !== 'function') throw requestError(503,'read_unavailable');
+        const assertCurrentRead = async () => {
+          const currentJob = await channel.get(body.job_id);
+          const currentMs = Number(now());
+          if (!Number.isFinite(currentMs) || !exactClaimForConfirmation(currentJob,body,leaseId,currentMs)) throw requestError(409,'stale_lease');
+        };
+        await assertCurrentRead();
+        let result;
+        try { result = await executeRead(body.request); }
+        catch { throw requestError(422,'read_lookup_failed'); }
+        await assertCurrentRead();
+        // Reads never reserve/consume the one mutation operation for this turn.
+        sendJson(res,200,{schema:'village-read-result/v1',job_id:body.job_id,room_key:body.room_key,
+          room_revision:body.room_revision,lease_id:leaseId,request:body.request,
+          read_at:new Date(Number(now())).toISOString(),result});
         return true;
       }
 

@@ -175,6 +175,27 @@ function Assert-RegisteredReservationChangeCapability {
     }
 }
 
+function Assert-NativeReadCapability {
+    param([Parameter(Mandatory = $true)][string]$SourceRoot)
+    $requirements = @{
+        '__init__.py' = @('from .read_tool import handle_read', 'name="village_read"')
+        'http_client.py' = @('/hermes/v1/tools/read')
+        'read_tool.py' = @('def handle_read', 'ACTIVE_TURN_FENCE', 'village-read-result/v1')
+    }
+    foreach ($file in $requirements.Keys) {
+        $path = Join-Path $SourceRoot $file
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Native read capability is incomplete: '$file' is missing."
+        }
+        $content = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
+        foreach ($marker in $requirements[$file]) {
+            if (-not $content.Contains($marker)) {
+                throw "Native read capability is incomplete: '$file' lacks '$marker'."
+            }
+        }
+    }
+}
+
 function Assert-CleanGitSource {
     param([Parameter(Mandatory = $true)][string]$SourceRoot)
     $repoOutput = @(& git -C $SourceRoot rev-parse --show-toplevel 2>&1)
@@ -430,6 +451,7 @@ Assert-NoReparsePoint -Path $sourceRoot -Recurse
 Assert-TargetAncestorsSafe -Target $targetRoot -ProfileRoot $profileRoot
 $manifest = @(Get-ReviewedManifest -SourceRoot $sourceRoot)
 Assert-RegisteredReservationChangeCapability -SourceRoot $sourceRoot
+Assert-NativeReadCapability -SourceRoot $sourceRoot
 $manifestSha = Get-ManifestDigest -Manifest $manifest
 $configContent = if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     [IO.File]::ReadAllText($configPath, [Text.Encoding]::UTF8)

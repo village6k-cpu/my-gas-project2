@@ -312,6 +312,29 @@ function gatewayFetch(base, pathname, init = {}) {
   });
 }
 
+test('native read tool works in no-send mode without consuming a mutation lease and rejects stale reads', async () => {
+  const channel = makeChannel();
+  let reads = 0;
+  const app = await start(createHermesGatewayHttpHandler({token,channel,transport:'gateway_no_send',
+    executeRead:async request => { reads++; return {sources:[],kind:request.kind}; }}));
+  const body = {schema:'village-read-request/v1',job_id:'job-1',room_key:'room-1',
+    room_revision:3,lease_id:leaseId,request:{kind:'catalog',query:'FX3'}};
+  try {
+    const response = await gatewayFetch(app.url,'/hermes/v1/tools/read',{method:'POST',body:JSON.stringify(body)});
+    assert.equal(response.status,200);
+    const result = await response.json();
+    assert.equal(result.schema,'village-read-result/v1');
+    assert.equal(result.request.kind,'catalog');
+    assert.equal(result.job_id,body.job_id);
+    assert.equal(reads,1);
+    assert.equal(channel.calls.reservation.length,0);
+    assert.equal(channel.calls.receipt.length,0);
+    channel.setJob({state:'superseded'});
+    assert.equal((await gatewayFetch(app.url,'/hermes/v1/tools/read',{method:'POST',body:JSON.stringify(body)})).status,409);
+    assert.equal(reads,1);
+  } finally { await app.close(); }
+});
+
 async function withRealGatewayChannel(run) {
   const directory = await mkdtemp(path.join(tmpdir(), 'hermes-gateway-http-'));
   const clock = { now: Date.parse('2026-08-21T00:00:00.000Z') };

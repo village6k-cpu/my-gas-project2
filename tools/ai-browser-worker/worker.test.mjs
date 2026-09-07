@@ -1434,6 +1434,30 @@ test('staff registration evidence is stale when a later customer or unknown mess
   }
 });
 
+test('successful inquiry receipt keeps an independent typed price reply for fresh price verification', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=gatewayDecisionFixture({classification:'price',
+    price_quote:{source:'trade',id:'260821-001'},
+    reply_decision:{replyMode:'auto_send',text:'부가세 포함 33,000원입니다.',
+      safetyClass:'sensitive_commitment',grounding:'authoritative_sheet',requiresRag:false}});
+  const receipt=confirmationReceiptFixture(job);
+  const prepared=await workerModule.prepareKakaoGatewayDecision({config:{},job,turn,
+    finalText:JSON.stringify(decision),trustedToolReceipts:[receipt]});
+  assert.equal(prepared.decision.reply_decision.replyMode,'auto_send',JSON.stringify(prepared.gatewaySafetyFailures));
+  assert.equal(prepared.decision.reply_decision.safetyClass,'sensitive_commitment');
+  assert.equal(prepared.decision.owner_review_required,false);
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision,{autoSendEnabled:true}).reason,
+    'authoritative_price_verification_required');
+  const verified = {priceVerification:{complete:true,totalVatIncluded:33000}};
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision,{autoSendEnabled:true},verified).allowed,true);
+  const availabilityClaim = {...prepared.decision,reply_decision:{...prepared.decision.reply_decision,text:'예약 가능합니다. 부가세 포함 33,000원입니다.'}};
+  assert.equal(canAutoSendCustomerAnswer(availabilityClaim,{autoSendEnabled:true},verified).reason,
+    'price_reply_contains_unverified_availability');
+  const failed=await workerModule.prepareKakaoGatewayDecision({config:{},job,turn,
+    finalText:JSON.stringify(decision),trustedToolReceipts:[{...receipt,status:'failed',error:'lookup failed'}]});
+  assert.equal(failed.decision.reply_decision.replyMode,'draft_only');
+});
+
 test('exact confirmed registration receipt finalizes no-reply and removes duplicate owner review', async () => {
   const { job, turn } = gatewayTurnFixture();
   const decision = confirmedRegistrationDecisionFixture();
