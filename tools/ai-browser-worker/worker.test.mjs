@@ -12682,7 +12682,9 @@ test('sendKakaoMessageViaChrome falls back to DevTools target when AX window is 
   assert.equal(result.via_devtools, true);
   assert.equal(result.readback_confirmed, true);
   assert.equal(result.observed_reply_hash, createHash('sha256').update('확인했습니다.').digest('hex'));
-  assert.ok(evalCalls[0].expression.includes('textarea[placeholder*="메시지"]'));
+  assert.equal(evalCalls.length, 2);
+  assert.ok(evalCalls[0].expression.includes('alreadyVisible'));
+  assert.ok(evalCalls[1].expression.includes('textarea[placeholder*="메시지"]'));
 });
 
 test('actual auto-reply sender emits a source-correlated content-free readback receipt', async (t) => {

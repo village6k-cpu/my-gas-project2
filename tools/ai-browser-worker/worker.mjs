@@ -647,7 +647,7 @@ export function buildHermesPrompt(job, options = {}) {
     ? `\nBROWSER NAVIGATION RESULT:\n${JSON.stringify(options.navigationContext, null, 2)}\n\nThis was deterministic UI navigation and live AX text capture only. If status is opened_target_chat and conversation_evidence.hint_matched is true, treat conversation_evidence.visible_static_text_tail as current Kakao screen evidence to inspect first; do not spend extra actions re-opening the chat list unless the evidence is insufficient or mismatched. Do not treat the navigation step itself as business classification evidence; the AI must still judge from the visible Kakao evidence.\n`
     : '';
   const ownerCaseContextText = Object.hasOwn(options, 'ownerCaseContext')
-    ? `\nOWNER CASE CONTEXT:\n${JSON.stringify(compactOwnerCaseContext(options.ownerCaseContext), null, 2)}\n\n- 같은 문의면 표현이 달라도 기존 caseKey를 정확히 재사용한다.\n- 같은 업무면 표현이 달라도 기존 taskKey를 정확히 재사용한다.\n- 같은 고객방이어도 목적이 다르면 별도 caseKey를 만들고, 시간이나 방 이름만으로 합치지 않는다.\n- 한 문의의 여러 조치는 한 case의 중복 없는 task로 정리한다. context가 unavailable이면 현재 의미를 나타내는 안정적인 새 키를 만든다.\n- owner_case는 대표가 카드만 보고 이해하는 짧은 업무 보고다. title은 고객과 구체 주제를 식별하고, requestSummary에는 확인된 장비·날짜·수량을 가능한 만큼 넣으며, problemSummary에는 아직 막힌 구체 사실, nextActionSummary에는 대상과 행동을 쓴다.\n- '문의', '예약 확인', '스케줄 확인', '확인 필요' 같은 한두 단어 요약은 금지한다. 모르는 사실은 만들지 말고, 확인된 구체 정보만 사용한다.\n- RQ, 거래ID, 자동화/bridge/gateway 상태, confirmation_request, bare 네 같은 내부 표현은 대표용 문구에 금지한다. 고객이 요청한 사실, 아직 결정되지 않은 사실, 사람이 할 다음 행동으로 바꿔 쓴다.\n`
+    ? `\nOWNER CASE CONTEXT:\n${JSON.stringify(compactOwnerCaseContext(options.ownerCaseContext), null, 2)}\n\n- 같은 문의면 표현이 달라도 기존 caseKey를 정확히 재사용한다.\n- 같은 업무면 표현이 달라도 기존 taskKey를 정확히 재사용한다.\n- 같은 고객방이어도 목적이 다르면 별도 caseKey를 만들고, 시간이나 방 이름만으로 합치지 않는다.\n- 한 문의의 여러 조치는 한 case의 중복 없는 task로 정리한다. context가 unavailable이면 현재 의미를 나타내는 안정적인 새 키를 만든다.\n- owner_case는 대표가 카드만 보고 이해하는 짧은 업무 보고다. title은 고객과 구체 주제를 식별하고, requestSummary에는 확인된 장비·날짜·수량을 가능한 만큼 넣으며, problemSummary에는 아직 막힌 구체 사실, nextActionSummary에는 대상과 행동을 쓴다.\n- '문의', '예약 확인', '스케줄 확인', '확인 필요' 같은 한두 단어 요약은 금지한다. 모르는 사실은 만들지 말고, 확인된 구체 정보만 사용한다.\n`
     : '';
   const recentBotSendsText = options.recentBotSends || '';
   const correctionsText = options.corrections || '';
@@ -776,7 +776,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 ${currentConfirmedPolicyText}
-  ${navigationContextText}${ownerCaseContextText.replace('bare 네', "단독 응답 '네'")}${terminalAckHintText}${recentBotSendsText}${correctionsText}
+  ${navigationContextText}${ownerCaseContextText}${ownerCaseContextText ? "\n- RQ, 거래ID, 자동화/bridge/gateway 상태, confirmation_request, 단독 응답 '네' 같은 내부 표현은 대표용 문구에 금지한다. 고객이 요청한 사실, 아직 결정되지 않은 사실, 사람이 할 다음 행동으로 바꿔 쓴다.\n" : ''}${terminalAckHintText}${recentBotSendsText}${correctionsText}
 ${lookupContextText}${ragContextText}${brainContextText}
 ${sheetExecutionText}
 
@@ -6204,19 +6204,43 @@ export async function attachKakaoFilesViaDevtools(target, attachmentPaths = [], 
       await new Promise((r) => setTimeout(r, 2500));
       const sendResult = await evaluateImpl(target, buildKakaoSendPendingAttachmentsExpression(files.length), { timeoutMs })
         .catch((error) => ({ sendClicked: false, error: error.message.slice(0, 500) }));
-      const selectedFileCount = Number(sendResult?.selectedFileCount || assignResult.fileCount || 0);
-      const attached = selectedFileCount >= files.length && sendResult?.sendClicked !== false;
+      const selectedFileCount = Number(sendResult?.selectedFileCount || 0);
+      const clickAttached = selectedFileCount >= files.length && sendResult?.sendClicked === true;
       // Kakao sometimes auto-sends file bubbles on change without needing submit.
-      const autoAttached = assignResult.ok && (sendResult?.selectedFileCount > 0 || sendResult?.sendClicked === false);
+      // Never treat bare DataTransfer assignment as proof — require filename in DOM.
+      const expectedNames = files.map((filePath) => path.basename(filePath));
+      const expectedStems = expectedNames.map((name) => name.replace(/\.[^.]+$/, ''));
+      const bodyProof = await evaluateImpl(target, `(() => {
+        const body = document.body ? String(document.body.innerText || '') : '';
+        const names = ${JSON.stringify(expectedNames)};
+        const stems = ${JSON.stringify(expectedStems)};
+        const foundNames = names.filter((name) => body.includes(name));
+        const foundStems = stems.filter((stem) => stem && body.includes(stem));
+        return {
+          ok: foundNames.length > 0 || foundStems.length > 0,
+          foundNames,
+          foundStems,
+          hasPdfToken: /\\.pdf/i.test(body.slice(-8000)),
+          tail: body.slice(-1200)
+        };
+      })()`, { timeoutMs: Math.min(timeoutMs, 20000) }).catch((error) => ({
+        ok: false,
+        error: error.message.slice(0, 500)
+      }));
+      const autoAttached = Boolean(bodyProof?.ok);
+      const attached = clickAttached || autoAttached;
       return {
-        attached: attached || Boolean(assignResult.ok),
-        reason: (attached || assignResult.ok) ? 'files_assigned_via_datatransfer' : 'attachment_send_not_verified',
+        attached,
+        reason: attached
+          ? (clickAttached ? 'files_selected_and_send_clicked' : 'files_autoattached_dom_verified')
+          : 'attachment_send_not_verified',
         files,
         fileCount: files.length,
         inputNodeId: 0,
         revealResult,
         assignResult,
         sendResult,
+        bodyProof,
         autoAttached
       };
     }
@@ -7704,6 +7728,48 @@ export function kakaoConversationContainsMessage(treeMarkdown = '', message = ''
   return values.some((value) => value === expected || value.includes(expected));
 }
 
+
+function buildKakaoOutboundPresenceMarkers(message = '') {
+  const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const full = normalize(message);
+  if (!full) return { full: '', head: '', markers: [], longMessage: false };
+  const head = full.slice(0, Math.min(80, full.length));
+  const lines = String(message || '')
+    .split(/\n+/)
+    .map((line) => normalize(line))
+    .filter((line) => line.length >= 12 && line.length <= 100);
+  const amounts = full.match(/\d{1,3}(?:,\d{3})+(?:원)?/g) || [];
+  const markers = [...new Set([head, ...lines.slice(0, 6), ...amounts.slice(0, 4)].filter(Boolean))];
+  return {
+    full,
+    head,
+    markers,
+    longMessage: full.length >= 120
+  };
+}
+
+function buildKakaoOutboundAlreadyVisibleExpression(textToSend = '') {
+  const presence = buildKakaoOutboundPresenceMarkers(textToSend);
+  return `(() => {
+    const presence = ${JSON.stringify(presence)};
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const body = normalize(document.body ? document.body.innerText : '');
+    if (!presence.full) return { alreadyVisible: false, reason: 'empty_message' };
+    const fullMatch = body.includes(presence.full);
+    const matchedMarkers = (presence.markers || []).filter((marker) => body.includes(normalize(marker)));
+    const markerMatch = presence.longMessage
+      ? matchedMarkers.length >= Math.min(2, (presence.markers || []).length || 2)
+      : Boolean(presence.head) && body.includes(normalize(presence.head));
+    return {
+      alreadyVisible: fullMatch || markerMatch,
+      fullMatch,
+      markerMatch,
+      matchedMarkers: matchedMarkers.slice(0, 6),
+      collapsedUiHint: /전체보기/.test(document.body ? document.body.innerText : '')
+    };
+  })()`;
+}
+
 function buildKakaoSendMessageExpression(textToSend = '') {
   return `(${async function kakaoSendMessage(message) {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -7768,11 +7834,48 @@ function buildKakaoSendMessageExpression(textToSend = '') {
     sendButton.click();
     await sleep(1200);
     const bodyText = deepText();
-    const sent = bodyText.replace(/\s+/g, ' ').includes(String(message).replace(/\s+/g, ' ').trim());
+    // Kakao Channel Manager collapses long outbound bubbles with "전체보기".
+    // Full-string includes() then false-negatives even when the bubble was sent,
+    // which historically caused operator/agent triple-retries (희수 2026-09-06).
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const full = normalize(message);
+    const body = normalize(bodyText);
+    const headLen = Math.min(80, full.length);
+    const head = full.slice(0, headLen);
+    const lines = String(message || '')
+      .split(/\n+/)
+      .map((line) => normalize(line))
+      .filter((line) => line.length >= 12);
+    const amounts = full.match(/\d{1,3}(?:,\d{3})+(?:원)?/g) || [];
+    const markers = [];
+    if (head) markers.push(head);
+    for (const line of lines.slice(0, 6)) {
+      if (line.length <= 100) markers.push(line);
+    }
+    for (const amount of amounts.slice(0, 4)) markers.push(amount);
+    const uniqueMarkers = [...new Set(markers)].filter(Boolean);
+    const matchedMarkers = uniqueMarkers.filter((marker) => body.includes(marker));
+    const longMessage = full.length >= 120;
+    const fullMatch = Boolean(full) && body.includes(full);
+    const markerMatch = longMessage
+      ? matchedMarkers.length >= Math.min(2, uniqueMarkers.length || 2)
+      : Boolean(head) && body.includes(head);
+    const sent = fullMatch || markerMatch;
     return {
       sent,
-      reason: sent ? 'sent_via_devtools_verified' : 'send_not_verified_in_conversation',
-      window_title: document.title
+      reason: sent
+        ? (fullMatch ? 'sent_via_devtools_verified' : 'sent_via_devtools_verified_markers')
+        : 'send_not_verified_in_conversation',
+      window_title: document.title,
+      verification: {
+        fullMatch,
+        markerMatch,
+        longMessage,
+        markerCount: uniqueMarkers.length,
+        matchedMarkerCount: matchedMarkers.length,
+        matchedMarkers: matchedMarkers.slice(0, 6),
+        collapsedUiHint: /전체보기/.test(bodyText || '')
+      }
     };
   }.toString()})(${JSON.stringify(textToSend)})`;
 }
@@ -7787,6 +7890,77 @@ export async function sendKakaoMessageViaDevtools(textToSend, navigationContext 
   if (!target?.webSocketDebuggerUrl) return { sent: false, reason: 'conversation_target_missing' };
   const files = normalizeKakaoAttachmentPaths(attachmentPaths);
   const textValue = text(textToSend).trim();
+
+  // Preflight: if the same long outbound already sits in the room (often collapsed
+  // with 전체보기), do not click 전송 again. This is the hard stop for false-negative
+  // retry loops after a real send.
+  if (textValue) {
+    const preflight = await evaluateImpl(target, buildKakaoOutboundAlreadyVisibleExpression(textValue), {
+      timeoutMs: Math.min(timeoutMs, 15000)
+    }).catch((error) => ({ alreadyVisible: false, error: error.message.slice(0, 300) }));
+    if (preflight?.alreadyVisible) {
+      if (files.length) {
+        const names = files.map((filePath) => path.basename(filePath));
+        const stems = names.map((name) => name.replace(/\.[^.]+$/, ''));
+        const fileVisible = await evaluateImpl(target, `(() => {
+          const body = document.body ? String(document.body.innerText || '') : '';
+          const expectedNames = ${JSON.stringify(names)};
+          const expectedStems = ${JSON.stringify(stems)};
+          const foundNames = expectedNames.filter((name) => body.includes(name));
+          const foundStems = expectedStems.filter((stem) => stem && body.includes(stem));
+          return { ok: foundNames.length > 0 || foundStems.length > 0, foundNames, foundStems };
+        })()`, { timeoutMs: Math.min(timeoutMs, 15000) }).catch(() => ({ ok: false }));
+        if (fileVisible?.ok) {
+          return {
+            sent: true,
+            reason: 'already_delivered_text_and_attachments',
+            window_title: target.title || '',
+            via_devtools: true,
+            already_delivered: true,
+            preflight,
+            readback_confirmed: true,
+            observed_reply_hash: autoReplyTextHash(textValue),
+            attachments: {
+              attached: true,
+              reason: 'already_visible_in_conversation',
+              files,
+              bodyProof: fileVisible
+            }
+          };
+        }
+        // Text already present; only attach missing files once.
+        const attachmentResult = await attachKakaoFilesViaDevtools(target, files, {
+          timeoutMs,
+          evaluateImpl,
+          cdpCallImpl
+        });
+        return {
+          sent: Boolean(attachmentResult?.attached),
+          reason: attachmentResult?.attached
+            ? 'already_delivered_text_attachments_added'
+            : (attachmentResult?.reason || 'already_delivered_text_attachments_missing'),
+          window_title: target.title || '',
+          via_devtools: true,
+          already_delivered: true,
+          preflight,
+          readback_confirmed: true,
+          observed_reply_hash: autoReplyTextHash(textValue),
+          attachments: attachmentResult
+        };
+      }
+      return {
+        sent: true,
+        reason: 'already_delivered_in_conversation',
+        window_title: target.title || '',
+        via_devtools: true,
+        already_delivered: true,
+        preflight,
+        readback_confirmed: true,
+        observed_reply_hash: autoReplyTextHash(textValue)
+      };
+    }
+  }
+
   const result = textValue
     ? await evaluateImpl(target, buildKakaoSendMessageExpression(textValue), { timeoutMs })
     : { sent: true, reason: 'text_skipped', window_title: target.title || '' };
@@ -7806,6 +7980,7 @@ export async function sendKakaoMessageViaDevtools(textToSend, navigationContext 
       : (attachmentResult?.reason || result?.reason || 'devtools_send_unknown'),
     window_title: result?.window_title || target.title || '',
     via_devtools: true,
+    ...(result?.verification ? { verification: result.verification } : {}),
     ...(sent && textValue ? {
       readback_confirmed: true,
       observed_reply_hash: autoReplyTextHash(textValue)
