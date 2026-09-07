@@ -2,6 +2,11 @@
 
 Use when a customer/staff asks for `세금계산서`, `계산서 발행`, `발행요청`, or says payment depends on tax-invoice issuance.
 
+## Direct routes for common multi-step requests
+
+- Latest registered rental plus a repair/extension/other amount without a `거래ID`: open [registered rental plus non-trade repair invoice](rental-plus-orphan-repair-invoice.md) immediately. Its bounded live-query commands replace broad session/source discovery.
+- After invoices exist, if staff confirms payment and asks only for a customer Kakao notice: open [paid after issue: Kakao notice only](post-issue-paid-notice-kakao-only.md) immediately. Do not re-issue or mutate the invoice as part of that follow-up.
+
 ## Safe operating sequence
 
 1. **Resolve the customer request and trade first**
