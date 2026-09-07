@@ -389,8 +389,9 @@ if ($GatewayMaintenance.IsPresent) {
         catch { $verified.bridge = $null }
         $verified.runtime = Get-KakaoWatcherRuntime
         $gatewayRuntime = Get-KakaoworkerGatewayRuntime
-        $gatewayHealthy = $null -ne $verified.bridge -and (Test-KakaoGatewayCutoverHealth -Health $verified.bridge `
-            -RuntimeProbe $verified.runtime -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence)
+        $gatewayHealthy = $null -ne $verified.bridge -and (Test-KakaoGatewayWatchdogHealth -Health $verified.bridge `
+            -RuntimeProbe $verified.runtime -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence) -and
+            $verified.bridge.gateway.unnotified_application_failures -eq 0
     } while (-not $gatewayHealthy -and [DateTime]::UtcNow -lt $deadline)
     if (-not $gatewayHealthy) { throw 'Gateway maintenance direct readback failed.' }
     [pscustomobject]@{

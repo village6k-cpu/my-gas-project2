@@ -104,12 +104,12 @@ function combinedLiveHealth(runtimeState, { authenticated = true, watcherReady =
   }
 }
 
-function gatewayCutoverHealth({ failed = 0, fresh = true, receiptVerified = true } = {}) {
+function gatewayCutoverHealth({ failed = 0, unnotified = 0, fresh = true, receiptVerified = true } = {}) {
   const escapedPath = modulePath.replaceAll("'", "''");
   const command = [
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
-    `$health=[pscustomobject]@{ok=$true; config=[pscustomobject]@{hermesTransport='gateway'; scheduleOwnerReviewRequired=$true; killSwitchPolicyEnforced=$true}; gateway=[pscustomobject]@{gatewayReady=$true; consumer=[pscustomobject]@{fresh=$${fresh ? 'true' : 'false'}}; queue=[pscustomobject]@{ready=0; claimed=0; retry=0; failed=${failed}}; unnotified_application_failures=0}}`,
+    `$health=[pscustomobject]@{ok=$true; config=[pscustomobject]@{hermesTransport='gateway'; scheduleOwnerReviewRequired=$true; killSwitchPolicyEnforced=$true}; gateway=[pscustomobject]@{gatewayReady=$true; consumer=[pscustomobject]@{fresh=$${fresh ? 'true' : 'false'}}; queue=[pscustomobject]@{ready=0; claimed=0; retry=0; failed=${failed}}; unnotified_application_failures=${unnotified}}}`,
     `$probe=[pscustomobject]@{state='healthy'; cdpReady=$true; authenticated=$true; watcherReady=$true}`,
     `$runtime=[pscustomobject]@{profile='kakaoworker'; pid=123; pluginPath='C:\\fixture\\kakao_village'; manifestSha256=('a' * 64); pluginReceiptVerified=$${receiptVerified ? 'true' : 'false'}}`,
     `$smoke=[pscustomobject]@{nativeSessionResult='pass'; scheduleOwnerReviewRequired=$true; sendCount=0; writeCount=0; killSwitchObserved='active'}`,
@@ -131,7 +131,9 @@ function gatewayWatchdogHealth({
   receiptVerified = true,
   targetMode = 'v2',
   healthMode = 'v2',
-  invariantHealthy = true
+  invariantHealthy = true,
+  startupMaintenance = false,
+  fixturePatch = ''
 } = {}) {
   const escapedPath = modulePath.replaceAll("'", "''");
   const legacyHealth = healthMode === 'legacy';
@@ -146,7 +148,10 @@ function gatewayWatchdogHealth({
     `$probe=[pscustomobject]@{state='healthy'; cdpReady=$true; authenticated=$true; watcherReady=$true}`,
     `$runtime=[pscustomobject]@{profile='kakaoworker'; pid=123; pluginPath='C:\\fixture\\kakao_village'; manifestSha256=('a' * 64); pluginReceiptVerified=$${receiptVerified ? 'true' : 'false'}}`,
     `$smoke=[pscustomobject]@{nativeSessionResult='pass'; scheduleOwnerReviewRequired=$true; sendCount=0; writeCount=0; killSwitchObserved='active'}`,
-    `Test-KakaoGatewayWatchdogHealth -Health $health -RuntimeProbe $probe -GatewayRuntime $runtime -SmokeEvidence $smoke`
+    fixturePatch,
+    startupMaintenance
+      ? `$verified=[pscustomobject]@{bridge=$health;runtime=$probe};$gatewayRuntime=$runtime;$smokeEvidence=$smoke;${readFileSync(startScriptPath, 'utf8').match(/\$gatewayHealthy = \$null -ne \$verified\.bridge[\s\S]*?(?=\r?\n    } while)/)?.[0] ?? (() => { throw new Error('Gateway maintenance health assignment missing'); })()};$gatewayHealthy`
+      : `Test-KakaoGatewayWatchdogHealth -Health $health -RuntimeProbe $probe -GatewayRuntime $runtime -SmokeEvidence $smoke`
   ].join('; ');
   try {
     return execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
@@ -160,6 +165,25 @@ function gatewayWatchdogHealth({
 
 test('watchdog keeps a ready matching runtime alive while Work Orchestrator debt heals', () => {
   assert.equal(gatewayWatchdogHealth({ invariantHealthy: false }), true);
+});
+
+test('startup maintenance tolerates terminal history while preserving active runtime safeguards', () => {
+  assert.equal(gatewayWatchdogHealth({ startupMaintenance: true, failed: 15 }), true);
+  for (const blocked of [{ ready: 1 }, { claimed: 1 }, { retry: 1 }, { fresh: false },
+    { receiptVerified: false }, { targetMode: 'v2', healthMode: 'legacy' }]) {
+    assert.equal(gatewayWatchdogHealth({ startupMaintenance: true, failed: 15, ...blocked }), false);
+  }
+  for (const fixturePatch of ['$probe.authenticated=$false', '$probe.watcherReady=$false',
+    '$health.config.scheduleOwnerReviewRequired=$false', '$health.config.killSwitchPolicyEnforced=$false',
+    '$smoke.sendCount=1', '$smoke.writeCount=1']) {
+    assert.equal(gatewayWatchdogHealth({ startupMaintenance: true, failed: 15, fixturePatch }), false);
+  }
+  assert.equal(gatewayWatchdogHealth({ startupMaintenance: true, unnotified: 1 }), false);
+  assert.equal(gatewayCutoverHealth({ failed: 15 }), false);
+  assert.equal(gatewayCutoverHealth({ unnotified: 1 }), false);
+  const cutover = readFileSync(startScriptPath, 'utf8').split('if ($ConfirmKakaoGatewayCutover.IsPresent -and -not $GatewayMaintenance.IsPresent) {')[1].split("state = 'cutover_complete'")[0];
+  assert.match(cutover, /Test-KakaoGatewayCutoverHealth/);
+  assert.doesNotMatch(cutover, /Test-KakaoGatewayWatchdogHealth/);
 });
 
 function verifyPluginReceipt({ tamper = false } = {}) {
