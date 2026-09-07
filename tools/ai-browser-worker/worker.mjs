@@ -2044,6 +2044,9 @@ export function buildSheetAppendPayload(decision, options = {}) {
 
 export function validateVillageConfirmationExecutionDecision(decision = {}, options = {}) {
   const roomRevision = options?.roomRevision;
+  if (decision.should_write_to_sheet === true && !text(decision.inquiry_disposition).trim()) {
+    return { valid: false, errors: ['inquiry_disposition is required for native confirmation execution'] };
+  }
   const validation = validateAiDecisionContract(decision, options);
   if (!validation.valid) return validation;
   if (decision.should_write_to_sheet === true) {
@@ -9426,7 +9429,7 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
     freshnessGuard.throwIfSuperseded();
     const recentBotSends = (dependencies.buildRecentBotSendsPromptText || buildRecentBotSendsPromptText)(config, job);
     const corrections = (dependencies.buildCorrectionsPromptText || buildCorrectionsPromptText)(config);
-    const prompt = text((dependencies.buildHermesPrompt || buildHermesPrompt)(job, {
+    const basePrompt = text((dependencies.buildHermesPrompt || buildHermesPrompt)(job, {
       gasApiUrl: config.gasApiUrl,
       lookupContext,
       navigationContext: snapshot.navigation,
@@ -9438,7 +9441,15 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
       terminalAckHint: capture?.terminalAcknowledgement,
       gatewayConfirmationToolAvailable: dependencies.gatewayConfirmationToolAvailable !== false
     })).trim();
-    if (!prompt) throw new Error('Gateway turn prompt is required');
+    if (!basePrompt) throw new Error('Gateway turn prompt is required');
+    // The native adapter consumes event.prompt, not event.raw.snapshot.
+    const prompt = `${basePrompt}\n\nTRUSTED CURRENT ROOM SNAPSHOT:\n${JSON.stringify({
+      job_id: snapshot.jobId,
+      room_key: snapshot.roomKey,
+      room_revision: snapshot.roomRevision,
+      conversation_revision: snapshot.roomRevision,
+      conversation_evidence_hash: snapshot.evidenceHash
+    }, null, 2)}\nCopy these server-provided coordinates and evidence hash exactly; do not calculate or guess them. Select customer_message_ids (and staff_message_ids when required) and verbatim texts from BROWSER NAVIGATION RESULT in DOM order. Every writing decision, including each batch child, must keep inquiry_disposition. Never remove disposition or source evidence to bypass a rejected request.\n`;
     const lookupEvidence = buildGatewayLookupEvidence(lookupContext);
     const raw = buildBoundedGatewayRaw({
       job,

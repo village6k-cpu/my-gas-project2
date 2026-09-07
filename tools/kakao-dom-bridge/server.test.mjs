@@ -2081,6 +2081,7 @@ test('server default confirmation validator matches the safe sheet payload bound
   const decision = {
     classification: 'reservation',
     should_write_to_sheet: true,
+    inquiry_disposition: 'new_inquiry',
     reservation_inquiry: {
       is_reservation_inquiry: true,
       already_registered: false,
