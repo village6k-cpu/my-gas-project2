@@ -2826,7 +2826,7 @@ async function fetchGvizRows(config = {}, sheet, tq) {
   return parseGvizTable(body);
 }
 
-async function fetchGasSearch(config = {}, sheet, col, query) {
+async function fetchGasSearch(config = {}, sheet, col, query, { withHeaders = false } = {}) {
   const data = await fetchReadOnlyJson(buildGasReadUrl(config.gasApiUrl || DEFAULT_GAS_API_URL, config.sheetApiKey || DEFAULT_SHEET_API_KEY, {
     action: 'search',
     sheet,
@@ -2836,6 +2836,10 @@ async function fetchGasSearch(config = {}, sheet, col, query) {
     fetchImpl: config.fetchImpl || fetch,
     timeoutMs: 30000
   });
+  if (withHeaders) {
+    if (!Array.isArray(data?.results)) throw new Error('invalid_read_result');
+    return {rows:data.results,headers:Array.isArray(data.headers) ? data.headers : []};
+  }
   return Array.isArray(data?.results) ? data.results : [];
 }
 
@@ -3092,18 +3096,20 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
   requireReadKeys(request,['kind','query']);
   requireReadText(request.query);
   const lookups = {
-    catalog:[['세트마스터',1],['장비마스터',2]],
-    reservations:[['계약마스터',2],['확인요청',11]],
-    request:[['확인요청',1]],
-    trade:[['계약마스터',1],['스케줄상세',2]]
+    catalog:[['세트마스터','A'],['장비마스터','B']],
+    reservations:[['계약마스터','B'],['확인요청','K']],
+    request:[['확인요청','A']],
+    trade:[['계약마스터','A'],['스케줄상세','B']]
   };
   const targets = lookups[request.kind];
   if (!targets) throw new Error('invalid_read_kind');
   if (request.kind === 'request' && !/^RQ-\d{6}-\d{3}$/.test(request.query)
     || request.kind === 'trade' && !/^\d{6}-\d{3}$/.test(request.query)) throw new Error('invalid_read_id');
   const sources = await Promise.all(targets.map(async ([sheet,col]) => {
-    const rows = await fetchGasSearch(config,sheet,col,request.query);
-    return {sheet,rows:rows.slice(0,100),truncated:rows.length>100};
+    const {rows,headers} = await fetchGasSearch(config,sheet,col,request.query,{withHeaders:true});
+    const matched = ['request','trade'].includes(request.kind)
+      ? rows.filter(row => text(row?.data?.[col.charCodeAt(0)-65]).trim() === request.query) : rows;
+    return {sheet,headers,rows:matched.slice(0,100),truncated:matched.length>100};
   }));
   return {sources};
 }
