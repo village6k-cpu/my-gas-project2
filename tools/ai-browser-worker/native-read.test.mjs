@@ -95,3 +95,16 @@ test('customerDB errors and ambiguous unit prices cannot become a complete quote
   assert.equal(result.complete,false);
   assert.equal(result.totalVatIncluded,null);
 });
+
+test('native record lookup keeps real headers and exact IDs with the GAS column contract',async()=>{
+  const c=config();
+  c.fetchImpl=async(url)=>{
+    const u=new URL(url);
+    assert.equal(u.searchParams.get('col'),'A');
+    return {ok:true,text:async()=>JSON.stringify({headers:['요청ID','반출일'],results:[
+      {data:['RQ-260909-001','2026-09-09']},{data:['RQ-260909-0010','2026-09-10']}]})};
+  };
+  const result=await worker.executeVillageReadOnlyLookup(c,{kind:'request',query:'RQ-260909-001'});
+  assert.deepEqual(result.sources[0].headers,['요청ID','반출일']);
+  assert.equal(result.sources[0].rows.length,1);
+});
