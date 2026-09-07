@@ -9,6 +9,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import villageTimeContract from '../../scripts/windows/village-time-contract.js';
 import { INQUIRY_LIFECYCLE_PROMPT, inquiryLifecycleErrors, validatePendingInquiryRevision } from './inquiry-lifecycle.mjs';
 import { reconcileConfirmationBatchReceipt } from './confirmation-batch-reconciliation.mjs';
+import { isSharedHermesGatewayIdle } from './shared-hermes-browser.mjs';
 import {
   inquiryConversationKey,
   actionFamilyForFollowUp,
@@ -6430,13 +6431,25 @@ export async function closeKakaoConversationWindow(windowInfo = {}, {
 export async function closeKakaoConversationTargetViaDevtools(targetInfo = {}, {
   cdpBaseUrl = kakaoDevtoolsBaseUrlFromEnv(),
   timeoutMs = 10000,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  sharedGatewayIdle = isSharedHermesGatewayIdle
 } = {}) {
   if (!targetInfo?.id || !cdpBaseUrl) return { status: 'skipped_missing_devtools_target' };
   if (targetInfo.close_safe === false) {
     return { status: 'skipped_unsafe_main_target', targetId: targetInfo.id };
   }
-  const body = await devtoolsFetchTextWithFallbackMethod(cdpBaseUrl, `/json/close/${encodeURIComponent(targetInfo.id)}`, { fetchImpl, timeoutMs });
+  if (!sharedGatewayIdle()) return { status: 'skipped_shared_gateway_active_or_unknown', targetId: targetInfo.id };
+  const targets = await devtoolsFetchJson(cdpBaseUrl, '/json/list', { fetchImpl, timeoutMs });
+  if (!Array.isArray(targets) || !targets.some((target) => target.id !== targetInfo.id && isKakaoMainListTarget(target))) {
+    return { status: 'skipped_unsafe_main_target', targetId: targetInfo.id };
+  }
+  if (!targetInfo.url || !targets.some((target) => target.type === 'page' && target.id === targetInfo.id
+    && target.url === targetInfo.url && !isKakaoMainListTarget(target))) {
+    return { status: 'skipped_changed_target', targetId: targetInfo.id };
+  }
+  if (!sharedGatewayIdle()) return { status: 'skipped_shared_gateway_active_or_unknown', targetId: targetInfo.id };
+  // Do not retry with stale activity/target evidence after a slow failed close.
+  const body = await devtoolsFetchText(cdpBaseUrl, `/json/close/${encodeURIComponent(targetInfo.id)}`, { fetchImpl, timeoutMs });
   return { status: 'closed_conversation_target', targetId: targetInfo.id, body: String(body || '').slice(0, 200) };
 }
 

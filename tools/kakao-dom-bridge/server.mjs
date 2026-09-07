@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
+import { isSharedHermesGatewayIdle } from '../ai-browser-worker/shared-hermes-browser.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
 import {
@@ -3704,6 +3705,15 @@ export function compactQueueAuditRecord(filename, object = {}) {
   // normalized event is already persisted in Supabase. Logging raw extension
   // DOM snapshots here used tens of GB per day and eventually made the bridge
   // unreliable. Keep the fields consumed by the watchdog and short evidence.
+  if (filename === 'tab-cleanups.ndjson') {
+    return {
+      at: object.at || '', finishedAt: object.finishedAt || '',
+      reason: compactQueueAuditText(object.reason, 100), skipped: object.skipped === true,
+      closed: object.closed || 0,
+      closedTargetIds: (object.closedTargetIds || []).slice(0, 100).map((id) => compactQueueAuditText(id, 128)),
+      errors: (object.errors || []).slice(0, 5).map((error) => compactQueueAuditText(error, 300))
+    };
+  }
   const base = {
     at: object.at || '',
     receivedAt: object.receivedAt || '',
@@ -6315,10 +6325,8 @@ async function fetchDevtools(pathname, init = {}) {
 }
 
 async function closeDevtoolsTab(tabId) {
-  try {
-    const response = await fetchDevtools(`/json/close/${encodeURIComponent(tabId)}`, { method: 'PUT' });
-    if (response.ok) return true;
-  } catch {}
+  // A retry after a failed/slow close would reuse stale ownership checks.
+  // GET is the CDP close endpoint; leave failure to a fresh cleanup cycle.
   try {
     const response = await fetchDevtools(`/json/close/${encodeURIComponent(tabId)}`);
     return response.ok;
@@ -6334,10 +6342,10 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
   }
   if (state.tabCleanupRunning) return { skipped: true, reason: 'already_running' };
   state.tabCleanupRunning = true;
-  const result = { at: nowIso(), reason, closed: 0, targets: [], errors: [] };
+  const result = { at: nowIso(), reason, closed: 0, closedTargetIds: [], targets: [], errors: [] };
   try {
     const gatewayIdle = async () => {
-      if (state.workerRunning || state.activeWorkerRuns > 0) return false;
+      if (state.workerRunning || state.activeWorkerRuns > 0 || !isSharedHermesGatewayIdle()) return false;
       if (!gatewayChannel) return true;
       // Read local execution state, independently of remote/history health checks.
       const status = await gatewayChannel.status();
@@ -6346,10 +6354,11 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
         || Array.isArray(status.application_counts)) {
         throw new Error('Gateway tab cleanup status unavailable');
       }
-      return status.counts.claimed === 0 && ['pending', 'claimed', 'applying', 'applied']
+      return !state.workerRunning && state.activeWorkerRuns === 0 && isSharedHermesGatewayIdle()
+        && status.counts.claimed === 0 && ['pending', 'claimed', 'applying', 'applied']
         .every((key) => !Object.hasOwn(status.application_counts, key) || status.application_counts[key] === 0);
     };
-    if (!await gatewayIdle()) return { ...result, skipped: true, reason: 'gateway_or_worker_active' };
+    if (!await gatewayIdle()) return Object.assign(result, { skipped: true, reason: 'gateway_or_worker_active' });
     const response = await fetchDevtools('/json/list');
     if (!response.ok) throw new Error(`DevTools tab list failed: ${response.status}`);
     const tabs = await response.json();
@@ -6357,7 +6366,7 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
     // Without a known list page, even a conversation page may be the last
     // browser/control surface. Preserve it until the list is restored.
     if (!pages.some((tab) => isMainKakaoChatListUrl(tab.url))) {
-      return { ...result, skipped: true, reason: 'main_kakao_list_missing' };
+      return Object.assign(result, { skipped: true, reason: 'main_kakao_list_missing' });
     }
     const targets = pages.filter((tab) => isKakaoConversationUrl(tab.url));
     result.targets = targets.map((tab) => ({ id: tab.id, title: tab.title || '', url: tab.url || '' }));
@@ -6367,7 +6376,27 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
         result.reason = 'gateway_or_worker_active';
         break;
       }
-      if (await closeDevtoolsTab(tab.id)) result.closed += 1;
+      // Another client can navigate/close the list while the sweep awaits I/O.
+      // Never use an old target list to close the new control surface.
+      const freshResponse = await fetchDevtools('/json/list');
+      if (!freshResponse.ok) throw new Error(`DevTools tab recheck failed: ${freshResponse.status}`);
+      const freshTabs = await freshResponse.json();
+      if (!Array.isArray(freshTabs) || !freshTabs.some((page) => page?.type === 'page'
+        && page.id !== tab.id && isMainKakaoChatListUrl(page.url))) {
+        result.skipped = true;
+        result.reason = 'main_kakao_list_missing';
+        break;
+      }
+      if (!freshTabs.some((page) => page?.type === 'page' && page.id === tab.id && page.url === tab.url)) continue;
+      if (!await gatewayIdle()) {
+        result.skipped = true;
+        result.reason = 'gateway_or_worker_active';
+        break;
+      }
+      if (await closeDevtoolsTab(tab.id)) {
+        result.closed += 1;
+        result.closedTargetIds.push(tab.id);
+      }
     }
     state.closedKakaoTabs += result.closed;
     return result;
@@ -6379,7 +6408,7 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
     result.finishedAt = nowIso();
     state.lastTabCleanup = result;
     state.tabCleanupRunning = false;
-    if (result.closed || result.errors.length) appendNdjson('tab-cleanups.ndjson', result);
+    if (result.closed || result.errors.length || result.skipped) appendNdjson('tab-cleanups.ndjson', result);
   }
 }
 

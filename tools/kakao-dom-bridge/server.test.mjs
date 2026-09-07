@@ -6346,7 +6346,7 @@ test('bridge queue replaces pending same-room work and cleans conversation tabs 
   assert.match(source, /cleanupIdleKakaoConversationTabs\('worker_finished', \{ allowQueued: true \}\)/);
 });
 
-async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 0 }, application_counts: {} }], activeWorkerRuns = 0 }) {
+async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 0 }, application_counts: {} }], activeWorkerRuns = 0, sharedIdle = [true], tabSnapshots = [tabs], onStatusRead = async () => {} }) {
   const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
   const extract = (name) => {
     const start = source.indexOf(`function ${name}(`);
@@ -6355,25 +6355,118 @@ async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 
   };
   const closed = [];
   let statusReads = 0;
+  let sharedReads = 0;
+  let tabReads = 0;
+  const audits = [];
   const state = { workerRunning: false, activeWorkerRuns, workerQueueLength: 0, rooms: new Map(), tabCleanupRunning: false, closedKakaoTabs: 0 };
   const channel = { status: async () => {
     const value = statuses[Math.min(statusReads++, statuses.length - 1)];
+    await onStatusRead(statusReads);
     if (value instanceof Error) throw value;
     return value;
   } };
-  const cleanup = new Function('CONFIG', 'state', 'gatewayChannel', 'fetchDevtools', 'closeDevtoolsTab', 'nowIso', 'appendNdjson',
+  const cleanup = new Function('CONFIG', 'state', 'gatewayChannel', 'fetchDevtools', 'closeDevtoolsTab', 'nowIso', 'appendNdjson', 'isSharedHermesGatewayIdle',
     `${extract('isMainKakaoChatListUrl')}\n${extract('isKakaoConversationUrl')}\n${extract('cleanupIdleKakaoConversationTabs')}\nreturn cleanupIdleKakaoConversationTabs;`)(
     { kakaoTabCleanupEnabled: true }, state, channel,
-    async () => ({ ok: true, json: async () => tabs }),
+    async () => ({ ok: true, json: async () => tabSnapshots[Math.min(tabReads++, tabSnapshots.length - 1)] }),
     async (id) => { closed.push(id); return true; },
-    () => '2026-09-07T13:53:04.000Z', () => {}
+    () => '2026-09-07T13:53:04.000Z', (name, value) => audits.push(compactQueueAuditRecord(name, value)),
+    () => sharedIdle[Math.min(sharedReads++, sharedIdle.length - 1)]
   );
   const result = await cleanup('interval');
-  return { result, closed, statusReads };
+  return { result, closed, statusReads, audits };
 }
 
 const cleanupMainTab = { type: 'page', id: 'main', url: 'https://business.kakao.com/space/123/channel/_test/chats' };
 const cleanupConversationTab = { type: 'page', id: 'conversation', url: 'https://business.kakao.com/space/123/channel/_test/chats/456' };
+
+test('idle Kakao cleanup preserves Slack Hermes work even when the Kakao Gateway is idle', async () => {
+  for (const sharedIdle of [[false], [true, false], [true, true, false]]) {
+    const { closed } = await syntheticIdleTabCleanup({ tabs: [cleanupMainTab, cleanupConversationTab], sharedIdle });
+    assert.deepEqual(closed, [], 'a Slack turn can own the shared browser outside the Kakao queue');
+  }
+});
+
+test('idle Kakao cleanup rechecks Slack after awaiting the final Kakao queue read', async () => {
+  const sharedIdle = [true];
+  const { closed } = await syntheticIdleTabCleanup({
+    tabs: [cleanupMainTab, cleanupConversationTab], sharedIdle,
+    onStatusRead: async (count) => { if (count === 3) sharedIdle[0] = false; }
+  });
+  assert.deepEqual(closed, []);
+});
+
+test('CDP sweep close does not retry a failed close against a potentially changed target', async () => {
+  const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('async function closeDevtoolsTab(');
+  const end = source.indexOf('\n}\n', start) + 2;
+  const attempts = [];
+  const close = new Function('fetchDevtools', source.slice(start, end) + ';return closeDevtoolsTab;')(
+    async (url, init = {}) => { attempts.push({ url, method: init.method || 'GET' }); throw new Error('transient disconnect'); }
+  );
+  assert.equal(await close('owned-tab'), false);
+  assert.deepEqual(attempts, [{ url: '/json/close/owned-tab', method: 'GET' }]);
+});
+
+test('idle Kakao cleanup rechecks the control page and target URL before each close', async () => {
+  const initial = [cleanupMainTab, cleanupConversationTab];
+  for (const changed of [
+    [cleanupConversationTab],
+    [cleanupMainTab, { ...cleanupConversationTab, url: cleanupMainTab.url }],
+    [cleanupMainTab, { ...cleanupConversationTab, url: cleanupConversationTab.url + '7' }]
+  ]) {
+    const { closed } = await syntheticIdleTabCleanup({ tabs: initial, tabSnapshots: [initial, changed] });
+    assert.deepEqual(closed, [], 'the original CDP list is not authority to close a changed target');
+  }
+});
+
+test('idle Kakao cleanup audit preserves closure evidence without customer titles or URLs', async () => {
+  const { audits } = await syntheticIdleTabCleanup({ tabs: [cleanupMainTab, { ...cleanupConversationTab, title: 'private customer' }] });
+  assert.equal(audits[0].closed, 1);
+  assert.deepEqual(audits[0].closedTargetIds, ['conversation']);
+  assert.equal(audits[0].finishedAt, '2026-09-07T13:53:04.000Z');
+  assert.doesNotMatch(JSON.stringify(audits), /private customer|https:/);
+});
+
+test('idle Kakao cleanup audit retains early skip decisions as well as closes', async () => {
+  for (const fixture of [
+    { tabs: [cleanupMainTab, cleanupConversationTab], sharedIdle: [false] },
+    { tabs: [cleanupConversationTab] }
+  ]) {
+    const { result, audits } = await syntheticIdleTabCleanup(fixture);
+    assert.equal(result.skipped, true);
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].skipped, true);
+    assert.equal(audits[0].reason, result.reason);
+    assert.equal(audits[0].closed, 0);
+  }
+});
+
+test('shared Hermes idle proof requires a live valid idle Gateway and rereads its state', async () => {
+  const { isSharedHermesGatewayIdle } = await import('../ai-browser-worker/shared-hermes-browser.mjs');
+  assert.equal(typeof isSharedHermesGatewayIdle, 'function');
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-shared-gateway-'));
+  const statePath = path.join(directory, 'gateway_state.json');
+  const idle = { kind: 'hermes-gateway', pid: process.pid, gateway_state: 'running', active_agents: 0, updated_at: new Date().toISOString() };
+  try {
+    assert.equal(isSharedHermesGatewayIdle({ statePath }), false);
+    await writeFile(statePath, JSON.stringify(idle));
+    assert.equal(isSharedHermesGatewayIdle({ statePath }), true);
+    for (const changed of [
+      { ...idle, active_agents: 1 }, { ...idle, active_agents: '0' },
+      { ...idle, active_agents: -1 }, { ...idle, gateway_state: 'starting' },
+      { ...idle, kind: 'unrelated' }, { ...idle, pid: 0 },
+      { ...idle, pid: 2147483647 }, { ...idle, updated_at: 'invalid' }, {}
+    ]) {
+      await writeFile(statePath, JSON.stringify(changed));
+      assert.equal(isSharedHermesGatewayIdle({ statePath }), false);
+    }
+    await writeFile(statePath, '{');
+    assert.equal(isSharedHermesGatewayIdle({ statePath }), false);
+    await writeFile(statePath, JSON.stringify({ ...idle, gateway_state: 'draining' }));
+    assert.equal(isSharedHermesGatewayIdle({ statePath }), true);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test('idle Kakao cleanup preserves the only Kakao control page without a main list', async () => {
   for (const tabs of [[cleanupConversationTab], [{ type: 'page', id: 'other', url: 'https://example.com' }, cleanupConversationTab]]) {
