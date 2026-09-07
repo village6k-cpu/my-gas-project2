@@ -6329,20 +6329,44 @@ async function closeDevtoolsTab(tabId) {
 
 async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueued = false } = {}) {
   if (!CONFIG.kakaoTabCleanupEnabled) return { skipped: true };
-  if (state.workerRunning || (!allowQueued && (state.workerQueueLength > 0 || state.rooms.size > 0))) {
+  if (state.workerRunning || state.activeWorkerRuns > 0 || (!allowQueued && (state.workerQueueLength > 0 || state.rooms.size > 0))) {
     return { skipped: true, reason: 'worker_or_debounce_active' };
   }
   if (state.tabCleanupRunning) return { skipped: true, reason: 'already_running' };
   state.tabCleanupRunning = true;
   const result = { at: nowIso(), reason, closed: 0, targets: [], errors: [] };
   try {
+    const gatewayIdle = async () => {
+      if (state.workerRunning || state.activeWorkerRuns > 0) return false;
+      if (!gatewayChannel) return true;
+      // Read local execution state, independently of remote/history health checks.
+      const status = await gatewayChannel.status();
+      if (!Number.isInteger(status?.counts?.claimed) || status.counts.claimed < 0
+        || !status.application_counts || typeof status.application_counts !== 'object'
+        || Array.isArray(status.application_counts)) {
+        throw new Error('Gateway tab cleanup status unavailable');
+      }
+      return status.counts.claimed === 0 && ['pending', 'claimed', 'applying', 'applied']
+        .every((key) => !Object.hasOwn(status.application_counts, key) || status.application_counts[key] === 0);
+    };
+    if (!await gatewayIdle()) return { ...result, skipped: true, reason: 'gateway_or_worker_active' };
     const response = await fetchDevtools('/json/list');
     if (!response.ok) throw new Error(`DevTools tab list failed: ${response.status}`);
     const tabs = await response.json();
-    const targets = (Array.isArray(tabs) ? tabs : [])
-      .filter((tab) => tab?.type === 'page' && tab.id && isKakaoConversationUrl(tab.url));
+    const pages = (Array.isArray(tabs) ? tabs : []).filter((tab) => tab?.type === 'page' && tab.id);
+    // Without a known list page, even a conversation page may be the last
+    // browser/control surface. Preserve it until the list is restored.
+    if (!pages.some((tab) => isMainKakaoChatListUrl(tab.url))) {
+      return { ...result, skipped: true, reason: 'main_kakao_list_missing' };
+    }
+    const targets = pages.filter((tab) => isKakaoConversationUrl(tab.url));
     result.targets = targets.map((tab) => ({ id: tab.id, title: tab.title || '', url: tab.url || '' }));
     for (const tab of targets) {
+      if (!await gatewayIdle()) {
+        result.skipped = true;
+        result.reason = 'gateway_or_worker_active';
+        break;
+      }
       if (await closeDevtoolsTab(tab.id)) result.closed += 1;
     }
     state.closedKakaoTabs += result.closed;

@@ -6346,6 +6346,72 @@ test('bridge queue replaces pending same-room work and cleans conversation tabs 
   assert.match(source, /cleanupIdleKakaoConversationTabs\('worker_finished', \{ allowQueued: true \}\)/);
 });
 
+async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 0 }, application_counts: {} }], activeWorkerRuns = 0 }) {
+  const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  const extract = (name) => {
+    const start = source.indexOf(`function ${name}(`);
+    const end = source.indexOf('\n}\n', start) + 2;
+    return source.slice(source.slice(start - 6, start) === 'async ' ? start - 6 : start, end);
+  };
+  const closed = [];
+  let statusReads = 0;
+  const state = { workerRunning: false, activeWorkerRuns, workerQueueLength: 0, rooms: new Map(), tabCleanupRunning: false, closedKakaoTabs: 0 };
+  const channel = { status: async () => {
+    const value = statuses[Math.min(statusReads++, statuses.length - 1)];
+    if (value instanceof Error) throw value;
+    return value;
+  } };
+  const cleanup = new Function('CONFIG', 'state', 'gatewayChannel', 'fetchDevtools', 'closeDevtoolsTab', 'nowIso', 'appendNdjson',
+    `${extract('isMainKakaoChatListUrl')}\n${extract('isKakaoConversationUrl')}\n${extract('cleanupIdleKakaoConversationTabs')}\nreturn cleanupIdleKakaoConversationTabs;`)(
+    { kakaoTabCleanupEnabled: true }, state, channel,
+    async () => ({ ok: true, json: async () => tabs }),
+    async (id) => { closed.push(id); return true; },
+    () => '2026-09-07T13:53:04.000Z', () => {}
+  );
+  const result = await cleanup('interval');
+  return { result, closed, statusReads };
+}
+
+const cleanupMainTab = { type: 'page', id: 'main', url: 'https://business.kakao.com/space/123/channel/_test/chats' };
+const cleanupConversationTab = { type: 'page', id: 'conversation', url: 'https://business.kakao.com/space/123/channel/_test/chats/456' };
+
+test('idle Kakao cleanup preserves the only Kakao control page without a main list', async () => {
+  for (const tabs of [[cleanupConversationTab], [{ type: 'page', id: 'other', url: 'https://example.com' }, cleanupConversationTab]]) {
+    const { closed } = await syntheticIdleTabCleanup({ tabs });
+    assert.deepEqual(closed, [], 'closing the only Kakao page destroys the browser/control surface');
+  }
+});
+
+test('idle Kakao cleanup still closes conversation tabs with a preserved main list', async () => {
+  const { closed, statusReads } = await syntheticIdleTabCleanup({
+    tabs: [cleanupMainTab, cleanupConversationTab],
+    statuses: [{ counts: { claimed: 0, failed: 15 }, application_counts: { failed: 369, finalized: 816 } }]
+  });
+  assert.deepEqual(closed, ['conversation']);
+  assert.ok(statusReads > 0, 'read the local Gateway channel independently of remote health/history');
+});
+
+test('idle Kakao cleanup preserves tabs while Gateway claims or applications are active', async () => {
+  for (const status of [
+    { counts: { claimed: 1 }, application_counts: {} },
+    { counts: { claimed: 0 }, application_counts: { applying: 1 } },
+    { counts: { claimed: 0 }, application_counts: { applied: 1 } }
+  ]) {
+    const { closed } = await syntheticIdleTabCleanup({ tabs: [cleanupMainTab, cleanupConversationTab], statuses: [status] });
+    assert.deepEqual(closed, []);
+  }
+  const { closed } = await syntheticIdleTabCleanup({ tabs: [cleanupMainTab, cleanupConversationTab], activeWorkerRuns: 1 });
+  assert.deepEqual(closed, []);
+});
+
+test('idle Kakao cleanup rechecks Gateway after reading CDP targets and fails closed on status errors', async () => {
+  const idle = { counts: { claimed: 0 }, application_counts: {} };
+  for (const statuses of [[idle, { counts: { claimed: 1 }, application_counts: {} }], [new Error('status unavailable')], [{}], [{ counts: { claimed: 0 } }]]) {
+    const { closed } = await syntheticIdleTabCleanup({ tabs: [cleanupMainTab, cleanupConversationTab], statuses });
+    assert.deepEqual(closed, []);
+  }
+});
+
 test('stable job identity ignores a disappearing Kakao unread badge for the same message', async () => {
   const { semanticPreviewIdentity } = await import('./server.mjs');
   assert.equal(
