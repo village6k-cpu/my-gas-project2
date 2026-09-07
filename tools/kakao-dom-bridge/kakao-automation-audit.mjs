@@ -355,7 +355,7 @@ function failureEvidence(receipt, base) {
   }
   const attemptedStage = safeOptionalText(receipt.attempted_stage, 120);
   if (attemptedStage) result.attempted_stage = attemptedStage;
-  const errorType = safeOptionalText(receipt.error?.type, 120);
+  const errorType = safeOptionalText(receipt.error?.type || receipt.error?.code, 120);
   if (errorType) result.error_type = errorType;
   return result;
 }
@@ -367,23 +367,37 @@ function outcomeSummary({ outcome, success, partial, failed, blocked }) {
   return failed;
 }
 
-function buildConfirmationEvent({ durableJob, operation, receipt, customerLabel, historicalImport }) {
-  const outcome = statusOutcome(receipt.status);
+function buildConfirmationEvent({ durableJob, operation, receipt, customerLabel, historicalImport,
+  eventAuthorityId = operation.operation_id, auditReceiptId = receipt.receipt_id, batchIndex = null }) {
+  let outcome = receipt.status === 'no_action' ? 'no_action' : statusOutcome(receipt.status);
   const sheet = isRecord(receipt.authoritative_sheet_result) ? receipt.authoritative_sheet_result : null;
-  if (outcome === 'success' && (!sheet || sheet.success !== true || typeof sheet.reqID !== 'string')) {
+  const uncertain = sheet?.uncertainWrite === true || sheet?.uncertain_write === true;
+  if (uncertain && (outcome === 'success' || outcome === 'no_action')) outcome = 'partial_success';
+  const tradeOnly = sheet?.alreadyRegistered === true && !sheet.reqID;
+  const tradeIds = [sheet?.matchedRegisteredTradeId, sheet?.tradeID]
+    .filter(value => value !== undefined && value !== null && value !== '');
+  if (tradeOnly && (tradeIds.length === 0 || tradeIds.some(value => typeof value !== 'string'
+    || !/^\d{6}-\d{3}$/.test(value) || value !== tradeIds[0]))) {
     throw new TypeError('trusted tool receipt set is invalid');
   }
-  const targetId = safeOptionalText(sheet?.reqID, 160);
+  const reconciled = tradeOnly && sheet.success === true && !uncertain && (outcome === 'success' || outcome === 'no_action');
+  if (reconciled) outcome = 'no_action';
+  if (outcome === 'success' && (!sheet || sheet.success !== true || typeof sheet.reqID !== 'string' || !/^RQ-\d{6}-\d{3}$/.test(sheet.reqID))) {
+    throw new TypeError('trusted tool receipt set is invalid');
+  }
+  const targetId = safeOptionalText(tradeOnly ? tradeIds[0] : sheet?.reqID, 160);
   const mutation = isRecord(sheet?.staff_confirmed_pending_mutation) ? sheet.staff_confirmed_pending_mutation : null;
   const replaced = Array.isArray(sheet?.replacedReqIDs) ? sheet.replacedReqIDs.filter((item) => typeof item === 'string') : [];
-  const actionType = replaced.length > 0 || mutation?.target_request_id ? 'update' : 'create';
+  const actionType = tradeOnly || replaced.length > 0 || mutation?.target_request_id ? 'update' : 'create';
   const before = equipmentText(mutation?.expected_before);
   const after = equipmentText(mutation?.final_plan);
   const changeItems = before !== null || after !== null
     ? [{ field: 'equipment', before, after }]
     : [];
   const label = targetId || '대상 미확정';
-  const summary = outcomeSummary({
+  const summary = reconciled ? `기존 등록 거래 ${targetId}에 요청 내용이 이미 반영되어 있음을 확인했습니다.`
+    : outcome === 'no_action' ? '확인요청에 추가로 반영한 변경이 없습니다.'
+    : outcomeSummary({
     outcome,
     success: `확인요청 ${label}을 ${actionType === 'update' ? '수정' : '생성'}했습니다.`,
     partial: `확인요청 ${label}이 부분 반영되었습니다.`,
@@ -391,29 +405,84 @@ function buildConfirmationEvent({ durableJob, operation, receipt, customerLabel,
     blocked: '확인요청 자동처리가 차단되었습니다.'
   });
   return normalizeKakaoAutomationAuditEvent({
-    event_key: authorityEventKey('confirmation_request', operation.operation_id),
+    event_key: authorityEventKey('confirmation_request', eventAuthorityId),
     job_id: durableJob.job_id,
     room_revision: durableJob.room_revision,
     operation_id: operation.operation_id,
-    receipt_id: receipt.receipt_id,
+    receipt_id: auditReceiptId,
     occurred_at: operation.completed_at || receipt.created_at,
     effect_type: 'confirmation_request',
     action_type: actionType,
     outcome,
     customer_label: customerLabel,
-    target_type: 'request',
+    target_type: tradeOnly ? 'trade' : 'request',
     target_id: targetId,
     summary,
     change_items: changeItems,
     outbound_text: null,
-    evidence: failureEvidence(receipt, {
+    evidence: failureEvidence(batchIndex === null ? receipt : { ...receipt, attempted_stage: `batch_child_${batchIndex}` }, {
       schema: receipt.schema,
       status: receipt.status,
-      readback: Boolean(sheet && sheet.success === true)
+      readback: Boolean(sheet && sheet.success === true && !uncertain)
     }),
     source_message_at: sourceMessageAt(durableJob),
     historical_import: Boolean(historicalImport)
   });
+}
+
+function buildConfirmationEvents(args) {
+  const { receipt, operation } = args;
+  const sheet = receipt.authoritative_sheet_result;
+  if (sheet?.batch !== true && !Object.hasOwn(receipt, 'request_results')) return [buildConfirmationEvent(args)];
+  const entries = sheet?.request_results;
+  const unattempted = sheet?.unattempted_indices;
+  const invalid = () => { throw new TypeError('trusted tool receipt set is invalid'); };
+  if (sheet?.batch !== true || !Array.isArray(entries) || entries.length > 8 || !Array.isArray(unattempted)
+    || entries.length + unattempted.length < 2 || entries.length + unattempted.length > 8
+    || unattempted.some((index, offset) => index !== entries.length + offset)
+    || !sameValue(entries, receipt.request_results)
+    || !sameValue(unattempted, receipt.unattempted_indices)
+    || !Array.isArray(receipt.child_receipts)
+    || !sameValue(entries.map(entry => entry?.receipt).filter(Boolean), receipt.child_receipts)) invalid();
+  const projected = [];
+  const requestIds = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!isRecord(entry) || entry.index !== index || !Array.isArray(entry.request_ids)) invalid();
+    const child = entry.receipt;
+    if (child === null) {
+      if (entry.status !== 'uncertain' || entry.request_ids.length > 0) invalid();
+      projected.push({ index, receipt: {
+        schema: receipt.schema, receipt_id: receipt.receipt_id, created_at: receipt.created_at,
+        status: 'partial_success', authoritative_sheet_result: null,
+        error: { code: 'confirmation_batch_execution_uncertain' }
+      } });
+      continue;
+    }
+    if (!isRecord(child) || child.schema !== receipt.schema
+      || child.job_id !== receipt.job_id || child.room_key !== receipt.room_key || child.room_revision !== receipt.room_revision
+      || typeof child.receipt_id !== 'string' || !child.receipt_id.trim()
+      || !['ok', 'failed', 'partial_success', 'no_action'].includes(child.status)
+      || entry.status !== child.status || !Array.isArray(child.availability_report)
+      || child.authoritative_sheet_result?.batch === true || Object.hasOwn(child, 'request_results')
+      || !sameValue(entry.authoritative_sheet_result, child.authoritative_sheet_result)) invalid();
+    canonicalTimestamp(child.created_at);
+    const childResult = child.authoritative_sheet_result;
+    const childIds = [...new Set([childResult?.reqID, ...(Array.isArray(childResult?.request_ids) ? childResult.request_ids : [])]
+      .filter(value => typeof value === 'string' && /^RQ-\d{6}-\d{3}$/.test(value)))];
+    if (!sameValue(childIds, entry.request_ids)) invalid();
+    requestIds.push(...childIds);
+    projected.push({ index, receipt: child });
+  }
+  const uniqueRequestIds = [...new Set(requestIds)];
+  if (!sameValue(uniqueRequestIds, sheet.request_ids) || !sameValue(uniqueRequestIds, receipt.request_ids)
+    || (sheet.reqID ?? null) !== (uniqueRequestIds[0] ?? null)
+    || sheet.success !== (receipt.status === 'ok')
+    || (receipt.status === 'ok' && (unattempted.length > 0 || projected.some(child => child.receipt.status !== 'ok')))) invalid();
+  return projected.map(child => buildConfirmationEvent({
+    ...args, receipt: child.receipt, auditReceiptId: receipt.receipt_id,
+    eventAuthorityId: `${operation.operation_id}\nbatch-child:${child.index}`, batchIndex: child.index
+  }));
 }
 
 function registeredSummary(actionType, tradeId, outcome) {
@@ -845,7 +914,7 @@ export function buildKakaoAutomationAuditEvents({
   const tool = unresolvedRegistration ? null : exactToolReceipt(durableJob);
   if (tool) {
     const args = { durableJob, ...tool, customerLabel, historicalImport };
-    if (tool.operation.tool === 'confirmation_request') events.push(buildConfirmationEvent(args));
+    if (tool.operation.tool === 'confirmation_request') events.push(...buildConfirmationEvents(args));
     else if (tool.operation.tool === 'confirmed_reservation_commit') events.push(buildConfirmedRegistrationEvent(args));
     else if (tool.operation.tool === 'registered_reservation_change') events.push(buildRegisteredEvent(args));
     else if (tool.operation.tool === 'document_send') events.push(buildDocumentEvent(args));

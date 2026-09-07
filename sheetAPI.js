@@ -48,8 +48,9 @@ function getConfirmationRequestSchema_() {
   return {
     fieldLanguage: "korean",
     required: ["예약자명", "장비"],
-    optional: ["반출일", "반출시간", "반납일", "반납시간", "일정미완성", "연락처", "할인유형", "업체명", "비고", "추가요청", "장비명원문보존"],
+    optional: ["반출일", "반출시간", "반납일", "반납시간", "일정미완성", "연락처", "할인유형", "업체명", "비고", "추가요청", "장비명원문보존", "customer_requested_pending_revision", "inquiry_disposition", "inquiry_source_evidence"],
     schedulePolicy: "장비 문의는 일정이 불완전해도 일정미완성=true와 빈 필드로 먼저 저장. 네 일정 필드가 모두 있을 때만 가용확인 실행",
+    lifecyclePolicy: "이미 등록된 동일 고객·호환 기간·장비 수량은 alreadyRegistered와 matchedRegisteredTradeId로 반환하며 reqID를 만들지 않음. 대기 문의 변경은 exact request_id/expected_before/expected_period/expected_set_components/source_evidence의 customer_requested_pending_revision 필요. 명시적 독립 대여만 inquiry_disposition=independent_rental 및 inquiry_source_evidence 허용; source_evidence의 customer_request/conversation_revision/conversation_evidence_hash/customer_message_ids는 신뢰 런타임이 실제 대화에 연결해야 함",
     formats: {
       반출일: "YYYY-MM-DD",
       반출시간: "HH:MM (두 자리, 예: 07:00)",
@@ -1630,10 +1631,11 @@ function runFunction(funcName, params) {
       var response = {
         success: true,
         function: funcName,
-        reqID: result.reqID,
         results: result.results,
         executionTime: (new Date() - startTime) + "ms"
       };
+      if (result.reqID) response.reqID = result.reqID;
+      if (result.alreadyRegistered === true) response.alreadyRegistered = true;
       if (result.duplicate) response.duplicate = true;
       if (result.completedExisting) response.completedExisting = true;
       if (typeof result.scheduleComplete === "boolean") response.scheduleComplete = result.scheduleComplete;
@@ -1650,10 +1652,12 @@ function runFunction(funcName, params) {
           return /^RQ-\d{6}-\d{3}$/.test(reqID);
         });
       }
-      if (result.staff_confirmed_pending_mutation &&
-          typeof result.staff_confirmed_pending_mutation === "object" &&
-          !Array.isArray(result.staff_confirmed_pending_mutation)) {
-        var pendingMutation = result.staff_confirmed_pending_mutation;
+      var pendingReceiptKey = result.customer_requested_pending_revision
+        ? "customer_requested_pending_revision" : "staff_confirmed_pending_mutation";
+      if (result[pendingReceiptKey] &&
+          typeof result[pendingReceiptKey] === "object" &&
+          !Array.isArray(result[pendingReceiptKey])) {
+        var pendingMutation = result[pendingReceiptKey];
         var cleanPendingPlan = function(rows) {
           return Array.isArray(rows) ? rows.map(function(row) {
             return {
@@ -1671,7 +1675,7 @@ function runFunction(funcName, params) {
             end_time: String(period.end_time || "").trim()
           };
         };
-        response.staff_confirmed_pending_mutation = {
+        response[pendingReceiptKey] = {
           target_scope: String(pendingMutation.target_scope || "").trim(),
           target_request_id: String(pendingMutation.target_request_id || "").trim().toUpperCase(),
           expected_before: cleanPendingPlan(pendingMutation.expected_before),
@@ -1885,7 +1889,18 @@ function runFunction(funcName, params) {
     this[funcName]();
   } catch (e) {
     if (!e.message.includes("Cannot call")) {
-      return { error: e.message };
+      var failure = { error: e.message };
+      if (funcName === "insertAndCheckRequest") {
+        if (e.code) failure.code = String(e.code);
+        ["existingRequestId", "effectiveRequestId"].forEach(function(field) {
+          if (/^RQ-\d{6}-\d{3}$/.test(String(e[field] || ""))) failure[field] = e[field];
+        });
+        ["existingRequestIds", "replacedReqIDs"].forEach(function(field) {
+          if (Array.isArray(e[field])) failure[field] = e[field].filter(function(id) { return /^RQ-\d{6}-\d{3}$/.test(String(id)); });
+        });
+        if (Array.isArray(e.appliedStages)) failure.appliedStages = e.appliedStages.map(String);
+      }
+      return failure;
     }
   }
   const endTime = new Date();

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
+import { executeConfirmationBatch } from '../ai-browser-worker/confirmation-batch.mjs';
 import {
   buildKakaoAutomationAuditEvents,
   createKakaoAutomationAuditStore,
@@ -80,6 +81,36 @@ function confirmationReceipt(overrides = {}) {
     error: null,
     ...overrides
   };
+}
+
+function batchChild(index, overrides = {}) {
+  return confirmationReceipt({
+    receipt_id: `receipt-batch-child-${index}`,
+    job_id: JOB_ID, room_key: ROOM_KEY, room_revision: ROOM_REVISION,
+    created_at: '2026-09-07T01:00:02.000Z',
+    authoritative_sheet_result: { success: true, reqID: `RQ-260907-00${index + 1}` },
+    ...overrides
+  });
+}
+
+function batchReceipt(children = [batchChild(0), batchChild(1)], { status = 'ok', unattemptedIndices = [] } = {}) {
+  const requestResults = children.map((receipt, index) => ({
+    index, status: receipt?.status ?? 'uncertain', receipt,
+    ...(receipt ? { authoritative_sheet_result: receipt.authoritative_sheet_result } : { error: { code: 'confirmation_batch_execution_uncertain' } }),
+    request_ids: receipt?.authoritative_sheet_result?.reqID ? [receipt.authoritative_sheet_result.reqID] : []
+  }));
+  const requestIds = requestResults.flatMap(result => result.request_ids);
+  return confirmationReceipt({
+    status,
+    receipt_id: 'receipt-batch-parent',
+    child_receipts: children.filter(Boolean), request_results: requestResults,
+    request_ids: requestIds, unattempted_indices: unattemptedIndices,
+    authoritative_sheet_result: {
+      success: status === 'ok', batch: true,
+      request_results: requestResults, request_ids: requestIds, unattempted_indices: unattemptedIndices,
+      ...(requestIds.length ? { reqID: requestIds[0] } : {})
+    }
+  });
 }
 
 function registeredReceipt(overrides = {}) {
@@ -250,6 +281,135 @@ test('trusted confirmation replacement maps to one immutable owner-readable audi
     source_message_at: '2026-09-07T01:00:00.000Z',
     historical_import: false
   });
+});
+
+test('two period batch projects distinct stable events under the one durable operation and parent receipt', () => {
+  const durableJob = baseJob({ receipt: batchReceipt() });
+  const events = buildKakaoAutomationAuditEvents({ durableJob });
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.map(event => event.target_id), ['RQ-260907-001', 'RQ-260907-002']);
+  assert.deepEqual(events.map(event => event.outcome), ['success', 'success']);
+  assert.deepEqual(events.map(event => event.operation_id), [CONFIRMATION_OPERATION, CONFIRMATION_OPERATION]);
+  assert.deepEqual(events.map(event => event.receipt_id), ['receipt-batch-parent', 'receipt-batch-parent']);
+  assert.notEqual(events[0].event_key, events[1].event_key);
+  assert.deepEqual(events.map(event => event.evidence.attempted_stage), ['batch_child_0', 'batch_child_1']);
+  assert.deepEqual(buildKakaoAutomationAuditEvents({ durableJob, historicalImport: true }).map(event => event.event_key), events.map(event => event.event_key));
+  const single = buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt: confirmationReceipt() }) });
+  assert.notEqual(events[0].event_key, single[0].event_key);
+});
+
+test('batch failure retains successful first period and audits failed second without inventing unattempted effects', () => {
+  const receipt = batchReceipt([
+    batchChild(0), batchChild(1, { status: 'failed', authoritative_sheet_result: null, error: { code: 'gas_rejected', message: 'private customer detail' } })
+  ], { status: 'partial_success', unattemptedIndices: [2] });
+  const events = buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt }) });
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.map(event => event.outcome), ['success', 'failed']);
+  assert.deepEqual(events.map(event => event.target_id), ['RQ-260907-001', null]);
+  assert.equal(events[1].evidence.error_type, 'gas_rejected');
+  assert.equal(JSON.stringify(events).includes('private customer detail'), false);
+});
+
+test('uncertain attempted batch child receives partial outcome and no fabricated target', () => {
+  const receipt = batchReceipt([batchChild(0), null], { status: 'partial_success', unattemptedIndices: [2] });
+  const events = buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt }) });
+  assert.equal(events.length, 2);
+  assert.equal(events[1].outcome, 'partial_success');
+  assert.equal(events[1].target_id, null);
+  assert.equal(events[1].evidence.readback, false);
+  assert.equal(events[1].evidence.error_type, 'confirmation_batch_execution_uncertain');
+});
+
+test('batch children must correlate to the authenticated parent job room and revision', () => {
+  for (const override of [{ job_id: 'other-job' }, { room_key: 'other-room' }, { room_revision: 8 }, { schema: 'other-schema' }]) {
+    const receipt = batchReceipt([batchChild(0), batchChild(1, override)]);
+    assert.throws(() => buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt }) }), /trusted tool receipt set is invalid/);
+  }
+});
+
+test('batch projection rejects duplicate indices and contradictory copied child evidence', () => {
+  const duplicateIndex = batchReceipt();
+  duplicateIndex.request_results[1].index = 0;
+  assert.throws(() => buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt: duplicateIndex }) }), /trusted tool receipt set is invalid/);
+  const contradictory = batchReceipt();
+  contradictory.authoritative_sheet_result.request_results = structuredClone(contradictory.request_results);
+  contradictory.authoritative_sheet_result.request_results[1].receipt.authoritative_sheet_result.reqID = 'RQ-260907-999';
+  assert.throws(() => buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt: contradictory }) }), /trusted tool receipt set is invalid/);
+});
+
+test('already registered trade reconciliation produces no-action trade audit without an RQ', () => {
+  const reconciled = batchChild(0, { authoritative_sheet_result: { success: true, alreadyRegistered: true, duplicate: true, matchedRegisteredTradeId: '260907-001' } });
+  const single = buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt: reconciled }) });
+  assert.equal(single[0].target_type, 'trade');
+  assert.equal(single[0].target_id, '260907-001');
+  assert.equal(single[0].outcome, 'no_action');
+  assert.match(single[0].summary, /기존 등록 거래/);
+  assert.equal(single[0].summary.includes('생성'), false);
+  const events = buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt: batchReceipt([reconciled, batchChild(1)]) }) });
+  assert.deepEqual(events.map(event => event.target_type), ['trade', 'request']);
+  assert.deepEqual(events.map(event => event.target_id), ['260907-001', 'RQ-260907-002']);
+  assert.deepEqual(events.map(event => event.outcome), ['no_action', 'success']);
+});
+
+test('trade-only reconciliation requires successful evidence and one real consistent trade id', () => {
+  for (const sheet of [
+    { success: true, alreadyRegistered: true },
+    { success: true, alreadyRegistered: true, matchedRegisteredTradeId: 'not-a-trade' },
+    { success: true, alreadyRegistered: true, matchedRegisteredTradeId: '260907-001', tradeID: '260907-002' }
+  ]) {
+    assert.throws(() => buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt: confirmationReceipt({ authoritative_sheet_result: sheet }) }) }), /trusted tool receipt set is invalid/);
+  }
+});
+
+test('ordinary child no-action is represented without a failure or success claim', () => {
+  const receipt = batchReceipt([batchChild(0), batchChild(1, { status: 'no_action', authoritative_sheet_result: null })], { status: 'partial_success', unattemptedIndices: [2] });
+  const events = buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt }) });
+  assert.equal(events[1].outcome, 'no_action');
+  assert.equal(events[1].summary.includes('실패'), false);
+  assert.equal(events[1].target_id, null);
+});
+
+test('real batch executor receipts project successful and uncertain periods without replay or shape adaptation', async () => {
+  const decision = { confirmation_requests: [1, 2, 3].map(day => ({
+    should_write_to_sheet: true,
+    sheet_row_candidate: { customer_name: 'Synthetic renter', phone: '', start_date: `2026-10-0${day}`, pickup_time: '09:00', end_date: `2026-10-0${day}`, return_time: '18:00' }
+  })) };
+  let executions = 0;
+  const receipt = await executeConfirmationBatch({
+    decision,
+    validateDecision: () => ({ valid: true }),
+    preflightDecision: async child => ({ ok: true, decision: child }),
+    executeDecision: async (_child, index) => {
+      executions += 1;
+      if (index === 1) throw new Error('Synthetic lost response');
+      return batchChild(index);
+    },
+    buildReceipt: ({ status, authoritativeSheetResult, availabilityReport, error }) => confirmationReceipt({
+      job_id: JOB_ID, room_key: ROOM_KEY, room_revision: ROOM_REVISION,
+      receipt_id: 'receipt-real-batch', created_at: '2026-09-07T01:00:02.000Z',
+      status, authoritative_sheet_result: authoritativeSheetResult, availability_report: availabilityReport, error
+    })
+  });
+  const events = buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt }) });
+  assert.equal(executions, 2);
+  assert.deepEqual(receipt.unattempted_indices, [2]);
+  assert.deepEqual(events.map(event => event.outcome), ['success', 'partial_success']);
+  assert.deepEqual(events.map(event => event.target_id), ['RQ-260907-001', null]);
+  assert.deepEqual(events.map(event => event.receipt_id), ['receipt-real-batch', 'receipt-real-batch']);
+});
+
+test('explicit uncertain evidence never becomes a successful audit from an ok child label', () => {
+  const uncertain = batchChild(1, { authoritative_sheet_result: { success: true, reqID: 'RQ-260907-002', uncertainWrite: true } });
+  const receipt = batchReceipt([batchChild(0), uncertain], { status: 'partial_success', unattemptedIndices: [2] });
+  const events = buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt }) });
+  assert.equal(events[1].outcome, 'partial_success');
+  assert.equal(events[1].evidence.readback, false);
+  assert.equal(events[1].target_id, 'RQ-260907-002');
+});
+
+test('batch preflight failure with zero attempted children creates no fictional effect event', () => {
+  const receipt = batchReceipt([], { status: 'failed', unattemptedIndices: [0, 1] });
+  assert.deepEqual(buildKakaoAutomationAuditEvents({ durableJob: baseJob({ receipt }) }), []);
 });
 
 test('trusted registered mutation and document send preserve typed action and authoritative target', () => {

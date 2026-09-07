@@ -1668,7 +1668,7 @@ test('staff-confirmed mutation prompt captures initial customer inquiries immedi
     { gatewayConfirmationToolAvailable: true }
   );
 
-  assert.match(prompt, /모든 고객 장비 문의[\s\S]*직원 답변을 기다리지 말고 즉시[\s\S]*village_confirmation_request/s);
+  assert.match(prompt, /new_inquiry.*immediately without waiting for staff approval/s);
   assert.match(prompt, /최초 확인요청 입력에는 staff_confirmed_mutation이 필요 없다/s);
   assert.match(prompt, /pending_request[\s\S]*equipment_add[\s\S]*village_confirmation_request[\s\S]*additions_only/i);
   assert.match(prompt, /pending_request[\s\S]*(equipment_remove|equipment_replace|equipment_quantity_change)[\s\S]*replace_full_plan/i);
@@ -4128,6 +4128,56 @@ function confirmationCatalogForDecision(decision) {
   };
 }
 
+test('inquiry lifecycle never writes declined, inventory-only, or already-applied conversations', () => {
+  for (const inquiry_disposition of ['declined', 'inventory_only', 'already_applied']) {
+    const decision = completeSheetDecision({ inquiry_disposition });
+    assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision).valid, false, inquiry_disposition);
+    assert.equal(workerModule.buildSheetAppendPayload(decision), null);
+  }
+});
+
+test('inquiry lifecycle accepts an AI-selected one-session period and rejects a contradictory duration', () => {
+  const decision = completeSheetDecision({
+    inquiry_disposition: 'new_inquiry',
+    sheet_row_candidate: {
+      schedule_basis: 'shop_single_session_default',
+      start_date: '2026-09-09', pickup_time: '08:00', end_date: '2026-09-10', return_time: '08:00'
+    }
+  });
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision).valid, true);
+  decision.sheet_row_candidate.end_date = '2026-09-11';
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision).valid, false);
+});
+
+test('inquiry lifecycle customer pending revision is separate from registration authority', () => {
+  const decision = completeSheetDecision({
+    inquiry_disposition: 'pending_revision',
+    existing_confirm_request_ids: ['RQ-260907-001'],
+    customer_requested_pending_revision: {
+      target_scope: 'pending_request', request_id: 'RQ-260907-001',
+      expected_before: [{ name: '소니 FX3 바디세트', quantity: 3 }],
+      expected_set_components: [],
+      expected_period: { start_date: '2026-07-24', start_time: '09:00', end_date: '2026-07-25', end_time: '18:00' },
+      source_evidence: { customer_request: '1대로 바꿔 주세요', conversation_revision: 7,
+        conversation_evidence_hash: 'a'.repeat(64), customer_message_ids: ['customer-7'] }
+    },
+    sheet_row_candidate: { equipment_write_mode: 'replace_full_plan' }
+  });
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision, { roomRevision: 7 }).valid, true);
+  const revisionArgs = workerModule.buildSheetAppendPayload(decision).args;
+  assert.ok(revisionArgs.customer_requested_pending_revision);
+  for (const field of ['할인유형','비고','추가요청']) assert.equal(Object.hasOwn(revisionArgs, field), false, field);
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision, { roomRevision: 8 }).valid, false);
+  decision.customer_requested_pending_revision.expected_period.end_date = '';
+  decision.customer_requested_pending_revision.expected_period.end_time = '';
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision, {roomRevision:7}).valid,true);
+  delete decision.customer_requested_pending_revision.expected_period.end_time;
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision, {roomRevision:7}).valid,false);
+  decision.customer_requested_pending_revision.expected_period.end_time = '';
+  decision.reservation_inquiry.already_registered = true;
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision, { roomRevision: 7 }).valid, false);
+});
+
 test('validateAiDecisionContract accepts every typed registered mutation kind and rejects unsafe registered authority', () => {
   for (const kind of [
     'equipment_add',
@@ -5358,9 +5408,8 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.match(prompt, /JOB EVIDENCE FROM SUPABASE/);
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
-  // 2026-08-24: 장비별 catalog_match_status와 exact catalog 필드가 추가되어 기본 계약이 약 20.2KB다.
-  // payload 미포함 검증은 위의 x.repeat(1000) assert가 담당하므로 계약 본문 상한은 21KB로 둔다.
-  assert.ok(prompt.length < 21000, `prompt too large: ${prompt.length}`);
+  // Bound the complete policy/schema including explicit inquiry lifecycle evidence.
+  assert.ok(prompt.length < 28000, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {
@@ -5614,45 +5663,22 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   assert.match(prompt, /할인유형: 고객DB I열이 카톡보다 우선/s);
   assert.match(prompt, /학생.*개인사업자\/프리랜서.*단골.*제휴.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
-  assert.match(prompt, /모든 고객 장비 문의.*확인요청 입력이 기본/s);
-  assert.match(prompt, /기존 등록.*기존 RQ.*staff_confirmed_mutation/s);
+  assert.match(prompt, /new_inquiry.*capture the complete currently requested plan immediately/s);
+  assert.match(prompt, /customer_requested_pending_revision.*staff_confirmed_mutation/s);
   assert.doesNotMatch(prompt, /예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다/);
   assert.match(prompt, /불확실한 장비명.*AI가 카탈로그 전체를 비교해 판단/s);
   assert.match(prompt, /연락처.*고객DB.*확인요청 생성은 막지 말고/s);
-  assert.match(prompt, /일정 일부\/연락처\/모델 세부가 부족해도.*버리지 않는다/s);
+  assert.match(prompt, /일정 일부\/연락처\/모델 세부가 부족해도.*누락하지 않는다/s);
 });
 
-test('buildHermesPrompt makes the native confirmation tool verify both writes and claimed existing RQs', () => {
-  const prompt = buildHermesPrompt(
-    { id: 'job-gateway-write', preview_text: '9월 2일 캐논 100-500 예약할게요' },
-    { gatewayConfirmationToolAvailable: true }
-  );
-
-  assert.match(prompt, /Gateway.*FINAL_JSON.*바깥 워커.*확인요청.*입력하지 않는다/s);
-  assert.match(prompt, /should_write_to_sheet=true.*village_confirmation_request.*한 번 호출한 뒤 FINAL_JSON/s);
-  assert.match(prompt, /모든 고객 장비 문의.*즉시.*village_confirmation_request/s);
-  assert.match(prompt, /일정.*불완전.*빈칸.*확인요청/s);
-  assert.doesNotMatch(prompt, /customer request without a later staff confirmation is read-only/i);
-  assert.match(prompt, /existing_confirm_request_ids.*village_confirmation_request.*검증/s);
-  assert.match(prompt, /should_write_to_sheet=false.*기존 RQ.*실재 여부/s);
-  assert.match(prompt, /no_action.*입력 성공.*아니다/s);
-  assert.match(
-    prompt,
-    /existing RQ.*authoritative no-record result.*existing_confirm_request_ids=\[\].*reservation_inquiry\.already_registered=false.*explicit genuinely-new reclassification.*only then.*should_write_to_sheet=true/is
-  );
-  assert.match(
-    prompt,
-    /no_action.*never authorizes a retry.*authoritative no-record result.*existing_confirm_request_ids=\[\].*reservation_inquiry\.already_registered=false.*explicit genuinely-new reclassification.*should_write_to_sheet=true.*otherwise remain read-only\/invalid/is
-  );
-  assert.doesNotMatch(
-    prompt,
-    /If that verification says an existing RQ was not found.*correct the decision to should_write_to_sheet=true/is
-  );
-  assert.doesNotMatch(
-    prompt,
-    /If the row still needs to be written.*call the tool with should_write_to_sheet=true/is
-  );
-  assert.doesNotMatch(prompt, /Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true/);
+test('buildHermesPrompt reconciles existing RQs read-only and reserves one lease for all intended writes', () => {
+  const prompt=buildHermesPrompt({id:'gateway',preview_text:'예약 문의'},{gatewayConfirmationToolAvailable:true});
+  assert.match(prompt,/FINAL_JSON alone does not write anything/);
+  assert.match(prompt,/Verify unchanged existing RQs with read-only lookup/);
+  assert.match(prompt,/plan them ALL before the first tool call/);
+  assert.match(prompt,/no_action receipt.*grants no retry authority/);
+  assert.doesNotMatch(prompt,/call village_confirmation_request once with should_write_to_sheet=false/);
+  assert.doesNotMatch(prompt,/existing_confirm_request_ids=\[\].*only then.*should_write_to_sheet=true/is);
 });
 
 test('buildHermesPrompt requires one native confirmation call for pending RQ replacement', () => {
@@ -7473,16 +7499,17 @@ test('buildHermesPrompt requires sender separation and customer turn clustering'
   assert.match(prompt, /latest customer\/inbound message or a cluster/s);
   assert.match(prompt, /안녕하세요.*27일날.*fx3 가능한가요/s);
   assert.match(prompt, /latest_customer_message_after_last_staff_reply/);
-  assert.match(prompt, /직원 답변과 무관하게 누락된 최초 입력을 즉시 catch-up/);
+  assert.match(prompt, /여전히 유효하고 거절·완료되지 않았으며.*누락된 최초 입력을 catch-up/);
   assert.match(prompt, /should_write_to_sheet=true.*already_registered=false.*replyMode=no_reply.*no_auto_reply_sent=true/s);
   assert.match(prompt, /conversation_turns/);
 });
 
-test('buildHermesPrompt captures every inquiry but keeps the registered schedule read-only until exact staff confirmation', () => {
+test('buildHermesPrompt reconciles applied inquiries and keeps registered changes staff-authorized', () => {
   const prompt = buildHermesPrompt({ id: 'job-addon', preview_text: '기존 예약에 렌즈 하나 추가해주세요' });
   assert.match(prompt, /equipment_write_mode/);
-  assert.match(prompt, /모든 새 장비 문의.*기존 등록 여부와 무관하게.*확인요청/is);
-  assert.match(prompt, /기존 등록 스케줄 자체의 변경.*customer-only.*read-only.*staff_confirmed_mutation/is);
+  assert.match(prompt, /Already-applied additions\/substitutions are already_applied with no write/is);
+  assert.doesNotMatch(prompt, /기존 등록 여부와 무관하게/is);
+  assert.match(prompt, /registered_change_inquiry.*staff-confirmed registered route/is);
   assert.match(prompt, /registered changes.*native route/is);
   assert.doesNotMatch(prompt, /An existing booking with newly added or increased equipment is not a duplicate/);
 });
@@ -13032,4 +13059,51 @@ test('buildHermesPrompt embeds the recent bot sends block and the owner-manual p
   assert.match(prompt, /사장\(사람\)의 수동 응대/);
   assert.match(prompt, /재확인 질문을 만들지 마라/);
   assert.match(prompt, /알림톡\/브랜드메시지는 관리자센터에서 확인할 수 없어요/);
+});
+
+
+test('confirmation batch execution preflights all periods and preserves both actual receipts', async () => {
+  const first = completeSheetDecision();
+  const second = completeSheetDecision({ sheet_row_candidate: {start_date:'2026-07-25',pickup_time:'10:00'} });
+  const calls = [];
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: {}, job: {jobId:'batch',roomKey:'room',roomRevision:7}, roomRevision:7,
+    decision:{...first,confirmation_requests:[first,second]},
+    dependencies:{
+      freshnessGuard:confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot:async()=>{calls.push('catalog');return confirmationCatalogForDecision(first);},
+      enrichSheetPayloadWithCustomerDbDiscount:async(_config,payload)=>({payload}),
+      ensureConfirmRequestDiscountApplied:async()=>({skipped:true}),
+      appendToSheet:async(_config,payload)=>{calls.push(payload.args.반출일);return {success:true,reqID:`RQ-260907-00${calls.length-1}`,results:[]};}
+    }
+  });
+  assert.equal(receipt.status,'ok');
+  assert.deepEqual(calls,['catalog','2026-07-24','2026-07-25']);
+  assert.deepEqual(receipt.request_ids,['RQ-260907-001','RQ-260907-002']);
+});
+
+test('confirmation batch rejects invalid later catalog before creating the first period', async () => {
+  const first=completeSheetDecision();
+  const second=completeSheetDecision({sheet_row_candidate:{start_date:'2026-07-25',equipment:[{item:'invented alias',quantity:1}]}});
+  let writes=0;
+  const receipt=await workerModule.executeVillageConfirmationRequest({
+    job:{jobId:'batch',roomKey:'room',roomRevision:7},roomRevision:7,
+    decision:{...first,confirmation_requests:[first,second]},
+    dependencies:{freshnessGuard:confirmationFreshnessGuard(),fetchEquipmentCatalogSnapshot:async()=>confirmationCatalogForDecision(first),appendToSheet:async()=>{writes++;return{success:true};},enrichSheetPayloadWithCustomerDbDiscount:async(_config,payload)=>({payload})}
+  });
+  assert.equal(writes,0);
+  assert.equal(receipt.status,'failed');
+});
+
+
+test('appendToSheet preserves uncertain pending cutover evidence without replay', async () => {
+  let calls=0;
+  const result=await workerModule.appendToSheet({gasApiUrl:'https://example.test/exec',sheetApiKey:'test',fetchImpl:async()=>{
+    calls++; return new Response(JSON.stringify({success:false,error:'cutover uncertain',code:'pending_request_cutover_uncertain',effectiveRequestId:'RQ-260907-099',replacedReqIDs:['RQ-260907-001'],appliedStages:['new_rows_inserted']}));
+  }},{action:'run',func:'insertAndCheckRequest',args:{}});
+  assert.equal(calls,1);
+  assert.equal(result.partial_success,true);
+  assert.equal(result.uncertainWrite,true);
+  assert.equal(result.reqID,'RQ-260907-099');
+  assert.equal(result.error_type,'pending_request_cutover_uncertain');
 });

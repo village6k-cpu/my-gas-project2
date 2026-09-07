@@ -11519,7 +11519,8 @@ function _isMutableConfirmRequestGroup_(group) {
   if ((group.tradeIds || []).filter(Boolean).length > 0) return false;
   var statusText = (group.registerActions || []).concat(group.statuses || []).join(" ");
   // 이미 등록/등록대기/보류/거절된 건은 사람이 건드린 상태일 수 있으므로 자동 교체하지 않는다.
-  return !/(등록완료|등록대기|등록\s*처리|개고생2\.0|거절|보류)/.test(statusText);
+  return !/(등록완료|등록대기|등록\s*처리|개고생2\.0|거절|보류|취소)/.test(statusText) &&
+    !(group.registerActions || []).some(function(action) { return String(action).trim() === "등록"; });
 }
 
 function _canReuseConfirmedRegistrationBootstrap_(group, expected) {
@@ -11706,7 +11707,7 @@ function _normalizeStaffConfirmedPendingPeriod_(period) {
  * typed pending mutation의 exact RQ와 baseline을 실제 쓰기 lock 안에서 다시 검증한다.
  * 실패하면 행 삭제나 새 RQ ID 예약 전에 예외를 발생시킨다.
  */
-function _resolveStaffConfirmedPendingRequestFence_(sheet, fence) {
+function _resolveStaffConfirmedPendingRequestFence_(sheet, fence, options) {
   if (fence === undefined || fence === null) return null;
   if (!fence || typeof fence !== "object" || Array.isArray(fence) || fence.target_scope !== "pending_request") {
     throw new Error("직원확정 확인요청 fence 형식 오류");
@@ -11719,7 +11720,10 @@ function _resolveStaffConfirmedPendingRequestFence_(sheet, fence) {
   var expectedSetComponents = Object.prototype.hasOwnProperty.call(fence, "expected_set_components")
     ? _normalizeStaffConfirmedSetComponents_(fence.expected_set_components)
     : null;
-  var expectedPeriod = _normalizeStaffConfirmedPendingPeriod_(fence.expected_period);
+  var allowIncompleteExpectedPeriod = !!(options && options.allowIncompleteExpectedPeriod === true);
+  var expectedPeriod = allowIncompleteExpectedPeriod
+    ? _normalizeCustomerRequestedPendingBaselinePeriod_(fence.expected_period)
+    : _normalizeStaffConfirmedPendingPeriod_(fence.expected_period);
   var groups = _buildConfirmRequestGroups_(sheet).filter(function(group) {
     return String(group.reqID || "").trim().toUpperCase() === requestId;
   });
@@ -11744,7 +11748,7 @@ function _resolveStaffConfirmedPendingRequestFence_(sheet, fence) {
     end_date: String(group.endDate || "").trim(),
     end_time: String(group.endTime || "").trim()
   };
-  if (!currentPeriod.start_date || !currentPeriod.start_time || !currentPeriod.end_date || !currentPeriod.end_time ||
+  if ((!allowIncompleteExpectedPeriod && (!currentPeriod.start_date || !currentPeriod.start_time || !currentPeriod.end_date || !currentPeriod.end_time)) ||
       currentPeriod.start_date !== expectedPeriod.start_date ||
       currentPeriod.start_time !== expectedPeriod.start_time ||
       currentPeriod.end_date !== expectedPeriod.end_date ||
@@ -11777,6 +11781,78 @@ function _findDuplicateConfirmRequest_(sheet, req, requestedEquipItems) {
     return group;
   }
   return null;
+}
+
+// Source evidence is bound to the immutable conversation by the trusted caller.
+// GAS validates its shape and rechecks the actual customer/RQ baseline under lock.
+function _assertInquirySourceEvidence_(evidence) {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence) ||
+      typeof evidence.customer_request !== "string" || !evidence.customer_request.trim() ||
+      !String(evidence.conversation_revision || "").trim() ||
+      !/^[a-f0-9]{64}$/i.test(String(evidence.conversation_evidence_hash || "")) ||
+      !Array.isArray(evidence.customer_message_ids) || !evidence.customer_message_ids.length ||
+      evidence.customer_message_ids.some(function(id) { return typeof id !== "string" || !id.trim(); })) {
+    throw new Error("고객 문의 변경의 대화 revision/hash/message 근거가 필요합니다.");
+  }
+}
+
+function _normalizeCustomerRequestedPendingBaselinePeriod_(period) {
+  var fields = ["start_date", "start_time", "end_date", "end_time"];
+  if (!period || typeof period !== "object" || Array.isArray(period) || Object.keys(period).length !== fields.length) {
+    throw new Error("고객 문의 수정 baseline period는 공란을 포함한 네 필드를 명시해야 합니다.");
+  }
+  var normalized = {};
+  fields.forEach(function(field) {
+    if (!Object.prototype.hasOwnProperty.call(period, field) || typeof period[field] !== "string") {
+      throw new Error("고객 문의 수정 baseline period의 누락 필드는 추측하지 않습니다: " + field);
+    }
+    var value = period[field].trim();
+    if (value && (field.indexOf("date") >= 0 ? !_confirmRequestStrictDate_(value) : !/^([01]\d|2[0-3]):00$/.test(value))) {
+      throw new Error("고객 문의 수정 baseline period 형식 오류: " + field);
+    }
+    normalized[field] = value;
+  });
+  return normalized;
+}
+
+function _resolveCustomerRequestedPendingRevision_(sheet, req) {
+  var fence = req.customer_requested_pending_revision;
+  if (fence === undefined || fence === null) return null;
+  if (req.staff_confirmed_pending_mutation || req.staff_confirmed_registration_bootstrap ||
+      req.inquiry_disposition === "independent_rental") {
+    throw new Error("고객 문의 수정과 다른 실행 권한을 함께 지정할 수 없습니다.");
+  }
+  _assertInquirySourceEvidence_(fence.source_evidence);
+  if (!Array.isArray(fence.expected_set_components)) throw new Error("고객 문의 수정의 세트 구성 baseline이 필요합니다.");
+  var resolved = _resolveStaffConfirmedPendingRequestFence_(sheet, fence, {allowIncompleteExpectedPeriod: true});
+  _normalizeStaffConfirmedPendingPeriod_({start_date: req.반출일, start_time: req.반출시간,
+    end_date: req.반납일, end_time: req.반납시간});
+  if (!_confirmRequestSameIdentity_(resolved.group, String(req.예약자명 || "").trim(), _confirmRequestPhoneKey_(req.연락처))) {
+    throw new Error("고객 문의 수정 대상의 고객 정보가 일치하지 않습니다.");
+  }
+  resolved.authority = "customer_requested_pending_revision";
+  return resolved;
+}
+
+function _assertNoUnfencedPendingRevision_(sheet, req, requestedEquipItems) {
+  var startDate = _confirmRequestDateKey_(req.반출일);
+  if (!startDate || !requestedEquipItems.length) return;
+  var incoming = [startDate, _confirmRequestTimeKey_(req.반출시간),
+    _confirmRequestDateKey_(req.반납일), _confirmRequestTimeKey_(req.반납시간)];
+  var matches = _buildConfirmRequestGroups_(sheet).filter(function(group) {
+    if (!_isMutableConfirmRequestGroup_(group) ||
+        !_confirmRequestSameIdentity_(group, String(req.예약자명 || "").trim(), _confirmRequestPhoneKey_(req.연락처)) ||
+        group.startDate !== startDate ||
+        _confirmRequestEquipListEquivalent_(group.topLevelEquipItems, requestedEquipItems)) return false;
+    var existing = [group.startDate, group.startTime, group.endDate, group.endTime];
+    return incoming.every(function(value, index) { return !value || !existing[index] || value === existing[index]; });
+  });
+  if (!matches.length) return;
+  var error = new Error("같은 고객·기간의 대기 문의가 있어 exact 고객 요청 수정 계약이 필요합니다.");
+  error.code = "pending_revision_required";
+  error.existingRequestIds = matches.map(function(group) { return group.reqID; });
+  if (matches.length === 1) error.existingRequestId = matches[0].reqID;
+  throw error;
 }
 
 function _findCompletableConfirmRequestGroups_(sheet, req, requestedEquipItems) {
@@ -12111,6 +12187,25 @@ function _insertAndCheckRequest(req) {
     sheet,
     req.staff_confirmed_pending_mutation
   );
+  var customerPendingFence = req.customer_requested_pending_revision
+    ? _resolveCustomerRequestedPendingRevision_(sheet, req) : null;
+  if (customerPendingFence) {
+    staffConfirmedPendingFence = customerPendingFence;
+    // Keep existing customer/commercial fields unless this exact plan supplies them.
+    // The caller's phone was checked against identity above; an equipment revision
+    // preserves the stored contact instead of rewriting it from the model's copy.
+    req.연락처 = sheet.getRange(customerPendingFence.group.rows[0], 12).getDisplayValue();
+    [["할인유형", "discount"], ["비고", "memo"], ["추가요청", "extraRequest"]].forEach(function(pair) {
+      if (!Object.prototype.hasOwnProperty.call(req, pair[0])) req[pair[0]] = customerPendingFence.group[pair[1]] || "";
+    });
+    req.staff_confirmed_exact_set_components = _projectStaffConfirmedDesiredSetComponents_(
+      customerPendingFence.expectedBefore, customerPendingFence.expectedSetComponents,
+      requestedEquipItems.map(function(item) { return { name: item.name, quantity: Number(item.qty) }; }),
+      ss.getSheetByName("세트마스터"), []
+    );
+  }
+  var independentRental = req.inquiry_disposition === "independent_rental";
+  if (independentRental) _assertInquirySourceEvidence_(req.inquiry_source_evidence);
 
   // 연락처는 고객DB로 보강하고, 할인유형은 카톡 판정을 최우선으로 적용한다.
   // - 연락처 미입력: 고객DB 이름 매칭이 정확히 1개일 때만 보강
@@ -12121,7 +12216,7 @@ function _insertAndCheckRequest(req) {
   // 직원확정 자동등록은 AI가 확정한 고객/상업 조건을 그대로 쓴다.
   // 일반 문의용 CustomerDB 보강을 이 단일 실행 capability에 적용하면
   // 동명인 전화번호/할인을 승인 내용과 다르게 등록할 수 있다.
-  var customerDbMatches = confirmedRegistrationBootstrap
+  var customerDbMatches = confirmedRegistrationBootstrap || customerPendingFence
     ? []
     : _findConfirmRequestCustomerDbMatches_(ss, req.예약자명, resolvedPhone);
   // 동명이인 방어: 요청에 연락처가 있는데 그 연락처가 고객DB의 어떤 행과도 일치하지
@@ -12150,15 +12245,21 @@ function _insertAndCheckRequest(req) {
   var dbDiscount = (!resolvedPhone && phoneLookupMatches.length > 1)
     ? ""
     : _bestConfirmRequestCustomerDbDiscount_(trustedMatches);
-  var resolvedDiscount = confirmedRegistrationBootstrap
+  var resolvedDiscount = confirmedRegistrationBootstrap || customerPendingFence
     ? String(req.할인유형 || "").normalize("NFKC").trim()
     : _resolveConfirmRequestDiscountOrBlank_(req.할인유형 || req.업체명, dbDiscount);
   var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone, 할인유형: resolvedDiscount });
 
-  // 같은 고객/기간의 등록 거래가 있어도 고객의 새 장비 문의는 먼저 확인요청에 남긴다.
-  // 기존 스케줄을 실제로 바꾸는 것은 이후 직원확정 registered_reservation_change가
-  // 이 RQ를 exact sourceRequestId로 다시 검증한 뒤에만 수행한다.
-  var registeredTradeId = _findRegisteredTradeForConfirmRequest_(ss, reqForDedupe);
+  // Current registered inventory is authoritative for repeated whole/subset plans.
+  // A real new item/quantity still creates an inquiry for the staff mutation path.
+  if (!staffConfirmedPendingFence && !independentRental && !confirmedRegistrationBootstrap) {
+    var registeredReceipt = _reconcileRegisteredConfirmRequest_(ss, reqForDedupe, requestedEquipItems);
+    if (registeredReceipt) return registeredReceipt;
+  }
+  if (!staffConfirmedPendingFence && !confirmedRegistrationBootstrap) {
+    _assertNoUnfencedPendingRevision_(sheet, reqForDedupe, requestedEquipItems);
+  }
+  var registeredTradeId = independentRental ? null : _findRegisteredTradeForConfirmRequest_(ss, reqForDedupe);
 
   // ── 중복 체크: 같은 예약자명/연락처 + 반출·반납창 + 같은 최상위 장비/수량 ──
   var duplicateRequest = staffConfirmedPendingFence
@@ -12400,6 +12501,18 @@ function _insertAndCheckRequest(req) {
     });
   }
 
+  if (customerPendingFence) {
+    var stagedPlanMatches = _confirmRequestEquipListEquivalent_(requestedEquipItems,
+      finalTopLevelPlan.map(function(item) { return {name: item.name, qty: item.quantity}; }));
+    var stagedPeriodMatches = finalPeriod && finalPeriod.start_date === req.반출일 &&
+      finalPeriod.start_time === req.반출시간 && finalPeriod.end_date === req.반납일 && finalPeriod.end_time === req.반납시간;
+    if (!stagedPlanMatches || !stagedPeriodMatches ||
+        !_staffConfirmedSetComponentsEquivalent_(finalSetComponents, req.staff_confirmed_exact_set_components)) {
+      var stagedMismatch = new Error("고객 문의 수정의 새 장비·기간·세트 readback이 계획과 다릅니다.");
+      stagedMismatch.code = "pending_revision_readback_mismatch";
+      throw stagedMismatch;
+    }
+  }
   var response = {
     reqID: reqID,
     results: results,
@@ -12411,10 +12524,9 @@ function _insertAndCheckRequest(req) {
   if (replacedReqIDs.length > 0) {
     // Write-first replacement: the old exact RQ remains authoritative until the
     // staged RQ has been expanded, checked, and read back successfully.
-    var cutoverFence = _resolveStaffConfirmedPendingRequestFence_(
-      sheet,
-      req.staff_confirmed_pending_mutation
-    );
+    var cutoverFence = customerPendingFence
+      ? _resolveCustomerRequestedPendingRevision_(sheet, req)
+      : _resolveStaffConfirmedPendingRequestFence_(sheet, req.staff_confirmed_pending_mutation);
     _assertStaffConfirmedReplacementSourceUnchanged_(
       staffConfirmedPendingFence.group,
       cutoverFence.group
@@ -12441,6 +12553,10 @@ function _insertAndCheckRequest(req) {
       final_plan: finalTopLevelPlan,
       final_period: finalPeriod
     };
+    if (customerPendingFence) {
+      response.customer_requested_pending_revision = response.staff_confirmed_pending_mutation;
+      delete response.staff_confirmed_pending_mutation;
+    }
   }
   return response;
   } catch (replacementError) {
@@ -17317,7 +17433,7 @@ function checkDuplicateRequest(ss, 예약자명, 반출일, 장비목록, 연락
  * 확인요청 쓰기 전에 같은 실제 고객과 exact 대여기간의 활성 등록 거래를 찾는다.
  * 장비목록은 변경 대상일 수 있으므로 비교하지 않는다.
  */
-function _findRegisteredTradesForConfirmRequest_(ss, req) {
+function _findRegisteredTradesForConfirmRequest_(ss, req, allowPartialPeriod) {
   req = req || {};
   var contractSheet = ss && ss.getSheetByName ? ss.getSheetByName("계약마스터") : null;
   if (!contractSheet || contractSheet.getLastRow() < 2) return [];
@@ -17328,7 +17444,8 @@ function _findRegisteredTradesForConfirmRequest_(ss, req) {
   var reqStartTime = _confirmRequestTimeKey_(req.반출시간);
   var reqEndDate = _confirmRequestDateKey_(req.반납일);
   var reqEndTime = _confirmRequestTimeKey_(req.반납시간);
-  if ((!reqName && !reqPhone) || !reqStartDate || !reqStartTime || !reqEndDate || !reqEndTime) return [];
+  if ((!reqName && !reqPhone) || !reqStartDate ||
+      (!allowPartialPeriod && (!reqStartTime || !reqEndDate || !reqEndTime))) return [];
 
   var contractRange = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10);
   var rows = contractRange.getValues();
@@ -17347,12 +17464,56 @@ function _findRegisteredTradesForConfirmRequest_(ss, req) {
     if (!sameName && !samePhone) continue;
     if (sameName && !samePhone && reqPhone && rowPhone && reqPhone !== rowPhone) continue;
     if (_confirmRequestDateKey_(row[4], displayRow[4]) !== reqStartDate
-        || _confirmRequestTimeKey_(row[5], displayRow[5]) !== reqStartTime
-        || _confirmRequestDateKey_(row[6], displayRow[6]) !== reqEndDate
-        || _confirmRequestTimeKey_(row[7], displayRow[7]) !== reqEndTime) continue;
+        || (reqStartTime && _confirmRequestTimeKey_(row[5], displayRow[5]) !== reqStartTime)
+        || (reqEndDate && _confirmRequestDateKey_(row[6], displayRow[6]) !== reqEndDate)
+        || (reqEndTime && _confirmRequestTimeKey_(row[7], displayRow[7]) !== reqEndTime)) continue;
     matchedTradeIds[tradeId] = true;
   }
   return Object.keys(matchedTradeIds);
+}
+
+function _reconcileRegisteredConfirmRequest_(ss, req, requestedEquipItems) {
+  var candidates = _findRegisteredTradesForConfirmRequest_(ss, req, true);
+  if (candidates.length > 1) {
+    var ambiguous = new Error("동일 고객·호환 기간의 등록 거래가 여러 건이라 대상 확인이 필요합니다.");
+    ambiguous.code = "registered_reconciliation_ambiguous";
+    throw ambiguous;
+  }
+  if (candidates.length !== 1 || !requestedEquipItems.length) return null;
+  var scheduleSheet = ss.getSheetByName("스케줄상세");
+  if (!scheduleSheet || scheduleSheet.getLastRow() < 2) return null;
+  var range = scheduleSheet.getRange(2, 1, scheduleSheet.getLastRow() - 1, 10);
+  var rows = range.getValues();
+  var displayRows = range.getDisplayValues();
+  var quantities = Object.create(null);
+  var requestedQuantities = Object.create(null);
+  var results = [];
+  var requestedPeriod = [_confirmRequestDateKey_(req.반출일), _confirmRequestTimeKey_(req.반출시간),
+    _confirmRequestDateKey_(req.반납일), _confirmRequestTimeKey_(req.반납시간)];
+  requestedEquipItems.forEach(function(item) {
+    var qty = Number(item.qty);
+    if (!Number.isInteger(qty) || qty < 1) throw new Error("문의 장비 수량은 양의 정수여야 합니다.");
+    requestedQuantities[item.name] = (requestedQuantities[item.name] || 0) + qty;
+  });
+  rows.forEach(function(row, index) {
+    var display = displayRows[index] || [];
+    if (String(display[1] || row[1] || "").trim() !== candidates[0] ||
+        /^(취소|삭제|거절)/.test(String(display[9] || row[9] || "").trim())) return;
+    var setName = String(display[2] || row[2] || "").trim();
+    var name = String(display[3] || row[3] || "").trim();
+    if (!name || (setName && setName !== name)) return;
+    var period = [_confirmRequestDateKey_(row[5], display[5]), _confirmRequestTimeKey_(row[6], display[6]),
+      _confirmRequestDateKey_(row[7], display[7]), _confirmRequestTimeKey_(row[8], display[8])];
+    if (!period.every(Boolean) || !requestedPeriod.every(function(value, i) { return !value || value === period[i]; })) return;
+    var quantity = Number(row[4] || display[4]);
+    if (!Number.isInteger(quantity) || quantity < 1) return;
+    quantities[name] = (quantities[name] || 0) + quantity;
+    results.push({장비명: name, 수량: quantity, 결과: "등록완료", 상세: "등록 스케줄 확인", scheduleId: String(display[0] || row[0] || ""),
+      period: {start_date: period[0], start_time: period[1], end_date: period[2], end_time: period[3]}});
+  });
+  if (!Object.keys(requestedQuantities).every(function(name) { return (quantities[name] || 0) >= requestedQuantities[name]; })) return null;
+  return {alreadyRegistered: true, duplicate: true, matchedRegisteredTradeId: candidates[0],
+    results: results, message: "요청 장비·수량은 기존 등록 거래에 이미 반영되어 있습니다."};
 }
 
 function _findRegisteredTradeForConfirmRequest_(ss, req) {

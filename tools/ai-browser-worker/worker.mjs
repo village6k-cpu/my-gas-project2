@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +7,8 @@ import { spawn, spawnSync, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import villageTimeContract from '../../scripts/windows/village-time-contract.js';
+import { INQUIRY_LIFECYCLE_PROMPT, inquiryLifecycleErrors, validatePendingInquiryRevision } from './inquiry-lifecycle.mjs';
+import { reconcileConfirmationBatchReceipt } from './confirmation-batch-reconciliation.mjs';
 import {
   inquiryConversationKey,
   actionFamilyForFollowUp,
@@ -669,9 +672,9 @@ export function buildHermesPrompt(job, options = {}) {
   const sheetExecutionText = options.gatewayConfirmationToolAvailable
     ? `GATEWAY NATIVE SHEET EXECUTION CONTRACT:
 - In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
-- 모든 고객 장비 문의는 직원 답변을 기다리지 말고 즉시 should_write_to_sheet=true로 village_confirmation_request를 한 번 호출한 뒤 FINAL_JSON을 낸다. GAS가 확인요청/계약/스케줄 중복을 lock 안에서 판정한다.
-- 일정이 불완전해도 값을 추측하지 말고 모르는 date/time은 빈칸, plan_complete=false로 확인요청에 먼저 남긴다. 일정이 완전할 때만 가용확인이 실행된다.
-- When existing_confirm_request_ids names an unchanged existing RQ, call village_confirmation_request once with should_write_to_sheet=false to 검증 기존 RQ 실재 여부; never pre-verify a write.
+- INQUIRY LIFECYCLE에 따라 genuinely new 또는 아직 미반영인 변경 문의만 village_confirmation_request로 접수한다. 이미 처리된 예약/품목, 거절된 요청, 단순 보유 질문은 입력하지 않는다.
+- 일정은 먼저 대화/기존 예약/명시된 1회차 운영 기준으로 해석한다. 그래도 모르는 필드만 빈칸, plan_complete=false로 접수한다.
+- Verify unchanged existing RQs with read-only lookup. Reserve village_confirmation_request for the chosen inquiry write; never consume its operation lease to pre-verify.
 - A pending-RQ addition with typed staff_confirmed_mutation target_scope="pending_request" + kind="equipment_add" requires one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only"; the executor verifies the exact RQ and merges the authoritative plan. Never pre-read with the operation fence.
 - Typed staff_confirmed_mutation target_scope="pending_request" + kind="equipment_remove"/"equipment_replace"/"equipment_quantity_change": one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ.
 - 최초 고객 장비 문의는 직원 확인 없이 즉시 확인요청에 입력한다. 이후 같은 방의 최신 직원 답변은 exact pending RQ의 등록 권한 증거가 될 수 있다.
@@ -690,8 +693,8 @@ export function buildHermesPrompt(job, options = {}) {
 - blocked, failed, partial_success, or contradictory registered readback is draft-only/no-send owner review. Never call either mutation tool again to replay it.
 - For an explicit registered-trade quote send, call village_document_send with the exact trade_id before FINAL_JSON. Choose tax_mode="supply_only" only for an explicit VAT-exclusive request; otherwise use "vat_included".
 - A successful correlated village_document_send receipt is the only delivery authority. Do not promise that a quote was or will be sent without that receipt; on tool failure use draft_only + owner review.
-- If verification of an existing RQ returns an authoritative no-record result, retry a write only after setting existing_confirm_request_ids=[], reservation_inquiry.already_registered=false, and recording an explicit genuinely-new reclassification; only then may should_write_to_sheet=true. If any condition is missing or ambiguous, remain read-only/invalid and do not call the tool again.
-- A no_action receipt is not 입력 성공이 아니다 and never authorizes a retry. A later write requires an authoritative no-record result, existing_confirm_request_ids=[], reservation_inquiry.already_registered=false, and explicit genuinely-new reclassification before should_write_to_sheet=true; otherwise remain read-only/invalid and do not call any mutation tool again.
+- If an RQ is absent, reconcile live contracts and schedules first. Do not retry the mutation tool under the consumed lease; absence can mean registration completed.
+- A no_action receipt is not creation success and grants no retry authority. Reconcile through read-only lookup, preserving any already completed operation.
 - Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
     : `SHEETS TOOL AVAILABLE VIA GAS API:
 - The outer worker owns the hidden GAS endpoint and credential; target: 확인요청.
@@ -700,6 +703,7 @@ export function buildHermesPrompt(job, options = {}) {
   return `AI-first Kakao rental-shop worker task.
 
 CRITICAL RULES:
+${INQUIRY_LIFECYCLE_PROMPT}
 - This is AI-first. 코드의 역할은 queue/claim/API 호출 같은 plumbing뿐이다.
 - 코드가 고객 의도, 예약 여부, 날짜/시간/장비를 최종 판단하면 안 된다. 코드 판단 금지: AI가 화면과 맥락을 보고 판단하고, 코드는 queue/claim/API write만 수행한다.
 - Outer code will validate your typed decision but will never infer names/dates/equipment, merge a different equipment list, synthesize reply prose, choose attachments, bypass RAG, or reroute follow-ups from keywords. Never fabricate missing schedule data: capture a new equipment inquiry with blank unknown date/time fields.
@@ -707,7 +711,7 @@ CRITICAL RULES:
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
 - Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
-- 고객의 모든 새 장비 문의는 기존 등록 여부와 무관하게 확인요청에 즉시 기록한다. 단, 기존 등록 스케줄 자체의 변경은 customer-only 단계에서 read-only이며 정확한 이후 직원 확인과 일치하는 typed staff_confirmed_mutation만 native registered route로 허용한다.
+- 신규 문의, 미등록 요청 수정, 이미 등록된 내용, 미반영 등록변경을 INQUIRY LIFECYCLE대로 구분한다. 현재 등록 여부와 최종 장비를 확인한 뒤 해당 경로를 사용한다.
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때 근거가 확보된 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
 - 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 일반 가격·환불정책·파손규정·세금 안내는 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
 - 예외(항상 사장 확인): 고객이 현재 대여/수령 장비의 기스·흠집·스크래치·파손·고장·작동이상·분실을 알린 실제 사고, 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의는 근거가 있어도 auto_send 금지. 계속 사용/그대로 수령/교체/배상 여부를 임의로 승인하지 말고 draft_only + owner_review_required=true + urgent damage_repair로 올린다.
@@ -738,7 +742,7 @@ SENDER AND TURN-TAKING POLICY:
 - Customer/inbound is the chat customer/nickname side, determined from the Kakao room title, bubble side/labels, and surrounding message order. A nickname like hellodesk may be a customer if it is the room/customer side; do not assume from text alone.
 - The actionable trigger is normally the latest customer/inbound message or a cluster of consecutive customer/inbound messages after the last staff/outbound reply.
 - For read-catchup/backstop jobs, a short later bubble ("네", "감사합니다", "견적서 부탁드립니다") must not erase an earlier unresolved reservation-format request in the same post-staff customer cluster.
-- If newest meaningful message is staff/outbound, no new reply. 앞선 고객 장비 문의가 확인요청/계약/스케줄 어디에도 없으면 직원 답변과 무관하게 누락된 최초 입력을 즉시 catch-up한다: should_write_to_sheet=true, already_registered=false, replyMode=no_reply, no_auto_reply_sent=true.
+- If newest meaningful message is staff/outbound, no new reply. 앞선 고객 장비 문의가 여전히 유효하고 거절·완료되지 않았으며 확인요청/계약/스케줄 어디에도 없으면 누락된 최초 입력을 catch-up한다: should_write_to_sheet=true, already_registered=false, replyMode=no_reply, no_auto_reply_sent=true.
 - Customers often split one thought across several bubbles. Merge consecutive customer/inbound messages within the same recent turn before classification, e.g. "안녕하세요" + "27일날" + "fx3 가능한가요?" = one reservation/availability question.
 - For Sheets append, safety_checks.latest_customer_message_after_last_staff_reply is true on the customer inquiry turn. A later staff/outbound turn may use false only for the exact unresolved customer equipment inquiry catch-up above. If sender order itself is unclear, do not mutate.
 - RECENT_BOT_SENDS에 없는 빌리지측 버블은 사장(사람)의 수동 응대다. 사장이 다룬 주제는 재답변·재확인 금지(no_reply), 사장 안내와 모순 금지.
@@ -765,7 +769,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 할인유형: 고객DB I열이 카톡보다 우선. DB 값(학생/개인사업자/프리랜서/단골/제휴/일반)이 있으면 sheet_row_candidate.discount_type에 그대로 쓰고, 없을 때만 카톡에서 학생/개사프/일반 추론.
 - 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리한다. 없거나 동명이인이어도 확인요청 생성은 막지 말고 sheet_row_candidate.phone=""로 둔다. 연락처는 등록 단계 필수라 follow_up/답장에서는 연락처 요청을 남긴다.
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
-- 모든 고객 장비 문의는 기존 exact RQ/등록 거래가 확인되지 않으면 확인요청 입력이 기본이다. 일정 일부/연락처/모델 세부가 부족해도 장비 문의 자체를 버리지 않는다. 장비마다 matched+정확 카탈로그명 또는 explicit unmatched가 필요하다. 모델이 접근할 수 없는 중복조회 플래그는 쓰기 선행조건이 아니며 GAS가 lock 안에서 계약마스터·스케줄상세·확인요청 중복을 판정한다. F열은 matched면 정확명, unmatched면 고객 원문; Q/R에는 AI 설명 금지. 연락처 없으면 L열 공란.
+- 유효한 신규 대여 문의는 일정 일부/연락처/모델 세부가 부족해도 누락하지 않는다. 기존 RQ/계약/스케줄은 먼저 대조한다. 모든 장비는 정확 카탈로그명 또는 실제 미해결 원문으로 구분한다. 거절·미보유 품목을 유효한 요청에 섞지 않는다.
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
 - 확인요청은 보수적인 정시 경계만 쓴다. 반출은 해당 시각의 시(hour)로 내림(12:59→12:00), 반납은 다음 시로 올림(18:01→19:00), 정시 HH:00은 그대로 둔다. 날짜와 함께 적힌 \`27일 24:00\`은 다음 날인 \`28일 00:00\`으로 정규화한다. 이 결과 반납이 반출 이후가 아니면 추측해서 쓰지 말고 확인 질문/후속조치를 만든다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
@@ -793,10 +797,10 @@ TASK:
 9-1. For FAQ/procedure/policy/components auto_send, use CURRENT_CONFIRMED_POLICY first, otherwise call RAG and fill rag_usage. Outer worker verifies current-policy match or high-confidence retrieved support. Never use RAG for current stock/booking/schedule truth.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 10-1. Doc types은 서류 생성/발송/발행만. 확인요청/예약/가용/스케줄/파손/반납/정산은 견적서 단어가 섞여도 doc 아님; primary item에 합친다.
-11. For every customer equipment inquiry with no exact registered trade/RQ, missing schedule fields, phone, or model detail are NOT sheet-write blockers. Search 고객DB by name; use one exact phone or leave phone="". 고객DB I열 discount_type outranks Kakao. Put missing details in follow_up/evidence, not Q/R. Set false only for non-equipment inquiry, unopened/mismatched chat, unclear sender order, or an authoritatively verified unchanged duplicate. If newest is staff/outbound, catch up the unresolved inquiry without sending a duplicate reply.
+11. Apply INQUIRY LIFECYCLE first. New unresolved rentals are captured; pending requests are revised with their exact typed revision; already-applied or declined requests are not recreated. Search 고객DB by name/known phone; use one exact phone or blank. Missing genuinely unknown details remain in follow_up/evidence, not Q/R.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
-11-2. Separate top-level equipment. New inquiry="full_plan"+all currently requested equipment; its schedule may be incomplete. exact typed pending additions="additions_only"+delta; exact typed pending remove/replace/reduce="replace_full_plan"+final plan. Registered changes use the native route, never equipment_write_mode. Otherwise no write + one review.
-11-3. Provided sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM; unknown components must be "" and plan_complete=false, never guessed. Village uses literal 24-hour time: 오전/오후 표시가 없는 \`5시\` means \`05:00\` and \`17시\` means \`17:00\`; only explicit \`오후 5시\` means \`17:00\`. 맥락을 추측해 12시간을 더하지 마라. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If a complete normalized range is impossible or contradictory, leave the uncertain component blank, capture the inquiry as incomplete, and create one review follow-up instead of dropping it or guessing.
+11-2. Separate top-level equipment. New inquiry="full_plan"+all currently requested equipment; its schedule may be incomplete. exact typed pending additions="additions_only"+delta; customer_requested_pending_revision or exact staff-confirmed pending remove/replace/reduce="replace_full_plan"+final plan. Registered changes use the native route, never equipment_write_mode. Otherwise no write + one review.
+11-3. Provided sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM; components still unknown after conversation/booking/single-session policy interpretation must be "" and plan_complete=false. Village uses literal 24-hour time: 오전/오후 표시가 없는 \`5시\` means \`05:00\` and \`17시\` means \`17:00\`; only explicit \`오후 5시\` means \`17:00\`. 맥락을 추측해 12시간을 더하지 마라. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If a complete normalized range is impossible or contradictory, leave the uncertain component blank, capture the inquiry as incomplete, and create one review follow-up instead of dropping it or guessing.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
 12-1. For real-world mutations set requiresHumanAction=true, allowed actionFamily, stable businessKey; otherwise false, "none", "".
@@ -808,6 +812,9 @@ Print a line containing FINAL_JSON, then a fenced json object.
 The JSON schema:
 {
   "should_write_to_sheet": boolean,
+  "inquiry_disposition": "new_inquiry" | "pending_revision" | "registered_change_inquiry" | "already_applied" | "inventory_only" | "declined" | "independent_rental",
+  "customer_requested_pending_revision": object | null,
+  "confirmation_requests": optional array of full child decisions for distinct periods,
   "reason": string,
   "confidence": "low" | "medium" | "high",
   "classification": "reservation" | "price" | "faq" | "ignore" | "already_answered" | "unclear",
@@ -1228,6 +1235,7 @@ function staffConfirmedRegistrationDecisionErrors(decision, registration, option
 
 function existingRecordWriteGateErrors(decision, options = {}) {
   if (decision?.should_write_to_sheet !== true) return [];
+  if (decision.customer_requested_pending_revision) return validatePendingInquiryRevision(decision, options);
   const inquiry = decision?.reservation_inquiry && typeof decision.reservation_inquiry === 'object'
     ? decision.reservation_inquiry
     : {};
@@ -1263,6 +1271,11 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
   const roomRevision = options?.roomRevision;
   if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
     return { valid: false, errors: ['decision must be an object'] };
+  }
+  errors.push(...inquiryLifecycleErrors(decision, options));
+  if (Object.hasOwn(decision, 'confirmation_requests')) {
+    const batch = validateConfirmationBatchDecision(decision, { validateDecision: child => Object.hasOwn(child, 'confirmation_requests') ? {valid:false,errors:['nested batch']} : validateVillageConfirmationExecutionDecision(child, options) });
+    errors.push(...batch.errors);
   }
   const hasDecisionSemantics = Boolean(
     text(decision.classification).trim()
@@ -1992,6 +2005,14 @@ export function buildSheetAppendPayload(decision, options = {}) {
     장비: equipment.map((item) => ({ 이름: item.item, 수량: item.quantity }))
   };
   if (incompleteSchedule) args.일정미완성 = true;
+  if (decision.customer_requested_pending_revision) {
+    args.customer_requested_pending_revision = structuredClone(decision.customer_requested_pending_revision);
+    for (const field of ['할인유형', '비고', '추가요청']) delete args[field];
+  }
+  if (decision.inquiry_disposition === 'independent_rental') {
+    args.inquiry_disposition = decision.inquiry_disposition;
+    args.inquiry_source_evidence = structuredClone(decision.inquiry_source_evidence);
+  }
   const pendingMutation = decision?.staff_confirmed_mutation?.target_scope === 'pending_request'
     ? decision.staff_confirmed_mutation
     : null;
@@ -2023,7 +2044,7 @@ export function buildSheetAppendPayload(decision, options = {}) {
 
 export function validateVillageConfirmationExecutionDecision(decision = {}, options = {}) {
   const roomRevision = options?.roomRevision;
-  const validation = validateAiDecisionContract(decision, { roomRevision });
+  const validation = validateAiDecisionContract(decision, options);
   if (!validation.valid) return validation;
   if (decision.should_write_to_sheet === true) {
     const planned = Array.isArray(decision?.sheet_row_candidate?.equipment)
@@ -4894,8 +4915,13 @@ export async function appendToSheet(config, payload) {
   if (!response.ok) throw new Error(`GAS Sheets request failed: ${response.status} ${JSON.stringify(data)}`);
   if (data?.error || data?.success === false) {
     const error = text(data.error || data.message || data.raw || 'GAS Sheets request rejected');
-    const errorType = classifyGasSheetError(error);
+    const errorType = text(data.code || data.error_type).trim() || classifyGasSheetError(error);
+    const effectiveRequestId = text(data.effectiveRequestId).trim().toUpperCase();
+    const uncertainCutover = errorType === 'pending_request_cutover_uncertain';
     return {
+      ...data,
+      ...(uncertainCutover ? {partial_success:true,uncertainWrite:true,
+        ...(/^RQ-\d{6}-\d{3}$/.test(effectiveRequestId) ? {reqID:effectiveRequestId} : {})} : {}),
       success: false,
       error,
       error_type: errorType,
@@ -9531,8 +9557,37 @@ export async function executeVillageConfirmationRequest({
     error
   });
 
+  if (Object.hasOwn(decision, 'confirmation_requests')) {
+    let catalogPromise;
+    const catalog = () => catalogPromise ||= Promise.resolve((dependencies.fetchEquipmentCatalogSnapshot || fetchEquipmentCatalogSnapshot)(config, {fetchImpl: config.fetchImpl || fetch}));
+    return executeConfirmationBatch({
+      decision,
+      validateDecision: child => validateVillageConfirmationExecutionDecision(child, {
+        roomRevision: requestedRevision,
+        ...((child.customer_requested_pending_revision || child.inquiry_disposition === 'independent_rental') ? {roomSnapshot: dependencies.roomSnapshot || null} : {})
+      }),
+      preflightDecision: async child => child.should_write_to_sheet === true
+        ? resolveEquipmentCatalogDecision(child, await catalog()) : {ok:true,decision:child},
+      executeDecision: async child => {
+        let executionState = null;
+        const receipt = await executeVillageConfirmationRequest({config,job,roomRevision,decision:child,signal,
+          dependencies:{...dependencies,fetchEquipmentCatalogSnapshot:catalog,onExecutionState:state=>{executionState=state;}}
+        });
+        return {receipt,executionState};
+      },
+      buildReceipt, signal,
+      assertCurrent: async () => {
+        dependencies.freshnessGuard?.throwIfSuperseded();
+        await dependencies.assertCurrentClaim?.();
+      },
+      onExecutionState: dependencies.onExecutionState || (()=>{})
+    });
+  }
+
   const existingRecordGateErrors = existingRecordWriteGateErrors(decision, {
-    roomRevision: requestedRevision
+    roomRevision: requestedRevision,
+    ...((decision.customer_requested_pending_revision || decision.inquiry_disposition === 'independent_rental')
+      ? { roomSnapshot: dependencies.roomSnapshot || null } : {})
   });
   if (existingRecordGateErrors.length) {
     return buildReceipt({
@@ -9544,7 +9599,9 @@ export async function executeVillageConfirmationRequest({
   }
 
   const validation = (dependencies.validateAiDecisionContract || validateVillageConfirmationExecutionDecision)(decision, {
-    roomRevision: requestedRevision
+    roomRevision: requestedRevision,
+    ...((decision.customer_requested_pending_revision || decision.inquiry_disposition === 'independent_rental')
+      ? { roomSnapshot: dependencies.roomSnapshot || null } : {})
   });
   if (!validation?.valid) {
     return buildReceipt({
@@ -9676,7 +9733,9 @@ export async function executeVillageConfirmationRequest({
 
     if (sheetPayload) {
       try {
-        const enriched = await enrichDiscountImpl(config, sheetPayload);
+        const enriched = executedDecision.customer_requested_pending_revision
+          ? {payload: sheetPayload, lookup: null}
+          : await enrichDiscountImpl(config, sheetPayload);
         sheetPayload = enriched.payload;
         customerDbDiscountLookup = enriched.lookup;
         if (customerDbDiscountLookup?.discountType) {
@@ -9714,7 +9773,7 @@ export async function executeVillageConfirmationRequest({
         };
       }
 
-      if (customerDbDiscountLookup?.discountType && sheetResult?.success === true) {
+      if (customerDbDiscountLookup?.discountType && sheetResult?.success === true && sheetResult?.alreadyRegistered !== true) {
         try {
           await freshnessGuard.checkNow();
           freshnessGuard.throwIfSuperseded();
@@ -10156,6 +10215,72 @@ function exactPendingMutationAuthoritativeReadback(receipt, decision) {
   });
 }
 
+function exactCustomerPendingRevisionReadback(receipt, decision) {
+  const revision = decision?.customer_requested_pending_revision;
+  const authoritative = receipt?.authoritative_sheet_result;
+  const evidence = authoritative?.customer_requested_pending_revision;
+  if (!revision || revision.target_scope !== 'pending_request' || !evidence
+    || evidence.target_scope !== 'pending_request' || authoritative?.success !== true
+    || authoritative?.alreadyRegistered === true || authoritative?.staff_confirmed_pending_mutation) return false;
+  const replacementId = text(authoritative.reqID).trim();
+  if (!/^RQ-\d{6}-\d{3}$/.test(replacementId) || replacementId === revision.request_id
+    || evidence.target_request_id !== revision.request_id || evidence.replacement_request_id !== replacementId
+    || !sameGatewayDecisionValue(authoritative.replacedReqIDs, [revision.request_id])) return false;
+  const expected = canonicalPendingMutationPlan(revision.expected_before);
+  const actualExpected = canonicalPendingMutationPlan(evidence.expected_before);
+  const desired = canonicalPendingMutationPlan(decision?.sheet_row_candidate?.equipment, {nameField:'item', quantityField:'quantity'});
+  const actualFinal = canonicalPendingMutationPlan(evidence.final_plan);
+  const desiredPeriod = normalizeConfirmRequestWindowForSheet(decision.sheet_row_candidate || {});
+  return Boolean(expected && actualExpected && desired && actualFinal && desiredPeriod)
+    && sameGatewayDecisionValue(expected, actualExpected)
+    && sameGatewayDecisionValue(revision.expected_period, evidence.expected_period)
+    && sameGatewayDecisionValue(desired, actualFinal)
+    && sameGatewayDecisionValue(evidence.final_period, {start_date:desiredPeriod.start_date,
+      start_time:desiredPeriod.pickup_time,end_date:desiredPeriod.end_date,end_time:desiredPeriod.return_time});
+}
+
+function exactRegisteredInquiryReconciliation(receipt, decision) {
+  const authoritative = receipt?.authoritative_sheet_result;
+  if (authoritative?.success !== true || authoritative.alreadyRegistered !== true
+    || !/^\d{6}-\d{3}$/.test(text(authoritative.matchedRegisteredTradeId).trim())
+    || extractSheetRequestId(authoritative) || decision?.inquiry_disposition === 'independent_rental') return false;
+  const planned = canonicalPendingMutationPlan(decision?.sheet_row_candidate?.equipment, {nameField:'item',quantityField:'quantity'});
+  const row = decision?.sheet_row_candidate || {};
+  const requestedPeriod = normalizeConfirmRequestWindowForSheet(row) || partialConfirmRequestWindowForSheet(row);
+  if (!planned || !requestedPeriod?.start_date) return false;
+  // appendToSheet normalizes public result rows; retain the original GAS rows for periods.
+  const rows = Array.isArray(authoritative?.data?.results) ? authoritative.data.results : authoritative.results;
+  if (!Array.isArray(rows)) return false;
+  const totals = new Map();
+  for (const item of rows) {
+    const name = text(item?.장비명 || item?.equipment).normalize('NFKC').trim();
+    const quantity = Number(item?.수량 ?? item?.quantity);
+    const p = item?.period;
+    const actual = p && normalizeConfirmRequestWindowForSheet({start_date:p.start_date,pickup_time:p.start_time,end_date:p.end_date,return_time:p.end_time});
+    if (!name || !Number.isSafeInteger(quantity) || quantity < 1 || !actual) continue;
+    if (Object.keys(requestedPeriod).some(key => requestedPeriod[key] && requestedPeriod[key] !== actual[key])) continue;
+    totals.set(name, (totals.get(name) || 0) + quantity);
+  }
+  return planned.every(item => (totals.get(item.name) || 0) >= item.quantity);
+}
+
+function forceRegisteredInquiryReconciliationSuccess(decision, receipt) {
+  const followUps = (Array.isArray(decision.follow_up_items) ? decision.follow_up_items : [])
+    .filter(item => text(item?.route || item?.follow_up_route).trim() !== 'schedule');
+  const remainingWork = followUps.some(item => item?.status !== 'done');
+  return {
+    ...decision, inquiry_disposition:'already_applied', should_write_to_sheet:false,
+    reservation_inquiry:{...(decision.reservation_inquiry || {}),already_registered:true},
+    existing_confirm_request_ids:[], owner_review_required:remainingWork, post_action_reconciled:true,
+    registered_reconciliation_readback:receipt.authoritative_sheet_result,
+    authoritative_sheet_result:receipt.authoritative_sheet_result, trusted_confirmation_receipt:receipt,
+    follow_up_items:followUps, suggested_reply_draft:'',
+    reply_decision:{...decisionReply(decision),replyMode:'no_reply',text:'',confidence:'high',
+      reason:'요청 장비·수량과 기간은 기존 등록 거래에서 확인되었습니다.',
+      shouldCreateTask:remainingWork,safetyClass:'no_send',grounding:'authoritative_sheet',requiresRag:false,attachmentKeys:[]}
+  };
+}
+
 function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
   const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
   const classification = text(decision?.classification).trim();
@@ -10196,6 +10321,8 @@ function stripAgentSuppliedReceiptFields(decision = {}) {
     confirmed_registration_readback: _confirmedRegistrationReadback,
     registered_mutation_review: _registeredMutationReview,
     registered_mutation_readback: _registeredMutationReadback,
+    customer_pending_revision_readback: _customerPendingRevisionReadback,
+    registered_reconciliation_readback: _registeredReconciliationReadback,
     authoritative_registered_result: _authoritativeRegisteredResult,
     ...withoutReceipts
   } = decision;
@@ -10694,9 +10821,19 @@ export async function prepareKakaoGatewayDecision({
     }
   }
   if (decision) {
-    const validation = validateAiDecisionContract(decision, {
+    // A final no-write statement may describe a completed customer inquiry revision.
+    // Validate its execution intent only against this turn's trusted receipt; the exact
+    // target and before/after state are checked again below before accepting success.
+    const hasCustomerRevisionReceipt = decision.customer_requested_pending_revision &&
+      (Array.isArray(trustedToolReceipts) ? trustedToolReceipts : []).some(receipt =>
+        exactTrustedConfirmationReceipt(receipt, {jobId,roomKey,roomRevision}) &&
+        receipt.authoritative_sheet_result?.customer_requested_pending_revision);
+    const validationDecision = hasCustomerRevisionReceipt && decision.should_write_to_sheet === false
+      ? {...decision,should_write_to_sheet:true} : decision;
+    const validation = validateAiDecisionContract(validationDecision, {
       requireOwnerCase: config.workOrchestratorV2WorkItemsEnabled === true,
-      roomRevision
+      roomRevision,
+      ...(decision.customer_requested_pending_revision ? {roomSnapshot:snapshot} : {})
     });
     if (!validation.valid) safetyFailures.push('invalid_gateway_decision');
     if (decision.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object') {
@@ -10802,6 +10939,8 @@ export async function prepareKakaoGatewayDecision({
   const structuredConfirmedRegistration = decision?.staff_confirmed_registration?.target_scope === 'pending_request';
   const structuredRegisteredMutation = decision?.staff_confirmed_mutation?.target_scope === 'registered_trade';
   const structuredPendingMutation = decision?.staff_confirmed_mutation?.target_scope === 'pending_request';
+  const structuredCustomerRevision = Boolean(decision?.customer_requested_pending_revision);
+  const hasConfirmationBatchReceipt = trustedConfirmationReceipt?.authoritative_sheet_result?.batch === true;
   const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
   const structuredDocumentClaim = decision ? gatewayDecisionHasStructuredDocumentClaim(decision) : false;
   const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
@@ -10809,7 +10948,34 @@ export async function prepareKakaoGatewayDecision({
   let sheetResult = null;
   let sheetPayload = null;
   let reason = '';
-  if (structuredConfirmedRegistration) {
+  if (hasConfirmationBatchReceipt) {
+    const exactReceiptSet = suppliedReceipts.length === 1 && exactConfirmationReceipts.length === 1 &&
+      !safetyFailures.includes('invalid_trusted_receipt') && !safetyFailures.includes('conflicting_trusted_receipts');
+    const batch = reconcileConfirmationBatchReceipt({receipt:trustedConfirmationReceipt,decision,job,
+      validateChildReadback:(childReceipt, authorized) => {
+        if (!exactReceiptSet || !validateAiDecisionContract(authorized, {roomRevision,
+          ...((authorized.customer_requested_pending_revision || authorized.inquiry_disposition === 'independent_rental')
+            ? {roomSnapshot:snapshot} : {})}).valid) return false;
+        if (authorized.customer_requested_pending_revision) return exactCustomerPendingRevisionReadback(childReceipt, authorized);
+        if (authorized.staff_confirmed_mutation?.target_scope === 'pending_request') return exactPendingMutationAuthoritativeReadback(childReceipt, authorized);
+        if (childReceipt.authoritative_sheet_result?.alreadyRegistered === true) return exactRegisteredInquiryReconciliation(childReceipt, authorized);
+        return childReceipt.authoritative_sheet_result?.success === true &&
+          /^RQ-\d{6}-\d{3}$/.test(extractSheetRequestId(childReceipt.authoritative_sheet_result));
+      }});
+    decision = batch.decision;
+    sheetResult = batch.sheetResult;
+    reason = batch.reason;
+    safetyFailures.push(...batch.errors);
+    if (!exactReceiptSet) safetyFailures.push('confirmation_batch_receipt_set_invalid');
+    if (batch.valid && exactReceiptSet) {
+      // Authorized child decisions and their durable results survive an omitted or
+      // malformed final envelope. Never reconstruct another write from that envelope.
+      for (const failure of ['malformed_gateway_final','invalid_gateway_decision']) {
+        let index = safetyFailures.indexOf(failure);
+        while (index >= 0) { safetyFailures.splice(index,1); index = safetyFailures.indexOf(failure); }
+      }
+    }
+  } else if (structuredConfirmedRegistration) {
     const registration = decision.staff_confirmed_registration;
     if (!parsedDecisionValid) {
       reason = '직원 확정 예약등록의 typed 결정이 현재 방/리비전 계약을 충족하지 못했습니다.';
@@ -10951,6 +11117,37 @@ export async function prepareKakaoGatewayDecision({
       });
       decision.trusted_confirmation_receipt = trustedConfirmationReceipt;
     }
+  } else if (structuredCustomerRevision) {
+    sheetResult = sheetResultFromTrustedReceipt(trustedConfirmationReceipt);
+    const exactReceiptSet = suppliedReceipts.length === 1 && exactConfirmationReceipts.length === 1 &&
+      !safetyFailures.includes('invalid_trusted_receipt') && !safetyFailures.includes('conflicting_trusted_receipts');
+    const reconciled = parsedDecisionValid && exactReceiptSet && trustedConfirmationReceipt.status === 'ok' &&
+      trustedConfirmationReceipt.error === null && exactCustomerPendingRevisionReadback(trustedConfirmationReceipt, decision);
+    if (!reconciled) safetyFailures.push(trustedConfirmationReceipt?.status === 'ok'
+      ? 'trusted_customer_revision_readback_contradiction' : 'trusted_customer_revision_failed');
+    reason = reconciled
+      ? '고객 요청에 따라 기존 문의를 교체했고 최종 장비·기간을 확인했습니다. 대기 문의의 가용 결과를 검토하세요.'
+      : '고객 문의 수정의 정확한 교체 대상·결과를 검증하지 못해 현재 문의 상태 확인이 필요합니다. 변경을 재실행하지 마세요.';
+    decision = forceGatewayOwnerReviewDecision(decision || {}, {job,schedule:true,reason,receipt:trustedConfirmationReceipt,
+      authoritativeSheetResult:trustedConfirmationReceipt?.authoritative_sheet_result});
+    decision.post_action_reconciled = reconciled;
+    if (reconciled) decision.customer_pending_revision_readback = trustedConfirmationReceipt.authoritative_sheet_result.customer_requested_pending_revision;
+    if (trustedConfirmationReceipt) decision.trusted_confirmation_receipt = trustedConfirmationReceipt;
+  } else if (trustedConfirmationReceipt?.authoritative_sheet_result?.alreadyRegistered === true) {
+    sheetResult = sheetResultFromTrustedReceipt(trustedConfirmationReceipt);
+    const reconciled = parsedDecisionValid && suppliedReceipts.length === 1 && exactConfirmationReceipts.length === 1 &&
+      !safetyFailures.includes('invalid_trusted_receipt') && !safetyFailures.includes('conflicting_trusted_receipts') &&
+      trustedConfirmationReceipt.status === 'ok' && trustedConfirmationReceipt.error === null &&
+      exactRegisteredInquiryReconciliation(trustedConfirmationReceipt, decision);
+    if (reconciled) {
+      decision = forceRegisteredInquiryReconciliationSuccess(decision, trustedConfirmationReceipt);
+    } else {
+      safetyFailures.push('trusted_registered_reconciliation_contradiction');
+      reason = '기존 등록 거래 재확인 결과가 현재 요청 장비·수량·기간과 일치하지 않습니다. 신규 문의 생성 없이 등록 상태를 확인하세요.';
+      decision = forceGatewayOwnerReviewDecision(decision || {}, {job,schedule:true,reason,receipt:trustedConfirmationReceipt,
+        authoritativeSheetResult:trustedConfirmationReceipt.authoritative_sheet_result});
+      decision.post_action_reconciled = false;
+    }
   } else if (trustedConfirmationReceipt) {
     sheetResult = sheetResultFromTrustedReceipt(trustedConfirmationReceipt);
     const receiptFailed = trustedConfirmationReceipt.status === 'failed' || trustedConfirmationReceipt.error !== null;
@@ -11012,11 +11209,11 @@ export async function prepareKakaoGatewayDecision({
     decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: false, reason });
   }
 
-  const baseFollowUpRows = [
+  const baseFollowUpRows = hasConfirmationBatchReceipt ? buildFollowUpRows(decision, job) : [
     ...buildFollowUpRows(decision, job),
     ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
   ];
-  let availabilityAwareRows = enrichFollowUpRowsWithSheetAvailability(
+  let availabilityAwareRows = hasConfirmationBatchReceipt ? baseFollowUpRows : enrichFollowUpRowsWithSheetAvailability(
     baseFollowUpRows,
     sheetResult,
     sheetPayload,
