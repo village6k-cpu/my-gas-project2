@@ -4,14 +4,14 @@ const EVENT_KEYS = [
   'receiptId', 'recordedAt', 'roomRevision', 'sourceMessageAt', 'summary', 'targetId', 'targetType',
 ];
 const PAYLOAD_KEYS = ['items', 'nextCursor', 'ok', 'source', 'sync'];
-const EVENT_KEY = /^kakao:(auto_reply|confirmation_request|registered_reservation_change|document_send):[0-9a-f]{64}$/;
+const EVENT_KEY = /^kakao:(auto_reply|confirmation_request|reservation_registration|registered_reservation_change|document_send):[0-9a-f]{64}$/;
 const UTC_MS = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const DATE = /^(?!0000)([0-9]{4})-([0-9]{2})-([0-9]{2})$/;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const PHONE = /01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4}/i;
 const SECRET = /(bearer\s+[a-z0-9._~-]+|(?:token|secret|password|apikey|api[ _-]?key)\s*[:=])/i;
 const BANK_ACCOUNT = /(?:계좌|은행|account)(?:번호)?[^0-9\r\n]{0,20}[0-9][0-9 -]{7,}[0-9]/i;
-const EFFECTS = new Set(['auto_reply', 'confirmation_request', 'registered_reservation_change', 'document_send']);
+const EFFECTS = new Set(['auto_reply', 'confirmation_request', 'reservation_registration', 'registered_reservation_change', 'document_send']);
 const ACTIONS = new Set(['send', 'create', 'update', 'add', 'remove', 'replace', 'quantity_change', 'date_time_change']);
 const OUTCOMES = new Set(['success', 'partial_success', 'failed', 'blocked', 'no_action']);
 const TARGETS = new Set(['room', 'request', 'trade', 'document']);
@@ -23,6 +23,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const EFFECT_LABELS = Object.freeze({
   auto_reply: '자동응대',
   confirmation_request: '확인요청',
+  reservation_registration: '예약 등록',
   registered_reservation_change: '등록 예약 변경',
   document_send: '견적·서류 발송',
 });

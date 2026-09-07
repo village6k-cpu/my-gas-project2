@@ -161,7 +161,7 @@ test('automation audit GET returns a fixed newest-first DTO and content-free syn
       }]);
   } });
 
-  const result = await GET(request('range=today&effect=confirmation_request&outcome=success&search=RQ-260907-001&limit=2'));
+  const result = await GET(request('range=today&effect=reservation_registration&outcome=success&search=RQ-260907-001&limit=2'));
   const value = await body(result);
   assert.equal(result.status, 200);
   assert.deepEqual(Object.keys(value).sort(), ['items', 'nextCursor', 'ok', 'source', 'sync'].sort());
@@ -182,7 +182,7 @@ test('automation audit GET returns a fixed newest-first DTO and content-free syn
   assert.match(calls[0].url, /kakao_automation_audit_events\?/);
   assert.match(calls[0].url, /order=occurred_at\.desc%2Cevent_key\.desc|order=occurred_at.desc%2Cevent_key.desc/);
   assert.match(calls[0].url, /limit=3/);
-  assert.match(decodeURIComponent(calls[0].url), /effect_type=eq\.confirmation_request/);
+  assert.match(decodeURIComponent(calls[0].url), /effect_type=eq\.reservation_registration/);
   assert.match(decodeURIComponent(calls[0].url), /outcome=eq\.success/);
   assert.doesNotMatch(calls[0].url, /work_items_v2|ai_follow_up_items/);
   assert.equal(calls[0].init.headers.apikey, 'service-role-key');

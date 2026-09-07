@@ -12,6 +12,7 @@ import { customerClusterHash } from './follow-up-policy.mjs';
 import * as workerModule from './worker.mjs';
 import { loadWorkOrchestratorConfig } from '../work-orchestrator-v2/contracts.mjs';
 import { registeredReservationChangeRequestDigest } from './staff-confirmed-mutation.mjs';
+import { executeVillageConfirmedReservationCommit } from './staff-confirmed-registration.mjs';
 
 const SAFE_PRE_CUTOVER_ENV = Object.freeze({
   WORK_ORCHESTRATOR_V2_RUNTIME_MODE: 'legacy',
@@ -29,6 +30,11 @@ const SAFE_PRE_CUTOVER_ENV = Object.freeze({
   SLACK_ACTION_POLL_ENABLED: '1'
 });
 Object.assign(process.env, SAFE_PRE_CUTOVER_ENV);
+
+const STAFF_AUTHORIZATION_INCIDENT = JSON.parse(fs.readFileSync(
+  new URL('../../test/fixtures/kakao-staff-authorized-registration/incident-pending-registration-001.json', import.meta.url),
+  'utf8'
+));
 
 import {
   buildBrainContext,
@@ -174,6 +180,20 @@ test('Kakao room snapshots are immutable and contain no live DOM handles', () =>
         hint_matched: true,
         hints: ['고객명'],
         visible_static_text_tail: '고객: 문의합니다',
+        messages: [
+          {
+            message_id: 'dom-customer-1',
+            role: 'customer',
+            order: 1,
+            text: '고객의 정확한 예약 요청'
+          },
+          {
+            message_id: 'dom-staff-1',
+            role: 'staff',
+            order: 2,
+            text: '직원의 무조건적 승인'
+          }
+        ],
         note: 'captured'
       }
     }
@@ -184,11 +204,23 @@ test('Kakao room snapshots are immutable and contain no live DOM handles', () =>
   assert.equal(typeof snapshot.evidenceHash, 'string');
   assert.equal(snapshot.evidenceHash.length, 64);
   assert.equal(snapshot.navigation.conversation_evidence.title, '고객명');
+  assert.deepEqual(snapshot.navigation.conversation_evidence.messages, [
+    {
+      message_id: 'dom-customer-1', role: 'customer', order: 1,
+      text: '고객의 정확한 예약 요청', text_hash: createHash('sha256').update('고객의 정확한 예약 요청').digest('hex')
+    },
+    {
+      message_id: 'dom-staff-1', role: 'staff', order: 2,
+      text: '직원의 무조건적 승인', text_hash: createHash('sha256').update('직원의 무조건적 승인').digest('hex')
+    }
+  ]);
   assert.equal(JSON.stringify(snapshot).includes('target-secret'), false);
   assert.equal(JSON.stringify(snapshot).includes('ws://'), false);
   assert.equal(JSON.stringify(snapshot).includes('element_index'), false);
   assert.equal(Object.isFrozen(snapshot), true);
   assert.equal(Object.isFrozen(snapshot.navigation.conversation_evidence), true);
+  assert.equal(Object.isFrozen(snapshot.navigation.conversation_evidence.messages), true);
+  assert.equal(Object.isFrozen(snapshot.navigation.conversation_evidence.messages[0]), true);
   assert.throws(() => { snapshot.navigation.status = 'mutated'; }, TypeError);
 });
 
@@ -807,6 +839,734 @@ function pendingReceiptFixture(job, overrides = {}) {
     ...overrides
   });
 }
+
+function confirmedRegistrationFixture(overrides = {}) {
+  const plan = [
+    { name: '소니 FX3 바디세트', quantity: 1 },
+    { name: '소니 GM 16-35mm', quantity: 1 },
+    { name: '소니 GM 70-200mm II', quantity: 1 }
+  ];
+  const period = {
+    start_date: '2026-09-07', start_time: '07:00',
+    end_date: '2026-09-07', end_time: '20:00'
+  };
+  return {
+    confirmed: true,
+    target_scope: 'pending_request',
+    request_id: 'RQ-260906-001',
+    source_evidence: {
+      customer_request: '고객이 장비와 일정을 확정해 예약을 요청한 발화',
+      staff_confirmation: '직원이 해당 요청을 확정한 발화',
+      conversation_revision: 7,
+      conversation_evidence_hash: 'a'.repeat(64),
+      customer_message_ids: ['dom-customer-1'],
+      staff_message_ids: ['dom-staff-1']
+    },
+    expected_before: plan,
+    expected_set_components: [{
+      set_item: '소니 FX3 바디세트',
+      component_item: '소니 FX3 바디(케이지)',
+      quantity: 1
+    }],
+    set_component_selections: [],
+    expected_period: period,
+    desired_after: plan,
+    desired_period: period,
+    ...overrides
+  };
+}
+
+function fastConfirmedRegistrationFixture(overrides = {}) {
+  return confirmedRegistrationFixture({
+    request_id: null,
+    expected_set_components: [],
+    set_component_selections: [],
+    pending_request_candidate: {
+      customer_name: '테스트 고객',
+      phone: '010-1111-2222',
+      discount_type: '일반',
+      memo: '',
+      extra_request: ''
+    },
+    ...overrides
+  });
+}
+
+function confirmedRegistrationDecisionFixture(overrides = {}) {
+  const registration = overrides.staff_confirmed_registration || confirmedRegistrationFixture();
+  return gatewayDecisionFixture({
+    classification: 'reservation',
+    confidence: 'high',
+    should_write_to_sheet: false,
+    owner_review_required: false,
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      confirmed: true,
+      already_registered: false,
+      equipment_requested: registration.desired_after
+    },
+    existing_confirm_request_ids: [registration.request_id],
+    safety_checks: {
+      latest_customer_message_after_last_staff_reply: false,
+      no_auto_reply_sent: true
+    },
+    staff_confirmed_registration: registration,
+    follow_up_items: [],
+    suggested_reply_draft: '',
+    reply_decision: {
+      replyMode: 'no_reply', text: '', confidence: 'high', reason: '직원 답변으로 이미 안내됨',
+      shouldCreateTask: false, safetyClass: 'no_send', grounding: 'staff_confirmation',
+      requiresRag: false, attachmentKeys: [], alreadyDelivered: true
+    },
+    ...overrides
+  });
+}
+
+function confirmedRegistrationReceiptFixture(job, overrides = {}) {
+  const registration = overrides.authorized_registration || confirmedRegistrationFixture();
+  const leaseId = overrides.lease_id || '99999999-8888-4777-8666-555555555555';
+  const requestDigest = workerModule.confirmedReservationCommitRequestDigest({
+    schema: 'village-confirmed-reservation-commit-request/v1',
+    job_id: job.jobId,
+    room_key: job.roomKey,
+    room_revision: job.roomRevision,
+    lease_id: leaseId,
+    registration
+  });
+  const authoritativeResult = {
+    schema: 'village-confirmed-reservation-commit-result/v1',
+    success: true,
+    status: 'ok',
+    request_id: registration.request_id,
+    effective_request_id: registration.request_id,
+    trade_id: '260907-001',
+    replaced_request_ids: [],
+    final_plan: registration.desired_after,
+    final_period: registration.desired_period,
+    final_set_components: registration.request_id === null
+      ? []
+      : registration.expected_set_components,
+    authoritative: {
+      request: {
+        reqID: registration.request_id,
+        name: registration.pending_request_candidate?.customer_name || '테스트 고객',
+        phone: (registration.pending_request_candidate?.phone || '010-1111-2222').replace(/\D/g, ''),
+        discount: registration.pending_request_candidate?.discount_type || '일반',
+        memo: registration.pending_request_candidate?.memo || '',
+        extraRequest: registration.pending_request_candidate?.extra_request || '',
+        startDate: registration.desired_period.start_date,
+        startTime: registration.desired_period.start_time,
+        endDate: registration.desired_period.end_date,
+        endTime: registration.desired_period.end_time,
+        topLevelEquipItems: registration.desired_after.map(({ name, quantity }) => ({ name, qty: quantity })),
+        setComponentItems: registration.request_id === null ? [] : registration.expected_set_components,
+        statuses: ['등록완료'],
+        tradeIds: ['260907-001']
+      },
+      registered_trade: {
+        contract: {},
+        schedule: {
+          rows: registration.request_id === null ? [] : registration.expected_set_components.map((entry, index) => ({
+            scheduleId: `260907-001-${String(index + 2).padStart(2, '0')}`,
+            setName: entry.set_item,
+            name: entry.component_item,
+            qty: entry.quantity,
+            isComponent: true
+          }))
+        },
+        ledger: {}
+      }
+    },
+    customerNotificationAttempted: false,
+    customerNotificationSent: false
+  };
+  return {
+    schema: 'village-confirmed-reservation-commit-receipt/v1',
+    receipt_id: 'confirmed-registration-receipt-1',
+    job_id: job.jobId,
+    room_key: job.roomKey,
+    room_revision: job.roomRevision,
+    lease_id: leaseId,
+    request_digest: requestDigest,
+    operation_id: '11111111-aaaa-4bbb-8ccc-222222222222',
+    status: 'ok',
+    target_scope: 'pending_request',
+    request_id: registration.request_id,
+    effective_request_id: registration.request_id,
+    trade_id: '260907-001',
+    authorized_registration: registration,
+    authoritative_result: authoritativeResult,
+    applied_stages: ['commitConfirmedReservation'],
+    attempted_stage: null,
+    customer_reply: 'no_reply',
+    created_at: '2026-09-07T00:00:00.000Z',
+    error: null,
+    ...overrides
+  };
+}
+
+test('confirmed registration receipt preserves authoritative partial-write stages after ledger failure', async () => {
+  const registration = confirmedRegistrationFixture();
+  const authoritativeResult = {
+    schema: 'village-confirmed-reservation-commit-result/v1',
+    success: false,
+    status: 'partial_success',
+    request_id: registration.request_id,
+    effective_request_id: registration.request_id,
+    trade_id: '260907-001',
+    replaced_request_ids: [],
+    applied_stages: ['contract', 'schedule'],
+    authoritative: {
+      registered_trade: {
+        contract: { tradeId: '260907-001' },
+        schedule: { rows: [{ scheduleId: '260907-001-01' }] },
+        ledger: null
+      }
+    },
+    attempted_stage: 'registration',
+    error: {
+      type: 'trade_ledger_write_failed',
+      message: 'registered rows exist but ledger verification failed'
+    },
+    customerNotificationSent: false
+  };
+  const receipt = await executeVillageConfirmedReservationCommit({
+    config: {},
+    job: { job_id: 'job-ledger-partial', room_key: 'room-ledger-partial', room_revision: 7 },
+    roomRevision: 7,
+    registration,
+    dependencies: {
+      randomUUID: () => 'receipt-ledger-partial',
+      now: () => new Date('2026-09-07T00:00:00.000Z'),
+      assertCurrentClaim: async () => {},
+      commitConfirmedReservation: async () => authoritativeResult
+    }
+  }, {
+    operationFence: { operation_id: '11111111-2222-4333-8444-555555555555' }
+  });
+
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.trade_id, '260907-001');
+  assert.deepEqual(receipt.applied_stages, ['contract', 'schedule']);
+  assert.deepEqual(receipt.authoritative_result, authoritativeResult);
+  assert.equal(receipt.attempted_stage, 'registration');
+  assert.equal(receipt.error.type, 'trade_ledger_write_failed');
+});
+
+test('confirmed registration executor rejects success when the authoritative request readback is incomplete', async () => {
+  const registration = confirmedRegistrationFixture();
+  const gatewayJob = { jobId: 'job-request-readback', roomKey: 'room-request-readback', roomRevision: 7 };
+  const result = structuredClone(confirmedRegistrationReceiptFixture(gatewayJob).authoritative_result);
+  result.authoritative.request.topLevelEquipItems[0].qty = 2;
+  const receipt = await executeVillageConfirmedReservationCommit({
+    config: {},
+    job: { job_id: gatewayJob.jobId, room_key: gatewayJob.roomKey, room_revision: 7 },
+    roomRevision: 7,
+    registration,
+    dependencies: {
+      randomUUID: () => 'receipt-request-readback',
+      now: () => new Date('2026-09-07T00:00:00.000Z'),
+      assertCurrentClaim: async () => {},
+      commitConfirmedReservation: async () => result
+    }
+  }, {
+    operationFence: { operation_id: '11111111-2222-4333-8444-555555555555' }
+  });
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.error.type, 'invalid_authoritative_result');
+});
+
+test('native prompt routes semantic staff authorization to one confirmed reservation commit without a closed phrase vocabulary', () => {
+  const prompt = buildHermesPrompt(
+    { id: 'job-confirmed-registration', preview_text: '예약을 진행하는 대화' },
+    { gatewayConfirmationToolAvailable: true }
+  );
+  assert.match(prompt, /full same-room conversation|같은 방.*전체.*대화/is);
+  assert.match(prompt, /semantic|의미.*판단/is);
+  assert.match(prompt, /village_confirmed_reservation_commit/);
+  assert.match(prompt, /pending.*register|미등록.*등록/is);
+  assert.match(prompt, /conditional|조건부|확인해.*보겠/is);
+  assert.match(prompt, /"staff_confirmed_registration": object \| null/);
+  assert.match(prompt, /conversation_evidence_hash/);
+  assert.match(prompt, /customer_message_ids/);
+  assert.match(prompt, /staff_message_ids/);
+  assert.match(prompt, /exact.*message_id.*verbatim|message_id.*원문.*그대로/is);
+  assert.match(
+    prompt,
+    /clear, unconditional staff authorization.*pending RQ.*village_confirmed_reservation_commit/is
+  );
+  assert.match(prompt, /직원이 이미 답변했으면.*typed contract.*등록·변경/is);
+  assert.doesNotMatch(prompt, /직원 답변은.*후속 증거일 뿐/);
+  assert.doesNotMatch(prompt, /staff_confirmation\s*\.\s*(?:match|includes)|approvalKeywords|APPROVAL_KEYWORDS/);
+});
+
+test('native prompt keeps a coalesced inquiry and fast staff authorization in one atomic confirmation commit', () => {
+  const prompt = buildHermesPrompt(
+    { id: 'job-fast-confirmed-registration', preview_text: '문의 직후 직원이 바로 승인한 대화' },
+    { gatewayConfirmationToolAvailable: true }
+  );
+  assert.match(prompt, /pending_request_candidate/);
+  assert.match(prompt, /request_id.*null/is);
+  assert.match(prompt, /same.*atomic.*operation|하나의.*원자.*작업/is);
+  assert.match(prompt, /확인요청.*생성.*등록/is);
+  assert.doesNotMatch(prompt, /가능합니다.*(?:정규식|keyword|키워드)/i);
+});
+
+test('existing-RQ confirmed registration requires an exact full set-component baseline and typed selections', () => {
+  const registration = confirmedRegistrationFixture({
+    set_component_selections: [{
+      set_item: '소니 FX3 바디세트',
+      component_item: '소니 FX3 바디(케이지)',
+      selected_item: '소니 FX3 바디(케이지)'
+    }]
+  });
+  assert.equal(workerModule.validateStaffConfirmedRegistration(registration, { roomRevision: 7 }).valid, true);
+
+  for (const invalid of [
+    (() => { const value = structuredClone(registration); delete value.expected_set_components; return value; })(),
+    (() => { const value = structuredClone(registration); delete value.set_component_selections; return value; })(),
+    {
+      ...registration,
+      expected_set_components: [
+        ...registration.expected_set_components,
+        structuredClone(registration.expected_set_components[0])
+      ]
+    }
+  ]) {
+    assert.equal(workerModule.validateStaffConfirmedRegistration(invalid, { roomRevision: 7 }).valid, false);
+  }
+});
+
+test('semantic pressure fixture keeps approval meaning in native Hermes while code enforces only typed DOM evidence', () => {
+  const cases = STAFF_AUTHORIZATION_INCIDENT.semantic_cases;
+  assert.equal(cases.filter((entry) => entry.expected_authorized === true).length, 2);
+  assert.equal(cases.filter((entry) => entry.expected_authorized === false).length, 3);
+  const prompt = buildHermesPrompt(
+    { id: 'job-semantic-staff-pressure', preview_text: '전체 대화 의미 판단' },
+    { gatewayConfirmationToolAvailable: true }
+  );
+  assert.match(prompt, /wording is open-ended/i);
+  assert.match(prompt, /Native Hermes—not code or keywords—semantically decides/i);
+  assert.match(prompt, /conditional.*ambiguous-target.*customer-authored.*stale.*not authorization/is);
+
+  for (const scenario of cases) {
+    const customerMessageId = `dom-${scenario.id}-customer`;
+    const staffMessageId = `dom-${scenario.id}-candidate`;
+    const snapshot = createImmutableKakaoRoomSnapshot({
+      job: { jobId: `job-${scenario.id}`, roomKey: `chat:${scenario.id}`, roomRevision: 7 },
+      capturedAt: '2026-09-07T00:00:00.000Z',
+      navigationContext: {
+        status: 'opened_target_chat',
+        conversation_evidence: {
+          source: 'semantic_fixture', title: '테스트 고객', hint_matched: true,
+          visible_static_text_tail: `${STAFF_AUTHORIZATION_INCIDENT.semantic_evidence.customer_request}\n${scenario.staff_reply}`,
+          messages: [
+            {
+              message_id: customerMessageId, role: 'customer', order: 1,
+              text: STAFF_AUTHORIZATION_INCIDENT.semantic_evidence.customer_request
+            },
+            {
+              message_id: staffMessageId, role: scenario.speaker_role, order: 2,
+              text: scenario.staff_reply
+            }
+          ]
+        }
+      }
+    });
+    const registration = confirmedRegistrationFixture({
+      confirmed: scenario.expected_authorized,
+      source_evidence: {
+        customer_request: STAFF_AUTHORIZATION_INCIDENT.semantic_evidence.customer_request,
+        staff_confirmation: scenario.staff_reply,
+        conversation_revision: 7,
+        conversation_evidence_hash: snapshot.evidenceHash,
+        customer_message_ids: [customerMessageId],
+        staff_message_ids: [staffMessageId]
+      }
+    });
+    const validation = workerModule.validateStaffConfirmedRegistration(registration, {
+      roomRevision: 7, roomSnapshot: snapshot
+    });
+    assert.equal(validation.valid, scenario.expected_authorized, scenario.id);
+
+    if (scenario.speaker_role === 'staff' && scenario.expected_authorized === false) {
+      const structurallyValid = workerModule.validateStaffConfirmedRegistration({
+        ...registration, confirmed: true
+      }, { roomRevision: 7, roomSnapshot: snapshot });
+      assert.equal(
+        structurallyValid.valid,
+        true,
+        `${scenario.id}: plumbing must not replace Hermes semantics with phrase parsing`
+      );
+    }
+  }
+});
+
+test('staff registration validator accepts a bounded missing-RQ candidate only when request_id is null', () => {
+  const fast = fastConfirmedRegistrationFixture();
+  assert.equal(workerModule.validateStaffConfirmedRegistration(fast, { roomRevision: 7 }).valid, true);
+
+  const missing = { ...fast };
+  delete missing.pending_request_candidate;
+  assert.equal(workerModule.validateStaffConfirmedRegistration(missing, { roomRevision: 7 }).valid, false);
+
+  const ambiguous = confirmedRegistrationFixture({
+    pending_request_candidate: fast.pending_request_candidate
+  });
+  assert.equal(workerModule.validateStaffConfirmedRegistration(ambiguous, { roomRevision: 7 }).valid, false);
+
+  const unsafe = fastConfirmedRegistrationFixture({
+    pending_request_candidate: { ...fast.pending_request_candidate, unexpected: true }
+  });
+  assert.equal(workerModule.validateStaffConfirmedRegistration(unsafe, { roomRevision: 7 }).valid, false);
+
+  for (const [field, value] of [
+    ['phone', 101011112222],
+    ['discount_type', 1],
+    ['memo', 123],
+    ['extra_request', false]
+  ]) {
+    const wrongType = fastConfirmedRegistrationFixture({
+      pending_request_candidate: { ...fast.pending_request_candidate, [field]: value }
+    });
+    assert.equal(
+      workerModule.validateStaffConfirmedRegistration(wrongType, { roomRevision: 7 }).valid,
+      false,
+      `${field} must remain a string instead of being coerced`
+    );
+  }
+
+  for (const candidate of [
+    { ...fast.pending_request_candidate, phone: '' },
+    { ...fast.pending_request_candidate, discount_type: '' }
+  ]) {
+    const unsafeIdentity = fastConfirmedRegistrationFixture({ pending_request_candidate: candidate });
+    assert.equal(
+      workerModule.validateStaffConfirmedRegistration(unsafeIdentity, { roomRevision: 7 }).valid,
+      false,
+      'automatic bootstrap must not bind a name-only or implicit-discount customer'
+    );
+  }
+
+  const newSetSelection = confirmedRegistrationFixture({
+    desired_after: [
+      ...confirmedRegistrationFixture().desired_after,
+      { name: '새 조명 세트', quantity: 1 }
+    ],
+    set_component_selections: [{
+      set_item: '새 조명 세트', component_item: '기본 전구', selected_item: '선택 전구'
+    }]
+  });
+  assert.equal(
+    workerModule.validateStaffConfirmedRegistration(newSetSelection, { roomRevision: 7 }).valid,
+    true,
+    'an exact selection on a newly authorized set is validated by GAS against the desired SetMaster projection'
+  );
+});
+
+test('fast confirmed registration decision binds the bootstrap candidate, plan, and period to one sheet row candidate', () => {
+  const registration = fastConfirmedRegistrationFixture();
+  const decision = confirmedRegistrationDecisionFixture({
+    staff_confirmed_registration: registration,
+    existing_confirm_request_ids: [],
+    sheet_row_candidate: {
+      plan_complete: true,
+      equipment_write_mode: 'full_plan',
+      customer_name: registration.pending_request_candidate.customer_name,
+      phone: registration.pending_request_candidate.phone,
+      discount_type: registration.pending_request_candidate.discount_type,
+      memo: registration.pending_request_candidate.memo,
+      extra_request: registration.pending_request_candidate.extra_request,
+      equipment: registration.desired_after.map(({ name, quantity }) => ({ item: name, quantity })),
+      set_component_selections: [],
+      start_date: registration.desired_period.start_date,
+      pickup_time: registration.desired_period.start_time,
+      end_date: registration.desired_period.end_date,
+      return_time: registration.desired_period.end_time
+    }
+  });
+  assert.deepEqual(validateAiDecisionContract(decision, { roomRevision: 7 }), { valid: true, errors: [] });
+
+  const mismatched = structuredClone(decision);
+  mismatched.sheet_row_candidate.customer_name = '다른 고객';
+  assert.equal(validateAiDecisionContract(mismatched, { roomRevision: 7 }).valid, false);
+
+  const selectedRegistration = fastConfirmedRegistrationFixture({
+    set_component_selections: [{
+      set_item: '소니 FX3 바디세트',
+      component_item: '메모리',
+      selected_item: 'CFexpress Type A 160GB'
+    }]
+  });
+  const selectedDecision = structuredClone(decision);
+  selectedDecision.staff_confirmed_registration = selectedRegistration;
+  selectedDecision.sheet_row_candidate.set_component_selections = structuredClone(
+    selectedRegistration.set_component_selections
+  );
+  assert.deepEqual(
+    validateAiDecisionContract(selectedDecision, { roomRevision: 7 }),
+    { valid: true, errors: [] },
+    'the atomic fast path must carry exact set-component choices instead of silently using defaults'
+  );
+
+  selectedDecision.sheet_row_candidate.set_component_selections[0].selected_item = '다른 메모리';
+  assert.equal(validateAiDecisionContract(selectedDecision, { roomRevision: 7 }).valid, false);
+});
+
+test('staff registration validator accepts open-ended confirmed evidence but rejects non-authorized and stale structures mechanically', () => {
+  for (const evidence of [
+    '짧은 긍정 답변',
+    '복수형 자연어 승인 답변',
+    '업무 진행을 약속한 자연어 답변',
+    '장비 추가를 확정한 자연어 답변'
+  ]) {
+    const registration = confirmedRegistrationFixture({
+      source_evidence: {
+        customer_request: '고객의 정확한 요청', staff_confirmation: evidence, conversation_revision: 7,
+        conversation_evidence_hash: 'a'.repeat(64),
+        customer_message_ids: ['dom-customer-1'], staff_message_ids: ['dom-staff-1']
+      }
+    });
+    assert.equal(workerModule.validateStaffConfirmedRegistration(registration, { roomRevision: 7 }).valid, true);
+  }
+  for (const registration of [
+    confirmedRegistrationFixture({ confirmed: false }),
+    confirmedRegistrationFixture({ source_evidence: {
+      customer_request: '요청', staff_confirmation: '조건부 답변', conversation_revision: 6,
+      conversation_evidence_hash: 'a'.repeat(64), customer_message_ids: ['dom-customer-1'], staff_message_ids: ['dom-staff-1']
+    } }),
+    confirmedRegistrationFixture({ expected_before: [] }),
+    confirmedRegistrationFixture({ expected_period: {
+      ...confirmedRegistrationFixture().expected_period,
+      start_time: '07:30'
+    } }),
+    confirmedRegistrationFixture({ request_id: 'RQ-invalid' })
+  ]) {
+    assert.equal(workerModule.validateStaffConfirmedRegistration(registration, { roomRevision: 7 }).valid, false);
+  }
+});
+
+test('staff registration authority is bound to exact immutable DOM roles, order, text, and snapshot hash', () => {
+  const snapshot = createImmutableKakaoRoomSnapshot({
+    job: { jobId: 'job-evidence-bound', roomKey: 'chat:evidence-bound', roomRevision: 7 },
+    capturedAt: '2026-09-07T00:00:00.000Z',
+    navigationContext: {
+      status: 'opened_target_chat',
+      conversation_evidence: {
+        source: 'test_fixture', title: '테스트 고객', hint_matched: true, hints: ['테스트 고객'],
+        visible_static_text_tail: '고객의 정확한 요청\n잠시 확인하겠습니다\n직원의 무조건적 승인',
+        messages: [
+          { message_id: 'dom-customer-1', role: 'customer', order: 1, text: '고객의 정확한 요청' },
+          { message_id: 'dom-staff-old', role: 'staff', order: 2, text: '잠시 확인하겠습니다' },
+          { message_id: 'dom-staff-1', role: 'staff', order: 3, text: '직원의 무조건적 승인' }
+        ]
+      }
+    }
+  });
+  const registration = confirmedRegistrationFixture({
+    source_evidence: {
+      customer_request: '고객의 정확한 요청',
+      staff_confirmation: '직원의 무조건적 승인',
+      conversation_revision: 7,
+      conversation_evidence_hash: snapshot.evidenceHash,
+      customer_message_ids: ['dom-customer-1'],
+      staff_message_ids: ['dom-staff-1']
+    }
+  });
+
+  assert.equal(workerModule.validateStaffConfirmedRegistration(registration, {
+    roomRevision: 7, roomSnapshot: snapshot
+  }).valid, true);
+  for (const invalidEvidence of [
+    { ...registration.source_evidence, conversation_evidence_hash: 'b'.repeat(64) },
+    { ...registration.source_evidence, customer_message_ids: ['dom-staff-1'] },
+    { ...registration.source_evidence, staff_message_ids: ['dom-staff-old'], staff_confirmation: '잠시 확인하겠습니다' },
+    { ...registration.source_evidence, staff_confirmation: '직원의 무조건적 승인이라고 모델이 재작성함' }
+  ]) {
+    assert.equal(workerModule.validateStaffConfirmedRegistration({
+      ...registration, source_evidence: invalidEvidence
+    }, { roomRevision: 7, roomSnapshot: snapshot }).valid, false);
+  }
+});
+
+test('staff registration evidence is stale when a later customer or unknown message follows the selected approval', () => {
+  for (const role of ['customer', 'unknown']) {
+    const snapshot = createImmutableKakaoRoomSnapshot({
+      job: { jobId: `job-later-${role}`, roomKey: `chat:later-${role}`, roomRevision: 7 },
+      capturedAt: '2026-09-07T00:00:00.000Z',
+      navigationContext: {
+        status: 'opened_target_chat',
+        conversation_evidence: {
+          source: 'test_fixture', title: '테스트 고객', hint_matched: true,
+          visible_static_text_tail: '예약 요청\n직원 승인\n후속 정정',
+          messages: [
+            { message_id: 'dom-customer-1', role: 'customer', order: 1, text: '예약 요청' },
+            { message_id: 'dom-staff-1', role: 'staff', order: 2, text: '직원 승인' },
+            { message_id: `dom-later-${role}`, role, order: 3, text: '후속 정정' }
+          ]
+        }
+      }
+    });
+    const registration = confirmedRegistrationFixture({
+      source_evidence: {
+        customer_request: '예약 요청',
+        staff_confirmation: '직원 승인',
+        conversation_revision: 7,
+        conversation_evidence_hash: snapshot.evidenceHash,
+        customer_message_ids: ['dom-customer-1'],
+        staff_message_ids: ['dom-staff-1']
+      }
+    });
+    const validation = workerModule.validateStaffConfirmedRegistration(registration, {
+      roomRevision: 7, roomSnapshot: snapshot
+    });
+    assert.equal(validation.valid, false, `${role} after approval must invalidate the evidence`);
+    assert.ok(validation.errors.some((error) => error.includes('current actionable DOM tail')),
+      `${role} tail must be the explicit reason the authorization is stale`);
+  }
+});
+
+test('exact confirmed registration receipt finalizes no-reply and removes duplicate owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = confirmedRegistrationDecisionFixture();
+  const receipt = confirmedRegistrationReceiptFixture(job);
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: [receipt]
+  });
+  assert.equal(prepared.decision.should_write_to_sheet, false);
+  assert.equal(prepared.decision.owner_review_required, false);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+  assert.equal(prepared.decision.reply_decision.text, '');
+  assert.deepEqual(prepared.decision.staff_confirmed_registration, decision.staff_confirmed_registration);
+  assert.deepEqual(prepared.decision.trusted_confirmed_reservation_commit_receipt, receipt);
+  assert.deepEqual(prepared.availabilityAwareRows, []);
+  assert.deepEqual(prepared.gatewaySafetyFailures, []);
+});
+
+test('confirmed registration success fails closed when customer notification was attempted or sent', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = confirmedRegistrationDecisionFixture();
+  for (const notificationOverride of [
+    { customerNotificationAttempted: true, customerNotificationSent: false },
+    { customerNotificationAttempted: false, customerNotificationSent: true }
+  ]) {
+    const receipt = confirmedRegistrationReceiptFixture(job);
+    Object.assign(receipt.authoritative_result, notificationOverride);
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: [receipt]
+    });
+    assert.equal(prepared.decision.owner_review_required, true);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+    assert.ok(prepared.gatewaySafetyFailures.includes('trusted_confirmed_registration_readback_contradiction'));
+  }
+});
+
+test('confirmed registration success requires the exact authoritative confirmation-request readback', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = confirmedRegistrationDecisionFixture();
+  for (const mutate of [
+    (receipt) => { receipt.authoritative_result.authoritative.request.topLevelEquipItems[0].qty = 2; },
+    (receipt) => { receipt.authoritative_result.authoritative.request.setComponentItems = []; },
+    (receipt) => { receipt.authoritative_result.authoritative.request.startTime = '08:00'; }
+  ]) {
+    const receipt = confirmedRegistrationReceiptFixture(job);
+    mutate(receipt);
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`,
+      trustedToolReceipts: [receipt]
+    });
+    assert.equal(prepared.decision.owner_review_required, true);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+    assert.ok(prepared.gatewaySafetyFailures.includes('trusted_confirmed_registration_readback_contradiction'));
+  }
+});
+
+test('exact fast-reply receipt finalizes the generated RQ without a duplicate owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const registration = fastConfirmedRegistrationFixture();
+  const decision = confirmedRegistrationDecisionFixture({
+    staff_confirmed_registration: registration,
+    existing_confirm_request_ids: [],
+    sheet_row_candidate: {
+      plan_complete: true,
+      equipment_write_mode: 'full_plan',
+      customer_name: registration.pending_request_candidate.customer_name,
+      phone: registration.pending_request_candidate.phone,
+      discount_type: registration.pending_request_candidate.discount_type,
+      memo: registration.pending_request_candidate.memo,
+      extra_request: registration.pending_request_candidate.extra_request,
+      equipment: registration.desired_after.map(({ name, quantity }) => ({ item: name, quantity })),
+      set_component_selections: [],
+      start_date: registration.desired_period.start_date,
+      pickup_time: registration.desired_period.start_time,
+      end_date: registration.desired_period.end_date,
+      return_time: registration.desired_period.end_time
+    }
+  });
+  const receipt = confirmedRegistrationReceiptFixture(job, {
+    authorized_registration: registration,
+    request_id: null,
+    effective_request_id: 'RQ-260907-009',
+    applied_stages: ['pending_request_bootstrap', 'registration', 'authoritative_readback']
+  });
+  receipt.authoritative_result = {
+    ...receipt.authoritative_result,
+    request_id: null,
+    effective_request_id: 'RQ-260907-009',
+    authoritative: {
+      request: {
+        reqID: 'RQ-260907-009',
+        name: registration.pending_request_candidate.customer_name,
+        phone: registration.pending_request_candidate.phone.replace(/\D/g, ''),
+        discount: registration.pending_request_candidate.discount_type,
+        memo: registration.pending_request_candidate.memo,
+        extraRequest: registration.pending_request_candidate.extra_request,
+        startDate: registration.desired_period.start_date,
+        startTime: registration.desired_period.start_time,
+        endDate: registration.desired_period.end_date,
+        endTime: registration.desired_period.end_time,
+        topLevelEquipItems: registration.desired_after.map(({ name, quantity }) => ({ name, qty: quantity })),
+        setComponentItems: [],
+        statuses: ['등록완료'], tradeIds: ['260907-001']
+      },
+      registered_trade: { contract: {}, schedule: { rows: [] }, ledger: {} }
+    }
+  };
+
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: [receipt]
+  });
+  assert.equal(prepared.decision.owner_review_required, false);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+  assert.deepEqual(prepared.availabilityAwareRows, []);
+  assert.deepEqual(prepared.gatewaySafetyFailures, []);
+  assert.equal(prepared.decision.confirmed_registration_readback.effective_request_id, 'RQ-260907-009');
+});
+
+test('missing, stale, conflicting, or failed confirmed registration receipt is one no-send owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = confirmedRegistrationDecisionFixture();
+  const exact = confirmedRegistrationReceiptFixture(job);
+  const cases = [
+    ['missing', []],
+    ['stale', [confirmedRegistrationReceiptFixture({ ...job, roomRevision: 8 })]],
+    ['duplicate', [exact, structuredClone(exact)]],
+    ['failed', [confirmedRegistrationReceiptFixture(job, {
+      status: 'blocked', authoritative_result: null,
+      error: { type: 'availability_conflict', message: 'authoritative blocker' }
+    })]]
+  ];
+  for (const [label, receipts] of cases) {
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: receipts
+    });
+    assert.equal(prepared.decision.should_write_to_sheet, false, label);
+    assert.equal(prepared.decision.owner_review_required, true, label);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', label);
+    assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send', label);
+    assert.equal(prepared.availabilityAwareRows.length, 1, label);
+  }
+});
 
 function extractSourceFunction(source, name) {
   const start = source.indexOf(`function ${name}(`);
@@ -5496,6 +6256,35 @@ test('openKakaoTargetChatViaDevtools waits past a header-only Kakao render until
   assert.equal(evidenceReads, 2);
   assert.equal(result.status, 'opened_target_chat');
   assert.match(result.conversation_evidence.visible_static_text_tail.join(' '), /ECM-673/);
+});
+
+test('openKakaoTargetChatViaDevtools preserves DOM-side message roles and order as immutable evidence', async () => {
+  const targets = [
+    { type: 'page', id: 'chat', title: '테스트 고객 - 빌리지 - 카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats/4981161999642866', webSocketDebuggerUrl: 'ws://chat' }
+  ];
+  const result = await openKakaoTargetChatViaDevtools({
+    room_key: 'chat:4981161999642866', customer_name: '테스트 고객'
+  }, {
+    cdpBaseUrl: 'http://127.0.0.1:9223',
+    fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify(targets) }),
+    evaluateImpl: async () => ({
+      title: targets[0].title,
+      href: targets[0].url,
+      text: '고객의 정확한 예약 요청\n직원의 무조건적 승인',
+      messages: [
+        { message_id: 'dom-customer-1', role: 'customer', order: 1, text: '고객의 정확한 예약 요청' },
+        { message_id: 'dom-staff-1', role: 'staff', order: 2, text: '직원의 무조건적 승인' }
+      ]
+    }),
+    evidenceMaxAttempts: 1,
+    evidencePollMs: 0
+  });
+
+  assert.equal(result.status, 'opened_target_chat');
+  assert.deepEqual(result.conversation_evidence.messages.map(({ message_id, role, order, text }) => ({ message_id, role, order, text })), [
+    { message_id: 'dom-customer-1', role: 'customer', order: 1, text: '고객의 정확한 예약 요청' },
+    { message_id: 'dom-staff-1', role: 'staff', order: 2, text: '직원의 무조건적 승인' }
+  ]);
 });
 
 test('openKakaoTargetChatViaDevtools fails closed when Kakao stays header-only', async () => {

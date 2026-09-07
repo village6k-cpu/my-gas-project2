@@ -1,0 +1,65 @@
+{
+  "schema": "village-kakao-staff-authorized-registration-fixture/v1",
+  "room_revision": 14,
+  "request_id": "RQ-260906-001",
+  "semantic_evidence": {
+    "customer_request": "sanitized exact pending reservation request",
+    "staff_confirmation": "sanitized unambiguous staff authorization for that request"
+  },
+  "expected_before": [
+    { "name": "소니 FX3 바디세트", "quantity": 1 },
+    { "name": "소니 GM 70-200mm II", "quantity": 1 }
+  ],
+  "expected_period": {
+    "start_date": "2026-09-07",
+    "start_time": "07:00",
+    "end_date": "2026-09-07",
+    "end_time": "20:00"
+  },
+  "desired_after": [
+    { "name": "소니 FX3 바디세트", "quantity": 1 },
+    { "name": "소니 GM 70-200mm II", "quantity": 1 }
+  ],
+  "desired_period": {
+    "start_date": "2026-09-07",
+    "start_time": "07:00",
+    "end_date": "2026-09-07",
+    "end_time": "20:00"
+  },
+  "conditional_case": {
+    "confirmed": false,
+    "reason": "sanitized conditional staff response requiring another check"
+  },
+  "semantic_cases": [
+    {
+      "id": "short-context-bound-ack",
+      "speaker_role": "staff",
+      "staff_reply": "네",
+      "expected_authorized": true
+    },
+    {
+      "id": "natural-unlisted-approval",
+      "speaker_role": "staff",
+      "staff_reply": "말씀하신 일정과 구성 그대로 준비해두겠습니다.",
+      "expected_authorized": true
+    },
+    {
+      "id": "literal-positive-with-condition",
+      "speaker_role": "staff",
+      "staff_reply": "가능합니다. 다만 일부 장비는 재고를 한 번 더 확인해야 합니다.",
+      "expected_authorized": false
+    },
+    {
+      "id": "literal-positive-customer-authored",
+      "speaker_role": "customer",
+      "staff_reply": "가능합니다",
+      "expected_authorized": false
+    },
+    {
+      "id": "partial-scope-only",
+      "speaker_role": "staff",
+      "staff_reply": "앞에서 말씀하신 구성 중 한 품목만 진행할 수 있습니다.",
+      "expected_authorized": false
+    }
+  ]
+}

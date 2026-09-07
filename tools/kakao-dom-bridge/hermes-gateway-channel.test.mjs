@@ -64,6 +64,46 @@ function registeredReservationChangeReceipt(claim, operationId, requestDigest = 
   };
 }
 
+function confirmedReservationCommitOperation(claim, requestDigest = 'confirmed-registration-digest-1') {
+  return { ...confirmationOperation(claim, requestDigest), tool: 'confirmed_reservation_commit' };
+}
+
+function confirmedReservationCommitReceipt(claim, operationId, requestDigest = 'confirmed-registration-digest-1', overrides = {}) {
+  return {
+    schema: 'village-confirmed-reservation-commit-receipt/v1', receipt_id: 'confirmed-registration-receipt-1',
+    job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+    lease_id: claim.lease_id, request_digest: requestDigest, operation_id: operationId,
+    status: 'ok', target_scope: 'pending_request', request_id: 'RQ-260907-001',
+    effective_request_id: 'RQ-260907-001', trade_id: '260907-001',
+    authorized_registration: { confirmed: true }, authoritative_result: { success: true },
+    applied_stages: ['commitConfirmedReservation'], attempted_stage: null, customer_reply: 'no_reply',
+    created_at: '2026-09-07T00:00:00.000Z', error: null,
+    ...overrides
+  };
+}
+
+test('confirmed registration receipt may correlate a bootstrapped RQ without a fabricated requested id', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-confirmed-bootstrap', 'room-confirmed-bootstrap', 4));
+    const claim = await channel.claim({ consumerId: 'gateway-confirmed-bootstrap', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(confirmedReservationCommitOperation(claim));
+    const receipt = confirmedReservationCommitReceipt(claim, reserved.reservation.operation_id, undefined, {
+      request_id: null,
+      effective_request_id: 'RQ-260907-009',
+      authorized_registration: {
+        confirmed: true,
+        request_id: null,
+        pending_request_candidate: { customer_name: '테스트 고객' }
+      },
+      applied_stages: ['pending_request_bootstrap', 'registration', 'authoritative_readback']
+    });
+
+    const recorded = await channel.recordToolReceipt(receipt);
+    assert.equal(recorded.tool_receipts[0].request_id, null);
+    assert.equal(recorded.tool_receipts[0].effective_request_id, 'RQ-260907-009');
+  });
+});
+
 function automationAuditEvent(overrides = {}) {
   return {
     event_key: `kakao:auto_reply:${'a'.repeat(64)}`,
@@ -765,6 +805,64 @@ test('restart makes an unresolved registered reservation change human-review-onl
       job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
       lease_id: claim.lease_id, final: { reply_mode: 'no_reply' }
     }), { code: 'confirmation_operation_unresolved' });
+  });
+});
+
+test('persists and fences the exact confirmed reservation commit operation envelope and late receipt', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('job-confirmed-registration', 'room-confirmed-registration', 7));
+    const claim = await channel.claim({ consumerId: 'gateway-confirmed-registration', waitMs: 0 });
+    const operation = confirmedReservationCommitOperation(claim);
+    const reserved = await channel.reserveToolOperation(operation);
+    assert.equal(reserved.created, true);
+    assert.equal(reserved.reservation.tool, 'confirmed_reservation_commit');
+    await assert.rejects(
+      channel.reserveToolOperation({ ...operation, request_digest: 'different-registration-digest' }),
+      { code: 'confirmation_operation_conflict' }
+    );
+    await assert.rejects(
+      channel.recordToolReceipt(confirmedReservationCommitReceipt(claim, 'wrong-operation-id')),
+      { code: 'operation_fence_mismatch' }
+    );
+    clock.now += 1_000;
+    await channel.reapExpiredLeases();
+    const recorded = await channel.recordToolReceipt(
+      confirmedReservationCommitReceipt(claim, reserved.reservation.operation_id)
+    );
+    assert.equal(recorded.tool_operation.state, 'completed');
+    assert.equal(recorded.tool_operation.receipt_id, 'confirmed-registration-receipt-1');
+    assert.equal(recorded.tool_receipts.length, 1);
+  });
+});
+
+test('restart makes unresolved confirmed reservation commit human-review-only and never replayable', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-confirmed-registration-restart', 'room-confirmed-registration-restart', 8));
+    const claim = await channel.claim({ consumerId: 'gateway-confirmed-registration', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation({
+      ...confirmedReservationCommitOperation(claim),
+      audit_target: {
+        schema: 'village-kakao-tool-audit-target/v1',
+        effect_type: 'reservation_registration',
+        action_type: 'create',
+        target_type: 'request',
+        target_id: 'RQ-260907-001'
+      }
+    });
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    const review = await restarted.get(claim.job_id);
+    assert.equal(review.state, 'failed');
+    assert.equal(review.human_review_required, true);
+    assert.equal(review.error.type, 'confirmation_operation_unresolved');
+    assert.equal(review.error.operation_id, reserved.reservation.operation_id);
+    assert.equal(review.failure_notification.state, 'pending');
+    assert.equal(await restarted.claim({ consumerId: 'gateway-after-restart', waitMs: 0 }), null);
+    assert.deepEqual(
+      (await restarted.listAuditProjectionCandidates({ limit: 10 })).map((job) => job.job_id),
+      [claim.job_id]
+    );
   });
 });
 

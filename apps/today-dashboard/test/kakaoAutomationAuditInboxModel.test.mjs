@@ -68,7 +68,8 @@ test('audit inbox exposes every read-only range, effect, and attention filter', 
   const { AUDIT_FILTERS, buildAutomationAuditQuery } = await loadModel();
   assert.deepEqual(AUDIT_FILTERS.ranges.map(({ value }) => value), ['today', '7d', 'custom']);
   assert.deepEqual(AUDIT_FILTERS.effects.map(({ value }) => value), [
-    '', 'auto_reply', 'confirmation_request', 'registered_reservation_change', 'document_send',
+    '', 'auto_reply', 'confirmation_request', 'reservation_registration',
+    'registered_reservation_change', 'document_send',
   ]);
   assert.deepEqual(AUDIT_FILTERS.outcomes.map(({ value }) => value), [
     '', 'success', 'partial_success', 'failed', 'blocked',
@@ -81,6 +82,24 @@ test('audit inbox exposes every read-only range, effect, and attention filter', 
     effect: 'registered_reservation_change', outcome: 'partial_success', search: 'RQ-260901', limit: 25,
     after: 'YWZ0ZXI',
   }), 'range=custom&from=2026-08-31T15%3A00%3A00.000Z&to=2026-09-03T15%3A00%3A00.000Z&effect=registered_reservation_change&outcome=partial_success&search=RQ-260901&limit=25&after=YWZ0ZXI');
+  assert.equal(buildAutomationAuditQuery({
+    range: 'today', effect: 'reservation_registration', outcome: 'success', search: '', limit: 50,
+  }), 'range=today&effect=reservation_registration&outcome=success&limit=50');
+});
+
+test('audit inbox labels staff-authorized reservation registration distinctly', async () => {
+  const { buildAutomationAuditView } = await loadModel();
+  const registration = item({
+    eventKey: `kakao:reservation_registration:${'b'.repeat(64)}`,
+    effectType: 'reservation_registration',
+    targetType: 'trade',
+    targetId: '260906-001',
+    summary: '예약 260906-001을 등록했습니다.',
+  });
+  const model = buildAutomationAuditView({ payload: payload({ items: [registration] }) });
+
+  assert.equal(model.rows[0].effectLabel, '예약 등록');
+  assert.equal(model.rows[0].ownerLine, '테스트 고객 · 예약 260906-001을 등록했습니다.');
 });
 
 test('audit outcome badges distinguish success, partial, failure, block, and no action', async () => {

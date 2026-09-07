@@ -189,9 +189,28 @@ function buildUpdateRequest(config, reqID, request) {
   return { method: 'GET', url: url.toString() };
 }
 
+function buildConfirmedReservationCommitRequest(config, registration, operationId) {
+  const url = baseUrl(config);
+  const key = url.searchParams.get('key');
+  url.searchParams.delete('key');
+  return {
+    method: 'POST',
+    url: url.toString(),
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({
+      key,
+      action: 'run',
+      func: 'commitConfirmedReservation',
+      args: { registration, operation_id: operationId }
+    })
+  };
+}
+
 async function fetchJson(fetchImpl, request, timeoutMs, label) {
   const response = await fetchImpl(request.url, {
     method: request.method,
+    ...(request.headers ? { headers: request.headers } : {}),
+    ...(request.body !== undefined ? { body: request.body } : {}),
     redirect: 'follow',
     signal: AbortSignal.timeout(timeoutMs)
   });
@@ -312,6 +331,269 @@ function normalizeConfirmationRequest(request) {
     }
   }
   return normalized;
+}
+
+const CONFIRMED_REGISTRATION_FIELDS = new Set([
+  'confirmed', 'target_scope', 'request_id', 'source_evidence',
+  'expected_before', 'expected_period', 'desired_after', 'desired_period',
+  'expected_set_components', 'set_component_selections', 'pending_request_candidate'
+]);
+const CONFIRMED_REGISTRATION_EVIDENCE_FIELDS = new Set([
+  'customer_request', 'staff_confirmation', 'conversation_revision',
+  'conversation_evidence_hash', 'customer_message_ids', 'staff_message_ids'
+]);
+const CONFIRMED_REGISTRATION_PERIOD_FIELDS = new Set([
+  'start_date', 'start_time', 'end_date', 'end_time'
+]);
+const CONFIRMED_REGISTRATION_CANDIDATE_FIELDS = new Set([
+  'customer_name', 'phone', 'discount_type', 'memo', 'extra_request'
+]);
+const CONFIRMED_REGISTRATION_CANDIDATE_REQUIRED_FIELDS = new Set([
+  'customer_name', 'phone', 'discount_type', 'memo', 'extra_request'
+]);
+const CONFIRMED_REGISTRATION_SELECTION_FIELDS = new Set([
+  'set_item', 'component_item', 'selected_item'
+]);
+const CONFIRMED_REGISTRATION_COMPONENT_FIELDS = new Set([
+  'set_item', 'component_item', 'quantity'
+]);
+const CONFIRMED_REGISTRATION_DISCOUNT_TYPES = new Set([
+  '', '일반', '학생', '개인사업자/프리랜서', '단골', '제휴'
+]);
+
+function normalizeConfirmedRegistrationPlan(value, field) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_EQUIPMENT) {
+    throw new Error(`${field} must contain 1-${MAX_EQUIPMENT} complete equipment items`);
+  }
+  const seen = new Set();
+  return value.map((entry, index) => {
+    assertOnlyAllowedFields(entry, new Set(['name', 'quantity']), `${field}[${index}]`);
+    const name = requiredText(entry.name, `${field}[${index}].name`, 120).normalize('NFKC');
+    const quantity = Number(entry.quantity);
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 999) {
+      throw new Error(`${field}[${index}].quantity must be an integer from 1 to 999`);
+    }
+    if (seen.has(name)) throw new Error(`${field} contains a duplicate equipment name: ${name}`);
+    seen.add(name);
+    return { name, quantity };
+  });
+}
+
+function normalizeConfirmedRegistrationPeriod(value, field) {
+  assertOnlyAllowedFields(value, CONFIRMED_REGISTRATION_PERIOD_FIELDS, field);
+  const normalized = {
+    start_date: normalizeDate(value.start_date, `${field}.start_date`),
+    start_time: normalizeTime(value.start_time, `${field}.start_time`),
+    end_date: normalizeDate(value.end_date, `${field}.end_date`),
+    end_time: normalizeTime(value.end_time, `${field}.end_time`)
+  };
+  if (!normalized.start_time.endsWith(':00') || !normalized.end_time.endsWith(':00')) {
+    throw new Error(`${field} times must use the confirmation-sheet HH:00 boundary`);
+  }
+  const startMs = Date.parse(`${normalized.start_date}T${normalized.start_time}:00Z`);
+  const endMs = Date.parse(`${normalized.end_date}T${normalized.end_time}:00Z`);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    throw new Error(`${field} end must be after start`);
+  }
+  return normalized;
+}
+
+function normalizeConfirmedRegistrationCandidate(value) {
+  assertOnlyAllowedFields(value, CONFIRMED_REGISTRATION_CANDIDATE_FIELDS, 'pending_request_candidate');
+  for (const field of CONFIRMED_REGISTRATION_CANDIDATE_REQUIRED_FIELDS) {
+    if (!Object.hasOwn(value, field)) {
+      throw new Error(`pending_request_candidate.${field} is required`);
+    }
+    if (typeof value[field] !== 'string') {
+      throw new Error(`pending_request_candidate.${field} must be a string`);
+    }
+  }
+  const candidate = {
+    customer_name: requiredText(value.customer_name, 'pending_request_candidate.customer_name', 120).normalize('NFKC'),
+    phone: String(value.phone ?? '').trim().normalize('NFKC'),
+    discount_type: String(value.discount_type ?? '').trim().normalize('NFKC'),
+    memo: String(value.memo ?? '').trim().normalize('NFKC'),
+    extra_request: String(value.extra_request ?? '').trim().normalize('NFKC')
+  };
+  if (candidate.phone.length > 80) throw new Error('pending_request_candidate.phone is too long');
+  if (!CONFIRMED_REGISTRATION_DISCOUNT_TYPES.has(candidate.discount_type)) {
+    throw new Error('pending_request_candidate.discount_type is invalid');
+  }
+  if (candidate.memo.length > 500) throw new Error('pending_request_candidate.memo is too long');
+  if (candidate.extra_request.length > 1_000) throw new Error('pending_request_candidate.extra_request is too long');
+  return candidate;
+}
+
+function normalizeConfirmedRegistrationSetComponents(value, field) {
+  if (!Array.isArray(value) || value.length > 120) {
+    throw new Error(`${field} must contain 0-120 exact set components`);
+  }
+  const seen = new Set();
+  return value.map((entry, index) => {
+    assertOnlyAllowedFields(entry, CONFIRMED_REGISTRATION_COMPONENT_FIELDS, `${field}[${index}]`);
+    const normalized = {
+      set_item: requiredText(entry.set_item, `${field}[${index}].set_item`, 120).normalize('NFKC'),
+      component_item: requiredText(entry.component_item, `${field}[${index}].component_item`, 120).normalize('NFKC'),
+      quantity: Number(entry.quantity)
+    };
+    if (!Number.isSafeInteger(normalized.quantity) || normalized.quantity < 1 || normalized.quantity > 999) {
+      throw new Error(`${field}[${index}].quantity must be an integer from 1 to 999`);
+    }
+    const signature = `${normalized.set_item}\u0000${normalized.component_item}`;
+    if (seen.has(signature)) throw new Error(`${field}[${index}] is duplicated`);
+    seen.add(signature);
+    return normalized;
+  });
+}
+
+function normalizeConfirmedRegistrationSetSelections(value) {
+  const field = 'set_component_selections';
+  if (!Array.isArray(value) || value.length > 40) {
+    throw new Error(`${field} must contain 0-40 exact selections`);
+  }
+  const seen = new Set();
+  return value.map((selection, index) => {
+    assertOnlyAllowedFields(selection, CONFIRMED_REGISTRATION_SELECTION_FIELDS, `${field}[${index}]`);
+    const normalized = {};
+    for (const name of CONFIRMED_REGISTRATION_SELECTION_FIELDS) {
+      normalized[name] = requiredText(selection[name], `${field}[${index}].${name}`, 120).normalize('NFKC');
+    }
+    const signature = `${normalized.set_item}\u0000${normalized.component_item}`;
+    if (seen.has(signature)) throw new Error(`${field}[${index}] is duplicated`);
+    seen.add(signature);
+    return normalized;
+  });
+}
+
+function normalizeConfirmedReservationCommit(value) {
+  assertOnlyAllowedFields(value, CONFIRMED_REGISTRATION_FIELDS, 'confirmed registration');
+  if (value.confirmed !== true) throw new Error('confirmed must be exactly true');
+  if (value.target_scope !== 'pending_request') throw new Error('target_scope must be pending_request');
+  let requestId = null;
+  let pendingRequestCandidate = null;
+  if (value.request_id === null) {
+    pendingRequestCandidate = normalizeConfirmedRegistrationCandidate(value.pending_request_candidate);
+  } else {
+    requestId = normalizeRequestId(value.request_id).toUpperCase();
+    if (value.pending_request_candidate !== undefined && value.pending_request_candidate !== null) {
+      throw new Error('pending_request_candidate is forbidden when request_id identifies an existing RQ');
+    }
+  }
+  assertOnlyAllowedFields(
+    value.source_evidence,
+    CONFIRMED_REGISTRATION_EVIDENCE_FIELDS,
+    'source_evidence'
+  );
+  const revision = Number(value.source_evidence.conversation_revision);
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new Error('source_evidence.conversation_revision must be a positive integer');
+  }
+  const evidenceHash = requiredText(
+    value.source_evidence.conversation_evidence_hash,
+    'source_evidence.conversation_evidence_hash',
+    64
+  );
+  if (!/^[a-f0-9]{64}$/.test(evidenceHash)) {
+    throw new Error('source_evidence.conversation_evidence_hash must be a lowercase SHA-256');
+  }
+  const normalizeMessageIds = (values, field) => {
+    if (!Array.isArray(values) || values.length < 1 || values.length > 20) {
+      throw new Error(`${field} must contain 1-20 message IDs`);
+    }
+    const seen = new Set();
+    return values.map((value, index) => {
+      const messageId = requiredText(value, `${field}[${index}]`, 160);
+      if (!/^[A-Za-z0-9._:-]{1,160}$/.test(messageId)) {
+        throw new Error(`${field}[${index}] is invalid`);
+      }
+      if (seen.has(messageId)) throw new Error(`${field}[${index}] is duplicated`);
+      seen.add(messageId);
+      return messageId;
+    });
+  };
+  const customerMessageIds = normalizeMessageIds(
+    value.source_evidence.customer_message_ids,
+    'source_evidence.customer_message_ids'
+  );
+  const staffMessageIds = normalizeMessageIds(
+    value.source_evidence.staff_message_ids,
+    'source_evidence.staff_message_ids'
+  );
+  if (staffMessageIds.some((messageId) => customerMessageIds.includes(messageId))) {
+    throw new Error('source_evidence customer and staff message IDs must not overlap');
+  }
+  const desiredAfter = normalizeConfirmedRegistrationPlan(value.desired_after, 'desired_after');
+  const expectedSetComponents = normalizeConfirmedRegistrationSetComponents(
+    value.expected_set_components, 'expected_set_components'
+  );
+  const setComponentSelections = normalizeConfirmedRegistrationSetSelections(value.set_component_selections);
+  if (requestId === null && expectedSetComponents.length !== 0) {
+    throw new Error('bootstrapped registration expected_set_components must be empty');
+  }
+  const desiredNames = new Set(desiredAfter.map((item) => item.name));
+  const baselineTargets = new Set(expectedSetComponents.map((entry) => (
+    `${entry.set_item}\u0000${entry.component_item}`
+  )));
+  for (const [index, selection] of setComponentSelections.entries()) {
+    if (!desiredNames.has(selection.set_item)) {
+      throw new Error(`set_component_selections[${index}].set_item must exist in desired_after`);
+    }
+    if (requestId !== null && !baselineTargets.has(`${selection.set_item}\u0000${selection.component_item}`)) {
+      throw new Error(`set_component_selections[${index}] must target expected_set_components`);
+    }
+  }
+  return {
+    confirmed: true,
+    target_scope: 'pending_request',
+    request_id: requestId,
+    ...(requestId === null ? { pending_request_candidate: pendingRequestCandidate } : {}),
+    source_evidence: {
+      customer_request: requiredText(value.source_evidence.customer_request, 'source_evidence.customer_request', 2_000),
+      staff_confirmation: requiredText(value.source_evidence.staff_confirmation, 'source_evidence.staff_confirmation', 2_000),
+      conversation_revision: revision,
+      conversation_evidence_hash: evidenceHash,
+      customer_message_ids: customerMessageIds,
+      staff_message_ids: staffMessageIds
+    },
+    expected_before: normalizeConfirmedRegistrationPlan(value.expected_before, 'expected_before'),
+    expected_set_components: expectedSetComponents,
+    set_component_selections: setComponentSelections,
+    expected_period: normalizeConfirmedRegistrationPeriod(value.expected_period, 'expected_period'),
+    desired_after: desiredAfter,
+    desired_period: normalizeConfirmedRegistrationPeriod(value.desired_period, 'desired_period')
+  };
+}
+
+async function commitConfirmedReservation({
+  config,
+  registration,
+  operationId,
+  fetchImpl = globalThis.fetch,
+  // Leave the same 10s transport buffer used by registered corrections:
+  // GAS must stop before the plugin's 250s HTTP read deadline.
+  timeoutMs = 240_000
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
+  const normalizedOperationId = requiredText(operationId, 'operationId', 36).toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalizedOperationId)) {
+    throw new Error('operationId must be a canonical UUID v4');
+  }
+  const normalized = normalizeConfirmedReservationCommit(registration);
+  const request = buildConfirmedReservationCommitRequest(config, normalized, normalizedOperationId);
+  try {
+    const payload = await fetchJson(
+      fetchImpl,
+      request,
+      timeoutMs,
+      `Confirmed reservation registration for ${normalized.request_id}`
+    );
+    if (!payload.result || typeof payload.result !== 'object' || Array.isArray(payload.result)) {
+      throw new Error(`Confirmed reservation registration returned no authoritative result for ${normalized.request_id}`);
+    }
+    return payload.result;
+  } catch (error) {
+    throw markUncertainWrite(error, normalized.request_id, 'confirmed_registration');
+  }
 }
 
 function normalizeUnregisteredOriginals(values, request) {
@@ -695,8 +977,8 @@ function parseCliArgs(args) {
   if (command === '--help' || command === '-h' || command === 'help') {
     return { command: 'help', envFile: DEFAULT_ENV_FILE, inputFile: null };
   }
-  if (command !== 'resolve' && command !== 'create' && command !== 'create-batch' && command !== 'update' && command !== 'reconcile') {
-    throw new Error('Command must be resolve, create, create-batch, update, or reconcile');
+  if (command !== 'resolve' && command !== 'create' && command !== 'create-batch' && command !== 'update' && command !== 'reconcile' && command !== 'commit-registration') {
+    throw new Error('Command must be resolve, create, create-batch, update, reconcile, or commit-registration');
   }
   const options = { command, envFile: DEFAULT_ENV_FILE, inputFile: null };
   for (let index = 1; index < args.length; index += 1) {
@@ -720,13 +1002,14 @@ async function main() {
   const options = parseCliArgs(process.argv.slice(2));
   if (options.command === 'help') {
     process.stdout.write(
-      'Usage: village-confirm-request.js <resolve|create|create-batch|update|reconcile> [--input-file PATH] [--env-file PATH]\n'
+      'Usage: village-confirm-request.js <resolve|create|create-batch|update|reconcile|commit-registration> [--input-file PATH] [--env-file PATH]\n'
       + '  resolve      {"queries":["장비 검색어", ...]} — 목록 시트에서 정확한 장비명 후보 조회 (읽기 전용)\n'
       + '  create       {"반출일","반출시간","반납일","반납시간","시간원문","예약자명","장비":[{"이름","수량"}], ...} — 확인요청 1건 생성+검증\n'
       + '  create-batch {"requests":[<create payload>, ...]} — 여러 스케줄 그룹을 한 번에 생성+검증\n'
       + '  update       {"reqID":"RQ-YYMMDD-NNN","request":<create payload>} — 기존 미등록 요청 전체 교체+검증\n'
       + '  reconcile    {"reqID":"RQ-..."} 또는 {"예약자명":"이름","반출일":"YYYY-MM-DD"?} — 쓰기 성공 여부가\n'
       + '               불확실할 때(uncertainWrite) 시트 실제 상태를 읽어 판정 (읽기 전용, 재삽입 아님)\n'
+      + '  commit-registration {"registration":{...}} — 직원이 확정한 exact pending RQ를 1회 등록+권위 readback\n'
       + '  영문 별칭(customerName→예약자명, phone→연락처, pickupDate→반출일, items→장비, name/quantity 등)은 자동 매핑됨.\n'
     );
     return;
@@ -750,6 +1033,12 @@ async function main() {
     });
   } else if (options.command === 'reconcile') {
     result = await reconcileConfirmationRequest({ config, query: input });
+  } else if (options.command === 'commit-registration') {
+    result = await commitConfirmedReservation({
+      config,
+      registration: input.registration || input,
+      operationId: input.operation_id || input.operationId
+    });
   } else {
     result = await createConfirmationRequest({
       config,
@@ -763,11 +1052,14 @@ async function main() {
 module.exports = {
   buildInsertRequest,
   buildUpdateRequest,
+  buildConfirmedReservationCommitRequest,
   buildSearchRequest,
   createConfirmationRequest,
   createConfirmationRequests,
   updateConfirmationRequest,
   normalizeConfirmationRequest,
+  normalizeConfirmedReservationCommit,
+  commitConfirmedReservation,
   reconcileConfirmationRequest,
   parseCliArgs,
   parseJsonInput,

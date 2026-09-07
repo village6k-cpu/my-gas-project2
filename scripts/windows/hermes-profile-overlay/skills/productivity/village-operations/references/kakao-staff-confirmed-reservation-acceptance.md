@@ -1,38 +1,38 @@
 # Kakao staff-confirmed reservation acceptance
 
-When Kakao automation sees a customer reply like `그럼 이렇게 부탁드립니다`, do not classify from that text alone as a fresh ambiguous reservation candidate.
+Use this contract when a customer equipment inquiry is followed by a Village staff reply that may authorize registration or an exact reservation change.
 
-## Pattern
+## Semantic authority
 
-Conversation order matters:
+Native Hermes must interpret the full same-room conversation. Wording is open-ended. Examples such as `네`, `네네`, `가능합니다`, or a longer natural reply are illustrative only, not a closed vocabulary, fixed phrase list, allowlist, regex, substring test, or mutation trigger.
 
-1. Customer asks for a rental/reservation configuration.
-2. Staff/outbound (`빌리지님`, `김준영님`, `최재형님`, etc.) already answers with availability/permission, e.g. `가능합니다`, `예약 가능`, `진행 가능`.
-3. Latest customer/inbound message accepts that answer: `그럼 이렇게 부탁드립니다`, `진행해주세요`, `예약해주세요`, `이렇게 해주세요`.
+Reason over verified speaker roles, DOM order, the exact equipment, quantities, period and requested operation, plus any correction or superseding message. A clear, current and unconditional staff reply may itself authorize that exact mutation; a later customer acceptance can corroborate it but is not required.
+
+`네` or `가능합니다` **is authorization** when the full conversation makes it the staff's clear, current answer approving the exact pending request. The identical word in an unrelated, ambiguous, conditional, or superseded context does not approve that request. Code must never decide this from the token alone; native Hermes decides from meaning. Conditional or tentative replies, partial scope, an unresolved stock check, customer-authored wording, or stale staff evidence are not authorization. If meaning or scope is uncertain, do not mutate and route one no-send owner review.
 
 ## Correct handling
 
-- Treat as **staff-confirmed reservation acceptance**, not generic `예약 후보 확인 필요`.
-- If the required sheet/register mutation has already succeeded or can be safely inferred from the automation path, use a short confirmation draft/auto-send candidate:
-  - `네 감독님, 말씀 주신 구성으로 예약 확정해드렸습니다.`
+- Every new customer equipment inquiry is recorded in 확인요청 independently of staff authorization.
+- Treat exact, unconditional staff authority as a **staff-confirmed reservation mutation**, not as a generic phrase match.
+- Execute only through the exact typed operation, immutable same-room evidence, lease/digest fence and authoritative readback. Never infer success from conversation text.
+- Exact success is `no_reply`; do not send a duplicate customer reply or Slack card.
 - If mutation is unavailable/failed, create exactly one operational follow-up that names the failed mutation (`확인요청 입력 실패`, `등록 실패`, etc.). Do not make a vague `답변 필요 / 예약 후보 확인 필요` card.
 - Keep existing safety: do not use this pattern for price/payment/refund/damage/legal/tax-sensitive commitments.
 
-## Code guard pattern
+## Execution boundary
 
-`canAutoSendCustomerAnswer` may still block `예약 확정` or `가능` wording by default. Add a narrow exception only when visible message order proves:
+Outer code may validate and execute typed evidence, but it must not infer authorization from a keyword, phrase, Korean acknowledgement, or customer-facing prose. It verifies only mechanical facts:
 
-- latest meaningful message is customer/inbound,
-- a prior staff/outbound message contains a positive availability phrase,
-- latest customer text is an acceptance/request-to-proceed phrase,
-- proposed reply is a short confirmation and contains no payment/price/refund/damage terms.
+- customer and staff message IDs resolve to the immutable current room snapshot,
+- roles and chronology are exact and the cited text/hash is unchanged,
+- the cited staff message is current rather than superseded,
+- the typed target/baseline/period matches the authoritative sheet state,
+- the operation receipt and readback prove the exact effect.
 
-Regression-test with the exact shape:
+Semantic regression scenarios must vary the language while preserving meaning, and must include misleading literal positives:
 
-```js
-visible_messages_used: [
-  { sender: '빌리지님', message: '네 감독님, 해당 구성 예약 가능합니다.' },
-  { sender: '김채현', message: '그럼 이렇게 부탁드립니다' }
-]
-reply_decision.text = '네 감독님, 말씀 주신 구성으로 예약 확정해드렸습니다.'
-```
+- clear short acknowledgement tied by context to one exact request: authorize;
+- clear natural-language approval without any listed example phrase: authorize;
+- literal `가능합니다` followed by a condition or unresolved check: do not authorize;
+- literal `네` whose target is another question or whose speaker is the customer: do not authorize;
+- later staff correction or different room revision: do not authorize.

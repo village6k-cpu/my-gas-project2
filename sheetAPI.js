@@ -7,17 +7,17 @@
  * - Claude 에이전트: 시트 읽기/쓰기/검색
  * - 스케줄 관리: 가용확인/등록/보류/거절/목록조회
  *
- * ★ 인증: 기존 운영키 호환 + 서버 내부키 ★
+ * ★ 인증: 공개 조회키 + 서버 내부키 분리 ★
  *
- * 수개월간 사용한 운영 자동화는 village2026 키를 계속 사용한다. Today Dashboard
- * 같은 서버 런타임은 Script Properties의 내부 키도 사용할 수 있다. 두 키는 동일한
- * 운영 권한으로 처리한다.
+ * village2026은 고객 토큰 조회와 공개 카탈로그 조회 전용이다. Today Dashboard,
+ * Hermes 같은 서버 런타임의 쓰기·발송·run 작업은 Script Properties의 내부 키만
+ * 사용할 수 있다.
  */
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // ★ API principal ★
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 기존 Claude/Codex/Hermes 운영 자동화와 호환되는 안정 키.
+// 고객 토큰 조회와 공개 카탈로그 조회에만 사용하는 공개 키.
 const VILLAGE_OPERATOR_API_KEY = "village2026";
 const VILLAGE_INTERNAL_API_KEY_PROPERTY = "VILLAGE_API_WRITE_KEY_V1";
 
@@ -28,7 +28,7 @@ function villageApiPrincipal_(key) {
     PropertiesService.getScriptProperties().getProperty(VILLAGE_INTERNAL_API_KEY_PROPERTY) || ""
   ).trim();
   if (internalKey && key === internalKey) return "internal";
-  if (key === VILLAGE_OPERATOR_API_KEY) return "internal";
+  if (key === VILLAGE_OPERATOR_API_KEY) return "public";
   return "";
 }
 
@@ -413,6 +413,15 @@ function handleRequestCore_(e) {
     if (!principal) {
       return jsonResponse({ error: "인증 실패. key 파라미터를 확인하세요." }, 403);
     }
+    if (principal !== "internal") {
+      var publicSheet = String(params.sheet || postBody.sheet || "").trim();
+      var publicCatalogRead = (action === "read" || action === "search") &&
+        (publicSheet === "목록" || publicSheet === "세트마스터");
+      var publicTokenRead = action === "myPage" || action === "myPageEstimate";
+      if (!publicCatalogRead && !publicTokenRead) {
+        return jsonResponse({ error: "internal credential required" }, 403);
+      }
+    }
 
     switch (action) {
 
@@ -507,7 +516,7 @@ function handleRequestCore_(e) {
         if (postBody.args) runParams.args = postBody.args;
         var runFuncName = String(params.func || postBody.func || "");
         // 확인요청을 바꾸는 run 함수들은 목록 캐시를 무효화한다
-        if (/Request|deleteTrade|recoverPending/i.test(runFuncName)) invalidateConfirmListCache_();
+        if (/Request|commitConfirmedReservation|deleteTrade|recoverPending/i.test(runFuncName)) invalidateConfirmListCache_();
         return jsonResponse(runFunction(runFuncName, runParams));
 
       case "timeline": {
@@ -1554,6 +1563,7 @@ function runFunction(funcName, params) {
     "refreshModelSelectionPrompts",
     "syncAuditFromMaster",
     "insertAndCheckRequest",
+    "commitConfirmedReservation",
     "updateRequest",
     "lookupConfirmRequestCustomer",
     "updateRequestItem",
@@ -1672,6 +1682,16 @@ function runFunction(funcName, params) {
         };
       }
       return response;
+    }
+    if (funcName === "commitConfirmedReservation" && params.args) {
+      var confirmedArgs = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var confirmedResult = commitConfirmedReservation(confirmedArgs);
+      return {
+        success: true,
+        function: funcName,
+        result: confirmedResult,
+        executionTime: (new Date() - startTime) + "ms"
+      };
     }
     if (funcName === "updateRequest" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;

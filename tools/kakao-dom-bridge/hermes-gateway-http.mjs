@@ -3,8 +3,12 @@ import {
   registeredReservationChangeRequestDigest,
   validateStaffConfirmedMutation
 } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
+import {
+  confirmedReservationCommitRequestDigest,
+  validateStaffConfirmedRegistration
+} from '../ai-browser-worker/staff-confirmed-registration.mjs';
 
-export { registeredReservationChangeRequestDigest };
+export { confirmedReservationCommitRequestDigest, registeredReservationChangeRequestDigest };
 
 const MAX_BODY_BYTES = 1_048_576;
 const GATEWAY_TRANSPORTS = new Set(['gateway', 'gateway_no_send']);
@@ -107,6 +111,20 @@ export function validateRegisteredReservationChangeBody(body) {
   return validation.valid === true && body.mutation?.target_scope === 'registered_trade';
 }
 
+export function validateConfirmedReservationCommitBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const allowedFields = new Set(['schema', 'job_id', 'room_key', 'room_revision', 'lease_id', 'registration']);
+  if (Object.keys(body).some((key) => !allowedFields.has(key))) return false;
+  if (body.schema !== 'village-confirmed-reservation-commit-request/v1'
+    || !String(body.job_id || '').trim()
+    || !String(body.room_key || '').trim()
+    || !Number.isInteger(body.room_revision)
+    || body.room_revision <= 0
+    || !String(body.lease_id || '').trim()) return false;
+  const validation = validateStaffConfirmedRegistration(body.registration, { roomRevision: body.room_revision });
+  return validation.valid === true && body.registration?.target_scope === 'pending_request';
+}
+
 function exactClaimForConfirmation(job, body, leaseId, nowMs) {
   const leaseExpiresAt = Number(job?.lease_expires_at_ms);
   return job
@@ -192,7 +210,7 @@ function durableDocumentOperationForRequest(job, body, leaseId, requestDigest) {
   return { reservation, receipt, conflict: false };
 }
 
-function durableRegisteredReservationChangeForRequest(job, body, leaseId, requestDigest) {
+function durableTypedOperationForRequest(job, body, leaseId, requestDigest, { tool, receiptSchema }) {
   if (!job
     || String(job.job_id || '') !== String(body?.job_id || '')
     || String(job.room_key || '') !== String(body?.room_key || '')
@@ -202,7 +220,7 @@ function durableRegisteredReservationChangeForRequest(job, body, leaseId, reques
   const reservation = job.tool_operation;
   if (!reservation) return { reservation: null, receipt: null, conflict: false };
   const matches = reservation.schema === 'village-tool-operation-reservation/v1'
-    && reservation.tool === 'registered_reservation_change'
+    && reservation.tool === tool
     && String(reservation.job_id || '') === String(body.job_id || '')
     && String(reservation.room_key || '') === String(body.room_key || '')
     && Number(reservation.room_revision) === Number(body.room_revision)
@@ -211,7 +229,7 @@ function durableRegisteredReservationChangeForRequest(job, body, leaseId, reques
     && String(reservation.operation_id || '').trim();
   if (!matches) return { reservation, receipt: null, conflict: true };
   const receipt = (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).find((candidate) => (
-    candidate?.schema === 'village-registered-reservation-change-receipt/v1'
+    candidate?.schema === receiptSchema
     && String(candidate.job_id || '') === String(body.job_id || '')
     && String(candidate.room_key || '') === String(body.room_key || '')
     && Number(candidate.room_revision) === Number(body.room_revision)
@@ -220,6 +238,20 @@ function durableRegisteredReservationChangeForRequest(job, body, leaseId, reques
     && String(candidate.operation_id || '') === reservation.operation_id
   )) || null;
   return { reservation, receipt, conflict: false };
+}
+
+function durableRegisteredReservationChangeForRequest(job, body, leaseId, requestDigest) {
+  return durableTypedOperationForRequest(job, body, leaseId, requestDigest, {
+    tool: 'registered_reservation_change',
+    receiptSchema: 'village-registered-reservation-change-receipt/v1'
+  });
+}
+
+function durableConfirmedReservationCommitForRequest(job, body, leaseId, requestDigest) {
+  return durableTypedOperationForRequest(job, body, leaseId, requestDigest, {
+    tool: 'confirmed_reservation_commit',
+    receiptSchema: 'village-confirmed-reservation-commit-receipt/v1'
+  });
 }
 
 function validateDocumentBody(body) {
@@ -338,7 +370,7 @@ export function buildGatewayHealthReadback({
 
 export function createHermesGatewayHttpHandler({
   token, channel, executeConfirmation, validateConfirmation, executeDocument, validateDocument,
-  executeRegisteredReservationChange,
+  executeRegisteredReservationChange, executeConfirmedReservationCommit,
   enqueueResultApplication, recoverFailureNotifications, recoverAuditProjections,
   transport = 'cli', now = Date.now, consumerFreshnessMs = 600_000
 } = {}) {
@@ -346,6 +378,7 @@ export function createHermesGatewayHttpHandler({
   const confirmationInFlight = new Map();
   const documentInFlight = new Map();
   const registeredReservationChangeInFlight = new Map();
+  const confirmedReservationCommitInFlight = new Map();
 
   function triggerOptionalAuditProjectionRecovery() {
     if (typeof recoverAuditProjections !== 'function') return;
@@ -651,6 +684,149 @@ export function createHermesGatewayHttpHandler({
         } finally {
           if (registeredReservationChangeInFlight.get(claimKey) === inFlight) {
             registeredReservationChangeInFlight.delete(claimKey);
+          }
+        }
+        return true;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/hermes/v1/tools/confirmed-reservation-commit') {
+        const body = await readJsonBody(req);
+        const leaseId = requiredLeaseId(body);
+        if (transport === 'gateway_no_send') throw requestError(403, 'writes_disabled');
+        if (!validateConfirmedReservationCommitBody(body)) {
+          throw requestError(422, 'invalid_confirmed_reservation_commit_request');
+        }
+        const request = structuredClone(body);
+        request.lease_id = leaseId;
+        const authorizedRegistration = structuredClone(request.registration);
+        if (typeof channel.get !== 'function' || typeof channel.reserveToolOperation !== 'function'
+          || typeof channel.recordToolReceipt !== 'function') {
+          throw requestError(503, 'confirmed_reservation_commit_fencing_unavailable');
+        }
+        const requestDigest = confirmedReservationCommitRequestDigest(request);
+        const currentTime = () => {
+          const value = now();
+          const milliseconds = value instanceof Date ? value.getTime() : Number(value);
+          if (!Number.isFinite(milliseconds)) {
+            throw requestError(503, 'confirmed_reservation_commit_clock_unavailable');
+          }
+          return milliseconds;
+        };
+        const assertCurrentClaim = async () => {
+          const currentJob = await channel.get(request.job_id);
+          if (!exactClaimForConfirmation(currentJob, request, leaseId, currentTime())) {
+            throw requestError(409, 'stale_lease');
+          }
+          return currentJob;
+        };
+        const claimKey = [request.job_id, request.room_key, request.room_revision, leaseId].map(String).join('\u0000');
+        const claimedJob = await channel.get(request.job_id);
+        const roomSnapshot = claimedJob?.local_context?.turn_internal?.snapshot;
+        const evidenceValidation = validateStaffConfirmedRegistration(authorizedRegistration, {
+          roomRevision: request.room_revision,
+          roomSnapshot
+        });
+        if (!evidenceValidation.valid) {
+          throw requestError(422, 'confirmed_reservation_evidence_mismatch');
+        }
+        let inFlight = confirmedReservationCommitInFlight.get(claimKey);
+        if (inFlight && inFlight.requestDigest !== requestDigest) {
+          throw requestError(409, 'confirmed_reservation_commit_conflict');
+        }
+        if (inFlight) {
+          try {
+            sendJson(res, 200, await inFlight.operation);
+          } finally {
+            if (confirmedReservationCommitInFlight.get(claimKey) === inFlight) {
+              confirmedReservationCommitInFlight.delete(claimKey);
+            }
+          }
+          return true;
+        }
+        const durable = durableConfirmedReservationCommitForRequest(
+          claimedJob, request, leaseId, requestDigest
+        );
+        if (durable.conflict) throw requestError(409, 'confirmed_reservation_commit_conflict');
+        if (durable.receipt) {
+          sendJson(res, 200, durable.receipt);
+          return true;
+        }
+        if (durable.reservation) throw requestError(409, 'confirmed_reservation_commit_unresolved');
+        if (!exactClaimForConfirmation(claimedJob, request, leaseId, currentTime())) {
+          throw requestError(409, 'stale_lease');
+        }
+        if (typeof executeConfirmedReservationCommit !== 'function') {
+          throw requestError(503, 'confirmed_reservation_commit_unavailable');
+        }
+        const operation = Promise.resolve().then(async () => {
+          let reserved;
+          try {
+            reserved = await channel.reserveToolOperation({
+              tool: 'confirmed_reservation_commit',
+              job_id: request.job_id,
+              room_key: request.room_key,
+              room_revision: request.room_revision,
+              lease_id: leaseId,
+              request_digest: requestDigest,
+              audit_target: {
+                schema: 'village-kakao-tool-audit-target/v1',
+                effect_type: 'reservation_registration',
+                action_type: 'create',
+                target_type: authorizedRegistration.request_id ? 'request' : 'room',
+                target_id: authorizedRegistration.request_id
+                  ? String(authorizedRegistration.request_id).toUpperCase()
+                  : null
+              }
+            });
+          } catch (error) {
+            if (error?.code === 'confirmation_operation_conflict') {
+              throw requestError(409, 'confirmed_reservation_commit_conflict');
+            }
+            throw error;
+          }
+          if (!reserved?.created || !reserved?.reservation) {
+            throw requestError(409, 'confirmed_reservation_commit_unresolved');
+          }
+          const operationFence = reserved.reservation;
+          await assertCurrentClaim();
+          const receipt = await executeConfirmedReservationCommit(structuredClone(request), {
+            assertCurrentClaim, operationFence, roomSnapshot: structuredClone(roomSnapshot)
+          });
+          if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
+            || receipt.schema !== 'village-confirmed-reservation-commit-receipt/v1') {
+            throw requestError(502, 'invalid_confirmed_reservation_commit_receipt');
+          }
+          if (String(receipt.job_id || '') !== String(request.job_id || '')
+            || String(receipt.room_key || '') !== String(request.room_key || '')
+            || Number(receipt.room_revision) !== Number(request.room_revision)
+            || receipt.target_scope !== 'pending_request'
+            || String(receipt.request_id || '').toUpperCase() !== String(authorizedRegistration.request_id || '').toUpperCase()) {
+            throw requestError(502, 'confirmed_reservation_commit_receipt_correlation_mismatch');
+          }
+          if (receipt.lease_id && receipt.lease_id !== leaseId) throw requestError(409, 'lease_id_mismatch');
+          if (receipt.request_digest && receipt.request_digest !== requestDigest) {
+            throw requestError(502, 'confirmed_reservation_commit_receipt_request_mismatch');
+          }
+          if (receipt.operation_id && receipt.operation_id !== operationFence.operation_id) {
+            throw requestError(502, 'confirmed_reservation_commit_receipt_operation_mismatch');
+          }
+          const fencedReceipt = {
+            ...receipt,
+            lease_id: leaseId,
+            request_digest: requestDigest,
+            operation_id: operationFence.operation_id,
+            authorized_registration: authorizedRegistration
+          };
+          await channel.recordToolReceipt(fencedReceipt);
+          return fencedReceipt;
+        });
+        inFlight = { requestDigest, operation };
+        confirmedReservationCommitInFlight.set(claimKey, inFlight);
+        try {
+          sendJson(res, 200, await inFlight.operation);
+        } finally {
+          if (confirmedReservationCommitInFlight.get(claimKey) === inFlight) {
+            confirmedReservationCommitInFlight.delete(claimKey);
           }
         }
         return true;

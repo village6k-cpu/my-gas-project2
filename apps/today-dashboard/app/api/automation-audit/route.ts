@@ -7,7 +7,7 @@ const EVENT_FIELDS = [
   'change_items', 'outbound_text', 'evidence', 'source_message_at', 'historical_import'
 ] as const;
 const QUERY_FIELDS = new Set(['range', 'from', 'to', 'effect', 'outcome', 'search', 'limit', 'after']);
-const EFFECT_TYPES = new Set(['auto_reply', 'confirmation_request', 'registered_reservation_change', 'document_send']);
+const EFFECT_TYPES = new Set(['auto_reply', 'confirmation_request', 'reservation_registration', 'registered_reservation_change', 'document_send']);
 const ACTION_TYPES = new Set(['send', 'create', 'update', 'add', 'remove', 'replace', 'quantity_change', 'date_time_change']);
 const OUTCOMES = new Set(['success', 'partial_success', 'failed', 'blocked', 'no_action']);
 const TARGET_TYPES = new Set(['room', 'request', 'trade', 'document']);
@@ -15,7 +15,7 @@ const CHANGE_FIELDS = new Set(['equipment', 'quantity', 'start_at', 'end_at', 't
 const PHONE_PATTERN = /01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4}/i;
 const SECRET_PATTERN = /(bearer\s+[a-z0-9._~-]+|(?:token|secret|password|apikey|api[ _-]?key)\s*[:=])/i;
 const BANK_ACCOUNT_PATTERN = /(?:계좌|은행|account)(?:번호)?[^0-9\r\n]{0,20}[0-9][0-9 -]{7,}[0-9]/i;
-const EVENT_KEY_PATTERN = /^kakao:(auto_reply|confirmation_request|registered_reservation_change|document_send):[0-9a-f]{64}$/;
+const EVENT_KEY_PATTERN = /^kakao:(auto_reply|confirmation_request|reservation_registration|registered_reservation_change|document_send):[0-9a-f]{64}$/;
 const UTC_MS = /^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const CURSOR_KEYS = ['occurredAt', 'eventKey'];
 const STATUS_KEYS = ['singleton', 'pending_count', 'conflict_count', 'oldest_pending_at', 'last_success_at', 'updated_at'];

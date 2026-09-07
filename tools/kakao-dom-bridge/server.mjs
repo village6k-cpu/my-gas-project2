@@ -28,6 +28,7 @@ import {
 } from './kakao-automation-audit.mjs';
 import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
 import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
+import { executeVillageConfirmedReservationCommit } from '../ai-browser-worker/staff-confirmed-registration.mjs';
 import {
   canonicalSourceEventKey,
   notificationReceiptInput,
@@ -2114,6 +2115,38 @@ export function createGatewayRegisteredReservationChangeExecutor({
   };
 }
 
+export function createGatewayConfirmedReservationCommitExecutor({
+  getConfig,
+  executeOperation = executeVillageConfirmedReservationCommit,
+  commitConfirmedReservation,
+  randomUUID = crypto.randomUUID,
+  now
+} = {}) {
+  if (typeof getConfig !== 'function') throw new Error('Gateway confirmed reservation commit config loader is required');
+  if (typeof executeOperation !== 'function') throw new Error('Gateway confirmed reservation commit operation is required');
+  return async (request, { assertCurrentClaim, operationFence, roomSnapshot } = {}) => {
+    const dependencies = {
+      assertCurrentClaim,
+      operationFence,
+      roomSnapshot,
+      ...(typeof commitConfirmedReservation === 'function' ? { commitConfirmedReservation } : {}),
+      ...(typeof randomUUID === 'function' ? { randomUUID } : {}),
+      ...(typeof now === 'function' ? { now } : {})
+    };
+    return executeOperation({
+      config: resolveGatewayRegisteredReservationChangeConfig(getConfig()),
+      job: {
+        job_id: request.job_id,
+        room_key: request.room_key,
+        room_revision: request.room_revision
+      },
+      roomRevision: request.room_revision,
+      registration: request.registration,
+      dependencies
+    });
+  };
+}
+
 export function resolveGatewayRegisteredReservationChangeConfig(workerConfig = {}) {
   const gasApiUrl = String(workerConfig.gasApiUrl || '').trim();
   const sheetApiKey = String(workerConfig.sheetApiKey || '').trim();
@@ -2562,6 +2595,8 @@ export function createGatewayResultApplicationCoordinator({
       ? 'village-document-receipt/v1'
       : operation.tool === 'registered_reservation_change'
         ? 'village-registered-reservation-change-receipt/v1'
+        : operation.tool === 'confirmed_reservation_commit'
+          ? 'village-confirmed-reservation-commit-receipt/v1'
         : 'village-confirmation-receipt/v1';
     const exact = receipts.filter((receipt) => (
       receipt?.schema === expectedSchema
@@ -2748,6 +2783,11 @@ const gatewayRegisteredReservationChangeExecutor = gatewayTransportEnabled
       getConfig: () => getKakaoWorkerRuntimeConfigForTransport()
     })
   : null;
+const gatewayConfirmedReservationCommitExecutor = gatewayTransportEnabled
+  ? createGatewayConfirmedReservationCommitExecutor({
+      getConfig: () => getKakaoWorkerRuntimeConfigForTransport()
+    })
+  : null;
 const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
@@ -2757,6 +2797,7 @@ const gatewayHttpHandler = createHermesGatewayHttpHandler({
   validateConfirmation: gatewayConfirmationValidator,
   executeDocument: gatewayDocumentExecutor,
   executeRegisteredReservationChange: gatewayRegisteredReservationChangeExecutor,
+  executeConfirmedReservationCommit: gatewayConfirmedReservationCommitExecutor,
   recoverFailureNotifications: gatewayTransportEnabled
     ? () => getGatewayFailureNotificationCoordinator().recover()
     : null,

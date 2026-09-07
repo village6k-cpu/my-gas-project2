@@ -15,6 +15,7 @@ const DIGEST = 'a'.repeat(64);
 const CONFIRMATION_OPERATION = '11111111-2222-4333-8444-555555555555';
 const REGISTERED_OPERATION = '22222222-3333-4444-8555-666666666666';
 const DOCUMENT_OPERATION = '33333333-4444-4555-8666-777777777777';
+const REGISTRATION_OPERATION = '44444444-5555-4666-8777-888888888888';
 
 function baseJob({ tool = 'confirmation_request', operationId = CONFIRMATION_OPERATION, receipt } = {}) {
   return {
@@ -114,6 +115,87 @@ function registeredReceipt(overrides = {}) {
   };
 }
 
+function confirmedRegistrationReceipt(overrides = {}) {
+  const plan = [
+    { name: '소니 FX3 바디세트', quantity: 1 },
+    { name: '소니 GM 70-200mm II', quantity: 1 }
+  ];
+  const period = {
+    start_date: '2026-09-07', start_time: '07:30',
+    end_date: '2026-09-07', end_time: '19:30'
+  };
+  const components = [{
+    set_item: '소니 FX3 바디세트',
+    component_item: '소니 FX3 바디(케이지)',
+    quantity: 1
+  }];
+  return {
+    schema: 'village-confirmed-reservation-commit-receipt/v1',
+    receipt_id: 'receipt-confirmed-registration-1',
+    status: 'ok',
+    target_scope: 'pending_request',
+    request_id: 'RQ-260906-001',
+    effective_request_id: 'RQ-260906-001',
+    trade_id: '260906-001',
+    authorized_registration: {
+      confirmed: true,
+      target_scope: 'pending_request',
+      request_id: 'RQ-260906-001',
+      source_evidence: {
+        customer_request: 'not stored in audit',
+        staff_confirmation: 'not stored in audit',
+        conversation_revision: ROOM_REVISION
+      },
+      expected_before: plan,
+      expected_set_components: components,
+      set_component_selections: [],
+      expected_period: period,
+      desired_after: plan,
+      desired_period: period
+    },
+    authoritative_result: {
+      success: true,
+      status: 'ok',
+      request_id: 'RQ-260906-001',
+      effective_request_id: 'RQ-260906-001',
+      trade_id: '260906-001',
+      final_plan: plan,
+      final_set_components: components,
+      final_period: period,
+      authoritative: {
+        registered: true,
+        request: {
+          reqID: 'RQ-260906-001',
+          name: '테스트 고객', phone: '01011112222', discount: '일반', memo: '', extraRequest: '',
+          startDate: period.start_date, startTime: period.start_time,
+          endDate: period.end_date, endTime: period.end_time,
+          topLevelEquipItems: plan.map(({ name, quantity }) => ({ name, qty: quantity })),
+          setComponentItems: components,
+          tradeIds: ['260906-001']
+        },
+        registered_trade: {
+          schedule: {
+            rows: components.map((entry, index) => ({
+              scheduleId: `260906-001-${String(index + 2).padStart(2, '0')}`,
+              setName: entry.set_item,
+              name: entry.component_item,
+              qty: entry.quantity,
+              isComponent: true
+            }))
+          }
+        }
+      },
+      customerNotificationAttempted: false,
+      customerNotificationSent: false
+    },
+    applied_stages: ['registration', 'authoritative_readback'],
+    attempted_stage: null,
+    customer_reply: 'no_reply',
+    error: null,
+    ...overrides
+  };
+}
+
 function documentReceipt(overrides = {}) {
   return {
     schema: 'village-document-receipt/v1',
@@ -202,6 +284,340 @@ test('trusted registered mutation and document send preserve typed action and au
   assert.equal(document[0].summary, '견적서 260907-001을 전송했습니다.');
   assert.deepEqual(document[0].change_items, [{ field: 'tax_mode', before: null, after: 'supply_only' }]);
   assert.deepEqual(document[0].evidence, { schema: 'village-document-receipt/v1', status: 'ok', readback: true });
+});
+
+test('staff-authorized pending registration becomes one no-send owner-readable audit event', () => {
+  const events = buildKakaoAutomationAuditEvents({
+    durableJob: baseJob({
+      tool: 'confirmed_reservation_commit',
+      operationId: REGISTRATION_OPERATION,
+      receipt: confirmedRegistrationReceipt()
+    })
+  });
+
+  assert.equal(events.length, 1);
+  assert.match(events[0].event_key, /^kakao:reservation_registration:[0-9a-f]{64}$/);
+  assert.deepEqual(events[0], {
+    ...events[0],
+    job_id: JOB_ID,
+    room_revision: ROOM_REVISION,
+    operation_id: REGISTRATION_OPERATION,
+    receipt_id: 'receipt-confirmed-registration-1',
+    occurred_at: '2026-09-07T01:00:03.000Z',
+    effect_type: 'reservation_registration',
+    action_type: 'create',
+    outcome: 'success',
+    customer_label: '테스트 고객',
+    target_type: 'trade',
+    target_id: '260906-001',
+    summary: '예약 260906-001을 등록했습니다.',
+    change_items: [{
+      field: 'equipment',
+      before: '소니 FX3 바디세트 1개, 소니 GM 70-200mm II 1개',
+      after: '소니 FX3 바디세트 1개, 소니 GM 70-200mm II 1개'
+    }],
+    outbound_text: null,
+    evidence: {
+      schema: 'village-confirmed-reservation-commit-receipt/v1',
+      status: 'ok',
+      readback: true,
+      applied_stages: ['registration', 'authoritative_readback']
+    },
+    source_message_at: '2026-09-07T01:00:00.000Z',
+    historical_import: false
+  });
+  assert.equal(JSON.stringify(events).includes('not stored in audit'), false);
+});
+
+test('a restarted registration with no persisted receipt remains visible once as an unresolved no-send audit event', () => {
+  const durableJob = {
+    ...baseJob(),
+    state: 'failed',
+    updated_at: '2026-09-07T01:00:05.000Z',
+    human_review_required: true,
+    error: {
+      type: 'confirmation_operation_unresolved',
+      operation_id: REGISTRATION_OPERATION,
+      operation_state: 'reserved',
+      reason: 'receipt_not_persisted'
+    },
+    tool_operation: {
+      schema: 'village-tool-operation-reservation/v1',
+      tool: 'confirmed_reservation_commit',
+      job_id: JOB_ID,
+      room_key: ROOM_KEY,
+      room_revision: ROOM_REVISION,
+      lease_id: LEASE_ID,
+      request_digest: DIGEST,
+      operation_id: REGISTRATION_OPERATION,
+      state: 'reserved',
+      receipt_id: null,
+      created_at: '2026-09-07T01:00:01.000Z',
+      completed_at: null,
+      audit_target: {
+        schema: 'village-kakao-tool-audit-target/v1',
+        effect_type: 'reservation_registration',
+        action_type: 'create',
+        target_type: 'request',
+        target_id: 'RQ-260907-001'
+      }
+    },
+    tool_receipts: []
+  };
+
+  const events = buildKakaoAutomationAuditEvents({ durableJob });
+
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0], {
+    event_key: `kakao:reservation_registration:${createHash('sha256')
+      .update(`village-kakao-automation-audit/v1\nreservation_registration\n${REGISTRATION_OPERATION}`)
+      .digest('hex')}`,
+    job_id: JOB_ID,
+    room_revision: ROOM_REVISION,
+    operation_id: REGISTRATION_OPERATION,
+    receipt_id: null,
+    occurred_at: '2026-09-07T01:00:01.000Z',
+    effect_type: 'reservation_registration',
+    action_type: 'create',
+    outcome: 'partial_success',
+    customer_label: '테스트 고객',
+    target_type: 'request',
+    target_id: 'RQ-260907-001',
+    summary: '예약 RQ-260907-001 자동처리 결과를 확인해야 합니다.',
+    change_items: [],
+    outbound_text: null,
+    evidence: {
+      schema: 'village-confirmed-reservation-commit-receipt/v1',
+      status: 'unresolved',
+      readback: false,
+      attempted_stage: 'receipt_persistence',
+      error_type: 'confirmation_operation_unresolved'
+    },
+    source_message_at: '2026-09-07T01:00:00.000Z',
+    historical_import: false
+  });
+  assert.equal(JSON.stringify(events).includes('staff_confirmation'), false);
+
+  const completedEvidence = baseJob({
+    tool: 'confirmed_reservation_commit',
+    operationId: REGISTRATION_OPERATION,
+    receipt: confirmedRegistrationReceipt()
+  });
+  const lateReceiptJob = {
+    ...durableJob,
+    updated_at: '2026-09-07T01:30:00.000Z',
+    tool_operation: {
+      ...completedEvidence.tool_operation,
+      audit_target: durableJob.tool_operation.audit_target
+    },
+    tool_receipts: completedEvidence.tool_receipts
+  };
+  assert.deepEqual(
+    buildKakaoAutomationAuditEvents({ durableJob: lateReceiptJob }),
+    events,
+    'late exact evidence may enrich durable state but cannot rewrite an unresolved operation as success'
+  );
+});
+
+test('coalesced fast authorization audits the generated effective RQ without inventing a requested RQ', () => {
+  const receipt = confirmedRegistrationReceipt({
+    request_id: null,
+    effective_request_id: 'RQ-260907-009',
+    applied_stages: ['pending_request_bootstrap', 'registration', 'authoritative_readback']
+  });
+  receipt.authorized_registration = {
+    ...receipt.authorized_registration,
+    request_id: null,
+    expected_set_components: [],
+    set_component_selections: [],
+    pending_request_candidate: {
+      customer_name: '테스트 고객', phone: '010-1111-2222', discount_type: '일반', memo: '', extra_request: ''
+    }
+  };
+  receipt.authoritative_result = {
+    ...receipt.authoritative_result,
+    request_id: null,
+    effective_request_id: 'RQ-260907-009',
+    final_set_components: [],
+    authoritative: {
+      ...receipt.authoritative_result.authoritative,
+      request: {
+        reqID: 'RQ-260907-009',
+        name: '테스트 고객', phone: '01011112222', discount: '일반', memo: '', extraRequest: '',
+        startDate: receipt.authorized_registration.desired_period.start_date,
+        startTime: receipt.authorized_registration.desired_period.start_time,
+        endDate: receipt.authorized_registration.desired_period.end_date,
+        endTime: receipt.authorized_registration.desired_period.end_time,
+        topLevelEquipItems: receipt.authorized_registration.desired_after
+          .map(({ name, quantity }) => ({ name, qty: quantity })),
+        setComponentItems: [], tradeIds: ['260906-001']
+      },
+      registered_trade: { schedule: { rows: [] } }
+    }
+  };
+
+  const events = buildKakaoAutomationAuditEvents({
+    durableJob: baseJob({
+      tool: 'confirmed_reservation_commit',
+      operationId: REGISTRATION_OPERATION,
+      receipt
+    })
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].effect_type, 'reservation_registration');
+  assert.equal(events[0].outcome, 'success');
+  assert.equal(events[0].target_type, 'trade');
+  assert.equal(events[0].target_id, '260906-001');
+  assert.equal(events[0].outbound_text, null);
+});
+
+test('registration audit compares private request terms exactly before redacting its public event', () => {
+  const exactReceipt = confirmedRegistrationReceipt({
+    request_id: null,
+    effective_request_id: 'RQ-260907-009',
+    applied_stages: ['pending_request_bootstrap', 'registration', 'authoritative_readback']
+  });
+  exactReceipt.authorized_registration = {
+    ...exactReceipt.authorized_registration,
+    request_id: null,
+    expected_set_components: [],
+    set_component_selections: [],
+    pending_request_candidate: {
+      customer_name: '테스트 고객', phone: '010-1111-2222', discount_type: '일반',
+      memo: '', extra_request: ''
+    }
+  };
+  exactReceipt.authoritative_result = {
+    ...exactReceipt.authoritative_result,
+    request_id: null,
+    effective_request_id: 'RQ-260907-009',
+    final_set_components: [],
+    authoritative: {
+      ...exactReceipt.authoritative_result.authoritative,
+      request: {
+        reqID: 'RQ-260907-009', tradeIds: ['260906-001'],
+        topLevelEquipItems: exactReceipt.authorized_registration.desired_after
+          .map(({ name, quantity }) => ({ name, qty: quantity })),
+        setComponentItems: [],
+        startDate: exactReceipt.authorized_registration.desired_period.start_date,
+        startTime: exactReceipt.authorized_registration.desired_period.start_time,
+        endDate: exactReceipt.authorized_registration.desired_period.end_date,
+        endTime: exactReceipt.authorized_registration.desired_period.end_time,
+        name: '테스트 고객', phone: '01011112222', discount: '일반', memo: '', extraRequest: ''
+      },
+      registered_trade: { schedule: { rows: [] } }
+    }
+  };
+
+  for (const [label, mutate] of [
+    ['blank versus private phone-shaped memo', (receipt) => {
+      receipt.authoritative_result.authoritative.request.memo = '010-9999-8888';
+    }],
+    ['different private memo values', (receipt) => {
+      receipt.authorized_registration.pending_request_candidate.memo = '010-1111-2222';
+      receipt.authoritative_result.authoritative.request.memo = '010-3333-4444';
+    }],
+    ['different secret-shaped extra requests', (receipt) => {
+      receipt.authorized_registration.pending_request_candidate.extra_request = 'token=first-private-value';
+      receipt.authoritative_result.authoritative.request.extraRequest = 'token=second-private-value';
+    }]
+  ]) {
+    const receipt = structuredClone(exactReceipt);
+    mutate(receipt);
+    assert.throws(() => buildKakaoAutomationAuditEvents({
+      durableJob: baseJob({
+        tool: 'confirmed_reservation_commit', operationId: REGISTRATION_OPERATION, receipt
+      })
+    }), /trusted tool receipt set is invalid/, label);
+  }
+});
+
+test('registration audit readback comparison is canonical and ignores harmless object key order', () => {
+  const receipt = confirmedRegistrationReceipt();
+  receipt.authoritative_result.final_plan = receipt.authoritative_result.final_plan.map((item) => ({
+    quantity: item.quantity,
+    name: item.name
+  }));
+  receipt.authoritative_result.final_period = {
+    end_time: receipt.authoritative_result.final_period.end_time,
+    start_date: receipt.authoritative_result.final_period.start_date,
+    end_date: receipt.authoritative_result.final_period.end_date,
+    start_time: receipt.authoritative_result.final_period.start_time
+  };
+  const events = buildKakaoAutomationAuditEvents({
+    durableJob: baseJob({
+      tool: 'confirmed_reservation_commit',
+      operationId: REGISTRATION_OPERATION,
+      receipt
+    })
+  });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].outcome, 'success');
+});
+
+test('registration audit rejects an ok receipt whose component readback contradicts the authorized set baseline', () => {
+  const receipt = confirmedRegistrationReceipt();
+  receipt.authoritative_result.final_set_components = [{
+    set_item: '소니 FX3 바디세트',
+    component_item: '인증되지 않은 대체 구성품',
+    quantity: 1
+  }];
+  receipt.authoritative_result.authoritative.registered_trade.schedule.rows = [{
+    scheduleId: '260906-001-02',
+    setName: '소니 FX3 바디세트',
+    name: '인증되지 않은 대체 구성품',
+    qty: 1,
+    isComponent: true
+  }];
+  assert.throws(() => buildKakaoAutomationAuditEvents({
+    durableJob: baseJob({
+      tool: 'confirmed_reservation_commit',
+      operationId: REGISTRATION_OPERATION,
+      receipt
+    })
+  }), /trusted tool receipt set is invalid/);
+});
+
+test('registration audit rejects an ok receipt whose authoritative request differs from the authorized operation', () => {
+  const receipt = confirmedRegistrationReceipt();
+  receipt.authoritative_result.authoritative.request.topLevelEquipItems[0].qty = 2;
+  assert.throws(() => buildKakaoAutomationAuditEvents({
+    durableJob: baseJob({
+      tool: 'confirmed_reservation_commit',
+      operationId: REGISTRATION_OPERATION,
+      receipt
+    })
+  }), /trusted tool receipt set is invalid/);
+});
+
+test('blocked and partial registration receipts remain visible without raw conversation evidence', () => {
+  for (const [status, expectedOutcome] of [['blocked', 'blocked'], ['partial_success', 'partial_success']]) {
+    const receipt = confirmedRegistrationReceipt({
+      status,
+      effective_request_id: status === 'partial_success' ? 'RQ-260907-002' : null,
+      trade_id: null,
+      authoritative_result: status === 'partial_success'
+        ? { success: false, status, effective_request_id: 'RQ-260907-002' }
+        : null,
+      applied_stages: status === 'partial_success' ? ['pending_request_replacement'] : [],
+      attempted_stage: status === 'partial_success' ? 'registration' : 'preflight',
+      error: { type: status === 'partial_success' ? 'commit_uncertain' : 'invalid_or_stale', message: 'private detail' }
+    });
+    const events = buildKakaoAutomationAuditEvents({
+      durableJob: baseJob({
+        tool: 'confirmed_reservation_commit',
+        operationId: REGISTRATION_OPERATION,
+        receipt
+      })
+    });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].outcome, expectedOutcome);
+    assert.equal(events[0].target_type, 'request');
+    assert.equal(events[0].target_id, 'RQ-260906-001');
+    assert.equal(JSON.stringify(events).includes('not stored in audit'), false);
+    assert.equal(JSON.stringify(events).includes('private detail'), false);
+  }
 });
 
 test('one tool effect plus one persisted DOM reply readback produces two distinct events', () => {

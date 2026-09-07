@@ -10633,7 +10633,7 @@ function handleScheduleEdit(e) {
       if (String(oVal).indexOf("등록완료") >= 0) return;
       // 다중 시트 쓰기 도중 하드킬돼도 복구 스윕이 집을 수 있게, 실행 전에
       // 내구 마커(등록대기)와 백업 트리거를 먼저 남긴다 (scheduleRegister와 동일 원칙).
-      markRegisterQueued_(sheet, row);
+      if (!markRegisterQueued_(sheet, row)) return;
       try { enqueuePendingRegister_(String(sheet.getRange(row, 1).getValue() || "").trim(), 30000); } catch (queueErr) {}
       registerByReqID(sheet, row, { fromQueue: false });
     } else if (val === "추가") {
@@ -11444,12 +11444,16 @@ function _buildConfirmRequestGroups_(sheet) {
         rows: [],
         name: "",
         phone: "",
+        discount: "",
+        memo: "",
+        extraRequest: "",
         startDate: "",
         startTime: "",
         endDate: "",
         endTime: "",
         equips: [],
         topLevelEquipItems: [],
+        setComponentItems: [],
         registerActions: [],
         statuses: [],
         tradeIds: []
@@ -11460,6 +11464,11 @@ function _buildConfirmRequestGroups_(sheet) {
     g.rows.push(di + 2);
     if ((rowData[10] || rowDisplay[10]) && !g.name) g.name = String(rowDisplay[10] || rowData[10]).trim();      // K: 예약자명
     if ((rowData[11] || rowDisplay[11]) && !g.phone) g.phone = _confirmRequestPhoneKey_(rowDisplay[11] || rowData[11]); // L: 연락처
+    if (g.rows.length === 1) {
+      g.discount = String(rowDisplay[12] || rowData[12] || "").trim();
+      g.memo = String(rowDisplay[16] || rowData[16] || "").trim();
+      g.extraRequest = String(rowDisplay[17] || rowData[17] || "").trim();
+    }
     if ((rowData[1] || rowDisplay[1]) && !g.startDate) g.startDate = _confirmRequestDateKey_(rowData[1], rowDisplay[1]); // B: 반출일
     if ((rowData[2] || rowDisplay[2]) && !g.startTime) g.startTime = _confirmRequestTimeKey_(rowData[2], rowDisplay[2]); // C: 반출시간
     if ((rowData[3] || rowDisplay[3]) && !g.endDate) g.endDate = _confirmRequestDateKey_(rowData[3], rowDisplay[3]);     // D: 반납일
@@ -11470,6 +11479,12 @@ function _buildConfirmRequestGroups_(sheet) {
       var memo = String(rowDisplay[16] || rowData[16] || "").trim(); // Q: 비고, 세트 구성품은 [세트]로 시작
       if (memo.indexOf("[세트]") !== 0) {
         g.topLevelEquipItems.push({ name: equipName, qty: rowDisplay[6] || rowData[6] || 1 });
+      } else {
+        g.setComponentItems.push({
+          set_item: memo.substring(4).trim(),
+          component_item: equipName,
+          quantity: Number(rowDisplay[6] || rowData[6]) || 1
+        });
       }
     }
     var registerAction = String(rowDisplay[13] || rowData[13] || "").trim(); // N: 등록
@@ -11507,6 +11522,18 @@ function _isMutableConfirmRequestGroup_(group) {
   return !/(등록완료|등록대기|등록\s*처리|개고생2\.0|거절|보류)/.test(statusText);
 }
 
+function _canReuseConfirmedRegistrationBootstrap_(group, expected) {
+  return _isMutableConfirmRequestGroup_(group) &&
+    !!expected.phone && group.phone === expected.phone &&
+    !!expected.name && group.name === expected.name &&
+    group.discount === expected.discount &&
+    group.memo === expected.memo &&
+    group.extraRequest === expected.extraRequest &&
+    Array.isArray(expected.setComponents) &&
+    (!Array.isArray(expected.setSelections) || expected.setSelections.length === 0) &&
+    _staffConfirmedSetComponentsEquivalent_(group.setComponentItems || [], expected.setComponents);
+}
+
 function _normalizeStaffConfirmedPendingPlan_(rows) {
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error("직원확정 확인요청의 기대 장비 baseline plan이 필요합니다.");
@@ -11524,6 +11551,125 @@ function _normalizeStaffConfirmedPendingPlan_(rows) {
   });
 }
 
+function _normalizeStaffConfirmedSetComponents_(rows) {
+  if (!Array.isArray(rows) || rows.length > 120) {
+    throw new Error("직원확정 세트 구성품 baseline은 0-120개 배열이어야 합니다.");
+  }
+  var seen = {};
+  return rows.map(function(row, index) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new Error("직원확정 세트 구성품 형식 오류: " + index);
+    }
+    var allowed = { set_item: true, component_item: true, quantity: true };
+    Object.keys(row).forEach(function(key) {
+      if (!allowed[key]) throw new Error("직원확정 세트 구성품 미지원 필드: " + key);
+    });
+    var setItem = String(row.set_item || "").normalize("NFKC").trim();
+    var componentItem = String(row.component_item || "").normalize("NFKC").trim();
+    var quantity = Number(row.quantity);
+    if (!setItem || !componentItem || setItem.length > 120 || componentItem.length > 120 ||
+        !Number.isInteger(quantity) || quantity < 1 || quantity > 999) {
+      throw new Error("직원확정 세트 구성품 형식 오류: " + index);
+    }
+    var key = setItem + "\u0000" + componentItem;
+    if (seen[key]) throw new Error("직원확정 세트 구성품 target 중복: " + index);
+    seen[key] = true;
+    return { set_item: setItem, component_item: componentItem, quantity: quantity };
+  });
+}
+
+function _staffConfirmedSetComponentsEquivalent_(left, right) {
+  function signature(rows) {
+    return _normalizeStaffConfirmedSetComponents_(rows).map(function(row) {
+      return [row.set_item, row.component_item, row.quantity].join("\u0001");
+    }).sort().join("\u0002");
+  }
+  return signature(left) === signature(right);
+}
+
+function _projectStaffConfirmedSetComponents_(baseline, selections) {
+  var projected = _normalizeStaffConfirmedSetComponents_(baseline).map(function(row) {
+    return { set_item: row.set_item, component_item: row.component_item, quantity: row.quantity };
+  });
+  (selections || []).forEach(function(selection) {
+    var matches = [];
+    projected.forEach(function(row, index) {
+      if (row.set_item === selection.set_item && row.component_item === selection.component_item) {
+        matches.push(index);
+      }
+    });
+    if (matches.length !== 1) {
+      throw new Error("set component projection target must match exactly one row: " +
+        selection.set_item + " / " + selection.component_item);
+    }
+    projected[matches[0]].component_item = selection.selected_item;
+  });
+  return _normalizeStaffConfirmedSetComponents_(projected);
+}
+
+function _confirmedRegistrationBootstrapSetComponents_(requestedEquipItems, setSheet) {
+  var components = [];
+  (requestedEquipItems || []).forEach(function(item) {
+    var setItem = String(item && item.name || "").normalize("NFKC").trim();
+    var setQuantity = Number(item && item.qty) || 1;
+    if (!setItem) return;
+    getSetComponents(setItem, setSheet).forEach(function(component) {
+      components.push({
+        set_item: setItem,
+        component_item: String(component && component.name || "").normalize("NFKC").trim(),
+        quantity: (Number(component && component.qty) || 1) * setQuantity
+      });
+    });
+  });
+  return _normalizeStaffConfirmedSetComponents_(components);
+}
+
+/**
+ * 직원확정 후의 최종 세트 구성품을 계산한다.
+ * - 같은 세트는 확인요청에서 사람이 골라 둔 실제 구성품을 보존한다.
+ * - 수량만 바뀌면 그 실제 구성품 수량을 정확한 비율로 조정한다.
+ * - 새로 추가된 세트만 현재 세트마스터 기본 구성으로 전개한다.
+ * - AI가 명시한 모델 선택은 이 완성된 투영에 마지막으로 적용한다.
+ */
+function _projectStaffConfirmedDesiredSetComponents_(
+  expectedPlan, expectedComponents, desiredPlan, setSheet, selections
+) {
+  var expectedQuantities = {};
+  var normalizedExpectedPlan = Array.isArray(expectedPlan) && expectedPlan.length > 0
+    ? _normalizeStaffConfirmedPendingPlan_(expectedPlan) : [];
+  normalizedExpectedPlan.forEach(function(item) {
+    expectedQuantities[item.name] = (expectedQuantities[item.name] || 0) + item.quantity;
+  });
+  var baseline = _normalizeStaffConfirmedSetComponents_(expectedComponents || []);
+  var projected = [];
+  _normalizeStaffConfirmedPendingPlan_(desiredPlan || []).forEach(function(item) {
+    var priorQuantity = expectedQuantities[item.name] || 0;
+    var priorRows = baseline.filter(function(row) { return row.set_item === item.name; });
+    if (priorQuantity > 0 && priorRows.length > 0) {
+      priorRows.forEach(function(row) {
+        var scaledQuantity = row.quantity * item.quantity / priorQuantity;
+        if (!Number.isInteger(scaledQuantity) || scaledQuantity < 1 || scaledQuantity > 999) {
+          throw new Error("기존 세트 구성품 수량을 새 세트 수량에 정확히 투영할 수 없습니다: " + item.name);
+        }
+        projected.push({
+          set_item: item.name,
+          component_item: row.component_item,
+          quantity: scaledQuantity
+        });
+      });
+      return;
+    }
+    getSetComponents(item.name, setSheet).forEach(function(component) {
+      projected.push({
+        set_item: item.name,
+        component_item: String(component && component.name || "").normalize("NFKC").trim(),
+        quantity: (Number(component && component.qty) || 1) * item.quantity
+      });
+    });
+  });
+  return _projectStaffConfirmedSetComponents_(projected, selections || []);
+}
+
 function _normalizeStaffConfirmedPendingPeriod_(period) {
   if (!period || typeof period !== "object" || Array.isArray(period)) {
     throw new Error("직원확정 확인요청의 기대 기간 baseline period가 필요합니다.");
@@ -11538,7 +11684,7 @@ function _normalizeStaffConfirmedPendingPeriod_(period) {
       candidate.getUTCDate() === Number(match[3]) ? raw : "";
   }
   function exactTime(value) {
-    var match = String(value || "").trim().match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    var match = String(value || "").trim().match(/^([01]\d|2[0-3]):(00)$/);
     return match ? { hour: Number(match[1]), minute: Number(match[2]) } : null;
   }
   var startDate = exactDate(period.start_date);
@@ -11546,7 +11692,7 @@ function _normalizeStaffConfirmedPendingPeriod_(period) {
   var startTime = exactTime(period.start_time);
   var endTime = exactTime(period.end_time);
   if (!startDate || !endDate || !startTime || !endTime) {
-    throw new Error("직원확정 기대 기간 baseline period 형식 오류");
+    throw new Error("직원확정 기대 기간 baseline period는 YYYY-MM-DD HH:00 형식이어야 합니다.");
   }
   return {
     start_date: startDate,
@@ -11570,6 +11716,9 @@ function _resolveStaffConfirmedPendingRequestFence_(sheet, fence) {
     throw new Error("직원확정 대상 요청ID 형식 오류");
   }
   var expectedBefore = _normalizeStaffConfirmedPendingPlan_(fence.expected_before);
+  var expectedSetComponents = Object.prototype.hasOwnProperty.call(fence, "expected_set_components")
+    ? _normalizeStaffConfirmedSetComponents_(fence.expected_set_components)
+    : null;
   var expectedPeriod = _normalizeStaffConfirmedPendingPeriod_(fence.expected_period);
   var groups = _buildConfirmRequestGroups_(sheet).filter(function(group) {
     return String(group.reqID || "").trim().toUpperCase() === requestId;
@@ -11585,6 +11734,10 @@ function _resolveStaffConfirmedPendingRequestFence_(sheet, fence) {
   if (!_confirmRequestEquipListEquivalent_(group.topLevelEquipItems, expectedItems)) {
     throw new Error("직원확정 기대 장비 baseline plan이 현재 확인요청과 다릅니다: " + requestId);
   }
+  if (expectedSetComponents &&
+      !_staffConfirmedSetComponentsEquivalent_(group.setComponentItems || [], expectedSetComponents)) {
+    throw new Error("직원확정 기대 세트 구성품 baseline이 현재 확인요청과 다릅니다: " + requestId);
+  }
   var currentPeriod = {
     start_date: String(group.startDate || "").trim(),
     start_time: String(group.startTime || "").trim(),
@@ -11598,7 +11751,12 @@ function _resolveStaffConfirmedPendingRequestFence_(sheet, fence) {
       currentPeriod.end_time !== expectedPeriod.end_time) {
     throw new Error("직원확정 기대 기간 baseline period가 현재 확인요청과 다릅니다: " + requestId);
   }
-  return { group: group, expectedBefore: expectedBefore, expectedPeriod: expectedPeriod };
+  return {
+    group: group,
+    expectedBefore: expectedBefore,
+    expectedSetComponents: expectedSetComponents,
+    expectedPeriod: expectedPeriod
+  };
 }
 
 function _findDuplicateConfirmRequest_(sheet, req, requestedEquipItems) {
@@ -11646,6 +11804,15 @@ function _findCompletableConfirmRequestGroups_(sheet, req, requestedEquipItems) 
   });
 }
 
+function _findCompletableConfirmRequestGroupsForInsert_(sheet, req, requestedEquipItems, staffConfirmedPendingFence) {
+  // An exact staff-confirmed mutation owns one specific RQ.  Falling through to
+  // the legacy "complete a compatible partial request" path could mutate a
+  // sibling RQ before the exact target is replaced, so that path is forbidden.
+  if (staffConfirmedPendingFence) return [];
+  if (req.일정미완성 === true) return [];
+  return _findCompletableConfirmRequestGroups_(sheet, req, requestedEquipItems);
+}
+
 function _findReplaceableConfirmRequestGroups_(sheet, req, requestedEquipItems) {
   var reqName = String(req.예약자명 || "").trim();
   var reqDate = _confirmRequestDateKey_(req.반출일);
@@ -11676,13 +11843,26 @@ function _selectAuthorizedConfirmRequestReplacementGroups_(staffConfirmedPending
 }
 
 function _deleteConfirmRequestGroups_(sheet, groups) {
-  var rowSet = {};
+  var reqSet = {};
   (groups || []).forEach(function(group) {
-    (group.rows || []).forEach(function(row) { rowSet[row] = true; });
+    var reqID = String(group && group.reqID || "").trim().toUpperCase();
+    if (reqID) reqSet[reqID] = true;
   });
-  var rows = Object.keys(rowSet).map(function(row) { return Number(row); }).filter(function(row) { return row > 1; });
-  rows.sort(function(a, b) { return b - a; });
-  rows.forEach(function(row) { sheet.deleteRow(row); });
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2 || Object.keys(reqSet).length === 0) return 0;
+  var values = sheet.getRange(2, 1, lastRow - 1, 1).getDisplayValues();
+  var rows = [];
+  values.forEach(function(row, index) {
+    if (reqSet[String(row[0] || "").trim().toUpperCase()]) rows.push(index + 2);
+  });
+  rows.sort(function(a, b) { return a - b; });
+  for (var ri = 1; ri < rows.length; ri++) {
+    if (rows[ri] !== rows[ri - 1] + 1) {
+      throw new Error("확인요청 행이 연속되지 않아 안전하게 교체할 수 없습니다.");
+    }
+  }
+  // 한 번의 Sheets mutation으로 지워 중간 행까지만 삭제되는 부분 실패를 막는다.
+  if (rows.length > 0) sheet.deleteRows(rows[0], rows.length);
   return rows.length;
 }
 
@@ -11907,6 +12087,7 @@ function _insertAndCheckRequest(req) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("확인요청");
   if (!sheet) throw new Error("확인요청 시트 없음");
+  var confirmedRegistrationBootstrap = req.staff_confirmed_registration_bootstrap === true;
 
   // 장비명 매칭: 목록에서 가장 유사한 이름 찾기
   var equipNames = [];
@@ -11937,7 +12118,12 @@ function _insertAndCheckRequest(req) {
   // - 할인유형: 카톡에 명시/판정값이 있으면 우선, 없을 때만 고객DB I열, 둘 다 없으면 일반
   var resolvedPhone = req.연락처 || "";
   var reqPhoneKey = _confirmRequestPhoneKey_(resolvedPhone);
-  var customerDbMatches = _findConfirmRequestCustomerDbMatches_(ss, req.예약자명, resolvedPhone);
+  // 직원확정 자동등록은 AI가 확정한 고객/상업 조건을 그대로 쓴다.
+  // 일반 문의용 CustomerDB 보강을 이 단일 실행 capability에 적용하면
+  // 동명인 전화번호/할인을 승인 내용과 다르게 등록할 수 있다.
+  var customerDbMatches = confirmedRegistrationBootstrap
+    ? []
+    : _findConfirmRequestCustomerDbMatches_(ss, req.예약자명, resolvedPhone);
   // 동명이인 방어: 요청에 연락처가 있는데 그 연락처가 고객DB의 어떤 행과도 일치하지
   // 않으면, 이름만 같은 매칭은 "다른 사람"이다. 이 경우 그 사람의 할인유형(단골 등)이나
   // 전화번호를 신규 고객에게 붙이면 안 된다 — 타인 단골할인 오적용(마진 누수)과
@@ -11964,7 +12150,9 @@ function _insertAndCheckRequest(req) {
   var dbDiscount = (!resolvedPhone && phoneLookupMatches.length > 1)
     ? ""
     : _bestConfirmRequestCustomerDbDiscount_(trustedMatches);
-  var resolvedDiscount = _resolveConfirmRequestDiscountOrBlank_(req.할인유형 || req.업체명, dbDiscount);
+  var resolvedDiscount = confirmedRegistrationBootstrap
+    ? String(req.할인유형 || "").normalize("NFKC").trim()
+    : _resolveConfirmRequestDiscountOrBlank_(req.할인유형 || req.업체명, dbDiscount);
   var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone, 할인유형: resolvedDiscount });
 
   // 같은 고객/기간의 등록 거래가 있어도 고객의 새 장비 문의는 먼저 확인요청에 남긴다.
@@ -11976,20 +12164,44 @@ function _insertAndCheckRequest(req) {
   var duplicateRequest = staffConfirmedPendingFence
     ? null
     : _findDuplicateConfirmRequest_(sheet, reqForDedupe, requestedEquipItems);
+  if (duplicateRequest && req.staff_confirmed_registration_bootstrap === true) {
+    var bootstrapSetSheet = ss.getSheetByName("세트마스터");
+    var bootstrapSetComponents = _confirmedRegistrationBootstrapSetComponents_(
+      requestedEquipItems,
+      bootstrapSetSheet
+    );
+    var bootstrapIdentity = {
+      phone: _confirmRequestPhoneKey_(reqForDedupe.연락처),
+      name: String(reqForDedupe.예약자명 || "").trim(),
+      discount: String(reqForDedupe.할인유형 || "").trim(),
+      memo: String(reqForDedupe.비고 || "").normalize("NFKC").trim(),
+      extraRequest: String(reqForDedupe.추가요청 || "").normalize("NFKC").trim(),
+      setComponents: bootstrapSetComponents,
+      setSelections: Array.isArray(req.staff_confirmed_set_component_selections)
+        ? req.staff_confirmed_set_component_selections : []
+    };
+    if (!_canReuseConfirmedRegistrationBootstrap_(duplicateRequest, bootstrapIdentity)) duplicateRequest = null;
+  }
   if (duplicateRequest) {
     var duplicateResponse = {
       reqID: duplicateRequest.reqID,
       duplicate: true,
       message: "중복 요청: 동일한 예약자/반출일시/장비 조합이 이미 존재합니다 (" + duplicateRequest.reqID + ")",
-      results: _collectConfirmRequestResultsByReqID_(sheet, duplicateRequest.reqID)
+      results: _collectConfirmRequestResultsByReqID_(sheet, duplicateRequest.reqID),
+      finalSetComponents: (duplicateRequest.setComponentItems || []).map(function(row) {
+        return { set_item: row.set_item, component_item: row.component_item, quantity: row.quantity };
+      })
     };
     if (registeredTradeId) duplicateResponse.matchedRegisteredTradeId = registeredTradeId;
     return duplicateResponse;
   }
 
-  var completableRequests = req.일정미완성 === true
-    ? []
-    : _findCompletableConfirmRequestGroups_(sheet, reqForDedupe, requestedEquipItems);
+  var completableRequests = _findCompletableConfirmRequestGroupsForInsert_(
+    sheet,
+    reqForDedupe,
+    requestedEquipItems,
+    staffConfirmedPendingFence
+  );
   if (completableRequests.length > 1) {
     throw new Error("일정을 보강할 수 있는 미완성 확인요청이 여러 건이라 자동 수정을 중단했습니다.");
   }
@@ -12027,10 +12239,7 @@ function _insertAndCheckRequest(req) {
   var replacedGroups = _selectAuthorizedConfirmRequestReplacementGroups_(staffConfirmedPendingFence);
   var replacedReqIDs = replacedGroups.map(function(group) { return group.reqID; });
   var replacedRows = 0;
-  if (replacedGroups.length > 0) {
-    replacedRows = _deleteConfirmRequestGroups_(sheet, replacedGroups);
-    SpreadsheetApp.flush();
-  }
+  var replacementCutoverAttempted = false;
 
   var lastRow = sheet.getLastRow();
 
@@ -12098,8 +12307,12 @@ function _insertAndCheckRequest(req) {
       "",                       // N: 등록
       "",                       // O: 등록상태
       "",                       // P: 거래ID
-      i === 0 ? _sanitizeConfirmRequestFreeText_(req.비고 || "", 180) : "",       // Q: 비고 (첫 행만, 내부 AI 설명 제거)
-      i === 0 ? _sanitizeConfirmRequestFreeText_(req.추가요청 || "", 180) : ""  // R: 추가요청 (첫 행만, 계약서 유입 방지)
+      i === 0 ? (confirmedRegistrationBootstrap
+        ? String(req.비고 || "").normalize("NFKC").trim()
+        : _sanitizeConfirmRequestFreeText_(req.비고 || "", 180)) : "",       // Q: 비고
+      i === 0 ? (confirmedRegistrationBootstrap
+        ? String(req.추가요청 || "").normalize("NFKC").trim()
+        : _sanitizeConfirmRequestFreeText_(req.추가요청 || "", 180)) : ""  // R: 추가요청
     ];
     // 날짜/시간(B~E)은 텍스트로 고정 — 시트 타임존이 Asia/Seoul과 다르면
     // 자동 변환된 직렬값이 읽기 시 16:00/1899-LMT 쓰레기가 되므로 원천 차단
@@ -12120,6 +12333,8 @@ function _insertAndCheckRequest(req) {
   }
   SpreadsheetApp.flush();
 
+  try {
+
   var missingScheduleFields = [];
   if (!req.반출일) missingScheduleFields.push("반출일");
   if (!req.반출시간) missingScheduleFields.push("반출시간");
@@ -12138,12 +12353,20 @@ function _insertAndCheckRequest(req) {
     sheet.getRange(startRow, 8).setValue("확인");
     SpreadsheetApp.flush();
     _processByReqID(sheet, startRow);
+    if (Object.prototype.hasOwnProperty.call(req, "staff_confirmed_exact_set_components")) {
+      _applyConfirmedReservationExactSetComponents_(
+        sheet,
+        reqID,
+        req.staff_confirmed_exact_set_components
+      );
+    }
   }
 
   // 가용확인 결과 읽기 — 세트 전개로 행이 늘어날 수 있으므로 reqID 기준으로 전체 읽기
   SpreadsheetApp.flush();
   var results = [];
   var finalTopLevelPlan = [];
+  var finalSetComponents = [];
   var finalPeriod = null;
   var sheetLastRow = sheet.getLastRow();
   for (var r = startRow; r <= sheetLastRow; r++) {
@@ -12159,8 +12382,15 @@ function _insertAndCheckRequest(req) {
     }
     var equipName = rowData[5];  // F
     if (!equipName) continue;    // 빈 행 스킵
-    if (String(rowData[16] || "").trim().indexOf("[세트]") !== 0) {
+    var finalSetTag = String(rowData[16] || "").trim();
+    if (finalSetTag.indexOf("[세트]") !== 0) {
       finalTopLevelPlan.push({ name: String(equipName).trim(), quantity: Number(rowData[6]) || 1 });
+    } else {
+      finalSetComponents.push({
+        set_item: finalSetTag.substring(4).trim(),
+        component_item: String(equipName).trim(),
+        quantity: Number(rowData[6]) || 1
+      });
     }
     results.push({
       장비명: equipName,
@@ -12173,11 +12403,31 @@ function _insertAndCheckRequest(req) {
   var response = {
     reqID: reqID,
     results: results,
+    finalSetComponents: finalSetComponents,
     scheduleComplete: req.일정미완성 !== true,
     missingScheduleFields: missingScheduleFields
   };
   if (registeredTradeId) response.matchedRegisteredTradeId = registeredTradeId;
   if (replacedReqIDs.length > 0) {
+    // Write-first replacement: the old exact RQ remains authoritative until the
+    // staged RQ has been expanded, checked, and read back successfully.
+    var cutoverFence = _resolveStaffConfirmedPendingRequestFence_(
+      sheet,
+      req.staff_confirmed_pending_mutation
+    );
+    _assertStaffConfirmedReplacementSourceUnchanged_(
+      staffConfirmedPendingFence.group,
+      cutoverFence.group
+    );
+    var expectedReplacedRows = cutoverFence.group.rows.length;
+    replacementCutoverAttempted = true;
+    replacedRows = _deleteConfirmRequestGroups_(sheet, [cutoverFence.group]);
+    if (replacedRows !== expectedReplacedRows) {
+      var cutoverCountError = new Error("직원확정 교체 대상 행 수가 cutover 직전에 달라졌습니다.");
+      cutoverCountError.code = "pending_request_cutover_uncertain";
+      throw cutoverCountError;
+    }
+    SpreadsheetApp.flush();
     response.replacedReqIDs = replacedReqIDs;
     response.replacedRows = replacedRows;
   }
@@ -12193,6 +12443,42 @@ function _insertAndCheckRequest(req) {
     };
   }
   return response;
+  } catch (replacementError) {
+    if (replacedReqIDs.length > 0 && reqID && !replacementCutoverAttempted) {
+      try {
+        _deleteConfirmRequestGroups_(sheet, [{ reqID: reqID }]);
+        SpreadsheetApp.flush();
+      } catch (stagedCleanupError) {}
+    }
+    if (replacedReqIDs.length > 0 && reqID && replacementCutoverAttempted) {
+      replacementError.effectiveRequestId = reqID;
+      replacementError.replacedReqIDs = replacedReqIDs.slice();
+      replacementError.appliedStages = ["pending_request_replacement"];
+      if (!replacementError.code) replacementError.code = "pending_request_cutover_uncertain";
+    }
+    throw replacementError;
+  }
+}
+
+function _assertStaffConfirmedReplacementSourceUnchanged_(beforeGroup, currentGroup) {
+  if (!beforeGroup || !currentGroup) throw new Error("직원확정 교체 대상 확인요청이 없습니다.");
+  var before = {
+    name: String(beforeGroup.name || "").normalize("NFKC").trim(),
+    phone: _confirmRequestPhoneKey_(beforeGroup.phone),
+    discount: String(beforeGroup.discount || "").normalize("NFKC").trim(),
+    memo: String(beforeGroup.memo || "").normalize("NFKC").trim(),
+    extraRequest: String(beforeGroup.extraRequest || "").normalize("NFKC").trim()
+  };
+  var current = {
+    name: String(currentGroup.name || "").normalize("NFKC").trim(),
+    phone: _confirmRequestPhoneKey_(currentGroup.phone),
+    discount: String(currentGroup.discount || "").normalize("NFKC").trim(),
+    memo: String(currentGroup.memo || "").normalize("NFKC").trim(),
+    extraRequest: String(currentGroup.extraRequest || "").normalize("NFKC").trim()
+  };
+  if (JSON.stringify(before) !== JSON.stringify(current)) {
+    throw new Error("직원확정 교체 중 고객/상업 조건이 시트에서 변경되었습니다.");
+  }
 }
 
 
@@ -13930,6 +14216,12 @@ function normalizeRegisterQueueStatus_(status) {
   return String(status || "").trim();
 }
 
+function isConfirmedRegistrationNoReplayStatus_(status) {
+  var value = String(status || "").trim();
+  return /^⚠️\s*자동등록\s*(?:처리중\(재실행\s*금지\)|후처리\s*실패\(재실행\s*금지\))\s*\[[0-9a-f-]{36}\](?:\s*—\s*수동확인\s*필요)?$/i.test(value) ||
+    value === "⚠️ 자동등록 후처리 실패 — 수동확인 필요";
+}
+
 function isRegisterQueueStatus_(status) {
   return normalizeRegisterQueueStatus_(status) === "등록대기";
 }
@@ -14203,6 +14495,38 @@ function markRequestLedgerPending_(sheet, allData, reqID, tradeID) {
   }
 }
 
+function handleRegistrationLedgerFailure_(sheet, allData, reqID, tradeID, ledgerError, registerOptions) {
+  if (!registerOptions || registerOptions.noAutomaticReplay !== true) {
+    markRequestLedgerPending_(sheet, allData, reqID, tradeID);
+    enqueuePendingRegister_(reqID, 30000);
+    return { queued: true };
+  }
+
+  // confirmed-reservation 경로는 이 시점에 계약마스터/스케줄상세 쓰기가 이미 끝났다.
+  // 등록대기나 legacy queue로 되돌리면 동일 예약을 다시 등록할 수 있으므로, 정확한
+  // 거래 ID를 남긴 채 비재시도 수동확인 상태로 고정하고 부분 성공 증거를 반환한다.
+  for (var i = 0; i < allData.length; i++) {
+    if (allData[i][0] !== reqID) continue;
+    if (allData[i][14] === "거절" || allData[i][14] === "보류" || allData[i][14] === "제외") continue;
+    var row = i + 2;
+    var terminalOperationId = String(registerOptions.confirmedReservationOperationId || "").trim().toLowerCase();
+    sheet.getRange(row, 15).setValue(
+      "⚠️ 자동등록 후처리 실패(재실행 금지) [" + terminalOperationId + "] — 수동확인 필요"
+    );
+    sheet.getRange(row, 15).setBackground("#FFEB9C");
+  }
+
+  var terminalError = new Error("등록은 반영됐지만 거래내역 기록을 확인하지 못했습니다. 자동 재시도하지 않습니다.");
+  terminalError.code = "trade_ledger_write_failed";
+  terminalError.tradeID = tradeID;
+  terminalError.appliedStages = ["contract", "schedule"];
+  terminalError.authoritativeRegistrationState = null;
+  try {
+    terminalError.authoritativeRegistrationState = readRegisteredTradeCorrectionState_(tradeID, false);
+  } catch (readbackError) {}
+  throw terminalError;
+}
+
 function finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, tradeID) {
   if (!tradeID) return false;
   try {
@@ -14301,8 +14625,20 @@ function markRequestRegisterFailed_(sheet, allData, reqID, message) {
 var REGISTER_QUEUE_PROCESSING_ = false;
 
 function markRegisterQueued_(sheet, row) {
+  var currentStatus = sheet.getRange(row, 15).getDisplayValue();
+  if (isConfirmedRegistrationNoReplayStatus_(currentStatus)) return false;
   sheet.getRange(row, 15).setValue("등록대기");
   sheet.getRange(row, 15).setBackground("#E8F0FE");
+  return true;
+}
+
+function shouldSkipLegacyRegistrationAfterLock_(allData, reqID, hasTransferredConfirmedLock) {
+  if (hasTransferredConfirmedLock) return false;
+  var targetReqID = String(reqID || "").trim();
+  return (allData || []).some(function(row) {
+    return String(row && row[0] || "").trim() === targetReqID &&
+      isConfirmedRegistrationNoReplayStatus_(row && row[14]);
+  });
 }
 
 function ensurePendingRegisterTrigger_(delayMs) {
@@ -14463,7 +14799,9 @@ function scheduleRegister(reqID) {
   sheet.getRange(targetRow, 14).setValue("바로등록");
 
   // O열에 큐 상태 표시 + 재시도 트리거 보장
-  markRegisterQueued_(sheet, targetRow);
+  if (!markRegisterQueued_(sheet, targetRow)) {
+    return { success: false, error: "직원확정 자동등록 처리 중이어서 수동 큐에 추가하지 않았습니다: " + reqID };
+  }
   } finally {
     if (confirmLocked) confirmLock.releaseLock();
   }
@@ -14543,6 +14881,7 @@ function _runPendingRegister() {
     // 실행 시점에 행을 새로 찾는다 (앞 건 등록의 세트 전개로 행이 밀렸을 수 있음)
     var qRow = findConfirmRequestRowByReqID_(sheet, pendingReqID);
     if (qRow < 0) continue;
+    if (isConfirmedRegistrationNoReplayStatus_(sheet.getRange(qRow, 15).getDisplayValue())) continue;
     try {
       registerByReqID(sheet, qRow, { fromQueue: true });
     } catch (e) {
@@ -14652,19 +14991,799 @@ function isRegisterMergeCandidate_(scheduleRow, candidateContract, expected) {
   return !!requestPhoneKey && !!candidatePhoneKey && requestPhoneKey === candidatePhoneKey;
 }
 
+function _normalizeConfirmedReservationCommit_(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("confirmed registration must be an object");
+  }
+  var allowed = {
+    confirmed: true, target_scope: true, request_id: true, source_evidence: true,
+    expected_before: true, expected_period: true, desired_after: true, desired_period: true,
+    expected_set_components: true, set_component_selections: true,
+    pending_request_candidate: true
+  };
+  Object.keys(input).forEach(function(key) {
+    if (!allowed[key]) throw new Error("unsupported confirmed registration field: " + key);
+  });
+  if (input.confirmed !== true) throw new Error("confirmed must be exactly true");
+  if (input.target_scope !== "pending_request") throw new Error("target_scope must be pending_request");
+  var requestId = null;
+  var pendingRequestCandidate = null;
+  if (input.request_id === null) {
+    var candidate = input.pending_request_candidate;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error("pending_request_candidate is required when request_id is null");
+    }
+    var candidateAllowed = {
+      customer_name: true, phone: true, discount_type: true, memo: true, extra_request: true
+    };
+    Object.keys(candidate).forEach(function(key) {
+      if (!candidateAllowed[key]) throw new Error("unsupported pending_request_candidate field: " + key);
+    });
+    ["customer_name", "phone", "discount_type", "memo", "extra_request"].forEach(function(key) {
+      if (!Object.prototype.hasOwnProperty.call(candidate, key)) {
+        throw new Error("pending_request_candidate " + key + " is required");
+      }
+      if (typeof candidate[key] !== "string") {
+        throw new Error("pending_request_candidate " + key + " must be a string");
+      }
+    });
+    var customerName = String(candidate.customer_name || "").normalize("NFKC").trim();
+    var phone = String(candidate.phone || "").normalize("NFKC").trim();
+    var discountType = String(candidate.discount_type || "").normalize("NFKC").trim();
+    var memo = String(candidate.memo || "").normalize("NFKC").trim();
+    var extraRequest = String(candidate.extra_request || "").normalize("NFKC").trim();
+    var allowedDiscounts = { "일반": true, "학생": true, "개인사업자/프리랜서": true, "단골": true, "제휴": true };
+    if (!customerName || customerName.length > 120 || !phone || phone.length > 80 ||
+        !allowedDiscounts[discountType] || memo.length > 500 || extraRequest.length > 1000) {
+      throw new Error("pending_request_candidate is invalid");
+    }
+    pendingRequestCandidate = {
+      customer_name: customerName, phone: phone, discount_type: discountType,
+      memo: memo, extra_request: extraRequest
+    };
+  } else {
+    requestId = String(input.request_id || "").trim().toUpperCase();
+    if (!/^RQ-\d{6}-\d{3}$/.test(requestId)) throw new Error("request_id format is invalid");
+    if (input.pending_request_candidate !== undefined && input.pending_request_candidate !== null) {
+      throw new Error("pending_request_candidate is forbidden when request_id identifies an existing RQ");
+    }
+  }
+  var evidence = input.source_evidence;
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    throw new Error("source_evidence must be an object");
+  }
+  var evidenceAllowed = {
+    customer_request: true, staff_confirmation: true, conversation_revision: true,
+    conversation_evidence_hash: true, customer_message_ids: true, staff_message_ids: true
+  };
+  Object.keys(evidence).forEach(function(key) {
+    if (!evidenceAllowed[key]) throw new Error("unsupported source_evidence field: " + key);
+  });
+  var customerRequest = String(evidence.customer_request || "").trim();
+  var staffConfirmation = String(evidence.staff_confirmation || "").trim();
+  var conversationRevision = Number(evidence.conversation_revision);
+  var conversationEvidenceHash = String(evidence.conversation_evidence_hash || "").trim();
+  function normalizeEvidenceMessageIds(values, field) {
+    if (!Array.isArray(values) || values.length < 1 || values.length > 20) {
+      throw new Error("source_evidence " + field + " must contain 1-20 message IDs");
+    }
+    var seen = {};
+    return values.map(function(value, index) {
+      var messageId = String(value || "").trim();
+      if (!/^[A-Za-z0-9._:-]{1,160}$/.test(messageId)) {
+        throw new Error("source_evidence " + field + "[" + index + "] is invalid");
+      }
+      if (seen[messageId]) {
+        throw new Error("source_evidence " + field + "[" + index + "] is duplicated");
+      }
+      seen[messageId] = true;
+      return messageId;
+    });
+  }
+  var customerMessageIds = normalizeEvidenceMessageIds(evidence.customer_message_ids, "customer_message_ids");
+  var staffMessageIds = normalizeEvidenceMessageIds(evidence.staff_message_ids, "staff_message_ids");
+  var customerMessageIdSet = {};
+  customerMessageIds.forEach(function(messageId) { customerMessageIdSet[messageId] = true; });
+  if (staffMessageIds.some(function(messageId) { return customerMessageIdSet[messageId]; })) {
+    throw new Error("source_evidence customer and staff message IDs must not overlap");
+  }
+  if (!customerRequest || customerRequest.length > 2000 || !staffConfirmation || staffConfirmation.length > 2000 ||
+      !/^[a-f0-9]{64}$/.test(conversationEvidenceHash) ||
+      !Number.isInteger(conversationRevision) || conversationRevision < 1) {
+    throw new Error("source_evidence is incomplete or invalid");
+  }
+  var expectedBefore = _normalizeStaffConfirmedPendingPlan_(input.expected_before);
+  var expectedSetComponents = _normalizeStaffConfirmedSetComponents_(input.expected_set_components);
+  if (!Array.isArray(input.set_component_selections) || input.set_component_selections.length > 40) {
+    throw new Error("set_component_selections must contain 0-40 exact selections");
+  }
+  var seenSetComponentTargets = {};
+  var setComponentSelections = input.set_component_selections.map(function(selection, index) {
+    if (!selection || typeof selection !== "object" || Array.isArray(selection)) {
+      throw new Error("set_component_selections[" + index + "] must be an object");
+    }
+    var selectionAllowed = { set_item: true, component_item: true, selected_item: true };
+    Object.keys(selection).forEach(function(key) {
+      if (!selectionAllowed[key]) throw new Error("unsupported set_component_selections field: " + key);
+    });
+    var normalizedSelection = {};
+    Object.keys(selectionAllowed).forEach(function(key) {
+      if (typeof selection[key] !== "string") {
+        throw new Error("set_component_selections " + key + " must be a string");
+      }
+      normalizedSelection[key] = selection[key].normalize("NFKC").trim();
+      if (!normalizedSelection[key] || normalizedSelection[key].length > 120) {
+        throw new Error("set_component_selections " + key + " is invalid");
+      }
+    });
+    var targetKey = normalizedSelection.set_item + "\u0000" + normalizedSelection.component_item;
+    if (seenSetComponentTargets[targetKey]) throw new Error("set_component_selections target is duplicated");
+    seenSetComponentTargets[targetKey] = true;
+    return normalizedSelection;
+  });
+  if (requestId === null && expectedSetComponents.length !== 0) {
+    throw new Error("bootstrap expected_set_components must be empty");
+  }
+  var desiredAfter = _normalizeStaffConfirmedPendingPlan_(input.desired_after);
+  var desiredNames = {};
+  desiredAfter.forEach(function(item) { desiredNames[item.name] = true; });
+  var expectedNames = {};
+  expectedBefore.forEach(function(item) { expectedNames[item.name] = true; });
+  var baselineTargets = {};
+  expectedSetComponents.forEach(function(item) {
+    baselineTargets[item.set_item + "\u0000" + item.component_item] = true;
+  });
+  setComponentSelections.forEach(function(selection, index) {
+    if (!desiredNames[selection.set_item]) {
+      throw new Error("set_component_selections[" + index + "] set_item must exist in desired_after");
+    }
+    if (requestId !== null && expectedNames[selection.set_item] &&
+        !baselineTargets[selection.set_item + "\u0000" + selection.component_item]) {
+      throw new Error("set_component_selections[" + index + "] must target expected_set_components");
+    }
+  });
+  var expectedPeriod = _normalizeStaffConfirmedPendingPeriod_(input.expected_period);
+  var desiredPeriod = _normalizeStaffConfirmedPendingPeriod_(input.desired_period);
+  var desiredStart = Date.parse(desiredPeriod.start_date + "T" + desiredPeriod.start_time + ":00Z");
+  var desiredEnd = Date.parse(desiredPeriod.end_date + "T" + desiredPeriod.end_time + ":00Z");
+  if (!Number.isFinite(desiredStart) || !Number.isFinite(desiredEnd) || desiredEnd <= desiredStart) {
+    throw new Error("desired_period end must be after start");
+  }
+  return {
+    confirmed: true,
+    target_scope: "pending_request",
+    request_id: requestId,
+    pending_request_candidate: pendingRequestCandidate,
+    source_evidence: {
+      customer_request: customerRequest,
+      staff_confirmation: staffConfirmation,
+      conversation_revision: conversationRevision,
+      conversation_evidence_hash: conversationEvidenceHash,
+      customer_message_ids: customerMessageIds,
+      staff_message_ids: staffMessageIds
+    },
+    expected_before: expectedBefore,
+    expected_set_components: expectedSetComponents,
+    set_component_selections: setComponentSelections,
+    expected_period: expectedPeriod,
+    desired_after: desiredAfter,
+    desired_period: desiredPeriod
+  };
+}
+
+function _confirmedReservationBootstrapRequest_(normalized) {
+  var candidate = normalized.pending_request_candidate;
+  if (!candidate || normalized.request_id !== null) {
+    throw new Error("pending request bootstrap contract is invalid");
+  }
+  return {
+    반출일: normalized.desired_period.start_date,
+    반출시간: normalized.desired_period.start_time,
+    반납일: normalized.desired_period.end_date,
+    반납시간: normalized.desired_period.end_time,
+    장비: normalized.desired_after.map(function(item) { return { 이름: item.name, 수량: item.quantity }; }),
+    예약자명: candidate.customer_name,
+    연락처: candidate.phone,
+    할인유형: candidate.discount_type,
+    비고: candidate.memo,
+    추가요청: candidate.extra_request,
+    장비명원문보존: true,
+    // 일반 문의의 느슨한 중복 판정과 자동 등록용 재사용 판정을 분리한다.
+    staff_confirmed_registration_bootstrap: true,
+    staff_confirmed_set_component_selections: normalized.set_component_selections
+  };
+}
+
+/**
+ * 빠른 문의+직원확정 턴의 세트 선택을 같은 등록 임계구역에서 정확히 반영한다.
+ * 모든 대상을 먼저 검증한 뒤 쓰므로 잘못된 한 항목 때문에 일부 선택만 적용되지 않는다.
+ */
+function _applyConfirmedReservationSetSelections_(sheet, reqID, selections) {
+  if (!Array.isArray(selections) || selections.length === 0) return { applied: 0 };
+  var exactReqID = String(reqID || "").trim().toUpperCase();
+  if (!/^RQ-\d{6}-\d{3}$/.test(exactReqID)) throw new Error("set selection request_id is invalid");
+  var ss = sheet.getParent ? sheet.getParent() : SpreadsheetApp.getActiveSpreadsheet();
+  var listSheet = ss.getSheetByName("목록");
+  if (!listSheet || listSheet.getLastRow() < 2) throw new Error("목록 시트를 찾을 수 없습니다");
+  var catalogNames = {};
+  listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues().forEach(function(row) {
+    var name = String(row[0] || "").normalize("NFKC").trim();
+    if (name) catalogNames[name] = true;
+  });
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) throw new Error("set selection request is missing");
+  var rows = sheet.getRange(2, 1, lastRow - 1, 17).getDisplayValues();
+  var topLevelNames = {};
+  var firstRequestRow = 0;
+  rows.forEach(function(row, index) {
+    if (String(row[0] || "").trim().toUpperCase() !== exactReqID) return;
+    if (!firstRequestRow) firstRequestRow = index + 2;
+    var qTag = String(row[16] || "").trim();
+    if (qTag.indexOf("[세트]") !== 0) {
+      var topName = String(row[5] || "").normalize("NFKC").trim();
+      if (topName) topLevelNames[topName] = true;
+    }
+  });
+  if (!firstRequestRow) throw new Error("set selection request is missing: " + exactReqID);
+
+  var writes = selections.map(function(selection) {
+    var setItem = String(selection.set_item || "").normalize("NFKC").trim();
+    var componentItem = String(selection.component_item || "").normalize("NFKC").trim();
+    var selectedItem = String(selection.selected_item || "").normalize("NFKC").trim();
+    if (!topLevelNames[setItem]) throw new Error("set selection owner is not in the request: " + setItem);
+    if (!catalogNames[selectedItem]) throw new Error("set selection is not an exact catalog item: " + selectedItem);
+    var matches = [];
+    rows.forEach(function(row, index) {
+      if (String(row[0] || "").trim().toUpperCase() !== exactReqID) return;
+      if (String(row[16] || "").trim() !== "[세트]" + setItem) return;
+      if (String(row[5] || "").normalize("NFKC").trim() === componentItem) matches.push(index + 2);
+    });
+    if (matches.length !== 1) {
+      throw new Error("set selection target must match exactly one expanded component: " + setItem + " / " + componentItem);
+    }
+    return { row: matches[0], selected_item: selectedItem };
+  });
+
+  writes.forEach(function(write) {
+    sheet.getRange(write.row, 6).setValue(write.selected_item);
+    sheet.getRange(write.row, 8).setValue("확인");
+    sheet.getRange(write.row, 9, 1, 2).clearContent();
+  });
+  SpreadsheetApp.flush();
+  _processByReqID(sheet, firstRequestRow);
+  SpreadsheetApp.flush();
+
+  writes.forEach(function(write) {
+    var readback = String(sheet.getRange(write.row, 6).getDisplayValue() || "").normalize("NFKC").trim();
+    if (readback !== write.selected_item) throw new Error("set selection readback mismatch");
+  });
+  return { applied: writes.length };
+}
+
+/**
+ * 교체용 새 RQ가 세트마스터 기본값으로 전개된 뒤, 직원이 승인한 완성 구성으로
+ * 정확히 맞춘다. 모든 행/카탈로그/개수를 먼저 검증하고 나서만 쓰며, 이후 가용확인
+ * 재실행과 readback까지 같은 User/Script lock 안에서 끝낸다.
+ */
+function _applyConfirmedReservationExactSetComponents_(sheet, reqID, desiredComponents) {
+  var exactReqID = String(reqID || "").trim().toUpperCase();
+  if (!/^RQ-\d{6}-\d{3}$/.test(exactReqID)) throw new Error("exact set projection request_id is invalid");
+  var desired = _normalizeStaffConfirmedSetComponents_(desiredComponents || []);
+  var ss = sheet.getParent ? sheet.getParent() : SpreadsheetApp.getActiveSpreadsheet();
+  var listSheet = ss.getSheetByName("목록");
+  if (!listSheet || listSheet.getLastRow() < 2) throw new Error("목록 시트를 찾을 수 없습니다");
+  var catalogNames = {};
+  listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues().forEach(function(row) {
+    var name = String(row[0] || "").normalize("NFKC").trim();
+    if (name) catalogNames[name] = true;
+  });
+
+  function snapshotRows() {
+    var lastRow = sheet.getLastRow();
+    var values = lastRow >= 2 ? sheet.getRange(2, 1, lastRow - 1, 17).getDisplayValues() : [];
+    var topLevel = {};
+    var components = [];
+    var firstRow = 0;
+    values.forEach(function(row, index) {
+      if (String(row[0] || "").trim().toUpperCase() !== exactReqID) return;
+      var sheetRow = index + 2;
+      if (!firstRow) firstRow = sheetRow;
+      var tag = String(row[16] || "").normalize("NFKC").trim();
+      var name = String(row[5] || "").normalize("NFKC").trim();
+      if (tag.indexOf("[세트]") === 0) {
+        components.push({
+          row: sheetRow,
+          set_item: tag.substring(4).trim(),
+          component_item: name,
+          quantity: Number(row[6]) || 1
+        });
+      } else if (name) {
+        topLevel[name] = true;
+      }
+    });
+    if (!firstRow) throw new Error("exact set projection request is missing: " + exactReqID);
+    return { firstRow: firstRow, topLevel: topLevel, components: components };
+  }
+
+  var current = snapshotRows();
+  var currentBySet = {};
+  current.components.forEach(function(row) {
+    if (!currentBySet[row.set_item]) currentBySet[row.set_item] = [];
+    currentBySet[row.set_item].push(row);
+  });
+  var desiredBySet = {};
+  desired.forEach(function(row) {
+    if (!current.topLevel[row.set_item]) {
+      throw new Error("exact set projection owner is not in the request: " + row.set_item);
+    }
+    if (!catalogNames[row.component_item]) {
+      throw new Error("exact set projection component is not an exact catalog item: " + row.component_item);
+    }
+    if (!desiredBySet[row.set_item]) desiredBySet[row.set_item] = [];
+    desiredBySet[row.set_item].push(row);
+  });
+  var allSets = {};
+  Object.keys(currentBySet).forEach(function(name) { allSets[name] = true; });
+  Object.keys(desiredBySet).forEach(function(name) { allSets[name] = true; });
+  var writes = [];
+  Object.keys(allSets).forEach(function(setItem) {
+    var currentRows = currentBySet[setItem] || [];
+    var desiredRows = desiredBySet[setItem] || [];
+    if (currentRows.length !== desiredRows.length) {
+      throw new Error("exact set projection row count mismatch: " + setItem);
+    }
+    currentRows.forEach(function(row, index) {
+      writes.push({
+        row: row.row,
+        component_item: desiredRows[index].component_item,
+        quantity: desiredRows[index].quantity
+      });
+    });
+  });
+
+  writes.forEach(function(write) {
+    sheet.getRange(write.row, 6).setValue(write.component_item);
+    sheet.getRange(write.row, 7).setValue(write.quantity);
+    sheet.getRange(write.row, 8).setValue("확인");
+    sheet.getRange(write.row, 9, 1, 2).clearContent();
+  });
+  if (writes.length > 0) {
+    SpreadsheetApp.flush();
+    _processByReqID(sheet, current.firstRow);
+    SpreadsheetApp.flush();
+  }
+  var readback = snapshotRows().components.map(function(row) {
+    return { set_item: row.set_item, component_item: row.component_item, quantity: row.quantity };
+  });
+  if (!_staffConfirmedSetComponentsEquivalent_(readback, desired)) {
+    throw new Error("exact set projection readback mismatch");
+  }
+  return { applied: writes.length, finalSetComponents: readback };
+}
+
+function _confirmedReservationPlanForFence_(plan) {
+  return plan.map(function(item) { return { name: item.name, quantity: item.quantity }; });
+}
+
+function _confirmedReservationPeriodForFence_(period) {
+  return {
+    start_date: period.start_date, start_time: period.start_time,
+    end_date: period.end_date, end_time: period.end_time
+  };
+}
+
+function _confirmedReservationPlanEquivalent_(left, right) {
+  return _confirmRequestEquipListEquivalent_(
+    left.map(function(item) { return { name: item.name, qty: item.quantity }; }),
+    right.map(function(item) { return { name: item.name, qty: item.quantity }; })
+  );
+}
+
+function _confirmedReservationPeriodEquivalent_(left, right) {
+  return left.start_date === right.start_date && left.start_time === right.start_time &&
+    left.end_date === right.end_date && left.end_time === right.end_time;
+}
+
+function _assertConfirmedReservationCatalogPlan_(ss, plan) {
+  var listSheet = ss.getSheetByName("목록");
+  if (!listSheet || listSheet.getLastRow() < 2) throw new Error("목록 시트를 찾을 수 없습니다");
+  var values = listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues();
+  var exact = {};
+  values.forEach(function(row) {
+    var name = String(row[0] || "").normalize("NFKC").trim();
+    if (name) exact[name] = true;
+  });
+  plan.forEach(function(item) {
+    if (!exact[String(item.name || "").normalize("NFKC").trim()]) {
+      throw new Error("desired_after 장비가 목록 정본과 정확히 일치하지 않습니다: " + item.name);
+    }
+  });
+}
+
+function _confirmedReservationReplacementRequest_(sheet, fence, normalized, expectedFinalSetComponents) {
+  var firstRow = fence.group.rows[0];
+  var raw = sheet.getRange(firstRow, 1, 1, 18).getValues()[0];
+  var display = sheet.getRange(firstRow, 1, 1, 18).getDisplayValues()[0];
+  return {
+    반출일: normalized.desired_period.start_date,
+    반출시간: normalized.desired_period.start_time,
+    반납일: normalized.desired_period.end_date,
+    반납시간: normalized.desired_period.end_time,
+    장비: normalized.desired_after.map(function(item) { return { 이름: item.name, 수량: item.quantity }; }),
+    예약자명: String(display[10] || raw[10] || fence.group.name || "").trim(),
+    연락처: String(display[11] || raw[11] || fence.group.phone || "").trim(),
+    할인유형: String(display[12] || raw[12] || "").trim(),
+    비고: String(display[16] || raw[16] || "").trim(),
+    추가요청: String(display[17] || raw[17] || "").trim(),
+    staff_confirmed_exact_set_components: expectedFinalSetComponents,
+    staff_confirmed_pending_mutation: {
+      target_scope: "pending_request",
+      request_id: normalized.request_id,
+      expected_before: _confirmedReservationPlanForFence_(normalized.expected_before),
+      expected_set_components: normalized.expected_set_components,
+      expected_period: _confirmedReservationPeriodForFence_(normalized.expected_period)
+    }
+  };
+}
+
+function _confirmedReservationRegisteredMatchRequest_(sheet, fence, period) {
+  var firstRow = fence.group.rows[0];
+  var raw = sheet.getRange(firstRow, 1, 1, 18).getValues()[0];
+  var display = sheet.getRange(firstRow, 1, 1, 18).getDisplayValues()[0];
+  return {
+    예약자명: String(display[10] || raw[10] || fence.group.name || "").trim(),
+    연락처: String(display[11] || raw[11] || fence.group.phone || "").trim(),
+    반출일: period.start_date,
+    반출시간: period.start_time,
+    반납일: period.end_date,
+    반납시간: period.end_time
+  };
+}
+
+function _confirmedReservationResult_(normalized, effectiveRequestId, replacedReqIDs, registrationOutcome, expectedFinalSetComponents) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  var groups = _buildConfirmRequestGroups_(sheet).filter(function(group) {
+    return String(group.reqID || "").trim().toUpperCase() === effectiveRequestId;
+  });
+  if (groups.length !== 1) throw new Error("registration readback request is missing: " + effectiveRequestId);
+  var group = groups[0];
+  if (!Array.isArray(expectedFinalSetComponents)) {
+    throw new Error("registration expected set component readback is missing");
+  }
+  if (normalized.request_id === null) {
+    var expectedCandidate = normalized.pending_request_candidate;
+    if (!expectedCandidate ||
+        group.name !== expectedCandidate.customer_name ||
+        group.phone !== _confirmRequestPhoneKey_(expectedCandidate.phone) ||
+        group.discount !== expectedCandidate.discount_type ||
+        group.memo !== expectedCandidate.memo ||
+        group.extraRequest !== expectedCandidate.extra_request) {
+      throw new Error("registered reservation authoritative readback mismatch: customer terms");
+    }
+  }
+  if (!_staffConfirmedSetComponentsEquivalent_(group.setComponentItems || [], expectedFinalSetComponents)) {
+    throw new Error("registered reservation authoritative readback mismatch: request set components");
+  }
+  var tradeIds = group.tradeIds.filter(function(value, index, all) { return value && all.indexOf(value) === index; });
+  var completed = group.rows.length > 0 && group.statuses.length === group.rows.length &&
+    group.statuses.every(function(status) { return isRegisterCompletedStatus_(status); }) &&
+    group.registerActions.length === group.rows.length &&
+    group.registerActions.every(function(action) { return action === "등록"; }) &&
+    tradeIds.length === 1;
+  if (!completed) {
+    return {
+      schema: "village-confirmed-reservation-commit-result/v1",
+      success: false,
+      status: "blocked",
+      request_id: normalized.request_id,
+      effective_request_id: effectiveRequestId,
+      replaced_request_ids: replacedReqIDs,
+      error: {
+        type: "registration_blocked",
+        message: String(group.statuses[group.statuses.length - 1] || "등록이 완료되지 않았습니다").slice(0, 500)
+      },
+      customerNotificationAttempted: false,
+      customerNotificationSent: false
+    };
+  }
+  var tradeId = tradeIds[0];
+  var state = readRegisteredTradeCorrectionState_(tradeId, true);
+  var expectedPeriodKey = [
+    normalized.desired_period.start_date, normalized.desired_period.start_time,
+    normalized.desired_period.end_date, normalized.desired_period.end_time
+  ].join("|");
+  var desiredQuantities = {};
+  normalized.desired_after.forEach(function(item) {
+    desiredQuantities[item.name] = (desiredQuantities[item.name] || 0) + item.quantity;
+  });
+  var registeredRows = state.schedule && Array.isArray(state.schedule.rows) ? state.schedule.rows : [];
+  var finalSetComponents = registeredRows.filter(function(row) {
+    return row && row.isComponent === true;
+  }).map(function(row) {
+    return {
+      set_item: String(row.setName || "").normalize("NFKC").trim(),
+      component_item: String(row.name || "").normalize("NFKC").trim(),
+      quantity: Number(row.qty) || 1
+    };
+  });
+  var finalSetComponentsMatch = _staffConfirmedSetComponentsEquivalent_(
+    finalSetComponents,
+    expectedFinalSetComponents
+  );
+  if (state.contract.startDate !== normalized.desired_period.start_date ||
+      state.contract.startTime !== normalized.desired_period.start_time ||
+      state.contract.endDate !== normalized.desired_period.end_date ||
+      state.contract.endTime !== normalized.desired_period.end_time ||
+      state.schedule.periods.length !== 1 || state.schedule.periods[0] !== expectedPeriodKey ||
+      _registeredTradeTopLevelQuantitySignature_(state.schedule.topLevelQuantities) !==
+        _registeredTradeTopLevelQuantitySignature_(desiredQuantities) ||
+      !finalSetComponentsMatch ||
+      !state.ledger || state.ledger.rows < 1 || state.ledger.startDate !== normalized.desired_period.start_date) {
+    throw new Error("registered reservation authoritative readback mismatch");
+  }
+  return {
+    schema: "village-confirmed-reservation-commit-result/v1",
+    success: true,
+    status: "ok",
+    request_id: normalized.request_id,
+    effective_request_id: effectiveRequestId,
+    trade_id: tradeId,
+    replaced_request_ids: replacedReqIDs,
+    final_plan: _confirmedReservationPlanForFence_(normalized.desired_after),
+    final_set_components: finalSetComponents,
+    final_period: _confirmedReservationPeriodForFence_(normalized.desired_period),
+    authoritative: { request: group, registered_trade: state },
+    customerNotificationAttempted: registrationOutcome && registrationOutcome.customerNotificationAttempted === true,
+    customerNotificationSent: registrationOutcome && registrationOutcome.customerNotificationSent === true
+  };
+}
+
+// JSON/HTTP로 위조할 수 없는 동일 GAS 런타임 capability. confirmed commit이 이미
+// 획득한 ScriptLock을 registerByReqID에 단 한 번 넘겨 RQ 교체와 등록을 한 임계구역으로 묶는다.
+var CONFIRMED_RESERVATION_LOCK_CAPABILITY_ = {};
+
+function commitConfirmedReservation(args) {
+  var normalized;
+  var effectiveRequestId = "";
+  var replacedReqIDs = [];
+  var expectedFinalSetComponents = [];
+  var stage = "preflight";
+  var appliedStages = [];
+  var scriptLock = LockService.getScriptLock();
+  var userLock = LockService.getUserLock();
+  var scriptLockHeld = false;
+  var userLockHeld = false;
+  try {
+    if (!scriptLock.tryLock(30000)) {
+      var busyError = new Error("다른 등록 작업이 진행 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.");
+      busyError.code = "registration_busy";
+      throw busyError;
+    }
+    scriptLockHeld = true;
+    try {
+      userLock.waitLock(30000);
+      userLockHeld = true;
+    } catch (userLockError) {
+      var inputBusyError = new Error("다른 예약 입력을 처리 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.");
+      inputBusyError.code = "registration_busy";
+      throw inputBusyError;
+    }
+    normalized = _normalizeConfirmedReservationCommit_(args && args.registration ? args.registration : args);
+    var operationId = String(args && args.operation_id || "").trim().toLowerCase();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)) {
+      throw new Error("operation_id must be a canonical UUID v4");
+    }
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName("확인요청");
+    if (!sheet) throw new Error("확인요청 시트 없음");
+    _assertConfirmedReservationCatalogPlan_(ss, normalized.desired_after);
+    var initialFence;
+    if (normalized.request_id === null) {
+      stage = "pending_request_bootstrap";
+      var bootstrap = _insertAndCheckRequest(_confirmedReservationBootstrapRequest_(normalized));
+      effectiveRequestId = String(bootstrap && bootstrap.reqID || "").trim().toUpperCase();
+      replacedReqIDs = Array.isArray(bootstrap && bootstrap.replacedReqIDs) ? bootstrap.replacedReqIDs.slice() : [];
+      if (!/^RQ-\d{6}-\d{3}$/.test(effectiveRequestId) || replacedReqIDs.length > 0) {
+        throw new Error("pending request bootstrap readback mismatch");
+      }
+      appliedStages.push("pending_request_bootstrap");
+      initialFence = _resolveStaffConfirmedPendingRequestFence_(sheet, {
+        target_scope: "pending_request",
+        request_id: effectiveRequestId,
+        expected_before: normalized.desired_after,
+        expected_set_components: Array.isArray(bootstrap.finalSetComponents)
+          ? bootstrap.finalSetComponents : [],
+        expected_period: normalized.desired_period
+      });
+      if (bootstrap.matchedRegisteredTradeId) {
+        var bootstrapRegisteredError = new Error(
+          "동일 고객·기간의 활성 등록 거래가 있어 새 확인요청만 보존하고 자동 등록을 중단합니다: " +
+          String(bootstrap.matchedRegisteredTradeId)
+        );
+        bootstrapRegisteredError.code = "registered_trade_exists";
+        throw bootstrapRegisteredError;
+      }
+    } else {
+      initialFence = _resolveStaffConfirmedPendingRequestFence_(sheet, {
+        target_scope: "pending_request",
+        request_id: normalized.request_id,
+        expected_before: normalized.expected_before,
+        expected_set_components: normalized.expected_set_components,
+        expected_period: normalized.expected_period
+      });
+    }
+    expectedFinalSetComponents = _projectStaffConfirmedDesiredSetComponents_(
+      normalized.request_id === null ? [] : normalized.expected_before,
+      initialFence.expectedSetComponents || [],
+      normalized.desired_after,
+      ss.getSheetByName("세트마스터"),
+      normalized.set_component_selections
+    );
+    var registeredTradeIds = [];
+    [normalized.expected_period, normalized.desired_period].forEach(function(period) {
+      _findRegisteredTradesForConfirmRequest_(
+        ss,
+        _confirmedReservationRegisteredMatchRequest_(sheet, initialFence, period)
+      ).forEach(function(tradeId) {
+        if (registeredTradeIds.indexOf(tradeId) < 0) registeredTradeIds.push(tradeId);
+      });
+    });
+    if (registeredTradeIds.length > 0) {
+      var registeredError = new Error(
+        "동일 고객·기간의 활성 등록 거래가 있어 pending 등록 경로를 중단합니다: " + registeredTradeIds.join(", ")
+      );
+      registeredError.code = "registered_trade_exists";
+      throw registeredError;
+    }
+    if (!effectiveRequestId) effectiveRequestId = normalized.request_id;
+    var needsReplacement = normalized.request_id !== null &&
+      (!_confirmedReservationPlanEquivalent_(normalized.expected_before, normalized.desired_after) ||
+       !_confirmedReservationPeriodEquivalent_(normalized.expected_period, normalized.desired_period));
+    if (needsReplacement) {
+      stage = "pending_request_replacement";
+      var replacement = _insertAndCheckRequest(
+        _confirmedReservationReplacementRequest_(
+          sheet,
+          initialFence,
+          normalized,
+          expectedFinalSetComponents
+        )
+      );
+      effectiveRequestId = String(replacement.reqID || "").trim().toUpperCase();
+      replacedReqIDs = Array.isArray(replacement.replacedReqIDs) ? replacement.replacedReqIDs.slice() : [];
+      if (!/^RQ-\d{6}-\d{3}$/.test(effectiveRequestId) ||
+          replacedReqIDs.length !== 1 || replacedReqIDs[0] !== normalized.request_id ||
+          !_staffConfirmedSetComponentsEquivalent_(
+            Array.isArray(replacement.finalSetComponents) ? replacement.finalSetComponents : [],
+            expectedFinalSetComponents
+          )) {
+        throw new Error("pending request replacement readback mismatch");
+      }
+      appliedStages.push("pending_request_replacement");
+    }
+    if (!needsReplacement && normalized.set_component_selections.length > 0) {
+      stage = "pending_request_set_component_selections";
+      _applyConfirmedReservationSetSelections_(sheet, effectiveRequestId, normalized.set_component_selections);
+      appliedStages.push("set_component_selections");
+    }
+    stage = "registration";
+    var current = _resolveStaffConfirmedPendingRequestFence_(sheet, {
+      target_scope: "pending_request",
+      request_id: effectiveRequestId,
+      expected_before: normalized.desired_after,
+      expected_set_components: expectedFinalSetComponents,
+      expected_period: normalized.desired_period
+    });
+    // registerByReqID가 이 lock을 finally에서 해제한다. 호출 직전에 소유권을 넘겨
+    // 예외/early return에서도 중복 release 없이 교체→등록 전체를 한 ScriptLock으로 유지한다.
+    scriptLockHeld = false;
+    var registrationOutcome = registerByReqID(sheet, current.group.rows[0], {
+      fromQueue: false,
+      failIfBusy: true,
+      forbidRegisteredMerge: true,
+      noAutomaticReplay: true,
+      // 카카오 헤르메스가 같은 대화에서 이미 확정 답변을 낸 뒤 수행하는 내부 반영이다.
+      // 등록완료 알림톡까지 보내면 고객에게 중복 응답이 되므로 이 경로에서만 억제한다.
+      suppressCustomerNotification: true,
+      preAcquiredScriptLock: scriptLock,
+      confirmedReservationLockCapability: CONFIRMED_RESERVATION_LOCK_CAPABILITY_,
+      confirmedReservationFence: {
+        target_scope: "pending_request",
+        request_id: effectiveRequestId,
+        expected_before: normalized.desired_after,
+        expected_set_components: current.expectedSetComponents,
+        expected_period: normalized.desired_period
+      },
+      confirmedReservationOperationId: operationId
+    });
+    appliedStages.push("registration");
+    stage = "authoritative_readback";
+    var confirmedResult = _confirmedReservationResult_(
+      normalized,
+      effectiveRequestId,
+      replacedReqIDs,
+      registrationOutcome,
+      expectedFinalSetComponents
+    );
+    if (confirmedResult && confirmedResult.success === true) {
+      appliedStages.push("authoritative_readback");
+      confirmedResult.applied_stages = appliedStages.slice();
+    }
+    return confirmedResult;
+  } catch (error) {
+    if (error && /^RQ-\d{6}-\d{3}$/.test(String(error.effectiveRequestId || "").trim().toUpperCase())) {
+      effectiveRequestId = String(error.effectiveRequestId).trim().toUpperCase();
+    }
+    if (error && Array.isArray(error.replacedReqIDs)) {
+      replacedReqIDs = error.replacedReqIDs.map(function(value) {
+        return String(value || "").trim().toUpperCase();
+      }).filter(function(value) { return /^RQ-\d{6}-\d{3}$/.test(value); });
+    }
+    return {
+      schema: "village-confirmed-reservation-commit-result/v1",
+      success: false,
+      status: stage === "preflight" ? "blocked" : "partial_success",
+      request_id: normalized ? normalized.request_id : null,
+      effective_request_id: effectiveRequestId || null,
+      replaced_request_ids: replacedReqIDs,
+      trade_id: String(error && error.tradeID || "").trim() || null,
+      applied_stages: appliedStages.concat(
+        error && Array.isArray(error.appliedStages) ? error.appliedStages : []
+      ).filter(function(value, index, all) { return value && all.indexOf(value) === index; }),
+      authoritative: error && error.authoritativeRegistrationState ? {
+        registered_trade: error.authoritativeRegistrationState
+      } : null,
+      attempted_stage: stage,
+      error: {
+        type: String(error && error.code || (stage === "preflight" ? "invalid_or_stale" : "commit_uncertain")),
+        message: String(error && error.message || error).slice(0, 500)
+      },
+      customerNotificationAttempted: false,
+      customerNotificationSent: false
+    };
+  } finally {
+    if (scriptLockHeld) {
+      try { scriptLock.releaseLock(); } catch (scriptReleaseError) {}
+    }
+    if (userLockHeld) {
+      try { userLock.releaseLock(); } catch (userReleaseError) {}
+    }
+  }
+}
+
 function registerByReqID(sheet, triggerRow, registerOptions) {
   registerOptions = registerOptions || {};
   var _regPerfT0 = Date.now(); // 계측: 총시간/락대기/알림톡/큐 소진 (perfLog_로 기록)
   // ── 전체 등록 프로세스 직렬화 (동시 실행 방지) ──
-  var regLock = LockService.getScriptLock();
-  if (!regLock.tryLock(30000)) {
+  var hasTransferredConfirmedLock = registerOptions.confirmedReservationLockCapability ===
+      CONFIRMED_RESERVATION_LOCK_CAPABILITY_ &&
+    registerOptions.preAcquiredScriptLock &&
+    typeof registerOptions.preAcquiredScriptLock.releaseLock === "function";
+  var suppressCustomerNotification = hasTransferredConfirmedLock &&
+    registerOptions.suppressCustomerNotification === true;
+  var confirmedReservationOperationId = hasTransferredConfirmedLock
+    ? String(registerOptions.confirmedReservationOperationId || "").trim().toLowerCase()
+    : "";
+  if (hasTransferredConfirmedLock &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(confirmedReservationOperationId)) {
+    throw new Error("confirmed reservation operation_id is invalid");
+  }
+  var regLock = hasTransferredConfirmedLock
+    ? registerOptions.preAcquiredScriptLock
+    : LockService.getScriptLock();
+  if (!hasTransferredConfirmedLock && !regLock.tryLock(30000)) {
+    if (registerOptions.failIfBusy === true) {
+      throw new Error("다른 등록 작업이 진행 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.");
+    }
     var pendingReqID = String(sheet.getRange(triggerRow, 1).getValue() || "").trim();
-    markRegisterQueued_(sheet, triggerRow);
+    if (!markRegisterQueued_(sheet, triggerRow)) return;
     enqueuePendingRegister_(pendingReqID, 30000);
     return;
   }
   var _postRegisterAlimtalk = null; // 락 해제 후 보낼 알림톡 payload (외부 HTTP를 락 밖으로)
   var _postRegisterScheduleFormat = false; // 9천+ 행 전체 서식은 등록 락 밖의 별도 워커로
+  var _registerOutcome = null;
   var _regPerf = { lockWaitMs: Date.now() - _regPerfT0, reqID: "" };
   try {
   // 락 획득 후 시트 데이터를 새로 읽어야 정확함
@@ -14692,6 +15811,26 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     return;
   }
 
+  // 큐/수동 호출이 ScriptLock을 기다리는 동안 confirmed operation이 시작될 수 있다.
+  // 락 밖의 사전검사만 믿지 않고, 락 획득 뒤의 최신 O열을 다시 확인해 절대 재실행하지 않는다.
+  if (shouldSkipLegacyRegistrationAfterLock_(allData, reqID, hasTransferredConfirmedLock)) return;
+
+  if (registerOptions.confirmedReservationFence) {
+    var requestedConfirmedFence = registerOptions.confirmedReservationFence;
+    var exactConfirmedReservationFence = _resolveStaffConfirmedPendingRequestFence_(
+      sheet, {
+        target_scope: requestedConfirmedFence.target_scope,
+        request_id: requestedConfirmedFence.request_id,
+        expected_before: requestedConfirmedFence.expected_before,
+        expected_set_components: requestedConfirmedFence.expected_set_components,
+        expected_period: requestedConfirmedFence.expected_period
+      }
+    );
+    if (!exactConfirmedReservationFence || exactConfirmedReservationFence.group.reqID !== reqID) {
+      throw new Error("confirmed reservation exact request fence mismatch");
+    }
+  }
+
   // 등록 직전 세트 펼침/가용확인을 한 번 더 보장한다.
   // 배치 입력 중 확인 락이 밀리면 I열이 비어 세트가 단품으로 등록될 수 있다.
   _processByReqID(sheet, triggerRow);
@@ -14703,6 +15842,20 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     allData[rdi][2] = regDisplayData[rdi][2];
     allData[rdi][4] = regDisplayData[rdi][4];
     allData[rdi][11] = regDisplayData[rdi][11];
+  }
+  if (requestedConfirmedFence) {
+    var postProcessConfirmedFence = _resolveStaffConfirmedPendingRequestFence_(
+      sheet, {
+        target_scope: requestedConfirmedFence.target_scope,
+        request_id: requestedConfirmedFence.request_id,
+        expected_before: requestedConfirmedFence.expected_before,
+        expected_set_components: requestedConfirmedFence.expected_set_components,
+        expected_period: requestedConfirmedFence.expected_period
+      }
+    );
+    if (!postProcessConfirmedFence || postProcessConfirmedFence.group.reqID !== reqID) {
+      throw new Error("confirmed reservation post-process exact request fence mismatch");
+    }
   }
   const directRegisterApproved = requestHasDirectRegisterApproval_(allData, reqID);
   var blockingRegisterIssue = getBlockingRegisterIssue_(allData, reqID, directRegisterApproved);
@@ -14982,11 +16135,27 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       }
       if (mergeTargetTID) mergeMode = true;
     }
+    if (mergeMode && registerOptions.forbidRegisteredMerge === true) {
+      var forbiddenMergeError = new Error(
+        "기존 등록 거래와의 합침은 confirmed pending 등록 경로에서 허용되지 않습니다: " + mergeTargetTID
+      );
+      forbiddenMergeError.code = "registered_trade_exists";
+      throw forbiddenMergeError;
+    }
     // 합침 요청에는 기존 품목이 섞여 다시 들어오는 경우가 있다. 새 품목만 쓰도록
     // 현재 거래의 C/D/E(세트/장비/수량)와 정확히 같은 행을 multiset으로 한 번씩 제외한다.
     var mergeSchedulePlan = planMergedScheduleRows_(
       allData, reqID, mergeTargetTID, mergeTargetScheduleRows
     );
+
+  if (hasTransferredConfirmedLock) {
+    var noReplayMarker = "⚠️ 자동등록 처리중(재실행 금지) [" + confirmedReservationOperationId + "]";
+    for (var nri = 0; nri < allData.length; nri++) {
+      if (String(allData[nri][0] || "").trim() !== String(reqID || "").trim()) continue;
+      sheet.getRange(nri + 2, 15).setValue(noReplayMarker);
+    }
+    SpreadsheetApp.flush();
+  }
 
   // ── 거래ID 생성: YYMMDD-NNN ──
   // registerByReqID 전체의 ScriptLock 안에서 양쪽 시트 최대번호를 읽고 즉시 기록하므로
@@ -15181,8 +16350,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     }, { dryRun: false });
     sheet.getRange(triggerRow, 15).setValue("✅ 개고생2.0 확인완료 (행" + ledgerWrite.row + ")");
   } catch (ledgerErr) {
-    markRequestLedgerPending_(sheet, allData, reqID, 거래ID);
-    enqueuePendingRegister_(reqID, 30000);
+    handleRegistrationLedgerFailure_(sheet, allData, reqID, 거래ID, ledgerErr, registerOptions);
     Logger.log("거래내역 저장 실패(등록대기 유지): " + reqID + " / " + ledgerErr.message);
     return;
   }
@@ -15227,9 +16395,18 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   // ── 등록완료 알림톡 + 내 예약 링크 (거래당 1회, 실패해도 등록은 진행) ──
   // POPBILL_TPL_REGISTER 템플릿 미설정 시 자동 스킵 (기존처럼 코워크 카톡 발송으로 운영 가능)
   // 팝빌 토큰+발송+캐시예열은 외부 HTTP 2~3회 — 전역 락 해제 직후(finally)로 미룬다
-  _postRegisterAlimtalk = {
-    거래ID: 거래ID, 예약자명: 예약자명, 연락처: 연락처,
-    반출일: 반출일, 반출시간: 반출시간, 반납일: 반납일, 반납시간: 반납시간
+  if (!suppressCustomerNotification) {
+    _postRegisterAlimtalk = {
+      거래ID: 거래ID, 예약자명: 예약자명, 연락처: 연락처,
+      반출일: 반출일, 반출시간: 반출시간, 반납일: 반납일, 반납시간: 반납시간
+    };
+  }
+  _registerOutcome = {
+    success: true,
+    reqID: reqID,
+    tradeID: 거래ID,
+    customerNotificationAttempted: !suppressCustomerNotification,
+    customerNotificationSent: false
   };
 
   // dashboard/timeline 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
@@ -15244,11 +16421,15 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       var _almT0 = Date.now();
       _regPerf.reqID = String(_postRegisterAlimtalk.거래ID || "");
       try {
-        sendRegisterCompleteAlimtalk_(
+        var registerNotificationResult = sendRegisterCompleteAlimtalk_(
           _postRegisterAlimtalk.거래ID, _postRegisterAlimtalk.예약자명, _postRegisterAlimtalk.연락처,
           _postRegisterAlimtalk.반출일, _postRegisterAlimtalk.반출시간,
           _postRegisterAlimtalk.반납일, _postRegisterAlimtalk.반납시간
         );
+        if (_registerOutcome) {
+          _registerOutcome.customerNotificationSent = !!(registerNotificationResult && registerNotificationResult.sent === true);
+          _registerOutcome.customerNotification = registerNotificationResult || null;
+        }
       } catch (almErr) {
         Logger.log("등록완료 알림톡 실패(등록은 정상): " + almErr.message);
       }
@@ -15272,6 +16453,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     _regPerf.totalMs = Date.now() - _regPerfT0;
     perfLog_("registerByReqID", _regPerf);
   }
+  return _registerOutcome;
 }
 
 
@@ -16135,10 +17317,10 @@ function checkDuplicateRequest(ss, 예약자명, 반출일, 장비목록, 연락
  * 확인요청 쓰기 전에 같은 실제 고객과 exact 대여기간의 활성 등록 거래를 찾는다.
  * 장비목록은 변경 대상일 수 있으므로 비교하지 않는다.
  */
-function _findRegisteredTradeForConfirmRequest_(ss, req) {
+function _findRegisteredTradesForConfirmRequest_(ss, req) {
   req = req || {};
   var contractSheet = ss && ss.getSheetByName ? ss.getSheetByName("계약마스터") : null;
-  if (!contractSheet || contractSheet.getLastRow() < 2) return null;
+  if (!contractSheet || contractSheet.getLastRow() < 2) return [];
 
   var reqName = String(req.예약자명 || "").trim();
   var reqPhone = _confirmRequestPhoneKey_(req.연락처);
@@ -16146,7 +17328,7 @@ function _findRegisteredTradeForConfirmRequest_(ss, req) {
   var reqStartTime = _confirmRequestTimeKey_(req.반출시간);
   var reqEndDate = _confirmRequestDateKey_(req.반납일);
   var reqEndTime = _confirmRequestTimeKey_(req.반납시간);
-  if ((!reqName && !reqPhone) || !reqStartDate || !reqStartTime || !reqEndDate || !reqEndTime) return null;
+  if ((!reqName && !reqPhone) || !reqStartDate || !reqStartTime || !reqEndDate || !reqEndTime) return [];
 
   var contractRange = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10);
   var rows = contractRange.getValues();
@@ -16170,7 +17352,11 @@ function _findRegisteredTradeForConfirmRequest_(ss, req) {
         || _confirmRequestTimeKey_(row[7], displayRow[7]) !== reqEndTime) continue;
     matchedTradeIds[tradeId] = true;
   }
-  var exactTradeIds = Object.keys(matchedTradeIds);
+  return Object.keys(matchedTradeIds);
+}
+
+function _findRegisteredTradeForConfirmRequest_(ss, req) {
+  var exactTradeIds = _findRegisteredTradesForConfirmRequest_(ss, req);
   // 한 문의를 어느 등록 거래에 반영할지 유일하게 증명될 때만 연결한다.
   // 복수 후보는 확인요청 자체는 남기되 자동 등록변경을 fail-closed 한다.
   return exactTradeIds.length === 1 ? exactTradeIds[0] : null;
