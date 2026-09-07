@@ -385,9 +385,21 @@ def watcher_probe_state(
 ) -> str:
     if watcher_is_healthy(value, expected_extension_version):
         return "healthy"
+    if value and value.get("liveListError") == "http_401":
+        return "login_required"
     if value and value.get("liveListProbeOk") is False:
         return "live_list_probe_failed"
     return "watcher_repair_required"
+
+
+def watcher_reports_authenticated(
+    value: dict[str, Any] | None,
+    classified_authenticated: bool,
+) -> bool:
+    return bool(
+        classified_authenticated
+        and not (value and value.get("liveListError") == "http_401")
+    )
 
 
 def watcher_should_reload(
@@ -458,7 +470,15 @@ def main() -> int:
             value = probe_watcher(cdp)
             healthy = watcher_is_healthy(value, expected_extension_version)
             state = watcher_probe_state(value, expected_extension_version)
-            print(json.dumps({"ok": healthy, **classification, "state": state, "watcherReady": healthy, "watcher": value}, ensure_ascii=False))
+            authenticated = watcher_reports_authenticated(value, bool(classification.get("authenticated")))
+            print(json.dumps({
+                "ok": healthy,
+                **classification,
+                "state": state,
+                "authenticated": authenticated,
+                "watcherReady": healthy,
+                "watcher": value,
+            }, ensure_ascii=False))
             return 0 if healthy else 2
         injection = build_injection(content_js)
         cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": injection})
@@ -482,7 +502,16 @@ def main() -> int:
                     break
         healthy = watcher_is_healthy(value, expected_extension_version)
         state = watcher_probe_state(value, expected_extension_version)
-        print(json.dumps({"ok": healthy, **classification, "state": state, "watcherReady": healthy, "reloaded": reloaded, "watcher": value}, ensure_ascii=False))
+        authenticated = watcher_reports_authenticated(value, bool(classification.get("authenticated")))
+        print(json.dumps({
+            "ok": healthy,
+            **classification,
+            "state": state,
+            "authenticated": authenticated,
+            "watcherReady": healthy,
+            "reloaded": reloaded,
+            "watcher": value,
+        }, ensure_ascii=False))
         return 0 if healthy else 2
     finally:
         cdp.close()

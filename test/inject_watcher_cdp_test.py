@@ -198,6 +198,31 @@ class WatcherHealthTest(unittest.TestCase):
                 "2026-08-13-cdp-health-v16",
             )
         )
+        self.assertTrue(INJECTOR.watcher_reports_authenticated(probe, True))
+
+    def test_live_list_http_401_is_an_authentication_failure(self):
+        probe = healthy_probe(
+            liveListProbeOk=False,
+            liveListError="http_401",
+        )
+
+        self.assertEqual(
+            INJECTOR.watcher_probe_state(
+                probe,
+                "2026-08-13-cdp-health-v16",
+            ),
+            "login_required",
+        )
+        self.assertFalse(
+            INJECTOR.watcher_should_reload(
+                probe,
+                "2026-08-13-cdp-health-v16",
+            )
+        )
+        self.assertFalse(INJECTOR.watcher_reports_authenticated(probe, True))
+        self.assertTrue(
+            INJECTOR.watcher_reports_authenticated(healthy_probe(), True)
+        )
 
     def test_stale_live_list_requests_a_bounded_kakao_page_reload(self):
         probe = healthy_probe(topRowsCount=1, liveListItemCount=100)
