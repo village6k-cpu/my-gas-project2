@@ -7,7 +7,8 @@ import crypto from 'node:crypto';
 import dns from 'node:dns';
 import { isSharedHermesGatewayIdle } from '../ai-browser-worker/shared-hermes-browser.mjs';
 import { spawn, spawnSync } from 'node:child_process';
-import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, executeVillageReadOnlyLookup, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
+import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
+import { executeVillageReadOnlyLookup } from '../ai-browser-worker/worker.mjs';
 import {
   applyPreparedKakaoDecision,
   buildKakaoGatewayTurn,
