@@ -228,6 +228,36 @@ test("v2 GET reads grouped inquiry cases and never returns raw work evidence", a
   assert.equal(requests[0].init.headers.authorization, "Bearer service-role-key");
 });
 
+test("v2 GET preserves cases when the worker receipt clock is ahead of the database write clock", async () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const receivedAt = "2026-09-07T13:15:46.101Z";
+  const updatedAt = "2026-09-07T13:15:45.565Z";
+  const inbox = {
+    summary: { now: 1, snoozed: 0, completed: 0, p0: 0,
+      byCategory: { schedule: 1, quote: 0, settlement: 0, customer: 0, operations: 0 } },
+    cases: [{
+      id, state: "now", priority: "normal", title: "고객 문의", ownerBrief: "일정을 확인하세요.",
+      requestSummary: "촬영 일정 확인 요청", problemSummary: "일정 확인 필요",
+      nextActionSummary: "일정을 확인하세요.", receivedAt, updatedAt,
+      categories: ["schedule"], completedStepCount: 0, totalStepCount: 1,
+      steps: [{ id, version: 1, category: "schedule", workTypeLabel: "스케줄 확인",
+        priority: "normal", state: "open", taskLabel: "일정 확인",
+        dueAt: null, snoozedUntil: null, updatedAt }],
+    }],
+    nextCursor: null, omittedCount: 0,
+  };
+  const { GET } = loadRoute({ fetchImpl: async () => response(inbox) });
+  const result = await GET(getV2Request());
+  assert.equal(result.status, 200);
+  assert.deepEqual((await readBody(result)).cases, inbox.cases);
+  for (const field of ["receivedAt", "updatedAt"]) {
+    const malformed = structuredClone(inbox);
+    malformed.cases[0][field] = "invalid-date";
+    const route = loadRoute({ fetchImpl: async () => response(malformed) });
+    assert.equal((await route.GET(getV2Request())).status, 503);
+  }
+});
+
 test("v2 GET fails closed when a successful upstream response is not an array", async () => {
   for (const malformed of [{ error: "upstream detail" }, null, "not-an-array"]) {
     const { GET } = loadRoute({ fetchImpl: async () => response(malformed) });

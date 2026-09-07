@@ -113,7 +113,8 @@ function safeCase(value, { view, category, now }) {
     || value.totalStepCount !== value.steps.length || value.completedStepCount > value.totalStepCount) throw invalidPayload();
   const receivedAt = timestamp(value.receivedAt);
   const updatedAt = timestamp(value.updatedAt);
-  if (Date.parse(receivedAt) > Date.parse(updatedAt)) throw invalidPayload();
+  // Worker receipt time and database write time use independent clocks.
+  // Preserve both valid timestamps without requiring an ordering between them.
   const steps = value.steps.map(safeStep);
   if (new Set(steps.map(({ id }) => id)).size !== steps.length
     || steps.some((entry) => !value.categories.includes(entry.category))

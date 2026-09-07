@@ -108,6 +108,24 @@ test("inquiry inbox exposes case counts and allows overlapping business categori
   assert.equal(model.selected.id, orderedCases[0].id);
 });
 
+test("a receipt clock ahead of the database clock does not hide any inquiry or change its action version", async () => {
+  const { buildInboxView, actionBody } = await loadModel();
+  const data = structuredClone(payload());
+  data.cases[1].receivedAt = "2026-09-05T15:35:00.536Z";
+  const model = buildInboxView({ payload: data, view: "now", category: null, selectedId: null, now });
+  assert.equal(model.rows.length, data.cases.length);
+  assert.equal(model.rows[1].receivedAt, data.cases[1].receivedAt);
+  assert.equal(model.rows[1].updatedAt, data.cases[1].updatedAt);
+  assert.deepEqual(actionBody(model.rows[1].steps[0], { type: "complete" }), {
+    id: data.cases[1].steps[0].id, expectedVersion: 7, action: { type: "complete" },
+  });
+  for (const field of ["receivedAt", "updatedAt"]) {
+    const malformed = structuredClone(data);
+    malformed.cases[1][field] = "invalid-date";
+    assert.throws(() => buildInboxView({ payload: malformed, view: "now", category: null, selectedId: null, now }), /payload invalid/);
+  }
+});
+
 test("inquiry timing is KST owner-readable and uses calendar-day age", async () => {
   const { buildInboxView, formatInquiryTiming } = await loadModel();
   assert.deepEqual(formatInquiryTiming("2026-09-03T12:29:00.000Z", now), {
