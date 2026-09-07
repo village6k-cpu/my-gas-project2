@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { customerClusterHash } from './follow-up-policy.mjs';
 import * as workerModule from './worker.mjs';
 import { loadWorkOrchestratorConfig } from '../work-orchestrator-v2/contracts.mjs';
+import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
 import { registeredReservationChangeRequestDigest } from './staff-confirmed-mutation.mjs';
 import { executeVillageConfirmedReservationCommit } from './staff-confirmed-registration.mjs';
 
@@ -3155,6 +3156,70 @@ test('authoritative automation resolution leaves unverified work open and record
   assert.equal(result.automationResolutionResult.work.status, 'open');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].resolution.resolutionKind, 'missing_authoritative_readback');
+});
+
+test('human finalization persists automation state through the real store contract after create or merge', async (t) => {
+  for (const created of [true, false]) {
+    await t.test(created ? 'new work' : 'existing work', async () => {
+      const calls = [];
+      let savedRow;
+      const storedVersion = created ? 1 : 2;
+      const store = createWorkOrchestratorStore({
+        supabaseUrl: 'https://example.supabase.co',
+        serviceRoleKey: 'test-service-role',
+        fetchImpl: async (url, options) => {
+          const target = new URL(url);
+          const body = JSON.parse(options.body);
+          calls.push({ target, method: options.method, body });
+          if (options.method === 'POST' && target.pathname === '/rest/v1/rpc/upsert_work_item_v2') {
+            assert.equal(calls.length, 1, 'must not replay the work upsert');
+            savedRow = {
+              ...body.p_candidate,
+              id: '11111111-1111-4111-8111-111111111111',
+              version: storedVersion,
+              digest_inclusion_count: 0,
+              consecutive_unhandled_digests: 0,
+              last_digest_at: null,
+              next_reminder_at: null
+            };
+            return new Response(JSON.stringify({ applied: true, created, row: savedRow }));
+          }
+          assert.equal(options.method, 'PATCH');
+          assert.equal(target.pathname, '/rest/v1/work_items_v2');
+          assert.equal(target.searchParams.get('id'), `eq.${savedRow.id}`);
+          assert.equal(target.searchParams.get('version'), `eq.${storedVersion}`);
+          assert.equal(target.searchParams.get('state'), 'in.(open,in_progress,snoozed)');
+          assert.deepEqual(Object.keys(body).sort(), [
+            'automation_state', 'resolution_evidence', 'resolution_kind', 'version'
+          ]);
+          savedRow = { ...savedRow, ...body };
+          return new Response(JSON.stringify([savedRow]));
+        }
+      });
+      const forbidden = async () => assert.fail('human finalization must not send or write legacy rows');
+      const result = await finalizePreparedKakaoDecision(workOrchestratorV2FinalizeInput({
+        rows: [workOrchestratorV2FollowUpRow()],
+        decision: { requires_owner_approval: true },
+        dependencies: {
+          workOrchestratorStore: store,
+          upsertFollowUpCaseRows: forbidden,
+          upsertFollowUpRows: forbidden,
+          deliverSlackFollowUpRows: forbidden
+        }
+      }));
+      assert.equal(result.workOrchestratorResult.error, null);
+      assert.equal(calls.length, 2);
+      assert.equal(result.workOrchestratorResult.inserted, created ? 1 : 0);
+      assert.equal(result.workOrchestratorResult.merged, created ? 0 : 1);
+      assert.deepEqual(result.workOrchestratorResult.rows, [savedRow]);
+      assert.equal(savedRow.version, storedVersion + 1);
+      assert.equal(savedRow.state, 'open');
+      assert.equal(savedRow.automation_state, 'needs_human');
+      assert.equal(savedRow.resolution_kind, 'owner_approval_required');
+      assert.equal(result.automationResolutionResult.work.status, 'open');
+      assert.equal(result.automationResolutionResult.noticeUpdate.status, 'not_requested');
+    });
+  }
 });
 
 test('authoritative automation resolution keeps owner approval open despite authoritative preliminary execution', async () => {
