@@ -11766,7 +11766,7 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
     });
     workOrchestratorResult = await persistHumanAutomationState({
       workOrchestratorResult,
-      resolution: automationApplied.result,
+      resolution: automationResolution,
       store: automationApplied.store
     });
     if (workOrchestratorResult.rows.length && !workOrchestratorResult.error
