@@ -11260,16 +11260,60 @@ test('closeKakaoConversationWindow closes only the supplied Windows customer pop
 
 test('closeKakaoConversationTargetViaDevtools closes only the target id', async () => {
   let requestedUrl = '';
-  const result = await closeKakaoConversationTargetViaDevtools({ id: 'target-1' }, {
+  const target = { type: 'page', id: 'target-1', url: 'https://business.kakao.com/space/test/channel/_test/chats/123', close_safe: true };
+  const result = await closeKakaoConversationTargetViaDevtools(target, {
     cdpBaseUrl: 'http://127.0.0.1:9223',
+    sharedGatewayIdle: () => true,
     fetchImpl: async (url) => {
       requestedUrl = String(url);
+      if (requestedUrl.endsWith('/json/list')) return { ok: true, text: async () => JSON.stringify([
+        { type: 'page', id: 'list', url: 'https://business.kakao.com/space/test/channel/_test/chats' }, target
+      ]) };
       return { ok: true, status: 200, text: async () => 'Target is closing' };
     }
   });
 
   assert.equal(result.status, 'closed_conversation_target');
   assert.match(requestedUrl, /\/json\/close\/target-1$/);
+});
+
+test('owned CDP cleanup preserves Slack work and a changed or last control target', async () => {
+  const target = { type: 'page', id: 'popup', url: 'https://business.kakao.com/space/test/channel/_test/chats/123', close_safe: true };
+  const main = { type: 'page', id: 'main', url: 'https://business.kakao.com/space/test/channel/_test/chats' };
+  for (const fixture of [
+    { idle: [false], tabs: [main, target] },
+    { idle: [true, false], tabs: [main, target] },
+    { idle: [true], tabs: [target] },
+    { idle: [true], tabs: [main, { ...target, url: main.url }] },
+    { idle: [true], tabs: [main, { ...target, url: target.url + '4' }] }
+  ]) {
+    let reads = 0;
+    const closed = [];
+    await closeKakaoConversationTargetViaDevtools(target, {
+      cdpBaseUrl: 'http://127.0.0.1:9223',
+      sharedGatewayIdle: () => fixture.idle[Math.min(reads++, fixture.idle.length - 1)],
+      fetchImpl: async (url) => {
+        if (String(url).includes('/json/close/')) closed.push(String(url));
+        return { ok: true, text: async () => JSON.stringify(fixture.tabs) };
+      }
+    });
+    assert.deepEqual(closed, [], 'finishing a worker must not close another active client or last control tab');
+  }
+});
+
+test('owned CDP cleanup does not retry a failed close without a new ownership check', async () => {
+  const target = { type: 'page', id: 'popup', url: 'https://business.kakao.com/space/test/channel/_test/chats/123', close_safe: true };
+  const main = { type: 'page', id: 'main', url: 'https://business.kakao.com/space/test/channel/_test/chats' };
+  let attempts = 0;
+  await assert.rejects(closeKakaoConversationTargetViaDevtools(target, {
+    cdpBaseUrl: 'http://127.0.0.1:9223', sharedGatewayIdle: () => true,
+    fetchImpl: async (url) => {
+      if (String(url).endsWith('/json/list')) return { ok: true, text: async () => JSON.stringify([main, target]) };
+      if (++attempts === 1) throw new Error('transient disconnect');
+      return { ok: true, text: async () => 'Target is closing' };
+    }
+  }), /transient disconnect/);
+  assert.equal(attempts, 1);
 });
 
 test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe replies', () => {
