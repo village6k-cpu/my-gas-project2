@@ -24,6 +24,7 @@ const EVENT_FIELDS = Object.freeze([
 const EFFECT_TYPES = new Set([
   'auto_reply',
   'confirmation_request',
+  'reservation_registration',
   'registered_reservation_change',
   'document_send'
 ]);
@@ -43,11 +44,12 @@ const CHANGE_FIELDS = new Set(['equipment', 'quantity', 'start_at', 'end_at', 't
 const PHONE_PATTERN = /01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4}/i;
 const SECRET_PATTERN = /(bearer\s+[a-z0-9._~-]+|(?:token|secret|password|apikey|api[ _-]?key)\s*[:=])/i;
 const BANK_ACCOUNT_PATTERN = /(?:계좌|은행|account)(?:번호)?[^0-9\r\n]{0,20}[0-9][0-9 -]{7,}[0-9]/i;
-const EVENT_KEY_PATTERN = /^kakao:(auto_reply|confirmation_request|registered_reservation_change|document_send):[0-9a-f]{64}$/;
+const EVENT_KEY_PATTERN = /^kakao:(auto_reply|confirmation_request|reservation_registration|registered_reservation_change|document_send):[0-9a-f]{64}$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const REPLY_RECEIPT_PATTERN = /^reply-readback-[0-9a-f]{64}$/;
 const TOOL_RECEIPT_SCHEMA = Object.freeze({
   confirmation_request: 'village-confirmation-receipt/v1',
+  confirmed_reservation_commit: 'village-confirmed-reservation-commit-receipt/v1',
   registered_reservation_change: 'village-registered-reservation-change-receipt/v1',
   document_send: 'village-document-receipt/v1'
 });
@@ -120,6 +122,22 @@ function safeOptionalText(value, max = 160) {
   } catch {
     return null;
   }
+}
+
+// Internal receipt equality must compare the real normalized values.  The
+// public audit serializer deliberately drops PII/secret-shaped text via
+// safeOptionalText(); reusing that redaction helper here would collapse two
+// different private values to the same null and falsely certify a readback.
+function exactInternalTextMatch(left, right, max) {
+  const normalize = (value) => {
+    if (typeof value !== 'string') return null;
+    const normalized = value.normalize('NFKC').trim();
+    return normalized.length <= max ? normalized : null;
+  };
+  const normalizedLeft = normalize(left);
+  const normalizedRight = normalize(right);
+  return normalizedLeft !== null && normalizedRight !== null
+    && normalizedLeft === normalizedRight;
 }
 
 function safeCustomerLabel({ durableJob, prepared, proof }) {
@@ -272,6 +290,43 @@ function exactToolReceipt(durableJob) {
     throw new TypeError('trusted tool receipt set is invalid');
   }
   return { operation, receipt };
+}
+
+function unresolvedConfirmedRegistrationOperation(durableJob) {
+  const operation = durableJob?.tool_operation;
+  const target = operation?.audit_target;
+  const receipts = durableJob?.tool_receipts;
+  const lateReceipt = Array.isArray(receipts) && receipts.length === 1 ? receipts[0] : null;
+  const unresolvedEvidenceState = operation?.state === 'reserved'
+    ? Array.isArray(receipts) && receipts.length === 0
+    : operation?.state === 'completed'
+      && isRecord(lateReceipt)
+      && lateReceipt.receipt_id === operation.receipt_id
+      && lateReceipt.operation_id === operation.operation_id
+      && lateReceipt.job_id === operation.job_id
+      && lateReceipt.room_key === operation.room_key
+      && lateReceipt.room_revision === operation.room_revision
+      && lateReceipt.lease_id === operation.lease_id
+      && lateReceipt.request_digest === operation.request_digest;
+  if (!isRecord(operation)
+    || operation.tool !== 'confirmed_reservation_commit'
+    || !unresolvedEvidenceState
+    || !['failed', 'superseded'].includes(durableJob?.state)
+    || durableJob?.error?.type !== 'confirmation_operation_unresolved'
+    || durableJob.error.operation_id !== operation.operation_id
+    || durableJob.job_id !== operation.job_id
+    || durableJob.room_key !== operation.room_key
+    || durableJob.room_revision !== operation.room_revision
+    || !hasExactKeys(target, ['schema', 'effect_type', 'action_type', 'target_type', 'target_id'])
+    || target.schema !== 'village-kakao-tool-audit-target/v1'
+    || target.effect_type !== 'reservation_registration'
+    || target.action_type !== 'create'
+    || !['request', 'room'].includes(target.target_type)
+    || (target.target_type === 'request' && !/^RQ-\d{6}-\d{3}$/.test(String(target.target_id || '')))
+    || (target.target_type === 'room' && target.target_id !== null)) {
+    return null;
+  }
+  return { operation, target };
 }
 
 function equipmentText(items) {
@@ -440,6 +495,243 @@ function buildRegisteredEvent({ durableJob, operation, receipt, customerLabel, h
   });
 }
 
+function normalizedRegistrationPeriod(period) {
+  if (!isRecord(period)) return { start: null, end: null };
+  const startDate = safeOptionalText(period.start_date, 20);
+  const startTime = safeOptionalText(period.start_time, 20);
+  const endDate = safeOptionalText(period.end_date, 20);
+  const endTime = safeOptionalText(period.end_time, 20);
+  return {
+    start: startDate && startTime ? `${startDate} ${startTime}` : null,
+    end: endDate && endTime ? `${endDate} ${endTime}` : null
+  };
+}
+
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
+  }
+  return value;
+}
+
+function sameValue(left, right) {
+  return JSON.stringify(canonicalValue(left)) === JSON.stringify(canonicalValue(right));
+}
+
+function canonicalRegistrationComponents(values) {
+  if (!Array.isArray(values)) return null;
+  const seen = new Set();
+  const rows = [];
+  for (const value of values) {
+    const setItem = safeOptionalText(value?.set_item, 300);
+    const componentItem = safeOptionalText(value?.component_item, 300);
+    const quantity = Number(value?.quantity);
+    const key = `${setItem}\u0000${componentItem}`;
+    if (!setItem || !componentItem || !Number.isSafeInteger(quantity) || quantity < 1 || seen.has(key)) return null;
+    seen.add(key);
+    rows.push({ set_item: setItem, component_item: componentItem, quantity });
+  }
+  return rows.sort((left, right) => (
+    left.set_item.localeCompare(right.set_item) || left.component_item.localeCompare(right.component_item)
+  ));
+}
+
+function canonicalRegistrationPlan(values, quantityField = 'quantity') {
+  if (!Array.isArray(values)) return null;
+  const totals = new Map();
+  for (const value of values) {
+    const name = safeOptionalText(value?.name, 300);
+    const quantity = Number(value?.[quantityField]);
+    if (!name || !Number.isSafeInteger(quantity) || quantity < 1) return null;
+    totals.set(name, (totals.get(name) || 0) + quantity);
+  }
+  if (!totals.size) return null;
+  return [...totals.entries()].map(([name, quantity]) => ({ name, quantity }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function confirmedRegistrationRequestReadback(result, registration) {
+  const request = result?.authoritative?.request;
+  const effectiveRequestId = safeOptionalText(result?.effective_request_id, 160);
+  const tradeId = safeOptionalText(result?.trade_id, 160);
+  if (!isRecord(request) || safeOptionalText(request.reqID, 160) !== effectiveRequestId
+    || !Array.isArray(request.tradeIds)
+    || !request.tradeIds.map((value) => safeOptionalText(value, 160)).includes(tradeId)) return false;
+  const requestPlan = canonicalRegistrationPlan(request.topLevelEquipItems, 'qty');
+  const desiredPlan = canonicalRegistrationPlan(registration?.desired_after);
+  if (!requestPlan || !desiredPlan || !sameValue(requestPlan, desiredPlan)) return false;
+  const desiredPeriod = registration?.desired_period;
+  if (safeOptionalText(request.startDate, 20) !== safeOptionalText(desiredPeriod?.start_date, 20)
+    || safeOptionalText(request.startTime, 20) !== safeOptionalText(desiredPeriod?.start_time, 20)
+    || safeOptionalText(request.endDate, 20) !== safeOptionalText(desiredPeriod?.end_date, 20)
+    || safeOptionalText(request.endTime, 20) !== safeOptionalText(desiredPeriod?.end_time, 20)) return false;
+  const requestComponents = canonicalRegistrationComponents(request.setComponentItems);
+  const finalComponents = canonicalRegistrationComponents(result?.final_set_components);
+  if (!requestComponents || !finalComponents || !sameValue(requestComponents, finalComponents)) return false;
+  if (registration?.request_id === null) {
+    const candidate = registration?.pending_request_candidate;
+    const phoneKey = (value) => String(value || '').replace(/\D/g, '');
+    if (!isRecord(candidate)
+      || !exactInternalTextMatch(request.name, candidate.customer_name, 300)
+      || phoneKey(request.phone) !== phoneKey(candidate.phone)
+      || !exactInternalTextMatch(request.discount, candidate.discount_type, 120)
+      || !exactInternalTextMatch(request.memo, candidate.memo, 500)
+      || !exactInternalTextMatch(request.extraRequest, candidate.extra_request, 1000)) return false;
+  }
+  return true;
+}
+
+function confirmedRegistrationComponentReadback(result, registration) {
+  const finalRows = canonicalRegistrationComponents(result?.final_set_components);
+  const scheduleRows = result?.authoritative?.registered_trade?.schedule?.rows;
+  if (!finalRows || !Array.isArray(scheduleRows)) return false;
+  const authoritativeRows = canonicalRegistrationComponents(scheduleRows
+    .filter((row) => row?.isComponent === true)
+    .map((row) => ({ set_item: row?.setName, component_item: row?.name, quantity: row?.qty })));
+  if (!authoritativeRows || !sameValue(finalRows, authoritativeRows)) return false;
+  if (registration?.request_id === null) {
+    return (registration.set_component_selections || []).every((selection) => finalRows.some((row) => (
+      row.set_item === selection?.set_item && row.component_item === selection?.selected_item
+    )));
+  }
+  const expectedPlan = canonicalRegistrationPlan(registration?.expected_before);
+  const desiredPlan = canonicalRegistrationPlan(registration?.desired_after);
+  if (!expectedPlan || !desiredPlan) return false;
+  if (!sameValue(expectedPlan, desiredPlan)) {
+    return (registration.set_component_selections || []).every((selection) => finalRows.some((row) => (
+      row.set_item === selection?.set_item && row.component_item === selection?.selected_item
+    )));
+  }
+  const projected = canonicalRegistrationComponents(registration?.expected_set_components);
+  if (!projected) return false;
+  for (const selection of registration.set_component_selections || []) {
+    const target = projected.find((row) => row.set_item === selection?.set_item
+      && row.component_item === selection?.component_item);
+    if (!target) return false;
+    target.component_item = selection.selected_item;
+  }
+  return sameValue(finalRows, canonicalRegistrationComponents(projected));
+}
+
+function buildConfirmedRegistrationEvent({ durableJob, operation, receipt, customerLabel, historicalImport }) {
+  const outcome = statusOutcome(receipt.status);
+  const registration = receipt.authorized_registration;
+  const result = receipt.authoritative_result;
+  const requestId = safeOptionalText(receipt.request_id, 160);
+  const effectiveRequestId = safeOptionalText(receipt.effective_request_id, 160);
+  const tradeId = safeOptionalText(receipt.trade_id, 160);
+  const bootstrapped = requestId === null;
+  const registrationIdentityValid = bootstrapped
+    ? registration?.request_id === null && isRecord(registration?.pending_request_candidate)
+    : registration?.request_id === requestId;
+  if (!isRecord(registration) || registration.target_scope !== 'pending_request'
+    || !registrationIdentityValid) {
+    throw new TypeError('trusted tool receipt set is invalid');
+  }
+  const readback = isRecord(result)
+    && result.success === true
+    && result.status === 'ok'
+    && result.request_id === requestId
+    && result.effective_request_id === effectiveRequestId
+    && result.trade_id === tradeId
+    && sameValue(result.final_plan, registration.desired_after)
+    && sameValue(result.final_period, registration.desired_period)
+    && confirmedRegistrationComponentReadback(result, registration)
+    && confirmedRegistrationRequestReadback(result, registration)
+    && result.customerNotificationAttempted === false
+    && result.customerNotificationSent === false
+    && isRecord(result.authoritative);
+  if (outcome === 'success' && (!tradeId || !effectiveRequestId || !readback
+    || (bootstrapped && !receipt.applied_stages?.includes('pending_request_bootstrap')))) {
+    throw new TypeError('trusted tool receipt set is invalid');
+  }
+  const before = equipmentText(registration.expected_before);
+  const after = equipmentText(registration.desired_after);
+  const changeItems = [];
+  if (before !== null || after !== null) {
+    changeItems.push({ field: 'equipment', before, after });
+  }
+  const beforePeriod = normalizedRegistrationPeriod(registration.expected_period);
+  const afterPeriod = normalizedRegistrationPeriod(registration.desired_period);
+  if (beforePeriod.start !== afterPeriod.start) {
+    changeItems.push({ field: 'start_at', before: beforePeriod.start, after: afterPeriod.start });
+  }
+  if (beforePeriod.end !== afterPeriod.end) {
+    changeItems.push({ field: 'end_at', before: beforePeriod.end, after: afterPeriod.end });
+  }
+  const label = tradeId || (bootstrapped ? effectiveRequestId : requestId) || effectiveRequestId
+    || safeOptionalText(durableJob.room_key, 160) || safeOptionalText(durableJob.job_id, 160);
+  const summary = outcomeSummary({
+    outcome,
+    success: `예약 ${label}을 등록했습니다.`,
+    partial: `예약 ${label} 등록이 부분 반영되었습니다.`,
+    failed: `예약 ${label} 등록이 실패했습니다.`,
+    blocked: `예약 ${label} 등록이 차단되었습니다.`
+  });
+  return normalizeKakaoAutomationAuditEvent({
+    event_key: authorityEventKey('reservation_registration', operation.operation_id),
+    job_id: durableJob.job_id,
+    room_revision: durableJob.room_revision,
+    operation_id: operation.operation_id,
+    receipt_id: receipt.receipt_id,
+    occurred_at: operation.completed_at || receipt.created_at,
+    effect_type: 'reservation_registration',
+    action_type: 'create',
+    outcome,
+    customer_label: customerLabel,
+    target_type: tradeId ? 'trade' : (effectiveRequestId || requestId) ? 'request' : 'room',
+    target_id: label,
+    summary,
+    change_items: changeItems,
+    outbound_text: null,
+    evidence: failureEvidence(receipt, {
+      schema: receipt.schema,
+      status: receipt.status,
+      readback
+    }),
+    source_message_at: sourceMessageAt(durableJob),
+    historical_import: Boolean(historicalImport)
+  });
+}
+
+function buildUnresolvedConfirmedRegistrationEvent({
+  durableJob, operation, target, customerLabel, historicalImport
+}) {
+  const targetId = target.target_id;
+  const label = targetId || null;
+  return normalizeKakaoAutomationAuditEvent({
+    event_key: authorityEventKey('reservation_registration', operation.operation_id),
+    job_id: durableJob.job_id,
+    room_revision: durableJob.room_revision,
+    operation_id: operation.operation_id,
+    receipt_id: null,
+    // A late exact receipt updates the durable job timestamp. The unresolved
+    // fact itself began when this immutable operation reservation was created.
+    occurred_at: operation.created_at,
+    effect_type: 'reservation_registration',
+    action_type: 'create',
+    outcome: 'partial_success',
+    customer_label: customerLabel,
+    target_type: target.target_type,
+    target_id: targetId,
+    summary: label
+      ? `예약 ${label} 자동처리 결과를 확인해야 합니다.`
+      : '예약 자동처리 결과를 확인해야 합니다.',
+    change_items: [],
+    outbound_text: null,
+    evidence: {
+      schema: 'village-confirmed-reservation-commit-receipt/v1',
+      status: 'unresolved',
+      readback: false,
+      attempted_stage: 'receipt_persistence',
+      error_type: 'confirmation_operation_unresolved'
+    },
+    source_message_at: sourceMessageAt(durableJob),
+    historical_import: Boolean(historicalImport)
+  });
+}
+
 function buildDocumentEvent({ durableJob, operation, receipt, customerLabel, historicalImport }) {
   const outcome = statusOutcome(receipt.status);
   const tradeId = safeOptionalText(receipt.trade_id, 160);
@@ -544,16 +836,27 @@ export function buildKakaoAutomationAuditEvents({
 } = {}) {
   if (!isRecord(durableJob)) throw new TypeError('durable job is required');
   const proof = replyReadbackProof({ durableJob, applied });
-  const customerLabel = safeCustomerLabel({ durableJob, prepared, proof });
+  const unresolvedRegistration = unresolvedConfirmedRegistrationOperation(durableJob);
+  const customerLabel = safeCustomerLabel({ durableJob, prepared, proof })
+    || (unresolvedRegistration ? '고객 식별 미확정' : null);
   if (!customerLabel) return [];
 
   const events = [];
-  const tool = exactToolReceipt(durableJob);
+  const tool = unresolvedRegistration ? null : exactToolReceipt(durableJob);
   if (tool) {
     const args = { durableJob, ...tool, customerLabel, historicalImport };
     if (tool.operation.tool === 'confirmation_request') events.push(buildConfirmationEvent(args));
+    else if (tool.operation.tool === 'confirmed_reservation_commit') events.push(buildConfirmedRegistrationEvent(args));
     else if (tool.operation.tool === 'registered_reservation_change') events.push(buildRegisteredEvent(args));
     else if (tool.operation.tool === 'document_send') events.push(buildDocumentEvent(args));
+  }
+  if (unresolvedRegistration) {
+    events.push(buildUnresolvedConfirmedRegistrationEvent({
+      durableJob,
+      ...unresolvedRegistration,
+      customerLabel,
+      historicalImport
+    }));
   }
   if (proof) {
     const replyEvent = buildReplyEvent({ durableJob, proof, customerLabel, historicalImport });

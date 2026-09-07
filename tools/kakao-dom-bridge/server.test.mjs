@@ -48,6 +48,7 @@ const {
   runP0EscalationPair,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
+  createGatewayConfirmedReservationCommitExecutor,
   createGatewayRegisteredReservationChangeExecutor,
   createGatewayConfirmationValidator,
   createGatewayDocumentExecutor,
@@ -94,6 +95,7 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+const { createImmutableKakaoRoomSnapshot } = await import('../ai-browser-worker/worker.mjs');
 
 test('authoritative automation resolution bridge updates exact coordinates and records exact readback', async () => {
   const updates = [];
@@ -288,6 +290,13 @@ const TASK7_NEUTRAL_INCIDENT_URL = new URL(
 const TASK7_INCIDENT = JSON.parse(await readFile(TASK7_NEUTRAL_INCIDENT_URL, 'utf8'));
 const TASK7_TOKEN = 'task-7-local-token';
 const TASK7_NOW = Date.parse('2026-08-27T01:00:00.000Z');
+const CONFIRMED_REGISTRATION_INCIDENT_URL = new URL(
+  '../../test/fixtures/kakao-staff-authorized-registration/incident-pending-registration-001.json',
+  import.meta.url
+);
+const CONFIRMED_REGISTRATION_INCIDENT = JSON.parse(
+  await readFile(CONFIRMED_REGISTRATION_INCIDENT_URL, 'utf8')
+);
 
 test('Task 7 loads the sanitized replay fixture through a neutral incident identifier', async () => {
   const incident = JSON.parse(await readFile(TASK7_NEUTRAL_INCIDENT_URL, 'utf8'));
@@ -1369,6 +1378,190 @@ test('server registered change executor maps authenticated worker config into th
   });
 });
 
+test('server confirmed reservation executor asserts the lease and maps one authenticated GAS commit into a receipt', async () => {
+  const roomSnapshot = createImmutableKakaoRoomSnapshot({
+    job: { jobId: 'confirmed-job-1', roomKey: 'confirmed-room-1', roomRevision: 9 },
+    capturedAt: '2026-09-07T00:00:00.000Z',
+    navigationContext: {
+      status: 'opened_target_chat', via_devtools: true,
+      conversation_evidence: {
+        source: 'offline_fixture', title: '테스트 고객', hint_matched: true,
+        visible_static_text_tail: '고객의 예약 요청\n직원의 확정 답변',
+        messages: [
+          { message_id: 'confirmed-customer-1', role: 'customer', order: 1, text: '고객의 예약 요청' },
+          { message_id: 'confirmed-staff-2', role: 'staff', order: 2, text: '직원의 확정 답변' }
+        ]
+      }
+    }
+  });
+  const registration = {
+    confirmed: true, target_scope: 'pending_request', request_id: 'RQ-260907-001',
+    source_evidence: {
+      customer_request: '고객의 예약 요청', staff_confirmation: '직원의 확정 답변', conversation_revision: 9,
+      conversation_evidence_hash: roomSnapshot.evidenceHash,
+      customer_message_ids: ['confirmed-customer-1'], staff_message_ids: ['confirmed-staff-2']
+    },
+    expected_before: [{ name: '소니 FX3 바디세트', quantity: 1 }],
+    expected_set_components: [],
+    set_component_selections: [],
+    expected_period: {
+      start_date: '2026-09-07', start_time: '07:00', end_date: '2026-09-07', end_time: '20:00'
+    },
+    desired_after: [{ name: '소니 FX3 바디세트', quantity: 1 }],
+    desired_period: {
+      start_date: '2026-09-07', start_time: '07:00', end_date: '2026-09-07', end_time: '20:00'
+    }
+  };
+  const authoritative = {
+    schema: 'village-confirmed-reservation-commit-result/v1', success: true, status: 'ok',
+    request_id: registration.request_id, effective_request_id: registration.request_id,
+    trade_id: '260907-001', replaced_request_ids: [], final_plan: registration.desired_after,
+    final_period: registration.desired_period,
+    final_set_components: [],
+    authoritative: {
+      request: {
+        reqID: registration.request_id, tradeIds: ['260907-001'],
+        topLevelEquipItems: registration.desired_after.map(({ name, quantity }) => ({ name, qty: quantity })),
+        setComponentItems: [],
+        startDate: registration.desired_period.start_date,
+        startTime: registration.desired_period.start_time,
+        endDate: registration.desired_period.end_date,
+        endTime: registration.desired_period.end_time
+      },
+      registered_trade: { schedule: { rows: [] } }
+    },
+    customerNotificationAttempted: false, customerNotificationSent: false
+  };
+  const runnerCalls = [];
+  let leaseChecks = 0;
+  const operationFence = { operation_id: 'confirmed-registration-operation-1' };
+  const executor = createGatewayConfirmedReservationCommitExecutor({
+    getConfig: () => ({
+      gasApiUrl: 'https://script.google.com/macros/s/internal-only/exec',
+      sheetApiKey: 'internal-key', publicCatalogKey: 'must-not-be-forwarded'
+    }),
+    commitConfirmedReservation: async (input) => {
+      runnerCalls.push(input);
+      return structuredClone(authoritative);
+    },
+    randomUUID: () => 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    now: () => new Date('2026-09-07T00:00:00.000Z')
+  });
+  const receipt = await executor({
+    schema: 'village-confirmed-reservation-commit-request/v1',
+    job_id: 'confirmed-job-1', room_key: 'confirmed-room-1', room_revision: 9,
+    lease_id: 'confirmed-lease-1', registration
+  }, {
+    assertCurrentClaim: async () => { leaseChecks += 1; }, operationFence, roomSnapshot
+  });
+  assert.equal(leaseChecks, 1);
+  assert.deepEqual(runnerCalls, [{
+    config: {
+      VILLAGE2_API_URL: 'https://script.google.com/macros/s/internal-only/exec',
+      VILLAGE2_API_KEY: 'internal-key'
+    },
+    registration,
+    operationId: operationFence.operation_id
+  }]);
+  assert.deepEqual(receipt, {
+    schema: 'village-confirmed-reservation-commit-receipt/v1',
+    receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    job_id: 'confirmed-job-1', room_key: 'confirmed-room-1', room_revision: 9,
+    status: 'ok', target_scope: 'pending_request', request_id: 'RQ-260907-001',
+    effective_request_id: 'RQ-260907-001', trade_id: '260907-001',
+    authoritative_result: authoritative,
+    applied_stages: ['registration', 'authoritative_readback'], attempted_stage: null,
+    customer_reply: 'no_reply', created_at: '2026-09-07T00:00:00.000Z', error: null
+  });
+  assert.equal(JSON.stringify(receipt).includes('internal-key'), false);
+});
+
+test('server confirmed reservation executor carries the exact durable room snapshot into the operation boundary', async () => {
+  const roomSnapshot = {
+    schema: 'kakao-room-snapshot/v1', jobId: 'confirmed-job-evidence',
+    roomKey: 'confirmed-room-evidence', roomRevision: 11,
+    evidenceHash: 'a'.repeat(64), navigation: { conversation_evidence: { messages: [] } }
+  };
+  let received = null;
+  const executor = createGatewayConfirmedReservationCommitExecutor({
+    getConfig: () => ({
+      gasApiUrl: 'https://script.google.com/macros/s/internal-only/exec', sheetApiKey: 'internal-key'
+    }),
+    executeOperation: async (request) => {
+      received = { roomSnapshot: structuredClone(request.dependencies.roomSnapshot) };
+      return { schema: 'test-receipt' };
+    }
+  });
+
+  const result = await executor({
+    job_id: 'confirmed-job-evidence', room_key: 'confirmed-room-evidence', room_revision: 11,
+    registration: { target_scope: 'pending_request' }
+  }, {
+    assertCurrentClaim: async () => {},
+    operationFence: { operation_id: 'confirmed-operation-evidence' },
+    roomSnapshot
+  });
+
+  assert.deepEqual(result, { schema: 'test-receipt' });
+  assert.deepEqual(received.roomSnapshot, roomSnapshot);
+});
+
+test('Gateway result coordinator passes only the exact durable confirmed-registration receipt to preparation', async () => {
+  const receipt = {
+    schema: 'village-confirmed-reservation-commit-receipt/v1', receipt_id: 'receipt-confirmed-1',
+    operation_id: 'operation-confirmed-1', lease_id: 'lease-confirmed-1', request_digest: 'digest-confirmed-1',
+    job_id: 'job-confirmed-application', room_key: 'room-confirmed-application', room_revision: 4,
+    status: 'ok'
+  };
+  const durableJob = {
+    job_id: receipt.job_id, room_key: receipt.room_key, room_revision: receipt.room_revision,
+    event: { job_id: receipt.job_id, room_key: receipt.room_key, room_revision: receipt.room_revision },
+    local_context: {
+      job: { jobId: receipt.job_id, roomKey: receipt.room_key, roomRevision: receipt.room_revision },
+      turn_internal: { snapshot: { schema: 'kakao-room-snapshot/v1' } }
+    },
+    result: { content: 'FINAL_JSON {}' },
+    tool_operation: {
+      tool: 'confirmed_reservation_commit', state: 'completed', receipt_id: receipt.receipt_id,
+      operation_id: receipt.operation_id, lease_id: receipt.lease_id, request_digest: receipt.request_digest
+    },
+    tool_receipts: [receipt], application: { state: 'pending' }
+  };
+  let preparedReceipts = null;
+  const channel = {
+    async claimApplication() {
+      return { claimed: true, application_id: 'application-confirmed-1', job: structuredClone(durableJob) };
+    },
+    async beginApplication() {},
+    async recordApplicationApplied() { return { application: { state: 'applied' } }; },
+    async finalizeApplication() {},
+    async failApplication() { throw new Error('unexpected application failure'); },
+    async listPendingApplicationFailureNotifications() { return []; },
+    async markApplicationFailureNotified() {}
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel, getConfig: () => ({}),
+    prepare: async ({ trustedToolReceipts }) => {
+      preparedReceipts = structuredClone(trustedToolReceipts);
+      return {
+        status: 'ai_prepared', snapshot: {},
+        decision: { owner_review_required: false, reply_decision: { shouldCreateTask: false } }
+      };
+    },
+    apply: async ({ prepared }) => ({ prepared, autoReplyResult: { attempted: false, sent: false } }),
+    finalize: async ({ applied }) => ({
+      status: 'ai_completed', decision: applied.prepared.decision,
+      followUpResult: { inserted: 0, rows: [] },
+      slackDeliveryResult: { skipped: true, reason: 'no_rows', results: [] },
+      autoReplyResult: { attempted: false, sent: false }
+    }),
+    record: async () => {}
+  });
+  await coordinator.enqueue(durableJob);
+  await coordinator.idle();
+  assert.deepEqual(preparedReceipts, [receipt]);
+});
+
 test('server registered change executor rejects missing authenticated transport config before the correction runner', async () => {
   const mutation = task7Mutation();
   const operationFence = { operation_id: 'registered-operation-missing-config' };
@@ -2020,6 +2213,67 @@ test('Kakao automation audit recovery queues exact durable evidence and projects
   const duplicate = await coordinator.recover({ limit: 10, historicalImport: true });
   assert.deepEqual(order, ['list_candidates', 'list_pending', 'record_status']);
   assert.deepEqual(duplicate, { queued: 0, delivered: 0, pending: 0, conflict: 0 });
+});
+
+test('Kakao automation audit recovery records an unresolved confirmed registration once without replaying it', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-audit-unresolved-registration-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const clock = { now: Date.parse('2026-09-07T01:00:00.000Z') };
+  const channel = createHermesGatewayChannel({
+    directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+  });
+  await channel.enqueue({
+    job_id: 'job-audit-unresolved-registration',
+    room_key: 'room-audit-unresolved-registration',
+    room_revision: 9,
+    detected_at: '2026-09-07T01:00:00.000Z'
+  }, { localContext: { job: { customerName: '복구 등록 고객' } } });
+  const claim = await channel.claim({ consumerId: 'gateway-audit-unresolved', waitMs: 0 });
+  await channel.reserveToolOperation({
+    tool: 'confirmed_reservation_commit',
+    job_id: claim.job_id,
+    room_key: claim.room_key,
+    room_revision: claim.room_revision,
+    lease_id: claim.lease_id,
+    request_digest: 'unresolved-registration-digest',
+    audit_target: {
+      schema: 'village-kakao-tool-audit-target/v1',
+      effect_type: 'reservation_registration',
+      action_type: 'create',
+      target_type: 'request',
+      target_id: 'RQ-260907-009'
+    }
+  });
+
+  clock.now += 5_000;
+  const restarted = createHermesGatewayChannel({
+    directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+  });
+  const stored = [];
+  const coordinator = createKakaoAutomationAuditCoordinator({
+    channel: restarted,
+    store: {
+      async insertAndReadback(events) {
+        stored.push(structuredClone(events));
+        return { inserted: events.length, existing: 0, events };
+      }
+    },
+    now: () => clock.now
+  });
+
+  const first = await coordinator.recover({ limit: 10, historicalImport: false });
+  assert.deepEqual(first, { queued: 1, delivered: 1, pending: 0, conflict: 0 });
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0][0].effect_type, 'reservation_registration');
+  assert.equal(stored[0][0].outcome, 'partial_success');
+  assert.equal(stored[0][0].target_id, 'RQ-260907-009');
+  assert.equal(stored[0][0].outbound_text, null);
+  assert.equal((await restarted.get(claim.job_id)).state, 'failed');
+  assert.equal(await restarted.claim({ consumerId: 'gateway-must-not-replay', waitMs: 0 }), null);
+
+  const duplicate = await coordinator.recover({ limit: 10, historicalImport: false });
+  assert.deepEqual(duplicate, { queued: 0, delivered: 0, pending: 0, conflict: 0 });
+  assert.equal(stored.length, 1);
 });
 
 test('Kakao automation audit store outage preserves pending projection and never invokes a business path', async () => {
@@ -6174,6 +6428,35 @@ test('semantic-looking previews are never suppressed before Hermes sees the room
   }
 });
 
+test('an arbitrary staff-side room change is queued so native Hermes can judge the full conversation', async () => {
+  const scheduled = [];
+  const response = await postShadowEvent({
+    source: 'kakao_channel_manager_dom',
+    status: 'pending_ai_review',
+    reason: 'top_row_changed',
+    roomKey: 'chat:staff-authorization-ingress-regression',
+    customerName: '테스트 고객',
+    previewText: '테스트 고객 그 일정 그대로 진행해둘게요 방금',
+    eventHash: 'staff-authorization-ingress-regression-event',
+    detectedAt: new Date().toISOString(),
+    unreadCount: null,
+    raw: { unreadSignal: false }
+  }, {
+    appendNdjson() {},
+    writeSupabaseEvent: async () => ({ ok: true }),
+    scheduleDebouncedJob: (event) => scheduled.push(structuredClone(event)),
+    shadowRuntime: { enabled: false },
+    immediateRuntime: { enabled: false }
+  });
+
+  assert.equal(response.status, 202);
+  assert.equal(response.body.ok, true);
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].roomKey, 'chat:staff-authorization-ingress-regression');
+  assert.ok(Number.isInteger(scheduled[0].roomRevision) && scheduled[0].roomRevision > 0);
+  assert.equal(scheduled[0].previewText, '테스트 고객 그 일정 그대로 진행해둘게요 방금');
+});
+
 test('recovery only rejects untrusted historical rows, not message semantics', () => {
   for (const previewText of ['감사합니다', '입금했습니다', '운영자님이 보냄', '네 가능합니다']) {
     assert.equal(shouldSkipSupabaseRowAsLowValue({
@@ -6211,4 +6494,568 @@ test('server keeps Gateway HTTP disabled by default and dispatches it before pub
   assert.match(source, /KAKAO_HERMES_MAX_ATTEMPTS/);
   assert.match(source, /createHermesGatewayHttpHandler/);
   assert.ok(source.indexOf('gatewayHttpHandler(req, res, url)') < source.indexOf("url.pathname === '/health'"));
+});
+
+test('sanitized staff authorization fixture contains typed evidence without customer identifiers', () => {
+  assert.equal(
+    CONFIRMED_REGISTRATION_INCIDENT.schema,
+    'village-kakao-staff-authorized-registration-fixture/v1'
+  );
+  assert.equal(CONFIRMED_REGISTRATION_INCIDENT.room_revision, 14);
+  assert.equal(CONFIRMED_REGISTRATION_INCIDENT.request_id, 'RQ-260906-001');
+  const serialized = JSON.stringify(CONFIRMED_REGISTRATION_INCIDENT);
+  assert.doesNotMatch(serialized, /01[016789][ -]?[0-9]{3,4}[ -]?[0-9]{4}/);
+  assert.doesNotMatch(serialized, /customer_name|phone|room_key|raw_conversation/i);
+});
+
+test('staff-authorized pending registration crosses Gateway once, applies no reply, and records one audit event', async () => {
+  const incident = CONFIRMED_REGISTRATION_INCIDENT;
+  const nowMs = Date.parse('2026-09-07T01:00:00.000Z');
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-confirmed-registration-replay-'));
+  const channel = createHermesGatewayChannel({
+    directory, leaseMs: 60_000, maxAttempts: 2, now: () => nowMs
+  });
+  const jobId = 'confirmed-registration-replay-job';
+  const roomKey = 'confirmed-registration-replay-room';
+  const event = {
+    schema: 'village-kakao-gateway-event/v1', job_id: jobId, room_key: roomKey,
+    room_revision: incident.room_revision, detected_at: '2026-09-07T00:59:59.000Z',
+    prompt: 'native Hermes prompt', raw: {}
+  };
+  const customerMessageId = 'dom-confirmed-registration-customer-1';
+  const staffMessageId = 'dom-confirmed-registration-staff-2';
+  const roomSnapshot = createImmutableKakaoRoomSnapshot({
+    job: { jobId, roomKey, roomRevision: incident.room_revision },
+    capturedAt: event.detected_at,
+    navigationContext: {
+      status: 'opened_target_chat', via_devtools: true,
+      conversation_evidence: {
+        source: 'offline_fixture', title: '테스트 고객', hint_matched: true,
+        visible_static_text_tail: [
+          incident.semantic_evidence.customer_request,
+          incident.semantic_evidence.staff_confirmation
+        ].join('\n'),
+        messages: [
+          {
+            message_id: customerMessageId, role: 'customer', order: 1,
+            text: incident.semantic_evidence.customer_request
+          },
+          {
+            message_id: staffMessageId, role: 'staff', order: 2,
+            text: incident.semantic_evidence.staff_confirmation
+          }
+        ]
+      }
+    }
+  });
+  await channel.enqueue(event, {
+    localContext: {
+      job: {
+        jobId, roomKey, roomRevision: incident.room_revision,
+        detectedAt: event.detected_at, previewText: 'sanitized pending reservation',
+        customerName: '테스트 고객'
+      },
+      turn_internal: {
+        snapshot: roomSnapshot,
+        lookupContext: { kill_switch: { status: 'active', error: null } },
+        ragContext: null, brainContext: null
+      }
+    }
+  });
+  const claim = await channel.claim({ consumerId: 'confirmed-registration-replay-consumer', waitMs: 0 });
+  const registration = {
+    confirmed: true,
+    target_scope: 'pending_request',
+    request_id: incident.request_id,
+    source_evidence: {
+      ...incident.semantic_evidence,
+      conversation_revision: incident.room_revision,
+      conversation_evidence_hash: roomSnapshot.evidenceHash,
+      customer_message_ids: [customerMessageId],
+      staff_message_ids: [staffMessageId]
+    },
+    expected_before: structuredClone(incident.expected_before),
+    expected_set_components: [],
+    set_component_selections: [],
+    expected_period: structuredClone(incident.expected_period),
+    desired_after: structuredClone(incident.desired_after),
+    desired_period: structuredClone(incident.desired_period)
+  };
+  const finalDecision = {
+    classification: 'reservation', confidence: 'high', should_write_to_sheet: false,
+    kill_switch_observed: 'active', customer: { name: '테스트 고객' },
+    owner_review_required: false,
+    reservation_inquiry: {
+      is_reservation_inquiry: true, confirmed: true, already_registered: false,
+      equipment_requested: registration.desired_after
+    },
+    existing_confirm_request_ids: [registration.request_id],
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
+      no_auto_reply_sent: true,
+      latest_customer_message_after_last_staff_reply: false
+    },
+    staff_confirmed_registration: registration,
+    follow_up_items: [], suggested_reply_draft: '',
+    reply_decision: {
+      replyMode: 'no_reply', text: '', confidence: 'high', reason: 'staff already answered',
+      shouldCreateTask: false, safetyClass: 'no_send', grounding: 'staff_confirmation',
+      requiresRag: false, attachmentKeys: [], alreadyDelivered: true
+    }
+  };
+  let gasCalls = 0;
+  let autoReplyAttempts = 0;
+  let slackAttempts = 0;
+  const auditRows = [];
+  const executor = createGatewayConfirmedReservationCommitExecutor({
+    getConfig: () => ({
+      gasApiUrl: 'https://script.google.com/macros/s/offline-fixture/exec',
+      sheetApiKey: 'offline-fake-only'
+    }),
+    commitConfirmedReservation: async ({ registration: received }) => {
+      gasCalls += 1;
+      assert.deepEqual(received, registration);
+      return {
+        schema: 'village-confirmed-reservation-commit-result/v1',
+        success: true, status: 'ok', request_id: registration.request_id,
+        effective_request_id: registration.request_id, trade_id: '260906-001',
+        replaced_request_ids: [], final_plan: registration.desired_after,
+        final_period: registration.desired_period, final_set_components: [],
+        authoritative: {
+          request: {
+            reqID: registration.request_id, tradeIds: ['260906-001'],
+            topLevelEquipItems: registration.desired_after.map(({ name, quantity }) => ({ name, qty: quantity })),
+            setComponentItems: [],
+            startDate: registration.desired_period.start_date,
+            startTime: registration.desired_period.start_time,
+            endDate: registration.desired_period.end_date,
+            endTime: registration.desired_period.end_time
+          },
+          registered_trade: { tradeID: '260906-001', schedule: { rows: [] } }
+        },
+        customerNotificationAttempted: false, customerNotificationSent: false
+      };
+    },
+    randomUUID: () => 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    now: () => new Date(nowMs)
+  });
+  const auditCoordinator = createKakaoAutomationAuditCoordinator({
+    channel,
+    store: {
+      async insertAndReadback(events) {
+        auditRows.push(...structuredClone(events));
+        return { inserted: events.length, existing: 0, events };
+      }
+    },
+    now: () => nowMs
+  });
+  const preparedDecisions = [];
+  const application = createGatewayResultApplicationCoordinator({
+    channel, getConfig: () => ({ autoSendEnabled: true }), auditCoordinator,
+    apply: async ({ prepared }) => {
+      preparedDecisions.push(structuredClone(prepared.decision));
+      autoReplyAttempts += prepared.decision.reply_decision.replyMode === 'auto_send' ? 1 : 0;
+      return { prepared, snapshotChanged: false, superseded: false, autoReplyResult: { attempted: false, sent: false } };
+    },
+    finalize: async ({ applied }) => {
+      slackAttempts += applied.prepared.decision.owner_review_required === true ? 1 : 0;
+      return {
+        status: 'ai_completed', decision: applied.prepared.decision,
+        followUpResult: { inserted: 0, rows: [] },
+        slackDeliveryResult: { skipped: true, reason: 'no_rows', results: [] },
+        autoReplyResult: { attempted: false, sent: false }
+      };
+    }
+  });
+  const handler = createHermesGatewayHttpHandler({
+    token: TASK7_TOKEN, channel, transport: 'gateway', now: () => nowMs,
+    executeConfirmedReservationCommit: executor,
+    enqueueResultApplication: (completed) => application.enqueue(completed)
+  });
+  const app = await startTask7Http(handler);
+  try {
+    const body = {
+      schema: 'village-confirmed-reservation-commit-request/v1',
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, registration
+    };
+    const toolResponse = await task7Post(app, '/hermes/v1/tools/confirmed-reservation-commit', body);
+    assert.equal(toolResponse.status, 200);
+    const receipt = await toolResponse.json();
+    assert.equal(receipt.status, 'ok');
+    assert.deepEqual(receipt.authorized_registration, registration);
+
+    const resultResponse = await task7Post(app, '/hermes/v1/results', {
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, content: `FINAL_JSON\n${JSON.stringify(finalDecision)}`
+    });
+    assert.equal(resultResponse.status, 200);
+    await application.idle();
+    await new Promise((resolve) => setImmediate(resolve));
+    await auditCoordinator.projectPending({ limit: 25 });
+
+    assert.equal(gasCalls, 1);
+    assert.equal(autoReplyAttempts, 0);
+    assert.equal(slackAttempts, 0);
+    assert.equal(preparedDecisions.length, 1);
+    assert.equal(preparedDecisions[0].reply_decision.replyMode, 'no_reply');
+    assert.equal(preparedDecisions[0].owner_review_required, false);
+    assert.deepEqual(preparedDecisions[0].follow_up_items, []);
+    assert.equal(auditRows.length, 1);
+    assert.equal(auditRows[0].effect_type, 'reservation_registration');
+    assert.equal(auditRows[0].outcome, 'success');
+    assert.equal(auditRows[0].target_id, '260906-001');
+
+    const retry = await task7Post(app, '/hermes/v1/tools/confirmed-reservation-commit', body);
+    assert.equal(retry.status, 200);
+    assert.deepEqual(await retry.json(), receipt);
+    assert.equal(gasCalls, 1);
+
+    const newerRegistration = structuredClone(registration);
+    newerRegistration.source_evidence.conversation_revision += 1;
+    const differentRevision = await task7Post(app, '/hermes/v1/tools/confirmed-reservation-commit', {
+      ...body,
+      room_revision: body.room_revision + 1,
+      registration: newerRegistration
+    });
+    assert.equal(differentRevision.status, 422);
+    assert.equal((await differentRevision.json()).error, 'confirmed_reservation_evidence_mismatch');
+    assert.equal(gasCalls, 1);
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('coalesced inquiry and staff authorization atomically create the RQ, register once, and audit the effective RQ', async () => {
+  const incident = CONFIRMED_REGISTRATION_INCIDENT;
+  const nowMs = Date.parse('2026-09-07T02:00:00.000Z');
+  const directory = await mkdtemp(path.join(tmpdir(), 'kakao-fast-confirmed-registration-replay-'));
+  const channel = createHermesGatewayChannel({
+    directory, leaseMs: 60_000, maxAttempts: 2, now: () => nowMs
+  });
+  const jobId = 'fast-confirmed-registration-replay-job';
+  const roomKey = 'fast-confirmed-registration-replay-room';
+  const roomRevision = incident.room_revision + 1;
+  const effectiveRequestId = 'RQ-260907-009';
+  const event = {
+    schema: 'village-kakao-gateway-event/v1', job_id: jobId, room_key: roomKey,
+    room_revision: roomRevision, detected_at: '2026-09-07T01:59:59.000Z',
+    prompt: 'native Hermes prompt', raw: {}
+  };
+  const customerMessageId = 'dom-fast-confirmed-customer-1';
+  const staffMessageId = 'dom-fast-confirmed-staff-2';
+  const roomSnapshot = createImmutableKakaoRoomSnapshot({
+    job: { jobId, roomKey, roomRevision }, capturedAt: event.detected_at,
+    navigationContext: {
+      status: 'opened_target_chat', via_devtools: true,
+      conversation_evidence: {
+        source: 'offline_fixture', title: '테스트 고객', hint_matched: true,
+        visible_static_text_tail: [
+          incident.semantic_evidence.customer_request,
+          incident.semantic_evidence.staff_confirmation
+        ].join('\n'),
+        messages: [
+          {
+            message_id: customerMessageId, role: 'customer', order: 1,
+            text: incident.semantic_evidence.customer_request
+          },
+          {
+            message_id: staffMessageId, role: 'staff', order: 2,
+            text: incident.semantic_evidence.staff_confirmation
+          }
+        ]
+      }
+    }
+  });
+  await channel.enqueue(event, {
+    localContext: {
+      job: {
+        jobId, roomKey, roomRevision, detectedAt: event.detected_at,
+        previewText: 'sanitized coalesced reservation', customerName: '테스트 고객'
+      },
+      turn_internal: {
+        snapshot: roomSnapshot,
+        lookupContext: { kill_switch: { status: 'active', error: null } },
+        ragContext: null, brainContext: null
+      }
+    }
+  });
+  const claim = await channel.claim({ consumerId: 'fast-confirmed-registration-consumer', waitMs: 0 });
+  const setComponentSelections = [{
+    set_item: incident.desired_after[0].name,
+    component_item: '메모리',
+    selected_item: 'CFexpress Type A 160GB'
+  }];
+  const pendingRequestCandidate = {
+    customer_name: '테스트 고객', phone: '010-1111-2222', discount_type: '일반',
+    memo: '', extra_request: ''
+  };
+  const registration = {
+    confirmed: true, target_scope: 'pending_request', request_id: null,
+    pending_request_candidate: pendingRequestCandidate,
+    source_evidence: {
+      ...incident.semantic_evidence, conversation_revision: roomRevision,
+      conversation_evidence_hash: roomSnapshot.evidenceHash,
+      customer_message_ids: [customerMessageId], staff_message_ids: [staffMessageId]
+    },
+    expected_before: structuredClone(incident.expected_before),
+    expected_set_components: [],
+    set_component_selections: setComponentSelections,
+    expected_period: structuredClone(incident.expected_period),
+    desired_after: structuredClone(incident.desired_after),
+    desired_period: structuredClone(incident.desired_period)
+  };
+  const finalDecision = {
+    classification: 'reservation', confidence: 'high', should_write_to_sheet: false,
+    kill_switch_observed: 'active', customer: { name: '테스트 고객' }, owner_review_required: false,
+    reservation_inquiry: {
+      is_reservation_inquiry: true, confirmed: true, already_registered: false,
+      equipment_requested: registration.desired_after
+    },
+    existing_confirm_request_ids: [],
+    sheet_row_candidate: {
+      plan_complete: true, equipment_write_mode: 'full_plan',
+      customer_name: pendingRequestCandidate.customer_name, phone: pendingRequestCandidate.phone,
+      discount_type: pendingRequestCandidate.discount_type, memo: '', extra_request: '',
+      equipment: registration.desired_after.map(({ name, quantity }) => ({ item: name, quantity })),
+      set_component_selections: setComponentSelections,
+      start_date: registration.desired_period.start_date,
+      pickup_time: registration.desired_period.start_time,
+      end_date: registration.desired_period.end_date,
+      return_time: registration.desired_period.end_time
+    },
+    safety_checks: {
+      kakao_conversation_opened: true, did_not_classify_from_preview_only: true,
+      duplicate_checked_contract_master: true, duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true, no_auto_reply_sent: true,
+      latest_customer_message_after_last_staff_reply: false
+    },
+    staff_confirmed_registration: registration,
+    follow_up_items: [], suggested_reply_draft: '',
+    reply_decision: {
+      replyMode: 'no_reply', text: '', confidence: 'high', reason: 'staff already answered',
+      shouldCreateTask: false, safetyClass: 'no_send', grounding: 'staff_confirmation',
+      requiresRag: false, attachmentKeys: [], alreadyDelivered: true
+    }
+  };
+  let gasCalls = 0;
+  let outboundAttempts = 0;
+  const auditRows = [];
+  const executor = createGatewayConfirmedReservationCommitExecutor({
+    getConfig: () => ({
+      gasApiUrl: 'https://script.google.com/macros/s/offline-fast-fixture/exec',
+      sheetApiKey: 'offline-fake-only'
+    }),
+    commitConfirmedReservation: async ({ registration: received }) => {
+      gasCalls += 1;
+      assert.deepEqual(received, registration);
+      assert.deepEqual(received.set_component_selections, setComponentSelections);
+      return {
+        schema: 'village-confirmed-reservation-commit-result/v1', success: true, status: 'ok',
+        request_id: null, effective_request_id: effectiveRequestId, trade_id: '260907-009',
+        replaced_request_ids: [],
+        applied_stages: ['pending_request_bootstrap', 'set_component_selections', 'registration', 'authoritative_readback'],
+        final_plan: registration.desired_after, final_period: registration.desired_period,
+        final_set_components: [{
+          set_item: setComponentSelections[0].set_item,
+          component_item: setComponentSelections[0].selected_item,
+          quantity: 1
+        }],
+        authoritative: {
+          request: {
+            reqID: effectiveRequestId, tradeIds: ['260907-009'],
+            topLevelEquipItems: registration.desired_after.map(({ name, quantity }) => ({ name, qty: quantity })),
+            setComponentItems: [{
+              set_item: setComponentSelections[0].set_item,
+              component_item: setComponentSelections[0].selected_item,
+              quantity: 1
+            }],
+            startDate: registration.desired_period.start_date,
+            startTime: registration.desired_period.start_time,
+            endDate: registration.desired_period.end_date,
+            endTime: registration.desired_period.end_time,
+            name: pendingRequestCandidate.customer_name,
+            phone: pendingRequestCandidate.phone,
+            discount: pendingRequestCandidate.discount_type,
+            memo: pendingRequestCandidate.memo,
+            extraRequest: pendingRequestCandidate.extra_request
+          },
+          registered_trade: {
+            tradeID: '260907-009',
+            schedule: {
+              rows: [{
+                isComponent: true,
+                setName: setComponentSelections[0].set_item,
+                name: setComponentSelections[0].selected_item,
+                qty: 1
+              }]
+            }
+          }
+        },
+        customerNotificationAttempted: false, customerNotificationSent: false
+      };
+    },
+    randomUUID: () => 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa',
+    now: () => new Date(nowMs)
+  });
+  const auditCoordinator = createKakaoAutomationAuditCoordinator({
+    channel,
+    store: {
+      async insertAndReadback(events) {
+        auditRows.push(...structuredClone(events));
+        return { inserted: events.length, existing: 0, events };
+      }
+    },
+    now: () => nowMs
+  });
+  const application = createGatewayResultApplicationCoordinator({
+    channel, getConfig: () => ({ autoSendEnabled: true }), auditCoordinator,
+    apply: async ({ prepared }) => {
+      outboundAttempts += prepared.decision.reply_decision.replyMode === 'auto_send' ? 1 : 0;
+      return {
+        prepared, snapshotChanged: false, superseded: false,
+        autoReplyResult: { attempted: false, sent: false }
+      };
+    },
+    finalize: async ({ applied }) => {
+      outboundAttempts += applied.prepared.decision.owner_review_required === true ? 1 : 0;
+      return {
+        status: 'ai_completed', decision: applied.prepared.decision,
+        followUpResult: { inserted: 0, rows: [] },
+        slackDeliveryResult: { skipped: true, reason: 'no_rows', results: [] },
+        autoReplyResult: { attempted: false, sent: false }
+      };
+    }
+  });
+  const handler = createHermesGatewayHttpHandler({
+    token: TASK7_TOKEN, channel, transport: 'gateway', now: () => nowMs,
+    executeConfirmedReservationCommit: executor,
+    enqueueResultApplication: (completed) => application.enqueue(completed)
+  });
+  const app = await startTask7Http(handler);
+  try {
+    const body = {
+      schema: 'village-confirmed-reservation-commit-request/v1',
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, registration
+    };
+    const toolResponse = await task7Post(app, '/hermes/v1/tools/confirmed-reservation-commit', body);
+    assert.equal(toolResponse.status, 200);
+    const receipt = await toolResponse.json();
+    assert.equal(receipt.status, 'ok');
+    assert.equal(receipt.request_id, null);
+    assert.equal(receipt.effective_request_id, effectiveRequestId);
+    assert.ok(receipt.applied_stages.includes('pending_request_bootstrap'));
+    assert.ok(receipt.applied_stages.includes('set_component_selections'));
+
+    const resultResponse = await task7Post(app, '/hermes/v1/results', {
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, content: `FINAL_JSON\n${JSON.stringify(finalDecision)}`
+    });
+    assert.equal(resultResponse.status, 200);
+    await application.idle();
+    await new Promise((resolve) => setImmediate(resolve));
+    await auditCoordinator.projectPending({ limit: 25 });
+
+    assert.equal(gasCalls, 1);
+    assert.equal(outboundAttempts, 0);
+    assert.equal(auditRows.length, 1);
+    assert.equal(auditRows[0].effect_type, 'reservation_registration');
+    assert.equal(auditRows[0].outcome, 'success');
+    assert.equal(auditRows[0].target_id, '260907-009');
+    assert.equal(JSON.stringify(auditRows[0]).includes(incident.semantic_evidence.customer_request), false);
+    assert.equal(JSON.stringify(auditRows[0]).includes(incident.semantic_evidence.staff_confirmation), false);
+
+    const retry = await task7Post(app, '/hermes/v1/tools/confirmed-reservation-commit', body);
+    assert.equal(retry.status, 200);
+    assert.deepEqual(await retry.json(), receipt);
+    assert.equal(gasCalls, 1);
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('conditional typed decision and stale pending baseline remain no-write', async () => {
+  const incident = CONFIRMED_REGISTRATION_INCIDENT;
+  const roomSnapshot = createImmutableKakaoRoomSnapshot({
+    job: { jobId: 'no-write-job', roomKey: 'no-write-room', roomRevision: incident.room_revision },
+    capturedAt: '2026-09-07T01:00:00.000Z',
+    navigationContext: {
+      status: 'opened_target_chat', via_devtools: true,
+      conversation_evidence: {
+        source: 'offline_fixture', title: '테스트 고객', hint_matched: true,
+        visible_static_text_tail: [
+          incident.semantic_evidence.customer_request,
+          incident.semantic_evidence.staff_confirmation
+        ].join('\n'),
+        messages: [
+          {
+            message_id: 'no-write-customer-1', role: 'customer', order: 1,
+            text: incident.semantic_evidence.customer_request
+          },
+          {
+            message_id: 'no-write-staff-2', role: 'staff', order: 2,
+            text: incident.semantic_evidence.staff_confirmation
+          }
+        ]
+      }
+    }
+  });
+  const base = {
+    confirmed: true, target_scope: 'pending_request', request_id: incident.request_id,
+    source_evidence: {
+      ...incident.semantic_evidence,
+      conversation_revision: incident.room_revision,
+      conversation_evidence_hash: roomSnapshot.evidenceHash,
+      customer_message_ids: ['no-write-customer-1'], staff_message_ids: ['no-write-staff-2']
+    },
+    expected_before: structuredClone(incident.expected_before),
+    expected_set_components: [],
+    set_component_selections: [],
+    expected_period: structuredClone(incident.expected_period),
+    desired_after: structuredClone(incident.desired_after),
+    desired_period: structuredClone(incident.desired_period)
+  };
+  let runnerCalls = 0;
+  let writes = 0;
+  const executor = createGatewayConfirmedReservationCommitExecutor({
+    getConfig: () => ({ gasApiUrl: 'https://script.google.com/macros/s/offline/exec', sheetApiKey: 'offline' }),
+    commitConfirmedReservation: async ({ registration }) => {
+      runnerCalls += 1;
+      if (JSON.stringify(registration.expected_before) !== JSON.stringify([{ name: 'authoritative current item', quantity: 1 }])) {
+        return {
+          schema: 'village-confirmed-reservation-commit-result/v1', success: false, status: 'blocked',
+          request_id: registration.request_id, effective_request_id: null, trade_id: null,
+          final_plan: null, final_period: null, authoritative: null,
+          attempted_stage: 'pending_request_fence',
+          error: { type: 'stale_pending_request', message: 'baseline changed' }
+        };
+      }
+      writes += 1;
+      throw new Error('unexpected write');
+    },
+    randomUUID: () => 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+    now: () => new Date('2026-09-07T01:00:00.000Z')
+  });
+  const job = { job_id: 'no-write-job', room_key: 'no-write-room', room_revision: incident.room_revision };
+  const fence = { operation_id: 'no-write-operation' };
+
+  const conditional = await executor({
+    ...job, registration: { ...base, confirmed: incident.conditional_case.confirmed }
+  }, { operationFence: fence, roomSnapshot });
+  assert.equal(conditional.status, 'failed');
+  assert.equal(conditional.error.type, 'invalid_registration');
+  assert.equal(runnerCalls, 0);
+
+  const stale = await executor({ ...job, registration: base }, { operationFence: fence, roomSnapshot });
+  assert.equal(stale.status, 'blocked');
+  assert.equal(stale.error.type, 'stale_pending_request');
+  assert.equal(runnerCalls, 1);
+  assert.equal(writes, 0);
 });

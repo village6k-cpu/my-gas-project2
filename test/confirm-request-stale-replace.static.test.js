@@ -4,6 +4,10 @@ const path = require('path');
 
 const source = fs.readFileSync(path.resolve(__dirname, '..', 'checkAvailability.js'), 'utf8');
 const api = fs.readFileSync(path.resolve(__dirname, '..', 'sheetAPI.js'), 'utf8');
+const insertRequestSource = source.slice(
+  source.indexOf('function _insertAndCheckRequest'),
+  source.indexOf('function _assertConfirmRequestEditableRows_')
+);
 
 assert.match(
   source,
@@ -23,10 +27,19 @@ assert.match(
   '중복 판정은 세트 구성품을 포함한 전체 행이 아니라 최상위 장비와 수량의 정확 일치로 해야 한다'
 );
 
+const stagedWrite = insertRequestSource.indexOf('sheet.getRange(row, 1, 1, 18).setValues([rowData])');
+// The function also has an earlier "complete an existing schedule" branch.
+// Anchor every ordering assertion to the newly staged row so this check proves
+// the replacement path instead of accidentally matching that earlier branch.
+const stagedProcess = insertRequestSource.indexOf('_processByReqID(sheet, startRow)', stagedWrite);
+const stagedReadback = insertRequestSource.indexOf('var finalTopLevelPlan = []', stagedProcess);
+const oldDelete = insertRequestSource.indexOf('_deleteConfirmRequestGroups_(sheet, [cutoverFence.group])', stagedReadback);
+assert.ok(stagedWrite >= 0 && stagedProcess > stagedWrite && stagedReadback > stagedProcess && oldDelete > stagedReadback,
+  '직원확정 교체는 새 RQ를 쓰고 가용확인/readback한 뒤에만 exact 기존 RQ를 삭제해야 한다');
 assert.match(
-  source,
-  /var replacedGroups = _selectAuthorizedConfirmRequestReplacementGroups_\(staffConfirmedPendingFence\);[\s\S]*_deleteConfirmRequestGroups_\(sheet, replacedGroups\)/,
-  '직원확정 exact fence가 있는 RQ만 새 확인요청 쓰기 전에 교체해야 한다'
+  insertRequestSource,
+  /catch\s*\([^)]*\)\s*\{[\s\S]*_deleteConfirmRequestGroups_\(sheet,\s*\[\{\s*reqID:\s*reqID/,
+  '기존 RQ 삭제 전 staging 실패는 새 RQ만 정리하고 기존 RQ를 보존해야 한다'
 );
 
 assert.doesNotMatch(
@@ -59,10 +72,6 @@ assert.match(
   'sheetAPI runFunction 응답도 검증한 exact 거래ID를 버리지 않고 worker에 전달해야 한다'
 );
 
-const insertRequestSource = source.slice(
-  source.indexOf('function _insertAndCheckRequest'),
-  source.indexOf('function _assertConfirmRequestEditableRows_')
-);
 assert.match(
   insertRequestSource,
   /var duplicateResponse = \{[\s\S]*if \(registeredTradeId\) duplicateResponse\.matchedRegisteredTradeId = registeredTradeId;/,

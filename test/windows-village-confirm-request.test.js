@@ -8,6 +8,8 @@ const {
   createConfirmationRequests,
   updateConfirmationRequest,
   normalizeConfirmationRequest,
+  normalizeConfirmedReservationCommit,
+  commitConfirmedReservation,
   reconcileConfirmationRequest,
   parseCliArgs,
   parseJsonInput,
@@ -38,6 +40,215 @@ function requestFixture(overrides = {}) {
     ...overrides
   };
 }
+
+function confirmedRegistrationFixture(overrides = {}) {
+  const period = {
+    start_date: '2026-09-07',
+    start_time: '07:00',
+    end_date: '2026-09-07',
+    end_time: '20:00'
+  };
+  const plan = [
+    { name: '소니 FX3 바디세트', quantity: 1 },
+    { name: '소니 GM 16-35mm', quantity: 1 },
+    { name: '소니 GM 70-200mm II', quantity: 1 }
+  ];
+  return {
+    confirmed: true,
+    target_scope: 'pending_request',
+    request_id: 'RQ-260906-001',
+    source_evidence: {
+      customer_request: 'bounded customer request evidence',
+      staff_confirmation: 'bounded staff confirmation evidence',
+      conversation_revision: 9,
+      conversation_evidence_hash: 'a'.repeat(64),
+      customer_message_ids: ['customer-message-1'],
+      staff_message_ids: ['staff-message-2']
+    },
+    expected_before: plan,
+    expected_set_components: [{
+      set_item: '소니 FX3 바디세트',
+      component_item: '소니 FX3 바디(케이지)',
+      quantity: 1
+    }],
+    set_component_selections: [],
+    expected_period: period,
+    desired_after: plan,
+    desired_period: period,
+    ...overrides
+  };
+}
+
+test('the CLI exposes one explicit staff-authorized pending registration command', () => {
+  assert.equal(parseCliArgs(['commit-registration']).command, 'commit-registration');
+});
+
+test('confirmed registration normalization requires one exact full-state authorization without prose routing', () => {
+  const normalized = normalizeConfirmedReservationCommit(confirmedRegistrationFixture());
+  assert.equal(normalized.request_id, 'RQ-260906-001');
+  assert.equal(normalized.source_evidence.conversation_revision, 9);
+  assert.equal(normalized.source_evidence.conversation_evidence_hash, 'a'.repeat(64));
+  assert.deepEqual(normalized.source_evidence.customer_message_ids, ['customer-message-1']);
+  assert.deepEqual(normalized.source_evidence.staff_message_ids, ['staff-message-2']);
+  assert.deepEqual(normalized.expected_before, normalized.desired_after);
+  assert.deepEqual(normalized.expected_set_components, [{
+    set_item: '소니 FX3 바디세트',
+    component_item: '소니 FX3 바디(케이지)',
+    quantity: 1
+  }]);
+  assert.deepEqual(normalized.set_component_selections, []);
+  assert.deepEqual(normalized.expected_period, normalized.desired_period);
+
+  for (const invalid of [
+    { confirmed: false },
+    { target_scope: 'registered_trade' },
+    { request_id: 'RQ-wrong' },
+    { source_evidence: {
+      customer_request: 'x', staff_confirmation: 'y', conversation_revision: 0,
+      conversation_evidence_hash: 'a'.repeat(64),
+      customer_message_ids: ['customer-message-1'], staff_message_ids: ['staff-message-2']
+    } },
+    { source_evidence: {
+      ...confirmedRegistrationFixture().source_evidence,
+      conversation_evidence_hash: 'A'.repeat(64)
+    } },
+    { source_evidence: {
+      ...confirmedRegistrationFixture().source_evidence,
+      customer_message_ids: []
+    } },
+    { source_evidence: {
+      ...confirmedRegistrationFixture().source_evidence,
+      staff_message_ids: ['staff message with spaces']
+    } },
+    { expected_period: {
+      ...confirmedRegistrationFixture().expected_period,
+      start_time: '07:30'
+    } },
+    { expected_before: [] },
+    { expected_period: { start_date: '2026-09-07', start_time: '', end_date: '2026-09-07', end_time: '20:00' } },
+    { desired_after: [{ name: '', quantity: 1 }] },
+    { desired_period: { start_date: '2026-09-07', start_time: '20:00', end_date: '2026-09-07', end_time: '07:00' } }
+  ]) {
+    assert.throws(
+      () => normalizeConfirmedReservationCommit(confirmedRegistrationFixture(invalid)),
+      /confirmed|target_scope|request_id|reqID|source_evidence|expected_before|expected_period|desired_after|desired_period|period/i
+    );
+  }
+});
+
+test('fast registration preserves exact set choices and rejects scalar metadata coercion', () => {
+  const candidate = {
+    customer_name: '테스트 고객', phone: '010-1111-2222', discount_type: '일반', memo: '', extra_request: ''
+  };
+  const selections = [{
+    set_item: '소니 FX3 바디세트', component_item: '메모리', selected_item: 'CFexpress Type A 160GB'
+  }];
+  const fast = confirmedRegistrationFixture({
+    request_id: null,
+    expected_set_components: [],
+    set_component_selections: selections,
+    pending_request_candidate: candidate
+  });
+  assert.deepEqual(normalizeConfirmedReservationCommit(fast).pending_request_candidate, candidate);
+  assert.deepEqual(normalizeConfirmedReservationCommit(fast).set_component_selections, selections);
+
+  for (const [field, value] of [['phone', 1010], ['memo', 123], ['extra_request', false]]) {
+    assert.throws(
+      () => normalizeConfirmedReservationCommit(confirmedRegistrationFixture({
+        request_id: null,
+        expected_set_components: [],
+        set_component_selections: selections,
+        pending_request_candidate: { ...candidate, [field]: value }
+      })),
+      new RegExp(`pending_request_candidate\\.${field}`, 'i')
+    );
+  }
+});
+
+test('confirmed registration rejects missing or duplicate set-component fencing fields', () => {
+  const fixture = confirmedRegistrationFixture();
+  const missingBaseline = structuredClone(fixture);
+  delete missingBaseline.expected_set_components;
+  assert.throws(() => normalizeConfirmedReservationCommit(missingBaseline), /expected_set_components/i);
+
+  const missingSelections = structuredClone(fixture);
+  delete missingSelections.set_component_selections;
+  assert.throws(() => normalizeConfirmedReservationCommit(missingSelections), /set_component_selections/i);
+
+  assert.throws(() => normalizeConfirmedReservationCommit({
+    ...fixture,
+    expected_set_components: [fixture.expected_set_components[0], fixture.expected_set_components[0]]
+  }), /duplicate|duplicated/i);
+});
+
+test('confirmed registration makes one bounded GAS operation call and returns authoritative receipt evidence', async () => {
+  const calls = [];
+  const timeoutRequests = [];
+  const registration = confirmedRegistrationFixture();
+  const operationId = '11111111-2222-4333-8444-555555555555';
+  const authoritative = {
+    success: true,
+    status: 'REGISTERED',
+    request_id: 'RQ-260906-001',
+    trade_id: '260906-001',
+    final_plan: registration.desired_after,
+    final_period: registration.desired_period,
+    customer_notification: { attempted: false }
+  };
+  const fetchImpl = async (url, options) => {
+    const parsed = new URL(url);
+    calls.push({ parsed, options });
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers['content-type'], 'application/json; charset=utf-8');
+    assert.equal(parsed.searchParams.has('args'), false, 'typed evidence must not be constrained by URL length');
+    assert.equal(parsed.searchParams.has('key'), false, 'write credential must not be placed in the URL');
+    const posted = JSON.parse(options.body);
+    assert.equal(posted.key, config.VILLAGE2_API_KEY);
+    delete posted.key;
+    assert.deepEqual(posted, {
+      action: 'run',
+      func: 'commitConfirmedReservation',
+      args: { registration, operation_id: operationId }
+    });
+    return response({ success: true, function: 'commitConfirmedReservation', result: authoritative });
+  };
+
+  const originalTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = (milliseconds) => {
+    timeoutRequests.push(milliseconds);
+    return new AbortController().signal;
+  };
+  let result;
+  try {
+    result = await commitConfirmedReservation({ config, registration, operationId, fetchImpl });
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(timeoutRequests, [240_000], 'GAS must finish before the plugin 250s transport deadline');
+  assert.ok(calls[0].options.signal);
+  assert.deepEqual(result, authoritative);
+});
+
+test('confirmed registration never retries a rejected or uncertain GAS mutation', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return response({ error: 'upstream failed' }, { ok: false, status: 504 });
+  };
+  await assert.rejects(
+    () => commitConfirmedReservation({
+      config,
+      registration: confirmedRegistrationFixture(),
+      operationId: '11111111-2222-4333-8444-555555555555',
+      fetchImpl,
+      timeoutMs: 250_000
+    }),
+    (error) => error.uncertainWrite === true && error.stage === 'confirmed_registration'
+  );
+  assert.equal(calls, 1);
+});
 
 test('Windows UTF-8 BOM input is accepted at the CLI boundary', () => {
   assert.deepEqual(parseJsonInput('\uFEFF{"queries":["600C"]}'), { queries: ['600C'] });

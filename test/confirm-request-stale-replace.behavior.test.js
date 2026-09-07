@@ -44,12 +44,13 @@ class FakeSheet {
   getRange(row, col, numRows, numCols) {
     assert.equal(row, 2);
     assert.equal(col, 1);
-    assert.equal(numCols, 18);
-    return new FakeRange(this.rows.slice(0, numRows));
+    assert.ok(numCols === 1 || numCols === 18);
+    const rows = this.rows.slice(0, numRows);
+    return new FakeRange(numCols === 1 ? rows.map((item) => [item[0]]) : rows);
   }
-  deleteRow(row) {
+  deleteRows(row, count) {
     this.writeCount += 1;
-    this.rows.splice(row - 2, 1);
+    this.rows.splice(row - 2, count);
   }
 }
 
@@ -138,6 +139,16 @@ assert.deepEqual(
   ['RQ-partial'],
   'one compatible partial inquiry must be selected for in-place schedule completion'
 );
+assert.deepEqual(
+  context._findCompletableConfirmRequestGroupsForInsert_(
+    partialSheet,
+    completeInquiry,
+    [{ name: '소니 A7S3 바디세트', qty: 1 }],
+    { group: { reqID: 'RQ-exact-authorized-target' } }
+  ),
+  [],
+  'an exact staff-confirmed replacement must never complete or mutate a different partial RQ'
+);
 
 const registeredSheet = new FakeSheet([
   requestRow({ reqID: 'RQ-registered', equip: '어퓨처 600X', qty: 1, name: '김재우', phone: '010-6403-9315', register: '등록', status: '등록완료', tradeId: '260622-999' })
@@ -148,17 +159,49 @@ assert.deepEqual(
   '거래ID/등록완료가 있는 RQ는 자동 삭제하면 안 된다'
 );
 
-function pendingFence({ requestId = 'RQ-260824-008', expectedBefore, expectedPeriod } = {}) {
+function pendingFence({ requestId = 'RQ-260824-008', expectedBefore, expectedSetComponents, expectedPeriod } = {}) {
   return {
     target_scope: 'pending_request',
     request_id: requestId,
     expected_before: expectedBefore || [{ name: '소니 FE 28-135mm', quantity: 1 }],
+    expected_set_components: expectedSetComponents || [],
     expected_period: expectedPeriod || {
       start_date: '2026-08-27', start_time: '06:00',
       end_date: '2026-08-27', end_time: '18:00'
     }
   };
 }
+
+const setComponentSheet = new FakeSheet([
+  requestRow({
+    reqID: 'RQ-260824-008', start: '2026-08-27', startTime: '06:00', end: '2026-08-27', endTime: '18:00',
+    equip: '소니 FX3 바디세트', qty: 1, name: '테스트 고객', phone: '010-1111-2222'
+  }),
+  requestRow({
+    reqID: 'RQ-260824-008', start: '', startTime: '', end: '', endTime: '',
+    equip: '소니 FX3 바디(케이지)', qty: 1, memo: '[세트]소니 FX3 바디세트'
+  })
+]);
+const exactSetFence = pendingFence({
+  expectedBefore: [{ name: '소니 FX3 바디세트', quantity: 1 }],
+  expectedSetComponents: [{
+    set_item: '소니 FX3 바디세트', component_item: '소니 FX3 바디(케이지)', quantity: 1
+  }]
+});
+assert.equal(
+  context._resolveStaffConfirmedPendingRequestFence_(setComponentSheet, exactSetFence).group.reqID,
+  'RQ-260824-008'
+);
+assert.throws(
+  () => context._resolveStaffConfirmedPendingRequestFence_(setComponentSheet, {
+    ...exactSetFence,
+    expected_set_components: [{
+      set_item: '소니 FX3 바디세트', component_item: '다른 구성품', quantity: 1
+    }]
+  }),
+  /구성품|component/i,
+  'same top-level set and period must not hide a stale component baseline'
+);
 
 function exactTargetMissingPeriod(component) {
   const period = {
@@ -261,6 +304,28 @@ assert.deepEqual(
   siblingSheet.rows.map((row) => row[0]),
   ['RQ-260824-010'],
   '같은 고객/기간의 sibling RQ는 exact target 교체 후에도 그대로 남아야 한다'
+);
+
+const shiftedSheet = new FakeSheet([
+  requestRow({
+    reqID: 'RQ-260824-008', start: '2026-08-27', startTime: '06:00', end: '2026-08-27', endTime: '18:00',
+    equip: '기존 장비', qty: 1, name: '테스트 고객', phone: '010-1111-2222'
+  }),
+  requestRow({
+    reqID: 'RQ-sibling', start: '2026-08-27', startTime: '06:00', end: '2026-08-27', endTime: '18:00',
+    equip: '형제 장비', qty: 1, name: '다른 고객', phone: '010-3333-4444'
+  })
+]);
+const staleRowNumberGroup = context._buildConfirmRequestGroups_(shiftedSheet)[0];
+shiftedSheet.rows.unshift(requestRow({
+  reqID: 'RQ-staged', start: '2026-08-28', startTime: '07:00', end: '2026-08-28', endTime: '19:00',
+  equip: '새 장비', qty: 1, name: '테스트 고객', phone: '010-1111-2222'
+}));
+assert.equal(context._deleteConfirmRequestGroups_(shiftedSheet, [staleRowNumberGroup]), 1);
+assert.deepEqual(
+  shiftedSheet.rows.map((row) => row[0]),
+  ['RQ-staged', 'RQ-sibling'],
+  'replacement deletion must rescan exact request IDs after staging shifts row numbers'
 );
 
 console.log('confirm request stale replacement behavior checks passed');

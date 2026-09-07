@@ -40,8 +40,8 @@ assert(
   'registration queue status must be normalized and must have reusable enqueue/completion paths'
 );
 assert(
-  /if \(!regLock\.tryLock\(30000\)\) \{[\s\S]{0,220}markRegisterQueued_\(sheet, triggerRow\);[\s\S]{0,220}enqueuePendingRegister_\(pendingReqID, 30000\);[\s\S]{0,80}return;[\s\S]{0,40}\}/.test(backend),
-  'registerByReqID lock contention must mark 등록대기 and schedule a retry instead of leaving a dead sheet state'
+  /if \(!hasTransferredConfirmedLock && !regLock\.tryLock\(30000\)\) \{[\s\S]{0,700}if \(!markRegisterQueued_\(sheet, triggerRow\)\) return;[\s\S]{0,220}enqueuePendingRegister_\(pendingReqID, 30000\);[\s\S]{0,80}return;[\s\S]{0,40}\}/.test(backend),
+  'registerByReqID lock contention must queue ordinary registrations but preserve confirmed no-replay states'
 );
 assert(
   /function _runPendingRegister\(\)[\s\S]*var sheet = ss\.getSheetByName\("확인요청"\);[\s\S]*if \(!queue\.length\) \{[\s\S]{0,160}processRegistrationQueue_\(sheet\);[\s\S]{0,80}return;[\s\S]{0,40}\}/.test(backend) &&
@@ -77,8 +77,14 @@ assert(
     /try \{\s*registerByReqID\(sheet, pendingRow, \{ fromQueue: true \}\);[\s\S]{0,260}catch \(e\) \{[\s\S]{0,160}등록 실패/.test(backend),
   'processRegistrationQueue_ must prevent nested drains and isolate each reqID failure so later registrations keep moving'
 );
+const registerQueueStart = backend.indexOf('function registerByReqID(');
+const registerQueueEnd = backend.indexOf('function perfLog_(', registerQueueStart);
+const registerQueueBody = backend.slice(registerQueueStart, registerQueueEnd);
+const registerFinallyAt = registerQueueBody.lastIndexOf('} finally {');
+const registerReleaseAt = registerQueueBody.indexOf('regLock.releaseLock();', registerFinallyAt);
+const registerDrainAt = registerQueueBody.indexOf('processRegistrationQueue_(sheet);', registerFinallyAt);
 assert(
-  /finally \{[\s\S]{0,80}regLock\.releaseLock\(\);[\s\S]{0,1200}processRegistrationQueue_\(sheet\);/.test(backend),
+  registerFinallyAt >= 0 && registerReleaseAt > registerFinallyAt && registerDrainAt > registerReleaseAt,
   'registerByReqID must drain 등록대기 in finally so validation returns and exceptions do not strand later requests (releaseLock 뒤 락 밖 알림톡 블록을 사이에 허용)'
 );
 assert(

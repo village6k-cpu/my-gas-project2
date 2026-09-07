@@ -17,7 +17,8 @@ const TOOL_OPERATION_STATES = new Set(['reserved', 'completed']);
 const TOOL_RECEIPT_SCHEMAS = new Map([
   ['confirmation_request', 'village-confirmation-receipt/v1'],
   ['document_send', 'village-document-receipt/v1'],
-  ['registered_reservation_change', 'village-registered-reservation-change-receipt/v1']
+  ['registered_reservation_change', 'village-registered-reservation-change-receipt/v1'],
+  ['confirmed_reservation_commit', 'village-confirmed-reservation-commit-receipt/v1']
 ]);
 const APPLICATION_STATES = new Set(['pending', 'claimed', 'applying', 'applied', 'finalized', 'failed']);
 const FAILURE_NOTIFICATION_STATES = new Set(['pending', 'delivered']);
@@ -84,7 +85,7 @@ function validateReceipt(receipt) {
     if (!/^\d{6}-\d{3}$/.test(String(receipt?.trade_id || ''))) throw channelError('invalid_receipt', 'trade_id is invalid');
     if (!['vat_included', 'supply_only'].includes(receipt?.tax_mode)) throw channelError('invalid_receipt', 'tax_mode is invalid');
     if (!isObjectOrNull(receipt?.authoritative_document_result)) throw channelError('invalid_receipt', 'authoritative_document_result must be an object or null');
-  } else {
+  } else if (receipt.schema === 'village-registered-reservation-change-receipt/v1') {
     if (receipt?.target_scope !== 'registered_trade') throw channelError('invalid_receipt', 'target_scope must be registered_trade');
     if (!/^\d{6}-\d{3}$/.test(String(receipt?.trade_id || ''))) throw channelError('invalid_receipt', 'trade_id is invalid');
     if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change']
@@ -95,6 +96,34 @@ function validateReceipt(receipt) {
       throw channelError('invalid_receipt', 'attempted_stage must be null or a string');
     }
     if (receipt?.customer_reply !== 'no_reply') throw channelError('invalid_receipt', 'customer_reply must be no_reply');
+  } else {
+    if (receipt?.target_scope !== 'pending_request') throw channelError('invalid_receipt', 'target_scope must be pending_request');
+    if (!(receipt?.request_id === null
+      || /^RQ-\d{6}-\d{3}$/.test(String(receipt?.request_id || '')))) {
+      throw channelError('invalid_receipt', 'request_id is invalid');
+    }
+    if (!(receipt?.effective_request_id === null
+      || /^RQ-\d{6}-\d{3}$/.test(String(receipt?.effective_request_id || '')))) {
+      throw channelError('invalid_receipt', 'effective_request_id is invalid');
+    }
+    if (!(receipt?.trade_id === null || /^\d{6}-\d{3}$/.test(String(receipt?.trade_id || '')))) {
+      throw channelError('invalid_receipt', 'trade_id is invalid');
+    }
+    if (!receipt?.authorized_registration || typeof receipt.authorized_registration !== 'object'
+      || Array.isArray(receipt.authorized_registration)) {
+      throw channelError('invalid_receipt', 'authorized_registration must be an object');
+    }
+    if (!isObjectOrNull(receipt?.authoritative_result)) throw channelError('invalid_receipt', 'authoritative_result must be an object or null');
+    if (!Array.isArray(receipt?.applied_stages)) throw channelError('invalid_receipt', 'applied_stages must be a list');
+    if (!(receipt?.attempted_stage === null || typeof receipt?.attempted_stage === 'string')) {
+      throw channelError('invalid_receipt', 'attempted_stage must be null or a string');
+    }
+    if (receipt?.customer_reply !== 'no_reply') throw channelError('invalid_receipt', 'customer_reply must be no_reply');
+    if (receipt.request_id === null && receipt.status === 'ok'
+      && (!/^RQ-\d{6}-\d{3}$/.test(String(receipt.effective_request_id || ''))
+        || !receipt.applied_stages.includes('pending_request_bootstrap'))) {
+      throw channelError('invalid_receipt', 'bootstrapped confirmed registration receipt is incomplete');
+    }
   }
   if (!isValidIso(receipt?.created_at)) throw channelError('invalid_receipt', 'created_at must be ISO-8601');
   if (!(receipt?.error === null || typeof receipt?.error === 'string' || isObjectOrNull(receipt?.error))) {
@@ -115,6 +144,34 @@ function normalizeToolOperation(operation) {
     lease_id: requiredString(operation?.lease_id ?? operation?.leaseId, 'lease_id', 'stale_lease'),
     request_digest: requiredString(operation?.request_digest ?? operation?.requestDigest, 'request_digest', 'invalid_tool_operation')
   };
+}
+
+function normalizeToolOperationAuditTarget(value, operation) {
+  if (value === undefined || value === null) return null;
+  if (operation.tool !== 'confirmed_reservation_commit'
+    || !value || typeof value !== 'object' || Array.isArray(value)
+    || !sameResult(Object.keys(value).sort(), [
+      'action_type', 'effect_type', 'schema', 'target_id', 'target_type'
+    ])) {
+    throw channelError('invalid_tool_operation', 'tool audit target is invalid');
+  }
+  if (value.schema !== 'village-kakao-tool-audit-target/v1'
+    || value.effect_type !== 'reservation_registration'
+    || value.action_type !== 'create'
+    || !['request', 'room'].includes(value.target_type)) {
+    throw channelError('invalid_tool_operation', 'tool audit target is invalid');
+  }
+  if (value.target_type === 'request') {
+    const targetId = requiredString(value.target_id, 'audit_target.target_id', 'invalid_tool_operation').toUpperCase();
+    if (!/^RQ-\d{6}-\d{3}$/.test(targetId)) {
+      throw channelError('invalid_tool_operation', 'tool audit request target is invalid');
+    }
+    return { ...value, target_id: targetId };
+  }
+  if (value.target_id !== null) {
+    throw channelError('invalid_tool_operation', 'room audit target_id must be null');
+  }
+  return { ...value };
 }
 
 function sameToolOperationEnvelope(reservation, operation) {
@@ -141,6 +198,20 @@ function exactReceiptForToolOperation(job) {
   )) || null;
 }
 
+function unresolvedToolOperationForAudit(job) {
+  const operation = job?.tool_operation;
+  if (!operation || operation.tool !== 'confirmed_reservation_commit' || operation.state !== 'reserved'
+    || !['failed', 'superseded'].includes(job?.state)
+    || job?.error?.type !== 'confirmation_operation_unresolved'
+    || job.error.operation_id !== operation.operation_id
+    || (Array.isArray(job?.tool_receipts) && job.tool_receipts.length > 0)) {
+    return null;
+  }
+  const normalized = normalizeToolOperation(operation);
+  const auditTarget = normalizeToolOperationAuditTarget(operation.audit_target, normalized);
+  return auditTarget ? { operation, auditTarget } : null;
+}
+
 function validatePersistedToolOperation(job) {
   const reservation = job?.tool_operation;
   if (reservation == null) return;
@@ -151,6 +222,7 @@ function validatePersistedToolOperation(job) {
     throw channelError('invalid_persisted_job', 'persisted tool operation is invalid');
   }
   const normalized = normalizeToolOperation(reservation);
+  normalizeToolOperationAuditTarget(reservation.audit_target, normalized);
   if (normalized.job_id !== job.job_id
     || normalized.room_key !== job.room_key
     || normalized.room_revision !== job.room_revision
@@ -617,11 +689,13 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     async reserveToolOperation(operation) {
       return mutate(async () => {
         const normalized = normalizeToolOperation(operation);
+        const auditTarget = normalizeToolOperationAuditTarget(operation?.audit_target, normalized);
         const job = jobs.get(normalized.job_id);
         if (!job) throw channelError('unknown_job', 'job does not exist');
         assertEnvelope(job, normalized);
         if (job.tool_operation) {
-          if (!sameToolOperationEnvelope(job.tool_operation, normalized)) {
+          if (!sameToolOperationEnvelope(job.tool_operation, normalized)
+            || !sameResult(job.tool_operation.audit_target ?? null, auditTarget)) {
             throw channelError('confirmation_operation_conflict', 'job already has another confirmation operation');
           }
           return { created: false, reservation: clone(job.tool_operation) };
@@ -631,6 +705,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           schema: 'village-tool-operation-reservation/v1',
           operation_id: randomUUID(),
           ...normalized,
+          ...(auditTarget ? { audit_target: auditTarget } : {}),
           state: 'reserved',
           created_at: iso(currentTime()),
           receipt_id: null,
@@ -935,7 +1010,9 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     async listAuditProjectionCandidates({ limit } = {}) {
       return mutate(async () => [...jobs.values()]
         .filter((job) => (job.audit_projection === undefined || job.audit_projection === null)
-          && Boolean(exactReceiptForToolOperation(job) || exactReplyReadbackForAudit(job)))
+          && Boolean(exactReceiptForToolOperation(job)
+            || unresolvedToolOperationForAudit(job)
+            || exactReplyReadbackForAudit(job)))
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
         .slice(0, boundedListLimit(limit))
         .map(clone));

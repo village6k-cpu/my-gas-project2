@@ -203,6 +203,9 @@ assert(
 
 // ── 등록완료 알림톡: 내 예약 링크 포함, 미설정 시 스킵, 거래당 1회, 등록 흐름 비차단 ──
 const backend = read('checkAvailability.js');
+const registerStart = backend.indexOf('function registerByReqID(');
+const registerEnd = backend.indexOf('function perfLog_(', registerStart);
+const registerBody = backend.slice(registerStart, registerEnd);
 assert(
   /function sendRegisterCompleteAlimtalk_/.test(backend) &&
     backend.includes("getProperty('POPBILL_TPL_REGISTER')") &&
@@ -211,8 +214,8 @@ assert(
   'register-complete alimtalk must include the my-page link, skip without a template, and dedupe per trade'
 );
 assert(
-  /try \{\s*sendRegisterCompleteAlimtalk_\([\s\S]{0,400}\);\s*\} catch/.test(backend) &&
-    /regLock\.releaseLock\(\);[\s\S]{0,400}sendRegisterCompleteAlimtalk_\(/.test(backend),
+  /try \{\s*var registerNotificationResult = sendRegisterCompleteAlimtalk_\([\s\S]{0,500}\}\s*catch/.test(registerBody) &&
+    registerBody.indexOf('regLock.releaseLock();') < registerBody.indexOf('sendRegisterCompleteAlimtalk_('),
   'registerByReqID must call the alimtalk inside try/catch AND after releaseLock (외부 HTTP를 전역 락 밖에서) so registration never fails or blocks on send errors'
 );
 assert(

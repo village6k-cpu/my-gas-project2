@@ -206,6 +206,43 @@ test('confirmation-request skill preserves AI judgment while enforcing the owner
   );
 });
 
+test('staff authorization guidance is open-ended semantic evidence, never a fixed Korean phrase trigger', () => {
+  const reference = fs.readFileSync(
+    path.join(
+      operationsRoot,
+      'references',
+      'kakao-staff-confirmed-reservation-acceptance.md'
+    ),
+    'utf8'
+  );
+
+  assert.match(
+    reference,
+    /native Hermes[\s\S]{0,220}(?:full|complete)[\s-]*same-room conversation/i,
+    'native Hermes must own the full same-room semantic interpretation'
+  );
+  assert.match(
+    reference,
+    /examples?[\s\S]{0,180}(?:not|never)[\s\S]{0,120}(?:closed|fixed|allowlist|trigger)/i,
+    'example replies must be explicitly non-exhaustive and non-triggering'
+  );
+  assert.match(
+    reference,
+    /(?:네|가능합니다)[\s\S]{0,120}(?:is authorization|승인)[\s\S]{0,220}(?:full conversation|전체 대화)/i,
+    'a short staff acknowledgement must authorize the exact request when its full context is clear'
+  );
+  assert.match(
+    reference,
+    /conditional|조건[\s\S]{0,160}ambiguous|모호[\s\S]{0,220}(?:not authorization|권한.*아니)/i,
+    'conditional or ambiguous staff evidence must stay non-authorizing'
+  );
+  assert.match(
+    reference,
+    /outer code[\s\S]{0,220}(?:must not|never)[\s\S]{0,180}(?:keyword|phrase|문구)/i,
+    'plumbing code must not infer authorization from words or phrases'
+  );
+});
+
 test('confirmation-request execution skill pins bare Korean hours to Village literal 24-hour time', () => {
   const skill = loadSkill(confirmRequestRoot);
   assertNativeEnvelope(skill);

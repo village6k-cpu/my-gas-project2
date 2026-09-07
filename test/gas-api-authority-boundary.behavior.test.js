@@ -60,9 +60,9 @@ function loadAuthority(internalKey = 'internal-key-from-script-properties') {
   return context;
 }
 
-test('the stable operator key keeps legacy confirmation and edit automations authorized', () => {
+test('the stable public key is never promoted to the internal principal', () => {
   const authority = loadAuthority();
-  assert.equal(authority.villageApiPrincipal_('village2026'), 'internal');
+  assert.equal(authority.villageApiPrincipal_('village2026'), 'public');
 });
 
 test('the server-side internal key remains valid alongside the stable operator key', () => {
@@ -70,6 +70,94 @@ test('the server-side internal key remains valid alongside the stable operator k
   assert.equal(authority.villageApiPrincipal_('internal-key-from-script-properties'), 'internal');
   assert.equal(authority.villageApiPrincipal_('wrong-key'), '');
   assert.equal(authority.villageApiPrincipal_(''), '');
+});
+
+function loadHandleRequestCore() {
+  const calls = [];
+  const context = {
+    PropertiesService: {
+      getScriptProperties() {
+        return {
+          getProperty(name) {
+            return name === 'VILLAGE_API_WRITE_KEY_V1'
+              ? 'internal-key-from-script-properties'
+              : '';
+          },
+        };
+      },
+    },
+    jsonResponse(payload, status = 200) {
+      return { payload, status };
+    },
+    invalidateConfirmListCache_() {},
+    runFunction(funcName, params) {
+      calls.push({ funcName, params });
+      return { success: true, function: funcName };
+    },
+    getMyReservation(token) {
+      return { success: true, tokenSeen: token };
+    },
+    searchSheet(sheet, col, query) {
+      return { sheet, col, query };
+    },
+  };
+  vm.runInNewContext(
+    [
+      `var VILLAGE_OPERATOR_API_KEY = 'village2026';`,
+      `var VILLAGE_INTERNAL_API_KEY_PROPERTY = 'VILLAGE_API_WRITE_KEY_V1';`,
+      extractFunction('villageApiPrincipal_'),
+      extractFunction('handleRequestCore_'),
+      'this.handleRequestCore_ = handleRequestCore_;',
+    ].join('\n'),
+    context,
+  );
+  return { context, calls };
+}
+
+test('the public key cannot invoke the confirmed reservation commit run function', () => {
+  const { context, calls } = loadHandleRequestCore();
+  const response = context.handleRequestCore_({
+    parameter: {
+      key: 'village2026',
+      action: 'run',
+      func: 'commitConfirmedReservation',
+    },
+  });
+
+  assert.equal(response.status, 403);
+  assert.equal(response.payload.error, 'internal credential required');
+  assert.equal(calls.length, 0);
+});
+
+test('the public key remains usable for token-scoped customer reads', () => {
+  const { context } = loadHandleRequestCore();
+  const response = context.handleRequestCore_({
+    parameter: {
+      key: 'village2026',
+      action: 'myPage',
+      token: 'opaque-token',
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.payload.success, true);
+  assert.equal(response.payload.tokenSeen, 'opaque-token');
+});
+
+test('the internal key can invoke the confirmed reservation commit run function', () => {
+  const { context, calls } = loadHandleRequestCore();
+  const response = context.handleRequestCore_({
+    parameter: {
+      key: 'internal-key-from-script-properties',
+      action: 'run',
+      func: 'commitConfirmedReservation',
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.payload.success, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].funcName, 'commitConfirmedReservation');
 });
 
 test('legacy GAS page routes resolve only to authenticated Today Dashboard replacements', () => {

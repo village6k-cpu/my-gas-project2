@@ -9,8 +9,10 @@ import { test } from 'node:test';
 
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import {
+  confirmedReservationCommitRequestDigest,
   createHermesGatewayHttpHandler,
   registeredReservationChangeRequestDigest,
+  validateConfirmedReservationCommitBody,
   validateRegisteredReservationChangeBody
 } from './hermes-gateway-http.mjs';
 
@@ -58,6 +60,34 @@ function expectedRegisteredReservationChangeDigest(body) {
   return createHash('sha256').update(JSON.stringify(canonicalTestJson(payload))).digest('hex');
 }
 
+function roomSnapshotFixture() {
+  const messages = [
+    { message_id: 'dom-customer-1', role: 'customer', order: 1, text: '고객의 정확한 예약 요청' },
+    { message_id: 'dom-staff-1', role: 'staff', order: 2, text: '직원의 무조건적 승인' }
+  ].map((message) => ({
+    ...message,
+    text_hash: createHash('sha256').update(message.text).digest('hex')
+  }));
+  const conversationEvidence = {
+    source: 'test_fixture', title: '테스트 고객', hint_matched: true, hints: ['테스트 고객'],
+    visible_static_text_tail: '고객의 정확한 예약 요청\n직원의 무조건적 승인',
+    messages,
+    note: 'immutable test evidence'
+  };
+  const evidenceHash = createHash('sha256').update(JSON.stringify(canonicalTestJson({
+    roomKey: 'room-1', roomRevision: 3, title: conversationEvidence.title,
+    hintMatched: true, visibleText: conversationEvidence.visible_static_text_tail, messages
+  }))).digest('hex');
+  return {
+    schema: 'kakao-room-snapshot/v1', jobId: 'job-1', roomKey: 'room-1', roomRevision: 3,
+    capturedAt: '2026-09-07T00:00:00.000Z', evidenceHash,
+    navigation: {
+      status: 'opened_target_chat', reason: '', via_devtools: true, already_open: true,
+      opened_by_devtools_search: false, search: null, conversation_evidence: conversationEvidence
+    }
+  };
+}
+
 function registeredMutation(overrides = {}) {
   return {
     confirmed: true,
@@ -102,6 +132,96 @@ function registeredChangeReceipt(request, overrides = {}) {
   };
 }
 
+function confirmedRegistration(overrides = {}) {
+  const plan = [
+    { name: '소니 FX3 바디세트', quantity: 1 },
+    { name: '소니 GM 70-200mm II', quantity: 1 }
+  ];
+  const period = {
+    start_date: '2026-09-07', start_time: '07:00', end_date: '2026-09-07', end_time: '20:00'
+  };
+  const components = [{
+    set_item: '소니 FX3 바디세트', component_item: '소니 FX3 바디(케이지)', quantity: 1
+  }];
+  return {
+    confirmed: true, target_scope: 'pending_request', request_id: 'RQ-260907-001',
+    source_evidence: {
+      customer_request: '고객의 정확한 예약 요청', staff_confirmation: '직원의 무조건적 승인',
+      conversation_revision: 3,
+      conversation_evidence_hash: roomSnapshotFixture().evidenceHash,
+      customer_message_ids: ['dom-customer-1'], staff_message_ids: ['dom-staff-1']
+    },
+    expected_before: plan, expected_set_components: components, set_component_selections: [],
+    expected_period: period, desired_after: plan, desired_period: period,
+    ...overrides
+  };
+}
+
+function fastConfirmedRegistration(overrides = {}) {
+  return confirmedRegistration({
+    request_id: null,
+    expected_set_components: [],
+    set_component_selections: [],
+    pending_request_candidate: {
+      customer_name: '테스트 고객', phone: '010-1111-2222', discount_type: '일반',
+      memo: '', extra_request: ''
+    },
+    ...overrides
+  });
+}
+
+function confirmedRegistrationBody(overrides = {}) {
+  return {
+    schema: 'village-confirmed-reservation-commit-request/v1',
+    job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId,
+    registration: confirmedRegistration(),
+    ...overrides
+  };
+}
+
+function confirmedRegistrationReceipt(request, overrides = {}) {
+  const components = request.registration.request_id === null
+    ? request.registration.set_component_selections.map((selection) => ({
+      set_item: selection.set_item, component_item: selection.selected_item, quantity: 1
+    }))
+    : request.registration.expected_set_components.map((entry) => ({ ...entry }));
+  if (request.registration.request_id !== null) {
+    for (const selection of request.registration.set_component_selections) {
+      const target = components.find((entry) => entry.set_item === selection.set_item
+        && entry.component_item === selection.component_item);
+      if (target) target.component_item = selection.selected_item;
+    }
+  }
+  return {
+    schema: 'village-confirmed-reservation-commit-receipt/v1',
+    receipt_id: 'confirmed-registration-receipt-1',
+    job_id: request.job_id, room_key: request.room_key, room_revision: request.room_revision,
+    status: 'ok', target_scope: 'pending_request', request_id: request.registration.request_id,
+    effective_request_id: request.registration.request_id, trade_id: '260907-001',
+    authoritative_result: {
+      schema: 'village-confirmed-reservation-commit-result/v1', success: true, status: 'ok',
+      request_id: request.registration.request_id, effective_request_id: request.registration.request_id,
+      trade_id: '260907-001', replaced_request_ids: [], final_plan: request.registration.desired_after,
+      final_set_components: components,
+      final_period: request.registration.desired_period,
+      authoritative: {
+        request: {},
+        registered_trade: { schedule: { rows: components.map((entry) => ({
+          setName: entry.set_item, name: entry.component_item, qty: entry.quantity, isComponent: true
+        })) } }
+      },
+      customerNotificationAttempted: false,
+      customerNotificationSent: false
+    },
+    applied_stages: request.registration.request_id === null
+      ? ['pending_request_bootstrap', 'registration', 'authoritative_readback']
+      : ['registration', 'authoritative_readback'],
+    attempted_stage: null,
+    customer_reply: 'no_reply', created_at: '2026-09-07T00:00:00.000Z', error: null,
+    ...overrides
+  };
+}
+
 const token = 'test-token-not-a-secret';
 const leaseId = 'lease-opaque-1';
 
@@ -109,7 +229,8 @@ function makeChannel() {
   const calls = { claim: [], complete: [], outcome: [], reservation: [], receipt: [], get: [] };
   const job = {
     job_id: 'job-1', room_key: 'room-1', room_revision: 3, state: 'claimed', lease_id: leaseId,
-    lease_expires_at_ms: 9_999_999_999_999, tool_operation: null, tool_receipts: []
+    lease_expires_at_ms: 9_999_999_999_999, tool_operation: null, tool_receipts: [],
+    local_context: { turn_internal: { snapshot: roomSnapshotFixture() } }
   };
   return {
     calls,
@@ -386,6 +507,210 @@ test('Gateway HTTP executes and persists one exact fenced registered reservation
     assert.deepEqual(channel.calls.receipt, [receipt]);
   } finally {
     await app.close();
+  }
+});
+
+test('confirmed reservation commit body is exact, canonical, and revision fenced', () => {
+  const first = confirmedRegistrationBody();
+  const reordered = {
+    lease_id: first.lease_id, room_revision: first.room_revision, room_key: first.room_key,
+    job_id: first.job_id, schema: first.schema,
+    registration: {
+      ...first.registration,
+      source_evidence: {
+        conversation_revision: 3,
+        conversation_evidence_hash: first.registration.source_evidence.conversation_evidence_hash,
+        customer_message_ids: first.registration.source_evidence.customer_message_ids,
+        staff_message_ids: first.registration.source_evidence.staff_message_ids,
+        staff_confirmation: first.registration.source_evidence.staff_confirmation,
+        customer_request: first.registration.source_evidence.customer_request
+      }
+    }
+  };
+  assert.equal(validateConfirmedReservationCommitBody(first), true);
+  assert.equal(validateConfirmedReservationCommitBody(confirmedRegistrationBody({
+    registration: fastConfirmedRegistration()
+  })), true);
+  assert.equal(confirmedReservationCommitRequestDigest(first), confirmedReservationCommitRequestDigest(reordered));
+  assert.equal(validateConfirmedReservationCommitBody({ ...first, unexpected: true }), false);
+  assert.equal(validateConfirmedReservationCommitBody({
+    ...first,
+    registration: confirmedRegistration({
+      source_evidence: { ...first.registration.source_evidence, conversation_revision: 2 }
+    })
+  }), false);
+});
+
+test('Gateway HTTP persists one atomic fast-reply receipt with null requested RQ and exact effective RQ', async () => {
+  const channel = makeChannel();
+  const request = confirmedRegistrationBody({ registration: fastConfirmedRegistration() });
+  let executions = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeConfirmedReservationCommit: async (body, { operationFence }) => {
+      executions += 1;
+      assert.deepEqual(body, request);
+      return confirmedRegistrationReceipt(request, {
+        request_id: null,
+        effective_request_id: 'RQ-260907-009',
+        authorized_registration: structuredClone(request.registration),
+        authoritative_result: {
+          ...confirmedRegistrationReceipt(request).authoritative_result,
+          request_id: null,
+          effective_request_id: 'RQ-260907-009'
+        },
+        applied_stages: ['pending_request_bootstrap', 'registration', 'authoritative_readback'],
+        operation_id: operationFence.operation_id
+      });
+    }
+  }));
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmed-reservation-commit', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request)
+    });
+    assert.equal(response.status, 200);
+    const receipt = await response.json();
+    assert.equal(executions, 1);
+    assert.equal(receipt.request_id, null);
+    assert.equal(receipt.effective_request_id, 'RQ-260907-009');
+    assert.deepEqual(channel.calls.reservation[0].audit_target, {
+      schema: 'village-kakao-tool-audit-target/v1', effect_type: 'reservation_registration',
+      action_type: 'create', target_type: 'room', target_id: null
+    });
+    assert.deepEqual(channel.calls.receipt, [receipt]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP executes and persists one immutable exact fenced confirmed reservation commit receipt', async () => {
+  const channel = makeChannel();
+  const request = confirmedRegistrationBody();
+  let executions = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeConfirmedReservationCommit: async (body, { assertCurrentClaim, operationFence }) => {
+      executions += 1;
+      assert.deepEqual(body, request);
+      await assertCurrentClaim();
+      body.registration.desired_after[0].name = 'executor-mutated-name';
+      return confirmedRegistrationReceipt(request, {
+        authorized_registration: confirmedRegistration({ request_id: 'RQ-260907-999' }),
+        operation_id: operationFence.operation_id
+      });
+    }
+  }));
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmed-reservation-commit', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request)
+    });
+    assert.equal(response.status, 200);
+    const receipt = await response.json();
+    const requestDigest = confirmedReservationCommitRequestDigest(request);
+    assert.equal(executions, 1);
+    assert.deepEqual(channel.calls.reservation, [{
+      tool: 'confirmed_reservation_commit', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+      lease_id: leaseId, request_digest: requestDigest,
+      audit_target: {
+        schema: 'village-kakao-tool-audit-target/v1', effect_type: 'reservation_registration',
+        action_type: 'create', target_type: 'request', target_id: 'RQ-260907-001'
+      }
+    }]);
+    assert.deepEqual(receipt.authorized_registration, request.registration);
+    assert.equal(receipt.request_digest, requestDigest);
+    assert.equal(receipt.operation_id, 'operation-opaque-1');
+    assert.deepEqual(channel.calls.receipt, [receipt]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP rejects confirmed registration evidence that is not bound to durable DOM roles and hash before reservation', async () => {
+  for (const sourceEvidence of [
+    { ...confirmedRegistration().source_evidence, conversation_evidence_hash: 'b'.repeat(64) },
+    {
+      ...confirmedRegistration().source_evidence,
+      staff_message_ids: ['dom-customer-1'],
+      staff_confirmation: '고객의 정확한 예약 요청'
+    }
+  ]) {
+    const channel = makeChannel();
+    let executions = 0;
+    const app = await start(createHermesGatewayHttpHandler({
+      token, channel, transport: 'gateway',
+      executeConfirmedReservationCommit: async () => { executions += 1; }
+    }));
+    try {
+      const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmed-reservation-commit', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(confirmedRegistrationBody({
+          registration: confirmedRegistration({ source_evidence: sourceEvidence })
+        }))
+      });
+      assert.equal(response.status, 422);
+      assert.deepEqual(await response.json(), { error: 'confirmed_reservation_evidence_mismatch' });
+      assert.equal(executions, 0);
+      assert.equal(channel.calls.reservation.length, 0);
+      assert.equal(channel.calls.receipt.length, 0);
+    } finally {
+      await app.close();
+    }
+  }
+});
+
+test('Gateway HTTP coalesces only the exact confirmed reservation digest and blocks no-send writes', async () => {
+  const channel = makeChannel();
+  const request = confirmedRegistrationBody();
+  let releaseExecution;
+  const gate = new Promise((resolve) => { releaseExecution = resolve; });
+  let executionStarted;
+  const started = new Promise((resolve) => { executionStarted = resolve; });
+  let executions = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeConfirmedReservationCommit: async (body) => {
+      executions += 1;
+      executionStarted();
+      await gate;
+      return confirmedRegistrationReceipt(body);
+    }
+  }));
+  try {
+    const post = (body) => gatewayFetch(app.url, '/hermes/v1/tools/confirmed-reservation-commit', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const first = post(request);
+    await started;
+    const duplicate = post(request);
+    const conflict = await post({
+      ...request,
+      registration: confirmedRegistration({ desired_after: [{ name: '소니 FX3 바디세트', quantity: 2 }] })
+    });
+    assert.equal(conflict.status, 409);
+    assert.deepEqual(await conflict.json(), { error: 'confirmed_reservation_commit_conflict' });
+    releaseExecution();
+    const results = await Promise.all([first, duplicate]);
+    assert.deepEqual(results.map((response) => response.status), [200, 200]);
+    assert.equal(executions, 1);
+  } finally {
+    releaseExecution?.();
+    await app.close();
+  }
+
+  const noSendChannel = makeChannel();
+  const noSend = await start(createHermesGatewayHttpHandler({
+    token, channel: noSendChannel, transport: 'gateway_no_send',
+    executeConfirmedReservationCommit: async () => { throw new Error('must not execute'); }
+  }));
+  try {
+    const response = await gatewayFetch(noSend.url, '/hermes/v1/tools/confirmed-reservation-commit', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request)
+    });
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { error: 'writes_disabled' });
+    assert.equal(noSendChannel.calls.reservation.length, 0);
+  } finally {
+    await noSend.close();
   }
 });
 
