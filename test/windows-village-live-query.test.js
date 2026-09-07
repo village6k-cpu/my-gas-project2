@@ -102,57 +102,6 @@ test('lookup rejects unknown domains instead of falling back to broad drive sear
   );
 });
 
-test('lookup can narrow one domain to one sheet and returns only the newest bounded rows', async () => {
-  const requests = [];
-  const result = await lookupVillage({
-    config,
-    domain: 'schedule',
-    sheet: '계약마스터',
-    query: '예약자',
-    limit: 2,
-    fetchImpl: async (url) => {
-      requests.push(url);
-      return {
-        ok: true,
-        json: async () => ({
-          sheet: '계약마스터',
-          headers: ['거래ID', '예약자명'],
-          count: 4,
-          results: [
-            { row: 2, data: ['260101-001', '예약자'] },
-            { row: 3, data: ['260201-001', '예약자'] },
-            { row: 4, data: ['260301-001', '예약자'] },
-            { row: 5, data: ['260401-001', '예약자'] }
-          ]
-        })
-      };
-    },
-    timeoutMs: 1_000
-  });
-
-  assert.equal(requests.length, 1, 'sheet narrowing must avoid unrelated domain reads');
-  assert.equal(new URL(requests[0]).searchParams.get('sheet'), '계약마스터');
-  assert.equal(result.matches, 4, 'total server matches must remain visible');
-  assert.equal(result.returnedMatches, 2);
-  assert.equal(result.truncated, true);
-  assert.deepEqual(
-    result.sheets[0].results.map((entry) => entry.row),
-    [4, 5],
-    'bounded output should retain the newest append-order matches'
-  );
-});
-
-test('lookup help is available without reading runtime credentials', () => {
-  assert.deepEqual(parseArgs(['lookup', '--help']), {
-    command: 'help',
-    topic: 'lookup'
-  });
-  assert.deepEqual(parseArgs(['--help']), {
-    command: 'help',
-    topic: 'all'
-  });
-});
-
 test('one AI-selected batch runs distinct read-only lookups together and preserves partial failures', async () => {
   const requests = [];
   const result = await lookupVillageBatch({

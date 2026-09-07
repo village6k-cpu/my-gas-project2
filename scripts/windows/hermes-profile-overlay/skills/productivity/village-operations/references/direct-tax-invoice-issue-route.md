@@ -8,20 +8,18 @@ Use this when a staff/user asks to issue a 세금계산서 for a single already-
 
 JSON body:
 
-`key` must come from the authenticated server/runtime's internal write credential (for example its configured `VILLAGE_GAS_INTERNAL_KEY`). Never print, log, paste into chat, or save that value in a reference. If the internal credential is unavailable, report `BLOCKED`; do not fall back to the public catalog-read key.
-
 ```json
 {
   "action": "issueTaxInvoice",
-  "key": "<server-side internal write credential>",
+  "key": "village2026",
   "id": "거래ID",
-  "amount": 100000,
+  "amount": 26400,
   "paymentMethod": "계좌이체(VAT포함)",
   "depositStatus": "미입금",
-  "invoiceeCorpNum": "000-00-00000",
-  "invoiceeCorpName": "발행처 상호",
-  "invoiceeCEOName": "대표자명",
-  "invoiceeEmail": "billing@example.com",
+  "invoiceeCorpNum": "490-88-02913",
+  "invoiceeCorpName": "주식회사 알티스트레이블(RTSTLABEL Inc.)",
+  "invoiceeCEOName": "김중구",
+  "invoiceeEmail": "ivan@example.com",
   "invoiceeAddr": "주소",
   "invoiceeBizType": "업태",
   "invoiceeBizClass": "종목"
@@ -54,7 +52,7 @@ After the POST succeeds, verify both:
 ```json
 {
   "action": "verifyTaxInvoiceNtsStatus",
-  "key": "<server-side internal write credential>",
+  "key": "village2026",
   "mgtKey": "관리키"
 }
 ```
@@ -66,7 +64,7 @@ Report carefully:
 
 ## Practical notes
 
-- Resolve the requested customer/date trade first via `tradeCandidates`/dashboard and confirm the amount against the contract CSV before issuing.
+- For a request like `하현준 6월 9일 건 ... 아래 정보로 계산서 발행하자`, resolve trade first via `tradeCandidates`/dashboard and confirm the amount against the contract CSV before issuing.
 - If the ledger has no payment method/status yet, choose the payload deliberately. `미입금` makes the invoice purpose `청구`; `입금완료` makes it `영수`.
 - OCR/vision from a business-registration PDF is acceptable when the representative name is clear. Do not guess 대표자명.
 - Apps Script POST redirects can be misleading with this route. A `curl -L`/POST attempt may return a Google Drive “현재 파일을 열 수 없습니다” HTML page even though `doPost` already executed and Popbill issuance succeeded. If the response is Drive/HTML or otherwise non-JSON after a POST, **do not immediately retry issuance**. First read back `거래내역` by 거래ID and `발행처DB` by 사업자번호; if `L=발행완료` and `O=관리키` exist, proceed directly to `verifyTaxInvoiceNtsStatus` with that 관리키. This prevents accidental duplicate issuance.

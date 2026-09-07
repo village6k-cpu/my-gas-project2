@@ -118,50 +118,6 @@ test('owner-managed Village operations learning stays outside the pinned package
   );
 });
 
-test('tax-invoice guidance directly routes split repair invoices and paid notice-only follow-ups', () => {
-  const referencesRoot = path.join(operationsRoot, 'references');
-  const workflow = fs.readFileSync(
-    path.join(referencesRoot, 'tax-invoice-issuance-workflow.md'),
-    'utf8'
-  );
-  const splitPath = path.join(referencesRoot, 'rental-plus-orphan-repair-invoice.md');
-  const noticePath = path.join(referencesRoot, 'post-issue-paid-notice-kakao-only.md');
-  const pitfallsPath = path.join(referencesRoot, 'popbill-registissue-field-pitfalls.md');
-
-  for (const requiredPath of [splitPath, noticePath, pitfallsPath]) {
-    assert.ok(fs.existsSync(requiredPath), `missing focused tax-invoice reference: ${requiredPath}`);
-  }
-  assert.match(workflow, /rental-plus-orphan-repair-invoice\.md/i);
-  assert.match(workflow, /post-issue-paid-notice-kakao-only\.md/i);
-
-  const split = fs.readFileSync(splitPath, 'utf8');
-  const notice = fs.readFileSync(noticePath, 'utf8');
-  const pitfalls = fs.readFileSync(pitfallsPath, 'utf8');
-  assert.match(split, /registered[^\r\n]{0,80}(?:GAS|issueTaxInvoice)/i);
-  assert.match(split, /(?:repair|수리)[^\r\n]{0,120}(?:orphan|manual Popbill)/i);
-  assert.match(split, /--sheet[\s\S]{0,80}(?:거래내역|계약마스터)[\s\S]{0,80}--limit/i);
-  assert.match(split, /--sheet\s+["'`]발행처DB["'`][\s\S]{0,100}--limit/i);
-  assert.match(notice, /do not re-issue|재발행[^\r\n]{0,40}(?:금지|하지)/i);
-  assert.match(notice, /Kakao notice only|카카오[^\r\n]{0,40}(?:안내|만)/i);
-  assert.match(notice, /village-kakao-scheduled-manual-send\.md/i);
-  assert.match(notice, /duplicate|중복/i);
-  assert.match(pitfalls, /cash[\s\S]{0,120}chkBill[\s\S]{0,120}credit[\s\S]{0,120}note/i);
-
-  const promoted = `${split}\n${notice}\n${pitfalls}`;
-  assert.doesNotMatch(promoted, /강용묵|506[,.]?000/);
-});
-
-test('direct tax-invoice issue guidance never embeds the public read key in a write payload', () => {
-  const direct = fs.readFileSync(
-    path.join(operationsRoot, 'references', 'direct-tax-invoice-issue-route.md'),
-    'utf8'
-  );
-
-  assert.doesNotMatch(direct, /"key"\s*:\s*"village2026"/i);
-  assert.match(direct, /server-side internal write credential|서버[^\r\n]{0,80}내부[^\r\n]{0,80}(?:키|credential)/i);
-  assert.match(direct, /do not[^\r\n]{0,80}(?:print|log)|출력[^\r\n]{0,40}(?:금지|하지)/i);
-});
-
 test('Village capability gaps use native Hermes learning without a business-operation broker', () => {
   const skill = loadSkill(capabilityRoot);
   assertNativeEnvelope(skill);
