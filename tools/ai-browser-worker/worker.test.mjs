@@ -272,6 +272,13 @@ test('buildKakaoGatewayTurn builds a bounded credential-safe native Hermes event
   assert.match(turn.event.prompt, /FINAL_JSON/);
   assert.match(turn.event.prompt, /AI-first Kakao rental-shop worker task/);
   assert.match(turn.event.prompt, /village_confirmation_request/);
+  assert.ok(turn.event.prompt.includes(JSON.stringify({
+    job_id: snapshot.jobId,
+    room_key: snapshot.roomKey,
+    room_revision: snapshot.roomRevision,
+    conversation_revision: snapshot.roomRevision,
+    conversation_evidence_hash: snapshot.evidenceHash
+  }, null, 2)), 'the native adapter consumes prompt only, so trusted evidence must be in prompt');
   assert.equal(turn.internal.snapshot, snapshot);
   assert.equal(turn.internal.lookupContext.kill_switch.status, 'active');
   assert.deepEqual(turn.event.raw.evidence.lookup.kill_switch, { status: 'active', error: null });
@@ -4136,6 +4143,7 @@ test('createWorkerTimingRecorder records named stages and total elapsed time', (
 function completeSheetDecision(overrides = {}) {
   const base = {
     should_write_to_sheet: true,
+    inquiry_disposition: 'new_inquiry',
     classification: 'reservation',
     confidence: 'high',
     safety_checks: {
@@ -7327,6 +7335,15 @@ test('confirmation execution validation rejects incomplete catalog decisions bef
   assert.ok(missingValidation.errors.some((error) => error.includes('catalog_match_status')));
   assert.equal(countValidation.valid, false);
   assert.ok(countValidation.errors.some((error) => error.includes('one-to-one')));
+});
+
+test('native confirmation execution cannot remove inquiry disposition to bypass source evidence', () => {
+  const decision = completeSheetDecision({ inquiry_disposition: 'independent_rental' });
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision).valid, false);
+  delete decision.inquiry_disposition;
+  const validation = workerModule.validateVillageConfirmationExecutionDecision(decision);
+  assert.equal(validation.valid, false);
+  assert.match(validation.errors.join('|'), /inquiry_disposition is required/);
 });
 
 test('confirmation execution preflight rejects a complete sheet row when required safety evidence is missing', () => {
@@ -13158,6 +13175,21 @@ test('confirmation batch rejects invalid later catalog before creating the first
   });
   assert.equal(writes,0);
   assert.equal(receipt.status,'failed');
+});
+
+test('confirmation batch rejects a child missing disposition before any lookup or write', async () => {
+  const first = completeSheetDecision();
+  const second = completeSheetDecision({ sheet_row_candidate: { start_date: '2026-07-25' } });
+  delete second.inquiry_disposition;
+  const forbidden = async () => assert.fail('invalid batch must fail before external effects');
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    job: { jobId: 'batch', roomKey: 'room', roomRevision: 7 },
+    decision: { ...first, confirmation_requests: [first, second] },
+    dependencies: { fetchEquipmentCatalogSnapshot: forbidden, appendToSheet: forbidden }
+  });
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.request_results.length, 0);
+  assert.deepEqual(receipt.unattempted_indices, [0, 1]);
 });
 
 
