@@ -232,7 +232,9 @@ function validateCase(value: unknown, query: { view: string; category: string | 
     || value.completedStepCount > value.totalStepCount) throw new Error("v2 response invalid");
   const receivedAt = canonicalTimestamp(value.receivedAt);
   const updatedAt = canonicalTimestamp(value.updatedAt);
-  if (receivedAt === null || updatedAt === null || Date.parse(receivedAt) > Date.parse(updatedAt)
+  // Receipt time comes from the worker; updatedAt comes from the database clock.
+  // Both must be valid, but their ordering is not a cross-system invariant.
+  if (receivedAt === null || updatedAt === null
     || query.category !== null && !value.categories.includes(query.category)) throw new Error("v2 response invalid");
   const steps = value.steps.map(validateCaseStep);
   if (new Set(steps.map((step: any) => step.id)).size !== steps.length
