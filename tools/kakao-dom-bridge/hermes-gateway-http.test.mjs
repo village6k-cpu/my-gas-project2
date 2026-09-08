@@ -346,6 +346,29 @@ async function withRealGatewayChannel(run) {
   }
 }
 
+test('Gateway HTTP renews only the live exact lease without changing the attempt or admitting another consumer', async () => {
+  await withRealGatewayChannel(async ({channel, clock}) => {
+    await channel.enqueue({schema:'village-kakao-gateway-event/v1',job_id:'job-renew',room_key:'room-renew',
+      room_revision:1,prompt:'bounded work',detected_at:new Date(clock.now).toISOString(),raw:{}});
+    const claim=await channel.claim({consumerId:'native',waitMs:0});
+    const app=await start(createHermesGatewayHttpHandler({token,channel,transport:'gateway'}));
+    const body={job_id:claim.job_id,room_key:claim.room_key,room_revision:claim.room_revision,lease_id:claim.lease_id};
+    try {
+      for(let count=0;count<7;count++) {
+        clock.now+=800;
+        const response=await gatewayFetch(app.url,'/hermes/v1/lease-renewals',{method:'POST',body:JSON.stringify(body)});
+        assert.equal(response.status,200);
+        assert.equal((await response.json()).lease_expires_at,new Date(clock.now+1000).toISOString());
+        assert.equal(await channel.claim({consumerId:'competitor',waitMs:0}),null);
+      }
+      assert.equal((await channel.get(claim.job_id)).attempts,1);
+      assert.equal((await gatewayFetch(app.url,'/hermes/v1/lease-renewals',{method:'POST',body:JSON.stringify({...body,room_revision:2})})).status,409);
+      clock.now+=1001;
+      assert.equal((await gatewayFetch(app.url,'/hermes/v1/lease-renewals',{method:'POST',body:JSON.stringify(body)})).status,409);
+    } finally {await app.close();}
+  });
+});
+
 test('Gateway HTTP claims a snake-case event with its opaque lease id', async () => {
   const channel = makeChannel();
   const app = await start(createHermesGatewayHttpHandler({ token, channel, transport: 'gateway' }));

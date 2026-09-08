@@ -255,11 +255,7 @@ function productionNormalizeContext() {
   assert.ok(helperStart >= 0 && helperEnd > helperStart);
   assert.ok(normalizeStart >= 0 && normalizeEnd > normalizeStart);
   const context = {};
-  vm.runInNewContext(
-    `${gas.slice(helperStart, helperEnd)}\n${gas.slice(normalizeStart, normalizeEnd)}\n`
-      + 'this.normalize = _normalizeConfirmedReservationCommit_;',
-    context
-  );
+  vm.runInNewContext(gas + '\nthis.normalize = _normalizeConfirmedReservationCommit_;', context);
   return context;
 }
 

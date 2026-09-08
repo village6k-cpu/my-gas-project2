@@ -424,6 +424,16 @@ export function createHermesGatewayHttpHandler({
         return true;
       }
 
+      if (req.method === 'POST' && url.pathname === '/hermes/v1/lease-renewals') {
+        const body = await readJsonBody(req);
+        requiredLeaseId(body);
+        const renewed = await channel.renewLease(body);
+        sendJson(res, 200, { ok: true, job_id: renewed.job_id, room_key: renewed.room_key,
+          room_revision: renewed.room_revision, lease_id: renewed.lease_id,
+          lease_expires_at: renewed.lease_expires_at });
+        return true;
+      }
+
       if (req.method === 'POST' && url.pathname === '/hermes/v1/results') {
         const body = await readJsonBody(req);
         requiredLeaseId(body);

@@ -148,6 +148,37 @@ async function withChannel(run, options = {}) {
   }
 }
 
+test('active native work renews the same lease beyond its initial duration without a retry', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('long-reasoning', 'room-long', 1));
+    const claim = await channel.claim({ consumerId: 'native', waitMs: 0 });
+    for (let i = 0; i < 12; i++) {
+      clock.now += 700;
+      const renewed = await channel.renewLease(claim);
+      assert.equal(renewed.lease_id, claim.lease_id);
+      assert.equal(renewed.attempts, 1);
+      assert.equal(await channel.claim({ consumerId: 'other', waitMs: 0 }), null);
+    }
+    await channel.reserveToolOperation(confirmationOperation(claim));
+    clock.now += 700;
+    assert.ok((await channel.renewLease(claim)).tool_operation);
+  });
+});
+
+test('lease renewal cannot resurrect expired work or renew another room or replaced lease', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('old-renewal', 'room-renew', 1));
+    const claim = await channel.claim({ consumerId: 'native', waitMs: 0 });
+    await assert.rejects(channel.renewLease({ ...claim, room_key: 'other' }));
+    await assert.rejects(channel.renewLease({ ...claim, lease_id: 'other' }));
+    clock.now += 1_001;
+    await assert.rejects(channel.renewLease(claim), /lease/);
+    const replacement = await channel.claim({ consumerId: 'native', waitMs: 0 });
+    assert.notEqual(replacement.lease_id, claim.lease_id);
+    await assert.rejects(channel.renewLease(claim), /lease/);
+  });
+});
+
 test('persists every job atomically under a SHA-256 name and recovers it after restart', async () => {
   await withChannel(async ({ directory, channel, clock }) => {
     await channel.enqueue(event('job-private-1', 'private-room', 1));
