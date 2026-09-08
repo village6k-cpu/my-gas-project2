@@ -6,7 +6,6 @@ import path from 'node:path';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import villageTimeContract from '../../scripts/windows/village-time-contract.js';
 import { INQUIRY_LIFECYCLE_PROMPT, inquiryLifecycleErrors, validatePendingInquiryRevision } from './inquiry-lifecycle.mjs';
 import { reconcileConfirmationBatchReceipt } from './confirmation-batch-reconciliation.mjs';
 import { isSharedHermesGatewayIdle } from './shared-hermes-browser.mjs';
@@ -46,7 +45,6 @@ export { validateWorkOrchestratorV2CutoverConfig } from '../work-orchestrator-v2
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const { extractVillageClockTokens, validateVillageRentalTimeSource } = villageTimeContract;
 
 const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec';
 // 공개 키 폴백 금지 — 키가 구성되지 않은 경로는 조용히 공개 키로 강등되는 대신
@@ -811,7 +809,7 @@ TASK:
 11. Apply INQUIRY LIFECYCLE first. New unresolved rentals are captured; pending requests are revised with their exact typed revision; already-applied or declined requests are not recreated. Search 고객DB by name/known phone; use one exact phone or blank. Missing genuinely unknown details remain in follow_up/evidence, not Q/R.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
 11-2. Separate top-level equipment. New inquiry="full_plan"+all currently requested equipment; its schedule may be incomplete. exact typed pending additions="additions_only"+delta; customer_requested_pending_revision or exact staff-confirmed pending remove/replace/reduce="replace_full_plan"+final plan. Registered changes use the native route, never equipment_write_mode. Otherwise no write + one review.
-11-3. Provided sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM; components still unknown after conversation/booking/single-session policy interpretation must be "" and plan_complete=false. Village uses literal 24-hour time: 오전/오후 표시가 없는 \`5시\` means \`05:00\` and \`17시\` means \`17:00\`; only explicit \`오후 5시\` means \`17:00\`. 맥락을 추측해 12시간을 더하지 마라. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If a complete normalized range is impossible or contradictory, leave the uncertain component blank, capture the inquiry as incomplete, and create one review follow-up instead of dropping it or guessing.
+11-3. Provided sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM; components still unknown after conversation/booking/single-session policy interpretation must be "" and plan_complete=false. Village uses literal 24-hour time: 오전/오후 표시가 없는 \`5시\` means \`05:00\` and \`17시\` means \`17:00\`; explicit \`오후 5시\` means \`17:00\`. 근거 없이 12시간을 더하지 마라. 저녁·밤·오후 같은 명시적 시간대 표현, 24시간 같은 대여 길이, 앞뒤 정정은 전체 대화에서 해석한다. 예를 들어 오늘 저녁 10시부터 24시간은 오늘 22:00부터 다음 날 22:00이다. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If a complete normalized range is impossible or contradictory, leave the uncertain component blank, capture the inquiry as incomplete, and create one review follow-up instead of dropping it or guessing.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
 12-1. For real-world mutations set requiresHumanAction=true, allowed actionFamily, stable businessKey; otherwise false, "none", "".
@@ -1341,35 +1339,9 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
         errors.push(`sheet_row_candidate.${field} must be ${expected}${incompleteNewInquiry ? ' when provided' : ''}`);
       }
     }
-    const customerTimeSource = text(decision.latest_customer_message_cluster).trim()
-      || (Array.isArray(decision.conversation_turns)
-        ? decision.conversation_turns
-          .filter((turn) => text(turn?.speaker_type).trim() === 'customer')
-          .map((turn) => text(turn?.message).trim())
-          .filter(Boolean)
-          .join(' ')
-        : '');
-    const customerClockTokens = extractVillageClockTokens(customerTimeSource);
-    if (customerClockTokens.length >= 2) {
-      const timeValidation = validateVillageRentalTimeSource({
-        sourceText: customerTimeSource,
-        pickupTime: row.pickup_time,
-        returnTime: row.return_time,
-        pairMode: 'last'
-      });
-      if (!timeValidation.ok) errors.push(...timeValidation.errors);
-    } else if (customerClockTokens.length === 1) {
-      const [token] = customerClockTokens;
-      const candidateTimes = [text(row.pickup_time).trim(), text(row.return_time).trim()];
-      if (!token.marker && token.sourceHour >= 1 && token.sourceHour <= 11) {
-        const pmGuess = `${String(token.sourceHour + 12).padStart(2, '0')}:${String(token.minute).padStart(2, '0')}`;
-        if (!candidateTimes.includes(token.normalized) && candidateTimes.includes(pmGuess)) {
-          errors.push(
-            `sheet time conflicts with bare customer clock ${token.raw}: Village 24-hour rule requires ${token.normalized}, not ${pmGuess}`
-          );
-        }
-      }
-    }
+    // The AI interprets the complete conversation (evening, duration, corrections).
+    // Re-parsing isolated clock tokens here can override a correct final period.
+    // Validate the structured date/time contract above, not natural-language meaning.
     if (!text(row.customer_name).trim()) errors.push('sheet_row_candidate.customer_name is required');
     if (!CONFIRM_REQUEST_DISCOUNT_TYPES.has(text(row.discount_type).trim())) {
       errors.push('sheet_row_candidate.discount_type must be an explicit allowed value');
@@ -11009,6 +10981,22 @@ export async function prepareKakaoGatewayDecision({
     }
   }
   if (decision) {
+    // FINAL may echo a tool result inside its input object. Results are never
+    // authority: recover only the exact server-sealed input, with one exact receipt.
+    const receipts = Array.isArray(trustedToolReceipts) ? trustedToolReceipts : [];
+    if (receipts.length === 1) {
+      const receipt = receipts[0];
+      for (const [field, exactReceipt, authorizedInput] of [
+        ['staff_confirmed_registration', exactTrustedConfirmedReservationCommitReceipt, trustedAuthorizedConfirmedRegistration],
+        ['staff_confirmed_mutation', exactTrustedRegisteredReservationChangeReceipt, trustedAuthorizedRegisteredMutation]
+      ]) {
+        const input = decision[field];
+        if (!input || typeof input !== 'object' || !exactReceipt(receipt, { jobId, roomKey, roomRevision })) continue;
+        const sealed = authorizedInput(receipt, { roomRevision });
+        const { commit_result: _commitResult, execution_result: _executionResult, ...withoutResult } = input;
+        if (sealed && sameGatewayDecisionValue(withoutResult, sealed)) decision[field] = sealed;
+      }
+    }
     // A final no-write statement may describe a completed customer inquiry revision.
     // Validate its execution intent only against this turn's trusted receipt; the exact
     // target and before/after state are checked again below before accepting success.
