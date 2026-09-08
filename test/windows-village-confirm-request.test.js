@@ -125,7 +125,7 @@ test('confirmed registration normalization requires one exact full-state authori
       start_time: '07:30'
     } },
     { expected_before: [] },
-    { expected_period: { start_date: '2026-09-07', start_time: '', end_date: '2026-09-07', end_time: '20:00' } },
+    { desired_period: { start_date: '2026-09-07', start_time: '', end_date: '2026-09-07', end_time: '20:00' } },
     { desired_after: [{ name: '', quantity: 1 }] },
     { desired_period: { start_date: '2026-09-07', start_time: '20:00', end_date: '2026-09-07', end_time: '07:00' } }
   ]) {

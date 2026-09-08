@@ -11702,7 +11702,7 @@ function _resolveStaffConfirmedPendingRequestFence_(sheet, fence, options) {
   var expectedSetComponents = Object.prototype.hasOwnProperty.call(fence, "expected_set_components")
     ? _normalizeStaffConfirmedSetComponents_(fence.expected_set_components)
     : null;
-  var allowIncompleteExpectedPeriod = !!(options && options.allowIncompleteExpectedPeriod === true);
+  var allowIncompleteExpectedPeriod = !(options && options.allowIncompleteExpectedPeriod === false);
   var expectedPeriod = allowIncompleteExpectedPeriod
     ? _normalizeCustomerRequestedPendingBaselinePeriod_(fence.expected_period)
     : _normalizeStaffConfirmedPendingPeriod_(fence.expected_period);
@@ -11807,13 +11807,45 @@ function _resolveCustomerRequestedPendingRevision_(sheet, req) {
   _assertInquirySourceEvidence_(fence.source_evidence);
   if (!Array.isArray(fence.expected_set_components)) throw new Error("고객 문의 수정의 세트 구성 baseline이 필요합니다.");
   var resolved = _resolveStaffConfirmedPendingRequestFence_(sheet, fence, {allowIncompleteExpectedPeriod: true});
-  _normalizeStaffConfirmedPendingPeriod_({start_date: req.반출일, start_time: req.반출시간,
+  var desiredPeriod = _normalizeCustomerRequestedPendingBaselinePeriod_({start_date: req.반출일, start_time: req.반출시간,
     end_date: req.반납일, end_time: req.반납시간});
-  if (!_confirmRequestSameIdentity_(resolved.group, String(req.예약자명 || "").trim(), _confirmRequestPhoneKey_(req.연락처))) {
+  ["start_date", "start_time", "end_date", "end_time"].forEach(function(key) {
+    if (resolved.expectedPeriod[key] && !desiredPeriod[key]) {
+      throw new Error("고객 문의 수정은 이미 알려진 일정을 빈칸으로 지울 수 없습니다.");
+    }
+  });
+  var identityUpdate = fence.customer_identity_update;
+  if (identityUpdate !== undefined && identityUpdate !== null) {
+    _assertPendingCustomerIdentityUpdate_(resolved.group, identityUpdate, req, fence.source_evidence);
+    resolved.customerIdentityUpdate = identityUpdate;
+  } else if (!_confirmRequestSameIdentity_(resolved.group, String(req.예약자명 || "").trim(), _confirmRequestPhoneKey_(req.연락처))) {
     throw new Error("고객 문의 수정 대상의 고객 정보가 일치하지 않습니다.");
   }
   resolved.authority = "customer_requested_pending_revision";
   return resolved;
+}
+
+function _assertPendingCustomerIdentityUpdate_(group, update, req, evidence) {
+  // Hermes determines that the final form belongs to this exact inquiry. Check
+  // its immutable evidence and current identity, without fuzzy name matching.
+  if (!update || typeof update !== "object" || Array.isArray(update) ||
+      Object.keys(update).some(function(key) { return ["expected_name", "expected_phone", "name", "phone", "discount_type"].indexOf(key) < 0; }) ||
+      ["expected_name", "expected_phone", "name", "phone"].some(function(key) { return typeof update[key] !== "string"; })) {
+    throw new Error("고객 정보 보완의 exact identity 형식 오류");
+  }
+  if (update.discount_type !== undefined && ["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"].indexOf(update.discount_type) < 0) {
+    throw new Error("고객 정보 보완의 할인유형 오류");
+  }
+  var phone = _confirmRequestPhoneKey_(update.phone);
+  var currentPhone = _confirmRequestPhoneKey_(group.phone);
+  var source = String(evidence && evidence.customer_request || "").normalize("NFKC");
+  if (update.expected_name.trim() !== group.name || _confirmRequestPhoneKey_(update.expected_phone) !== currentPhone ||
+      !update.name.trim() || update.name.trim().length > 120 || phone.length < 8 || phone.length > 15 ||
+      !/^[\d\s()+.\-]+$/.test(update.phone) || update.name.trim() !== String(req.예약자명 || "").trim() ||
+      phone !== _confirmRequestPhoneKey_(req.연락처) || (currentPhone && currentPhone !== phone) ||
+      source.indexOf(update.name.trim()) < 0 || source.replace(/[\s()+.\-]/g, "").indexOf(phone) < 0) {
+    throw new Error("고객 정보 보완의 baseline 또는 대화 근거가 일치하지 않습니다.");
+  }
 }
 
 function _assertNoUnfencedPendingRevision_(sheet, req, requestedEquipItems) {
@@ -12176,7 +12208,11 @@ function _insertAndCheckRequest(req) {
     // Keep existing customer/commercial fields unless this exact plan supplies them.
     // The caller's phone was checked against identity above; an equipment revision
     // preserves the stored contact instead of rewriting it from the model's copy.
-    req.연락처 = sheet.getRange(customerPendingFence.group.rows[0], 12).getDisplayValue();
+    if (!customerPendingFence.customerIdentityUpdate) {
+      req.연락처 = sheet.getRange(customerPendingFence.group.rows[0], 12).getDisplayValue();
+    } else if (customerPendingFence.customerIdentityUpdate.discount_type !== undefined) {
+      req.할인유형 = customerPendingFence.customerIdentityUpdate.discount_type;
+    }
     [["할인유형", "discount"], ["비고", "memo"], ["추가요청", "extraRequest"]].forEach(function(pair) {
       if (!Object.prototype.hasOwnProperty.call(req, pair[0])) req[pair[0]] = customerPendingFence.group[pair[1]] || "";
     });
@@ -12455,7 +12491,7 @@ function _insertAndCheckRequest(req) {
   for (var r = startRow; r <= sheetLastRow; r++) {
     var rowData = sheet.getRange(r, 1, 1, 17).getDisplayValues()[0];
     if (rowData[0] !== reqID) break;  // 다른 reqID가 나오면 종료
-    if (!finalPeriod && rowData[1]) {
+    if (!finalPeriod && r === startRow) {
       finalPeriod = {
         start_date: String(rowData[1] || "").trim(),
         start_time: String(rowData[2] || "").trim(),
@@ -15151,7 +15187,7 @@ function _normalizeConfirmedReservationCommit_(input) {
     confirmed: true, target_scope: true, request_id: true, source_evidence: true,
     expected_before: true, expected_period: true, desired_after: true, desired_period: true,
     expected_set_components: true, set_component_selections: true,
-    pending_request_candidate: true
+    pending_request_candidate: true, customer_identity_update: true
   };
   Object.keys(input).forEach(function(key) {
     if (!allowed[key]) throw new Error("unsupported confirmed registration field: " + key);
@@ -15294,18 +15330,25 @@ function _normalizeConfirmedReservationCommit_(input) {
       throw new Error("set_component_selections[" + index + "] must target expected_set_components");
     }
   });
-  var expectedPeriod = _normalizeStaffConfirmedPendingPeriod_(input.expected_period);
+  var expectedPeriod = _normalizeCustomerRequestedPendingBaselinePeriod_(input.expected_period);
   var desiredPeriod = _normalizeStaffConfirmedPendingPeriod_(input.desired_period);
   var desiredStart = Date.parse(desiredPeriod.start_date + "T" + desiredPeriod.start_time + ":00Z");
   var desiredEnd = Date.parse(desiredPeriod.end_date + "T" + desiredPeriod.end_time + ":00Z");
   if (!Number.isFinite(desiredStart) || !Number.isFinite(desiredEnd) || desiredEnd <= desiredStart) {
     throw new Error("desired_period end must be after start");
   }
+  var identityUpdate = input.customer_identity_update;
+  if (identityUpdate) {
+    if (requestId === null) throw new Error("customer_identity_update requires an existing pending RQ");
+    _assertPendingCustomerIdentityUpdate_({name: identityUpdate.expected_name, phone: identityUpdate.expected_phone},
+      identityUpdate, {예약자명: identityUpdate.name, 연락처: identityUpdate.phone}, evidence);
+  }
   return {
     confirmed: true,
     target_scope: "pending_request",
     request_id: requestId,
     pending_request_candidate: pendingRequestCandidate,
+    ...(identityUpdate ? {customer_identity_update: identityUpdate} : {}),
     source_evidence: {
       customer_request: customerRequest,
       staff_confirmation: staffConfirmation,
@@ -15464,12 +15507,23 @@ function _applyConfirmedReservationExactSetComponents_(sheet, reqID, desiredComp
     currentBySet[row.set_item].push(row);
   });
   var desiredBySet = {};
+  var includedComponents = {};
+  current.components.forEach(function(row) {
+    var key = JSON.stringify([row.set_item, row.component_item, row.quantity]);
+    includedComponents[key] = (includedComponents[key] || 0) + 1;
+  });
   desired.forEach(function(row) {
     if (!current.topLevel[row.set_item]) {
       throw new Error("exact set projection owner is not in the request: " + row.set_item);
     }
     if (!catalogNames[row.component_item]) {
-      throw new Error("exact set projection component is not an exact catalog item: " + row.component_item);
+      // Preserve an exact included component already expanded by the set
+      // master. Only a new/substituted item needs independent catalog identity.
+      var includedKey = JSON.stringify([row.set_item, row.component_item, row.quantity]);
+      if (!includedComponents[includedKey]) {
+        throw new Error("exact set projection component is not an exact catalog item: " + row.component_item);
+      }
+      includedComponents[includedKey]--;
     }
     if (!desiredBySet[row.set_item]) desiredBySet[row.set_item] = [];
     desiredBySet[row.set_item].push(row);
@@ -15562,9 +15616,10 @@ function _confirmedReservationReplacementRequest_(sheet, fence, normalized, expe
     반납일: normalized.desired_period.end_date,
     반납시간: normalized.desired_period.end_time,
     장비: normalized.desired_after.map(function(item) { return { 이름: item.name, 수량: item.quantity }; }),
-    예약자명: String(display[10] || raw[10] || fence.group.name || "").trim(),
-    연락처: String(display[11] || raw[11] || fence.group.phone || "").trim(),
-    할인유형: String(display[12] || raw[12] || "").trim(),
+    예약자명: normalized.customer_identity_update ? normalized.customer_identity_update.name : String(display[10] || raw[10] || fence.group.name || "").trim(),
+    연락처: normalized.customer_identity_update ? normalized.customer_identity_update.phone : String(display[11] || raw[11] || fence.group.phone || "").trim(),
+    할인유형: normalized.customer_identity_update && normalized.customer_identity_update.discount_type !== undefined
+      ? normalized.customer_identity_update.discount_type : String(display[12] || raw[12] || "").trim(),
     비고: String(display[16] || raw[16] || "").trim(),
     추가요청: String(display[17] || raw[17] || "").trim(),
     staff_confirmed_exact_set_components: expectedFinalSetComponents,
@@ -15600,6 +15655,13 @@ function _confirmedReservationResult_(normalized, effectiveRequestId, replacedRe
   });
   if (groups.length !== 1) throw new Error("registration readback request is missing: " + effectiveRequestId);
   var group = groups[0];
+  if (normalized.customer_identity_update) {
+    var finalIdentity = normalized.customer_identity_update;
+    if (group.name !== finalIdentity.name || group.phone !== _confirmRequestPhoneKey_(finalIdentity.phone) ||
+        (finalIdentity.discount_type !== undefined && group.discount !== finalIdentity.discount_type)) {
+      throw new Error("registered reservation authoritative readback mismatch: completed customer identity");
+    }
+  }
   if (!Array.isArray(expectedFinalSetComponents)) {
     throw new Error("registration expected set component readback is missing");
   }
@@ -15765,6 +15827,10 @@ function commitConfirmedReservation(args) {
         expected_period: normalized.expected_period
       });
     }
+    if (normalized.customer_identity_update) {
+      _assertPendingCustomerIdentityUpdate_(initialFence.group, normalized.customer_identity_update,
+        {예약자명: normalized.customer_identity_update.name, 연락처: normalized.customer_identity_update.phone}, normalized.source_evidence);
+    }
     expectedFinalSetComponents = _projectStaffConfirmedDesiredSetComponents_(
       normalized.request_id === null ? [] : normalized.expected_before,
       initialFence.expectedSetComponents || [],
@@ -15780,6 +15846,14 @@ function commitConfirmedReservation(args) {
       ).forEach(function(tradeId) {
         if (registeredTradeIds.indexOf(tradeId) < 0) registeredTradeIds.push(tradeId);
       });
+      if (normalized.customer_identity_update) {
+        var completedCustomer = _confirmedReservationRegisteredMatchRequest_(sheet, initialFence, period);
+        completedCustomer.예약자명 = normalized.customer_identity_update.name;
+        completedCustomer.연락처 = normalized.customer_identity_update.phone;
+        _findRegisteredTradesForConfirmRequest_(ss, completedCustomer).forEach(function(tradeId) {
+          if (registeredTradeIds.indexOf(tradeId) < 0) registeredTradeIds.push(tradeId);
+        });
+      }
     });
     if (registeredTradeIds.length > 0) {
       var registeredError = new Error(
@@ -15790,7 +15864,7 @@ function commitConfirmedReservation(args) {
     }
     if (!effectiveRequestId) effectiveRequestId = normalized.request_id;
     var needsReplacement = normalized.request_id !== null &&
-      (!_confirmedReservationPlanEquivalent_(normalized.expected_before, normalized.desired_after) ||
+      (normalized.customer_identity_update || !_confirmedReservationPlanEquivalent_(normalized.expected_before, normalized.desired_after) ||
        !_confirmedReservationPeriodEquivalent_(normalized.expected_period, normalized.desired_period));
     if (needsReplacement) {
       stage = "pending_request_replacement";

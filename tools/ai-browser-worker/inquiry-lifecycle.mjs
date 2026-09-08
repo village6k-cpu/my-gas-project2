@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import identityHelpers from '../../scripts/windows/pending-customer-identity.js';
 
 const dispositions = new Set(['new_inquiry', 'pending_revision', 'registered_change_inquiry', 'already_applied', 'inventory_only', 'declined', 'independent_rental']);
 const record = (value) => value && typeof value === 'object' && !Array.isArray(value);
@@ -73,6 +74,13 @@ export function validatePendingInquiryRevision(decision, options = {}) {
   if (revision === undefined || revision === null) return [];
   if (!record(revision)) return ['customer_requested_pending_revision must be an object'];
   const errors = validateCustomerInquiryEvidence(revision.source_evidence, options);
+  try {
+    const identity = identityHelpers.normalizePendingCustomerIdentity(revision.customer_identity_update, revision.source_evidence?.customer_request);
+    if (identity && (text(identity.name) !== text(decision.sheet_row_candidate?.customer_name) ||
+        identity.phone.replace(/\D/g, '') !== String(decision.sheet_row_candidate?.phone || '').replace(/\D/g, ''))) {
+      errors.push('customer_identity_update must match the final sheet customer');
+    }
+  } catch (error) { errors.push(error.message); }
   const ids = decision.existing_confirm_request_ids;
   if (revision.target_scope !== 'pending_request' || !/^RQ-\d{6}-\d{3}$/.test(revision.request_id || '')) errors.push('customer revision must target one exact pending RQ');
   if (!Array.isArray(ids) || ids.length !== 1 || ids[0] !== revision.request_id) errors.push('customer revision must match existing_confirm_request_ids');

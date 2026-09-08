@@ -117,6 +117,26 @@ test('ambiguous registered targets stop before creating another request', () => 
 
 const evidence = {customer_request:'장비 구성을 새 계획으로 바꿔 주세요', conversation_revision:'revision-1', conversation_evidence_hash:'a'.repeat(64), customer_message_ids:['message-1']};
 function revision(overrides = {}) { return {target_scope:'pending_request',request_id:'RQ-260907-001',expected_before:[{name:'이전 장비',quantity:1}],expected_period:{start_date:period[0],start_time:period[1],end_date:period[2],end_time:period[3]},expected_set_components:[],source_evidence:evidence,...overrides}; }
+
+test('same-room final form completes an exact nickname and blank contact with explicit AI identity evidence', () => {
+  const h = harness({contracts:[],requests:[pending({10:'지윤',11:''})]});
+  const finalEvidence = {...evidence,customer_request:'김지윤 / 010-0000-0002 / DJI 마이크 / F21C'};
+  h.insert(request([['DJI 마이크',1],['F21C',1]], {예약자명:'김지윤',연락처:'010-0000-0002',
+    customer_requested_pending_revision:revision({source_evidence:finalEvidence,
+      customer_identity_update:{expected_name:'지윤',expected_phone:'',name:'김지윤',phone:'010-0000-0002'}})}));
+  assert.equal(h.sheets['확인요청'].rows[0][10],'김지윤');
+  assert.equal(h.sheets['확인요청'].rows[0][11],'010-0000-0002');
+});
+
+for (const label of ['contradicting known contact','stale nickname','unsupported final identity']) {
+  test(`identity completion rejects ${label} before writes`, () => {
+    const h=harness({contracts:[],requests:[pending({10:'지윤',11:label==='contradicting known contact'?'01000000001':''})]});
+    assert.throws(()=>h.insert(request([['새 장비',1]],{예약자명:'김지윤',연락처:'01000000002',
+      customer_requested_pending_revision:revision({source_evidence:{...evidence,customer_request:label==='unsupported final identity'?'예약할게요':'김지윤 01000000002'},
+        customer_identity_update:{expected_name:label==='stale nickname'?'다른 이름':'지윤',expected_phone:label==='contradicting known contact'?'01000000001':'',name:'김지윤',phone:'01000000002'}})})));
+    assert.equal(h.sheets['확인요청'].writes,0);
+  });
+}
 test('same-period changed pending plan without a typed revision writes nothing', () => {
   const h = harness({contracts:[],requests:[pending()]});
   assert.throws(() => h.insert(request([['새 장비',1]])), e => e.code === 'pending_revision_required' && e.existingRequestId === 'RQ-260907-001');
@@ -190,6 +210,17 @@ test('customer revision cannot replace a complete schedule with missing fields',
   const h = harness({contracts:[],requests:[pending()]});
   assert.throws(() => h.insert(request([['새 장비',1]],{반납시간:'',일정미완성:true,customer_requested_pending_revision:revision()})));
   assert.equal(h.sheets['확인요청'].writes,0);
+});
+
+test('customer can revise equipment while retaining genuinely unknown schedule fields', () => {
+  const h=harness({contracts:[],requests:[pending({1:'',2:'',3:'',4:''})]});
+  const expected_period={start_date:'',start_time:'',end_date:'',end_time:''};
+  const result=h.insert(request([['새 장비',1]],{반출일:'',반출시간:'',반납일:'',반납시간:'',일정미완성:true,
+    customer_requested_pending_revision:revision({expected_period})}));
+  assert.equal(result.customer_requested_pending_revision.target_request_id,'RQ-260907-001');
+  assert.equal(result.scheduleComplete,false);
+  assert.equal(h.sheets['확인요청'].rows[0][5],'새 장비');
+  assert.deepEqual(h.sheets['확인요청'].rows[0].slice(1,5),['','','','']);
 });
 test('customer revision fills a precisely matched incomplete baseline period without guessing', () => {
   const h=harness({contracts:[],requests:[pending({3:'',4:''})]});

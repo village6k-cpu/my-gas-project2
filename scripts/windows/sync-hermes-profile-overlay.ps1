@@ -58,7 +58,8 @@ $skillNameAliases = @{
 }
 $ownerManagedSkillNames = @(
     'village-operations',
-    'village-capability-development'
+    'village-capability-development',
+    'village-kakao-gateway-worker'
 )
 $overlaySkillsRoot = Join-Path $PSScriptRoot 'hermes-profile-overlay\skills'
 $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -962,6 +963,11 @@ try {
     [void]$copiedNames.Add('village-capability-development')
 
     if ($ProfileScoped.IsPresent) {
+        $gatewaySkillSource = Join-Path $overlaySkillsRoot 'productivity\village-kakao-gateway-worker'
+        $gatewaySkillDestination = Join-Path $stagingRoot 'productivity\village-kakao-gateway-worker'
+        Copy-SkillPackage -Source $gatewaySkillSource -Destination $gatewaySkillDestination
+        Assert-PackageCopy -Source $gatewaySkillSource -Destination $gatewaySkillDestination
+        [void]$copiedNames.Add('village-kakao-gateway-worker')
         if (-not (Test-Path -LiteralPath (Join-Path $rpaSource 'SKILL.md') -PathType Leaf)) {
             throw "Profile-scoped parity source is missing '$rpaSource'."
         }

@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { normalizePendingCustomerIdentity, normalizePendingBaselinePeriod } = require('./pending-customer-identity.js');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 const { validateVillageRentalTimeSource } = require('./village-time-contract.js');
 
@@ -337,7 +338,7 @@ function normalizeConfirmationRequest(request) {
 const CONFIRMED_REGISTRATION_FIELDS = new Set([
   'confirmed', 'target_scope', 'request_id', 'source_evidence',
   'expected_before', 'expected_period', 'desired_after', 'desired_period',
-  'expected_set_components', 'set_component_selections', 'pending_request_candidate'
+  'expected_set_components', 'set_component_selections', 'pending_request_candidate', 'customer_identity_update'
 ]);
 const CONFIRMED_REGISTRATION_EVIDENCE_FIELDS = new Set([
   'customer_request', 'staff_confirmation', 'conversation_revision',
@@ -524,6 +525,8 @@ function normalizeConfirmedReservationCommit(value) {
     throw new Error('source_evidence customer and staff message IDs must not overlap');
   }
   const desiredAfter = normalizeConfirmedRegistrationPlan(value.desired_after, 'desired_after');
+  const identityUpdate = normalizePendingCustomerIdentity(value.customer_identity_update, value.source_evidence.customer_request);
+  if (identityUpdate && requestId === null) throw new Error('customer_identity_update requires an existing pending RQ');
   const expectedSetComponents = normalizeConfirmedRegistrationSetComponents(
     value.expected_set_components, 'expected_set_components'
   );
@@ -532,6 +535,7 @@ function normalizeConfirmedReservationCommit(value) {
     throw new Error('bootstrapped registration expected_set_components must be empty');
   }
   const desiredNames = new Set(desiredAfter.map((item) => item.name));
+  const expectedNames = new Set(normalizeConfirmedRegistrationPlan(value.expected_before, 'expected_before').map((item) => item.name));
   const baselineTargets = new Set(expectedSetComponents.map((entry) => (
     `${entry.set_item}\u0000${entry.component_item}`
   )));
@@ -539,7 +543,8 @@ function normalizeConfirmedReservationCommit(value) {
     if (!desiredNames.has(selection.set_item)) {
       throw new Error(`set_component_selections[${index}].set_item must exist in desired_after`);
     }
-    if (requestId !== null && !baselineTargets.has(`${selection.set_item}\u0000${selection.component_item}`)) {
+    if (requestId !== null && expectedNames.has(selection.set_item)
+      && !baselineTargets.has(`${selection.set_item}\u0000${selection.component_item}`)) {
       throw new Error(`set_component_selections[${index}] must target expected_set_components`);
     }
   }
@@ -547,6 +552,7 @@ function normalizeConfirmedReservationCommit(value) {
     confirmed: true,
     target_scope: 'pending_request',
     request_id: requestId,
+    ...(identityUpdate ? { customer_identity_update: identityUpdate } : {}),
     ...(requestId === null ? { pending_request_candidate: pendingRequestCandidate } : {}),
     source_evidence: {
       customer_request: requiredText(value.source_evidence.customer_request, 'source_evidence.customer_request', 2_000),
@@ -559,7 +565,7 @@ function normalizeConfirmedReservationCommit(value) {
     expected_before: normalizeConfirmedRegistrationPlan(value.expected_before, 'expected_before'),
     expected_set_components: expectedSetComponents,
     set_component_selections: setComponentSelections,
-    expected_period: normalizeConfirmedRegistrationPeriod(value.expected_period, 'expected_period'),
+    expected_period: normalizePendingBaselinePeriod(value.expected_period),
     desired_after: desiredAfter,
     desired_period: normalizeConfirmedRegistrationPeriod(value.desired_period, 'desired_period')
   };

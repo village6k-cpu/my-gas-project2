@@ -681,7 +681,7 @@ export function buildHermesPrompt(job, options = {}) {
 - INQUIRY LIFECYCLE에 따라 genuinely new 또는 아직 미반영인 변경 문의만 village_confirmation_request로 접수한다. 이미 처리된 예약/품목, 거절된 요청, 단순 보유 질문은 입력하지 않는다.
 - 일정은 먼저 대화/기존 예약/명시된 1회차 운영 기준으로 해석한다. 그래도 모르는 필드만 빈칸, plan_complete=false로 접수한다.
 - Verify unchanged existing RQs with read-only lookup. Reserve village_confirmation_request for the chosen inquiry write; never consume its operation lease to pre-verify.
-- A pending-RQ addition with typed staff_confirmed_mutation target_scope="pending_request" + kind="equipment_add" requires one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only"; the executor verifies the exact RQ and merges the authoritative plan. Never pre-read with the operation fence.
+- A pending-RQ addition with typed staff_confirmed_mutation target_scope="pending_request" + kind="equipment_add" requires one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only". candidate.equipment and reservation_inquiry.equipment_requested contain only the additions in the same order; mutation.desired_after is the full final plan. date_change=null when unchanged. Use village_read for the baseline, never the mutating tool as a pre-read.
 - Typed staff_confirmed_mutation target_scope="pending_request" + kind="equipment_remove"/"equipment_replace"/"equipment_quantity_change": one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ.
 - 최초 고객 장비 문의는 직원 확인 없이 즉시 확인요청에 입력한다. 이후 같은 방의 최신 직원 답변은 exact pending RQ의 등록 권한 증거가 될 수 있다.
 - 최초 확인요청 입력에는 staff_confirmed_mutation이 필요 없다. 고객 장비 문의 자체만으로 village_confirmation_request를 호출하고, 직원의 이후 답변은 별도의 등록·변경 권한으로 의미 판단한다.
@@ -689,7 +689,7 @@ export function buildHermesPrompt(job, options = {}) {
 - Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use only village_registered_reservation_change exactly once before FINAL_JSON. Equipment changes must carry the exact existing inquiry request_id and the same single ID in existing_confirm_request_ids; date_time_change must carry neither. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
 - Read the full same-room conversation. Native Hermes—not code or keywords—semantically decides whether a Village staff reply clearly and unconditionally authorizes the exact customer request; wording is open-ended.
 - For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit once before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
-- Fast/coalesced turn exception: if the customer equipment inquiry and a later clear staff authorization are both in this same immutable room snapshot but no RQ exists yet, still call village_confirmed_reservation_commit exactly once with request_id=null and pending_request_candidate copied from the internally consistent sheet_row_candidate, including the exact set_component_selections array when present. That one atomic operation creates or reuses the 확인요청 first, applies and rechecks those exact set choices, exact-fences its effective RQ, and only then registers it. Never invent an RQ ID and never split this into two tool calls.
+- Fast/coalesced turn: if this same snapshot contains the inquiry and clear staff authorization but no RQ exists, call village_confirmed_reservation_commit once with request_id=null. pending_request_candidate contains exactly customer_name, phone, discount_type, memo and extra_request. Put set_component_selections at registration top level, never inside pending_request_candidate. This atomic operation creates/reuses and verifies the RQ, applies exact choices and registers it. Never invent an RQ ID or split intake and registration into two calls.
 - Bind source_evidence to the immutable room snapshot: copy conversation_evidence_hash exactly, cite the exact customer_message_ids and staff_message_ids in DOM order, and copy those selected message texts verbatim (joined by real newline characters, not literal backslash-n) into customer_request and staff_confirmation. Never invent or summarize message evidence.
 - You own sender and authorization interpretation from the complete conversation. A DOM role of unknown means the extractor lacks explicit sender metadata; it does not mean the message is unusable. Use the visible conversation, adjacent turns, known sender roles and supplied bubble layout together to identify who spoke. Cite the existing message IDs under the roles you determined; never modify the snapshot or contradict a known opposing sender. If the actual speaker remains ambiguous after that review, do not claim authorization.
 - Evaluate the customer's current plan and whether staff authorization still applies across ALL subsequent turns. Quote requests, thanks and administrative replies can leave an earlier approval valid; cancellation, replacement requests, new conditions or withdrawn approval can invalidate it. Choose the applicable staff evidence semantically, even when it is not the last staff message or the final message. confirmed=true asserts your review of the current full conversation; no separate post_confirmation_review object is required. Do not register cancelled or not-yet-approved changes.
@@ -697,7 +697,7 @@ export function buildHermesPrompt(job, options = {}) {
 - After exact registration success, do not repeat the staff's confirmation. Use no_reply when no customer question remains. A separate later price question still deserves village_read and its independently verified price answer; retain any unfinished document task. A registration receipt does not mean that answer or document has already been delivered. Blocked/failed/partial/missing/contradictory receipt is one draft-only no-send owner review and is never auto-replayed.
 - A registered_trade mutation must not call village_confirmation_request again: the equipment inquiry RQ was created on the customer turn, and the registered tool atomically links/finalizes that exact RQ only after authoritative schedule readback.
 - Do not parse RQ or trade IDs from prose. Only exact typed fields backed by authoritative lookups count.
-- For ambiguous target, catalog, or staff evidence: set staff_confirmed_mutation=null, call no mutation tool, make no customer success claim, and create one urgent owner-review follow-up.
+- For ambiguous authorization or target of an existing registered change, do not execute that change or claim success. This does not block a new unresolved rental inquiry or an evidence-bound pending inquiry revision: capture what the customer currently requests, retain genuine uncertainties for review, and do not imply inventory/registration approval.
 - blocked, failed, partial_success, or contradictory registered readback is draft-only/no-send owner review. Never call either mutation tool again to replay it.
 - For an explicit registered-trade quote send, call village_document_send with the exact trade_id before FINAL_JSON. Choose tax_mode="supply_only" only for an explicit VAT-exclusive request; otherwise use "vat_included".
 - A successful correlated village_document_send receipt is the only delivery authority. Do not promise that a quote was or will be sent without that receipt; on tool failure use draft_only + owner review.
@@ -705,6 +705,7 @@ export function buildHermesPrompt(job, options = {}) {
 - A registration receipt proves registration only. If a later customer also requested a quote document, retain that exact open document follow-up after registration success; do not discard it or mark it delivered. Follow the single-operation receipt boundary and do not replay registration to generate a document.
 - If an RQ is absent, reconcile live contracts and schedules first. Do not retry the mutation tool under the consumed lease; absence can mean registration completed.
 - A no_action receipt is not creation success and grants no retry authority. Reconcile through read-only lookup, preserving any already completed operation.
+- inquiry_disposition=already_applied requires live final rows matching the requested plan. A blocked/failed/unexecuted tool call is still an unresolved inquiry or change, even if should_write_to_sheet=false prevents replay.
 - Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
     : `SHEETS TOOL AVAILABLE VIA GAS API:
 - The outer worker owns the hidden GAS endpoint and credential; target: 확인요청.
@@ -734,7 +735,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - read-catchup/backstop job일 수 있다. 마지막 버블이 "네네/감사합니다/견적서 부탁"이어도 같은 최근 고객 턴 앞쪽 예약형식 메시지가 있으면 확인요청/계약/스케줄 등록 여부를 확인한다.
 - 확인요청에 이미 RQ가 있으면 중복 입력 금지. 단, 그 RQ가 자동화가 만든 것이라고 추정하거나 보고하지 마라. 수동 입력일 수 있다.
 - 확인요청에 이미 RQ가 있으면 중복 입력은 금지하되, 반드시 그 RQ의 I열(결과)과 J열(상세)을 읽어서 가용확인 결과 기준으로 follow_up_items.summary/recommended_action/suggested_reply_draft를 만든다. 사람에게 "RQ 결과를 검토하라"고만 떠넘기지 마라.
-- L열 연락처 공란/O열 등록상태 "연락처 입력 필요": "연락처 즉시 요청 → 연락처 입력 → 가용 재확인 → 등록".
+- L열 연락처 공란/O열 등록상태 "연락처 입력 필요": 먼저 현재 대화의 최종 예약양식과 고객DB를 읽는다. 같은 문의의 최종 이름/연락처가 이미 있으면 exact customer_identity_update로 보완하며 처리한다. 실제로 확인할 수 없을 때만 연락처를 요청한다. 최종 등록은 비어 있는 expected_period를 그대로 기준으로 삼고 완성된 desired_period를 적용할 수 있다.
 - 기존 RQ 결과가 비어 있거나 읽히지 않으면 "가용확인 결과 없음/재확인 필요"로 보고한다. 결과가 ✅ 가용일 때만 고객 답변 초안에 예약 가능하다고 쓴다. ⚠️/❌/가용0/결과없음이면 가능 단정 금지.
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
 - 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/처리판 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
@@ -1177,7 +1178,10 @@ function staffConfirmedMutationDecisionErrors(decision, mutation, options = {}) 
   }
   const desiredPlan = normalizedStaffMutationPlan(mutation.desired_after, 'name');
   const sheetPlan = normalizedStaffMutationPlan(decision?.sheet_row_candidate?.equipment, 'item');
-  if (!sameGatewayDecisionValue(desiredPlan, sheetPlan)) {
+  const addedFinalPlan = mutation.kind === 'equipment_add'
+    ? canonicalPendingMutationPlan([...(mutation.expected_before || []), ...(sheetPlan || [])]) : null;
+  if (!sameGatewayDecisionValue(desiredPlan, sheetPlan)
+    && !(addedFinalPlan && sameGatewayDecisionValue(canonicalPendingMutationPlan(mutation.desired_after), addedFinalPlan))) {
     errors.push('pending staff_confirmed_mutation desired_after must equal the normalized sheet_row_candidate equipment plan');
   }
   return errors;
@@ -1322,9 +1326,9 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
     const row = decision.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'
       ? decision.sheet_row_candidate
       : {};
-    const incompleteNewInquiry = isIncompleteNewInquiryCapture(decision, row);
+    const incompleteNewInquiry = isIncompleteInquiryCapture(decision, row);
     if (!incompleteNewInquiry && row.plan_complete !== true) {
-      errors.push('sheet_row_candidate.plan_complete must be true unless this is a new incomplete equipment inquiry');
+      errors.push('sheet_row_candidate.plan_complete must be true unless this is an incomplete inquiry intake or exact pending revision');
     }
     for (const [field, validator, expected] of [
       ['start_date', isStrictIsoDate, 'YYYY-MM-DD'],
@@ -1710,7 +1714,7 @@ function sheetSafetyValidationErrors(decision = {}) {
   return errors.length ? errors : ['sheet writes require explicit safety_checks that prove the Kakao conversation state'];
 }
 
-function isIncompleteNewInquiryCapture(decision = {}, row = {}) {
+function isIncompleteInquiryCapture(decision = {}, row = {}) {
   const reservation = decision?.reservation_inquiry || {};
   const equipment = Array.isArray(reservation.equipment_requested) ? reservation.equipment_requested : [];
   const planned = Array.isArray(row.equipment) ? row.equipment : [];
@@ -1727,9 +1731,12 @@ function isIncompleteNewInquiryCapture(decision = {}, row = {}) {
     && reservation.already_registered === false
     && equipment.length > 0
     && planned.length > 0
-    && existingIds.length === 0
     && !decision.staff_confirmed_mutation
-    && (!mode || mode === 'full_plan');
+    && !decision.staff_confirmed_registration
+    && ((existingIds.length === 0 && (!mode || mode === 'full_plan'))
+      || (mode === 'replace_full_plan' && existingIds.length === 1
+        && decision.customer_requested_pending_revision?.request_id === existingIds[0]
+        && decision.customer_requested_pending_revision?.target_scope === 'pending_request'));
 }
 
 export function resolveEquipmentCatalogDecision(decision = {}, catalogSnapshot = {}) {
@@ -1992,7 +1999,7 @@ export function buildSheetAppendPayload(decision, options = {}) {
   const row = decision.sheet_row_candidate || {};
   const equipment = normalizeSheetEquipmentItems(decision);
   if (!equipment.length) return null;
-  const incompleteSchedule = isIncompleteNewInquiryCapture(decision, row);
+  const incompleteSchedule = isIncompleteInquiryCapture(decision, row);
   const requestWindow = normalizeConfirmRequestWindowForSheet(row)
     || (incompleteSchedule ? partialConfirmRequestWindowForSheet(row) : null);
   if (!requestWindow) return null;
@@ -10860,16 +10867,20 @@ function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, 
     type: schedule ? 'schedule_check' : 'reply_needed',
     route,
     taskKey: `gateway:${route}:${jobId || 'unknown'}`,
+    requiresHumanAction: true,
+    actionFamily: schedule ? 'reservation_change' : 'none',
+    businessKey: `gateway:${text(job.roomKey || job.room_key).trim() || jobId || 'unknown'}`,
     priority: schedule || status === 'failed' ? 'high' : 'normal',
     status: 'open',
     customer_name: customerName,
     title: schedule ? `${customerName} 스케줄 결과 사장 확인 필요` : `${customerName} Hermes 결과 확인 필요`,
     summary: text(reason).trim().slice(0, 1000) || 'Gateway 결과를 자동 적용할 수 없어 사람 확인이 필요합니다.',
     recommended_action: schedule
-      ? '권위 있는 확인요청 결과와 대화 초안을 대조한 뒤 사장이 직접 발송 여부를 결정하세요.'
+      ? '실패 단계와 최신 확인요청·계약·스케줄을 대조해 미완료 작업을 처리하세요. 적용된 작업은 재실행하지 마세요.'
       : '최신 카카오 대화와 Hermes 결과를 직접 확인한 뒤 답변 여부를 결정하세요.',
     suggested_reply_draft: text(decision?.suggested_reply_draft || decisionReply(decision).text).slice(0, 1000),
     evidence: [receiptId ? `receipt_id: ${receiptId}` : '', status ? `receipt_status: ${status}` : '', jobId ? `job_id: ${jobId}` : ''].filter(Boolean),
+    blocking_reason: text(receipt?.error?.message || receipt?.error || reason).slice(0, 1000) || null,
     due_hint: 'now',
     alertLevel: 'none'
   };

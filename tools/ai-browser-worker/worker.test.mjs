@@ -1750,7 +1750,7 @@ test('staff-confirmed mutation prompt captures initial customer inquiries immedi
   assert.doesNotMatch(prompt, /registered booking or pending-RQ additions="additions_only"/i);
   assert.doesNotMatch(prompt, /Never replace a registered booking/i);
   assert.match(prompt, /Do not parse[\s\S]*(RQ|trade)[\s\S]*from prose/i);
-  assert.match(prompt, /ambiguous target, catalog, or staff evidence[\s\S]*no mutation tool[\s\S]*one urgent owner-review follow-up/i);
+  assert.match(prompt, /ambiguous authorization or target[\s\S]*does not block a new unresolved rental inquiry/i);
   assert.match(prompt, /"staff_confirmed_mutation": object \| null/);
 });
 
@@ -1846,6 +1846,9 @@ test('typed pending stale or missing durable receipt stays no-send with one owne
     assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send', label);
     assert.equal(prepared.decision.owner_review_required, true, label);
     assert.equal(prepared.availabilityAwareRows.length, 1, label);
+    const {buildHumanWorkCandidates}=await import('../work-orchestrator-v2/work-items.mjs');
+    const candidates=buildHumanWorkCandidates({decision:prepared.decision,job,followUpRows:prepared.availabilityAwareRows});
+    assert.equal(candidates.length,1,`${label}: a failed native operation must persist actionable owner work`);
   }
 });
 
@@ -4346,6 +4349,14 @@ test('inquiry lifecycle customer pending revision is separate from registration 
   delete decision.customer_requested_pending_revision.expected_period.end_time;
   assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision, {roomRevision:7}).valid,false);
   decision.customer_requested_pending_revision.expected_period.end_time = '';
+  decision.sheet_row_candidate.end_date = '';
+  decision.sheet_row_candidate.return_time = '';
+  decision.sheet_row_candidate.plan_complete = false;
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision, {roomRevision:7}).valid,true);
+  const incompleteArgs=workerModule.buildSheetAppendPayload(decision).args;
+  assert.equal(incompleteArgs.일정미완성,true);
+  assert.equal(incompleteArgs.반납일,'');
+  assert.equal(incompleteArgs.반납시간,'');
   decision.reservation_inquiry.already_registered = true;
   assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision, { roomRevision: 7 }).valid, false);
 });
@@ -6139,7 +6150,7 @@ test('buildHermesPrompt requires existing RQ availability result before follow-u
 
   assert.match(prompt, /확인요청에 이미 RQ.*I열\(결과\).*J열\(상세\)/s);
   assert.match(prompt, /L열 연락처.*O열 등록상태.*연락처 입력 필요/s);
-  assert.match(prompt, /연락처 즉시 요청 → 연락처 입력 → 가용 재확인 → 등록/);
+  assert.match(prompt, /최종 예약양식과 고객DB[\s\S]*customer_identity_update[\s\S]*실제로 확인할 수 없을 때만 연락처를 요청/);
   assert.match(prompt, /사람에게 "RQ 결과를 검토하라"고만 떠넘기지 마라/);
   assert.match(prompt, /결과가 ✅ 가용일 때만.*예약 가능/s);
   assert.match(prompt, /follow-up must report the availability result itself/s);
@@ -8356,6 +8367,18 @@ test('typed additions-only pending RQ writes merge the authoritative full plan i
     { 이름: 'C스탠드', 수량: 3 },
     { 이름: '로닌 링그립', 수량: 1 }
   ]);
+});
+
+test('pending additions accept an explicit final desired plan while writing only the added quantities', () => {
+  const mutation=pendingMutationFixture({kind:'equipment_add',expected_before:[{name:'소니 FX3 풀세트',quantity:1}],
+    desired_after:[{name:'소니 FX3 풀세트',quantity:1},{name:'소니 ECM-673',quantity:1},{name:'줌 F6',quantity:1}]});
+  const decision=pendingDecisionFixture({staff_confirmed_mutation:mutation,
+    sheet_row_candidate:{equipment_write_mode:'additions_only',equipment:[{item:'소니 ECM-673',quantity:1},{item:'줌 F6',quantity:1}]}});
+  assert.equal(validateAiDecisionContract(decision).valid,true);
+  const payload=buildSheetAppendPayload(decision,{apiKey:'test'});
+  const result=mergeAdditionsOnlySheetPayloadWithExistingRequest(payload,decision,{reqID:mutation.request_id,topLevelEquipment:[{이름:'소니 FX3 풀세트',수량:1}]});
+  assert.equal(result.ok,true);
+  assert.deepEqual(result.payload.args.장비,mutation.desired_after.map(x=>({이름:x.name,수량:x.quantity})));
 });
 
 test('typed additions-only pending RQ writes fail closed without an authoritative full plan', () => {

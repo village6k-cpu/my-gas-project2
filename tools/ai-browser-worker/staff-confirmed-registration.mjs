@@ -2,12 +2,13 @@ import { createHash, randomUUID as defaultRandomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const { normalizePendingCustomerIdentity, normalizePendingBaselinePeriod } = require('../../scripts/windows/pending-customer-identity.js');
 const { commitConfirmedReservation: defaultCommitConfirmedReservation } = require('../../scripts/windows/village-confirm-request.js');
 
 const REGISTRATION_FIELDS = new Set([
   'confirmed', 'target_scope', 'request_id', 'source_evidence',
   'expected_before', 'expected_period', 'desired_after', 'desired_period',
-  'expected_set_components', 'set_component_selections', 'pending_request_candidate'
+  'expected_set_components', 'set_component_selections', 'pending_request_candidate', 'customer_identity_update'
 ]);
 const EVIDENCE_FIELDS = new Set([
   'customer_request', 'staff_confirmation', 'conversation_revision',
@@ -342,7 +343,11 @@ export function validateStaffConfirmedRegistration(value, { roomRevision, roomSn
   errors.push(...planErrors(value.expected_before, 'expected_before'));
   errors.push(...setComponentBaselineErrors(value.expected_set_components));
   errors.push(...setComponentSelectionErrors(value.set_component_selections));
-  errors.push(...periodErrors(value.expected_period, 'expected_period'));
+  try { normalizePendingBaselinePeriod(value.expected_period); } catch (error) { errors.push(error.message); }
+  try {
+    const update = normalizePendingCustomerIdentity(value.customer_identity_update, value.source_evidence?.customer_request);
+    if (update && value.request_id === null) errors.push('customer_identity_update requires an existing pending RQ');
+  } catch (error) { errors.push(error.message); }
   errors.push(...planErrors(value.desired_after, 'desired_after'));
   errors.push(...periodErrors(value.desired_period, 'desired_period'));
   if (value.request_id === null && Array.isArray(value.expected_set_components)
@@ -443,6 +448,10 @@ function exactAuthoritativeRequestReadback(result, registration) {
   const finalComponents = canonicalComponentRows(result?.final_set_components);
   if (!requestComponents || !finalComponents
     || !sameCanonicalValue(requestComponents, finalComponents)) return false;
+  const identity = registration?.customer_identity_update;
+  if (identity && (normalizedText(request.name) !== normalizedText(identity.name)
+    || phoneKey(request.phone) !== phoneKey(identity.phone)
+    || (identity.discount_type !== undefined && normalizedText(request.discount) !== identity.discount_type))) return false;
   if (registration?.request_id === null) {
     const candidate = registration?.pending_request_candidate;
     if (!candidate || normalizedText(request.name) !== normalizedText(candidate.customer_name)

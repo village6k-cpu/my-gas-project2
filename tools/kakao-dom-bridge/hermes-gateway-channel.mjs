@@ -686,6 +686,21 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       } while (true);
     },
 
+    async renewLease(envelope) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(envelope?.job_id, 'job_id'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertEnvelope(job, envelope);
+        assertCurrentLease(job, envelope);
+        // Renewal belongs to the running native turn, never a new attempt. In
+        // particular it cannot resurrect an expired or superseded operation.
+        const expiresAt = currentTime() + leaseDuration;
+        return clone(await update(job, {
+          lease_expires_at: iso(expiresAt), lease_expires_at_ms: expiresAt
+        }));
+      });
+    },
+
     async reserveToolOperation(operation) {
       return mutate(async () => {
         const normalized = normalizeToolOperation(operation);
