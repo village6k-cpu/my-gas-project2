@@ -71,7 +71,7 @@ assert(
   "수정 패널은 장비가 실제로 바뀌었는지 비교해야 한다",
 );
 assert(
-  /if \(equipmentChanged\) args\.장비 =/.test(editPanel),
+  /if \(equipmentChanged\)\s*(?:\{\s*)?args\.장비 =/.test(editPanel),
   "고객명·연락처·할인만 저장할 때 장비 전체 목록을 GAS로 다시 보내면 안 된다",
 );
 assert(

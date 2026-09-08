@@ -1007,7 +1007,23 @@ function EditPanel({
     };
     // 고객정보/할인만 바뀐 저장에 20~30개 장비 전체를 다시 보내면 GAS가 모든 행을
     // 재작성·재확인한다. 장비가 실제로 달라졌을 때만 목록을 보낸다.
-    if (equipmentChanged) args.장비 = normalizedEquipment;
+    if (equipmentChanged) {
+      args.장비 = normalizedEquipment;
+      // 편집창에서 직원이 직접 줄인 품목만 현재 원본 수량과 함께 제출한다.
+      // GAS는 잠금 안에서 다시 대조하므로 다른 세션의 수량 변경을 덮지 않는다.
+      const quantities = (items: typeof normalizedEquipment) => {
+        const totals = new Map<string, number>();
+        for (const item of items) {
+          if (item.제외 || /^\s*\[세트\]/.test(item.비고)) continue;
+          totals.set(item.이름, (totals.get(item.이름) || 0) + item.수량);
+        }
+        return totals;
+      };
+      const before = quantities(JSON.parse(originalEquipmentSignature));
+      const after = quantities(normalizedEquipment);
+      args.equipmentReductions = Array.from(before).filter(([name, qty]) => (after.get(name) || 0) < qty)
+        .map(([name, beforeQty]) => ({ name, beforeQty, afterQty: after.get(name) || 0, reason: "직원 확인요청 편집 저장" }));
+    }
     if (skip) args.skipCheck = true; // 가용확인 생략(등록 시 자동 처리)
     const localPatch = (r: Req): Req => ({
       ...r,

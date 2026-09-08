@@ -1413,6 +1413,38 @@ function supaUpsertGrouped_(cfg, table, rows, conflict) {
   return allOk;
 }
 
+/** 시트 추가 작업이 발급한 ID만 투영한다. 충돌 행은 수정하지 않으며 실제 반출을 추정하지 않는다. */
+function supaInsertAuthorizedScheduleItems_(cfg, tid, rows, addedScheduleIds) {
+  addedScheduleIds = addedScheduleIds || [];
+  if (!addedScheduleIds.length) return true;
+  var byId = Object.create(null);
+  (rows || []).forEach(function(row) { byId[row.schedule_id] = row; });
+  var inserts = [];
+  var seen = Object.create(null);
+  for (var i = 0; i < addedScheduleIds.length; i++) {
+    var id = String(addedScheduleIds[i] || '').trim();
+    var row = byId[id];
+    if (!row || row.trade_id !== tid || id.indexOf(tid + '-') !== 0 || !row.name ||
+        !Number.isInteger(row.qty) || row.qty < 1) return false;
+    if (seen[id]) continue;
+    seen[id] = true;
+    // UI 소유 상태/불변 기준선은 복사하지 않는다. 재시도도 이미 존재하는 행을 덮지 않는다.
+    inserts.push({ schedule_id: id, trade_id: tid, sort: row.sort, name: row.name, qty: row.qty,
+      set_name: row.set_name || null, is_set_header: !!row.is_set_header,
+      is_component: !!row.is_component, category: row.category || null, checkout_state: 'pending' });
+  }
+  var token = supaToken_(cfg);
+  if (!token) return false;
+  var response = UrlFetchApp.fetch(cfg.url + '/rest/v1/schedule_items?on_conflict=schedule_id', {
+    method: 'post', contentType: 'application/json',
+    headers: { apikey: cfg.apikey, Authorization: 'Bearer ' + token,
+      'Content-Profile': 'village', 'Accept-Profile': 'village',
+      Prefer: 'resolution=ignore-duplicates,return=minimal' },
+    payload: JSON.stringify(inserts), muteHttpExceptions: true
+  });
+  return response.getResponseCode() >= 200 && response.getResponseCode() < 300;
+}
+
 /** 반출 후 schedule_items 구조 동기화. PATCH만 사용해 기준선 없는 행을
  * 신규 생성하지 않고, 한 행이라도 없으면 실패로 돌려 안전 복구 큐가 담당하게 한다. */
 function supaPatchExistingScheduleItems_(cfg, rows) {

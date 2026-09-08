@@ -921,6 +921,7 @@ test('actual single-equipment GAS add preserves schedule suffix 100 without chan
     invalidateDashboardReturnInspectionForTrade_: () => ({ success: true }),
     isDashboardTradeCheckoutStarted_: () => false,
     formatScheduleSheet() {},
+    scheduleDashboardStructureProjectionUnderLock_() {},
     scheduleContractRegenUnderLock_() {},
     ensureDashboardStructureProjectionTrigger_() {},
     ensureContractRegenTrigger_() {},

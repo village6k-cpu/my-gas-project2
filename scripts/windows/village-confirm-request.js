@@ -174,13 +174,14 @@ function normalizeRequestId(value) {
   return reqID;
 }
 
-function buildUpdateRequest(config, reqID, request) {
+function buildUpdateRequest(config, reqID, request, equipmentReductions = []) {
   const url = baseUrl(config);
   url.searchParams.set('action', 'run');
   url.searchParams.set('func', 'updateRequest');
   url.searchParams.set('args', JSON.stringify({
     reqID: normalizeRequestId(reqID),
     ...request,
+    equipmentReductions,
     장비명원문보존: true
   }));
   if (url.toString().length > 16_000) {
@@ -710,6 +711,7 @@ async function updateConfirmationRequest({
   reqID,
   request,
   unregisteredOriginals = [],
+  equipmentReductions = [],
   fetchImpl = globalThis.fetch,
   readTimeoutMs = 30_000,
   writeTimeoutMs = 180_000
@@ -727,12 +729,12 @@ async function updateConfirmationRequest({
   });
   const updatePayload = await fetchJson(
     fetchImpl,
-    buildUpdateRequest(config, normalizedReqID, normalized),
+    buildUpdateRequest(config, normalizedReqID, normalized, equipmentReductions),
     writeTimeoutMs,
     'Confirmation-request update'
   );
   if (updatePayload.success !== true) {
-    throw new Error(`Confirmation-request update failed for ${normalizedReqID}`);
+    throw new Error(`Confirmation-request update failed for ${normalizedReqID}: ${String(updatePayload.error || updatePayload.message || 'unknown error')}`);
   }
   try {
     const readbackPayload = await fetchJson(
@@ -1006,7 +1008,8 @@ async function main() {
       + '  resolve      {"queries":["장비 검색어", ...]} — 목록 시트에서 정확한 장비명 후보 조회 (읽기 전용)\n'
       + '  create       {"반출일","반출시간","반납일","반납시간","시간원문","예약자명","장비":[{"이름","수량"}], ...} — 확인요청 1건 생성+검증\n'
       + '  create-batch {"requests":[<create payload>, ...]} — 여러 스케줄 그룹을 한 번에 생성+검증\n'
-      + '  update       {"reqID":"RQ-YYMMDD-NNN","request":<create payload>} — 기존 미등록 요청 전체 교체+검증\n'
+      + '  update       {"reqID":"RQ-YYMMDD-NNN","request":<create payload>,"equipmentReductions":[]} — 기존 미등록 요청 전체 교체+검증\n'
+      + '               품목/수량 감소는 명시적 변경 근거와 정확한 {name,beforeQty,afterQty,reason} 필요. 누락을 승인으로 우회하지 말고 원문 전체 목록 복원.\n'
       + '  reconcile    {"reqID":"RQ-..."} 또는 {"예약자명":"이름","반출일":"YYYY-MM-DD"?} — 쓰기 성공 여부가\n'
       + '               불확실할 때(uncertainWrite) 시트 실제 상태를 읽어 판정 (읽기 전용, 재삽입 아님)\n'
       + '  commit-registration {"registration":{...}} — 직원이 확정한 exact pending RQ를 1회 등록+권위 readback\n'
@@ -1029,7 +1032,8 @@ async function main() {
       config,
       reqID: input.reqID,
       request: input.request || input,
-      unregisteredOriginals: input.unregisteredOriginals || []
+      unregisteredOriginals: input.unregisteredOriginals || [],
+      equipmentReductions: input.equipmentReductions || []
     });
   } else if (options.command === 'reconcile') {
     result = await reconcileConfirmationRequest({ config, query: input });
