@@ -92,6 +92,32 @@ function result(state, resolutionKind, evidence, noticeText) {
   return { state, resolutionKind, evidence, noticeText };
 }
 
+// Completing model inference is not the same as executing its reply intent.
+// This describes the host result without inventing a business task or retrying
+// an ambiguous send. Only transport-owned evidence can establish delivery.
+export function deriveCustomerReplyOutcome({ decision = {}, autoReplyResult = {}, superseded = false, snapshotChanged = false } = {}) {
+  const reply = decision.reply_decision || {};
+  const requested = (reply.replyMode || reply.reply_mode) === 'auto_send';
+  if (!requested) return { requested: false, state: 'not_requested', reason: 'no_auto_reply_intent' };
+  if (autoReplyResult.sent === true && typedAutoReplyReadbackReceipt(autoReplyResult.readbackReceipt)) {
+    return { requested: true, state: 'delivered', reason: 'auto_reply_readback' };
+  }
+  const rawReason = autoReplyResult.sent === true ? 'missing_reply_readback'
+    : autoReplyResult.sendResult?.reason || autoReplyResult.gate?.reason || autoReplyResult.reason || 'missing_apply_result';
+  const reason = typeof rawReason === 'string' && /^[a-z0-9_]{1,120}$/.test(rawReason) ? rawReason : 'reply_execution_failed';
+  if (autoReplyResult.attempted === true || autoReplyResult.sent === true) {
+    return { requested: true, state: 'delivery_uncertain', reason };
+  }
+  if (superseded || snapshotChanged) return { requested: true, state: 'superseded', reason };
+  if (['duplicate_recent_auto_reply', 'duplicate_room_reply_text_24h'].includes(reason)) {
+    return { requested: true, state: 'already_delivered', reason };
+  }
+  if (['kill_switch_paused', 'kill_switch_price_paused', 'auto_send_disabled'].includes(reason)) {
+    return { requested: true, state: 'paused', reason };
+  }
+  return { requested: true, state: 'blocked', reason };
+}
+
 export function deriveAutomationResolution(input = {}) {
   const decision = isRecord(input.decision) ? input.decision : {};
   const sheetResult = isRecord(input.sheetResult) ? input.sheetResult : {};
@@ -167,6 +193,15 @@ export function deriveAutomationResolution(input = {}) {
       'auto_reply_readback',
       { autoReply: replyEvidence },
       'The automated reply was confirmed by authoritative readback.'
+    );
+  }
+
+  const replyOutcome = deriveCustomerReplyOutcome({ decision, autoReplyResult });
+  if (replyOutcome.requested && !['delivered', 'already_delivered'].includes(replyOutcome.state)) {
+    return result(
+      'needs_human', 'missing_authoritative_readback',
+      { ...(operationEvidence && { operationReceipt: operationEvidence }) },
+      'The requested customer reply has not been confirmed by authoritative readback.'
     );
   }
 
