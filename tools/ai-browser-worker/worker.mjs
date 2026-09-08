@@ -6,7 +6,6 @@ import path from 'node:path';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import { resolveAlignedMessageRoles } from './conversation-role-alignment.mjs';
 import villageTimeContract from '../../scripts/windows/village-time-contract.js';
 import { INQUIRY_LIFECYCLE_PROMPT, inquiryLifecycleErrors, validatePendingInquiryRevision } from './inquiry-lifecycle.mjs';
 import { reconcileConfirmationBatchReceipt } from './confirmation-batch-reconciliation.mjs';
@@ -691,10 +690,11 @@ export function buildHermesPrompt(job, options = {}) {
 - Read the full same-room conversation. Native Hermes—not code or keywords—semantically decides whether a Village staff reply clearly and unconditionally authorizes the exact customer request; wording is open-ended.
 - For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit once before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
 - Fast/coalesced turn exception: if the customer equipment inquiry and a later clear staff authorization are both in this same immutable room snapshot but no RQ exists yet, still call village_confirmed_reservation_commit exactly once with request_id=null and pending_request_candidate copied from the internally consistent sheet_row_candidate, including the exact set_component_selections array when present. That one atomic operation creates or reuses the 확인요청 first, applies and rechecks those exact set choices, exact-fences its effective RQ, and only then registers it. Never invent an RQ ID and never split this into two tool calls.
-- Bind source_evidence to the immutable room snapshot: copy conversation_evidence_hash exactly, cite the exact customer_message_ids and staff_message_ids in DOM order, and copy those selected message texts verbatim (joined by newline) into customer_request and staff_confirmation. Never invent, summarize, or relabel message evidence.
-- A later customer question does not automatically revoke staff approval. Semantically review every later message. If all leave the approved reservation unchanged, add source_evidence.post_confirmation_review={message_ids:[every later customer DOM ID in order],reservation_unchanged:true,reason:your grounded explanation}. Never use this for cancellation, changed equipment, quantity, dates, conditions, or unresolved intent. Unknown sender evidence still requires review; do not relabel it. Join verbatim selected texts with real newline characters, not literal backslash-n.
+- Bind source_evidence to the immutable room snapshot: copy conversation_evidence_hash exactly, cite the exact customer_message_ids and staff_message_ids in DOM order, and copy those selected message texts verbatim (joined by real newline characters, not literal backslash-n) into customer_request and staff_confirmation. Never invent or summarize message evidence.
+- You own sender and authorization interpretation from the complete conversation. A DOM role of unknown means the extractor lacks explicit sender metadata; it does not mean the message is unusable. Use the visible conversation, adjacent turns, known sender roles and supplied bubble layout together to identify who spoke. Cite the existing message IDs under the roles you determined; never modify the snapshot or contradict a known opposing sender. If the actual speaker remains ambiguous after that review, do not claim authorization.
+- Evaluate the customer's current plan and whether staff authorization still applies across ALL subsequent turns. Quote requests, thanks and administrative replies can leave an earlier approval valid; cancellation, replacement requests, new conditions or withdrawn approval can invalidate it. Choose the applicable staff evidence semantically, even when it is not the last staff message or the final message. confirmed=true asserts your review of the current full conversation; no separate post_confirmation_review object is required. Do not register cancelled or not-yet-approved changes.
 - Conditional/tentative, ambiguous-target, unresolved-inventory, customer-authored, or stale evidence is not authorization: use staff_confirmed_registration=null and do not call the tool.
-- Exact success is no_reply. Blocked/failed/partial/missing/contradictory receipt is one draft-only no-send owner review and is never auto-replayed.
+- After exact registration success, do not repeat the staff's confirmation. Use no_reply when no customer question remains. A separate later price question still deserves village_read and its independently verified price answer; retain any unfinished document task. A registration receipt does not mean that answer or document has already been delivered. Blocked/failed/partial/missing/contradictory receipt is one draft-only no-send owner review and is never auto-replayed.
 - A registered_trade mutation must not call village_confirmation_request again: the equipment inquiry RQ was created on the customer turn, and the registered tool atomically links/finalizes that exact RQ only after authoritative schedule readback.
 - Do not parse RQ or trade IDs from prose. Only exact typed fields backed by authoritative lookups count.
 - For ambiguous target, catalog, or staff evidence: set staff_confirmed_mutation=null, call no mutation tool, make no customer success claim, and create one urgent owner-review follow-up.
@@ -6992,7 +6992,13 @@ export function normalizeKakaoConversationMessages(messages = [], { maxItems = 8
     if (seenIds.has(messageId)) messageId = `dom-${order}-${textHash.slice(0, 24)}`;
     if (seenIds.has(messageId)) continue;
     seenIds.add(messageId);
-    normalized.push({ message_id: messageId, role, order, text: messageText, text_hash: textHash });
+    const layout = candidate.layout;
+    const observedLayout = layout && ['left', 'right', 'viewport_width'].every(key => Number.isFinite(layout[key]))
+      && layout.right > layout.left && layout.viewport_width > 0
+      ? {left: layout.left, right: layout.right, viewport_width: layout.viewport_width}
+      : null;
+    normalized.push({ message_id: messageId, role, order, text: messageText, text_hash: textHash,
+      ...(observedLayout ? {layout: observedLayout} : {}) });
     if (normalized.length >= Math.max(1, Math.min(100, Number(maxItems) || 80))) break;
   }
   return normalized;
@@ -7158,7 +7164,7 @@ function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allow
 export function buildKakaoConversationTextExpression() {
   // Must pierce shadow roots + same-origin iframes (Kakao 2026-08-06 deploy):
   // a plain body.innerText read returns only wrapper chrome labels.
-  return `(${function kakaoConversationText(resolveRoles) {
+  return `(${function kakaoConversationText() {
     const parts = [];
     const seen = new Set();
     const docs = [];
@@ -7232,19 +7238,9 @@ export function buildKakaoConversationTextExpression() {
     ));
     const roleFor = (element) => {
       const signature = structuralSignature(element);
-      if (tokenMatch(signature, ['outgoing', 'outbound', 'sent', 'send', 'mine', 'right', 'staff'])) return 'staff';
-      if (tokenMatch(signature, ['incoming', 'inbound', 'received', 'receive', 'other', 'left', 'customer'])) return 'customer';
-      try {
-        const geometryElement = element.querySelector?.('.bubble_g, [class*="bubble"]') || element;
-        const rect = geometryElement.getBoundingClientRect();
-        const width = Number(element.ownerDocument?.documentElement?.clientWidth || element.ownerDocument?.defaultView?.innerWidth || 0);
-        if (width > 0 && rect.width > 0 && rect.width < width * 0.9) {
-          const center = rect.left + (rect.width / 2);
-          if (center >= width * 0.58) return 'staff';
-          if (center <= width * 0.42) return 'customer';
-        }
-      } catch {}
-      return 'unknown';
+      const staff = tokenMatch(signature, ['outgoing', 'outbound', 'sent', 'send', 'mine', 'right', 'staff']);
+      const customer = tokenMatch(signature, ['incoming', 'inbound', 'received', 'receive', 'other', 'left', 'customer']);
+      return staff === customer ? 'unknown' : staff ? 'staff' : 'customer';
     };
     const textFor = (element) => {
       try {
@@ -7276,6 +7272,7 @@ export function buildKakaoConversationTextExpression() {
         top: Number(rect.top) || 0,
         left: Number(rect.left) || 0,
         right: Number(rect.right),
+        viewportWidth: Number(element.ownerDocument?.documentElement?.clientWidth || element.ownerDocument?.defaultView?.innerWidth || 0),
         domIndex,
         role,
         text: messageText,
@@ -7288,14 +7285,15 @@ export function buildKakaoConversationTextExpression() {
       });
     });
     rows.sort((left, right) => left.top - right.top || left.left - right.left || left.domIndex - right.domIndex);
-    const messages = resolveRoles(rows).slice(-80).map((row, index) => ({
+    const messages = rows.slice(-80).map((row, index) => ({
       message_id: /^[A-Za-z0-9._:-]{1,160}$/.test(row.nativeId) ? row.nativeId : `dom-${index + 1}`,
       role: row.role,
+      layout: {left: row.left, right: row.right, viewport_width: row.viewportWidth},
       order: index + 1,
       text: row.text
     }));
     return { title: document.title, href: location.href, text: parts.join('\n'), messages };
-  }.toString()})(${resolveAlignedMessageRoles.toString()})`;
+  }.toString()})()`;
 }
 
 export async function openKakaoTargetChatViaDevtools(job, {
@@ -9510,7 +9508,8 @@ function buildBoundedGatewayRaw({ job = {}, snapshot, lookupEvidence, ragContext
                 role: ['customer', 'staff', 'unknown'].includes(message?.role) ? message.role : 'unknown',
                 order: Number(message?.order),
                 text: boundedGatewayText(message?.text, 2_000),
-                text_hash: boundedGatewayText(message?.text_hash, 64)
+                text_hash: boundedGatewayText(message?.text_hash, 64),
+                ...(message?.layout ? {layout: message.layout} : {})
               }))
             : [],
           note: boundedGatewayText(snapshot.navigation?.conversation_evidence?.note, 500)
@@ -10837,16 +10836,10 @@ function forceConfirmedRegistrationSuccess(decision = {}, receipt) {
     trusted_confirmed_reservation_commit_receipt: receipt,
     reply_decision: {
       ...decisionReply(decision),
-      replyMode: 'no_reply',
-      text: '',
-      confidence: 'high',
-      reason: '직원의 확정 답변으로 승인된 예약이 exact receipt와 권위 readback으로 검증되어 중복 답장을 보내지 않습니다.',
-      shouldCreateTask: followUps.some(item => item.requiresHumanAction === true),
-      safetyClass: 'no_send',
-      grounding: 'authoritative_sheet',
-      requiresRag: false,
-      attachmentKeys: [],
-      alreadyDelivered: true
+      // Registration completion is not delivery of a later customer's answer.
+      // Preserve Hermes' reply decision; normal grounding, freshness and dedupe
+      // checks still decide whether that answer may actually be sent.
+      shouldCreateTask: followUps.some(item => item.requiresHumanAction === true)
     }
   };
 }

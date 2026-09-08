@@ -242,7 +242,9 @@ test('buildKakaoGatewayTurn builds a bounded credential-safe native Hermes event
         source: 'devtools',
         title: '고객님',
         hint_matched: true,
-        visible_static_text_tail: '고객: FX3 내일 가능할까요?'
+        visible_static_text_tail: '고객: FX3 내일 가능할까요?',
+        messages: [{message_id:'c1',role:'unknown',text:'FX3 내일 가능할까요?',
+          layout:{left:30,right:710,viewport_width:800}}]
       }
     }
   });
@@ -280,6 +282,10 @@ test('buildKakaoGatewayTurn builds a bounded credential-safe native Hermes event
     conversation_evidence_hash: snapshot.evidenceHash
   }, null, 2)), 'the native adapter consumes prompt only, so trusted evidence must be in prompt');
   assert.equal(turn.internal.snapshot, snapshot);
+  assert.deepEqual(turn.event.raw.snapshot.navigation.conversation_evidence.messages[0].layout,
+    {left:30,right:710,viewport_width:800});
+  assert.ok(turn.event.prompt.includes(JSON.stringify(snapshot.navigation, null, 2)),
+    'the model must receive the same conversation and observed layout bound by the snapshot hash');
   assert.equal(turn.internal.lookupContext.kill_switch.status, 'active');
   assert.deepEqual(turn.event.raw.evidence.lookup.kill_switch, { status: 'active', error: null });
   assert.ok(Buffer.byteLength(JSON.stringify(turn.event), 'utf8') <= 1_048_576);
@@ -1388,7 +1394,6 @@ test('staff registration authority is bound to exact immutable DOM roles, order,
   for (const invalidEvidence of [
     { ...registration.source_evidence, conversation_evidence_hash: 'b'.repeat(64) },
     { ...registration.source_evidence, customer_message_ids: ['dom-staff-1'] },
-    { ...registration.source_evidence, staff_message_ids: ['dom-staff-old'], staff_confirmation: '잠시 확인하겠습니다' },
     { ...registration.source_evidence, staff_confirmation: '직원의 무조건적 승인이라고 모델이 재작성함' }
   ]) {
     assert.equal(workerModule.validateStaffConfirmedRegistration({
@@ -1397,7 +1402,7 @@ test('staff registration authority is bound to exact immutable DOM roles, order,
   }
 });
 
-test('staff registration evidence is stale when a later customer or unknown message follows the selected approval', () => {
+test('later message position does not make current AI-selected registration evidence stale', () => {
   for (const role of ['customer', 'unknown']) {
     const snapshot = createImmutableKakaoRoomSnapshot({
       job: { jobId: `job-later-${role}`, roomKey: `chat:later-${role}`, roomRevision: 7 },
@@ -1406,11 +1411,11 @@ test('staff registration evidence is stale when a later customer or unknown mess
         status: 'opened_target_chat',
         conversation_evidence: {
           source: 'test_fixture', title: '테스트 고객', hint_matched: true,
-          visible_static_text_tail: '예약 요청\n직원 승인\n후속 정정',
+          visible_static_text_tail: '예약 요청\n직원 승인\n견적서 부탁드립니다',
           messages: [
             { message_id: 'dom-customer-1', role: 'customer', order: 1, text: '예약 요청' },
             { message_id: 'dom-staff-1', role: 'staff', order: 2, text: '직원 승인' },
-            { message_id: `dom-later-${role}`, role, order: 3, text: '후속 정정' }
+            { message_id: `dom-later-${role}`, role, order: 3, text: '견적서 부탁드립니다' }
           ]
         }
       }
@@ -1428,9 +1433,7 @@ test('staff registration evidence is stale when a later customer or unknown mess
     const validation = workerModule.validateStaffConfirmedRegistration(registration, {
       roomRevision: 7, roomSnapshot: snapshot
     });
-    assert.equal(validation.valid, false, `${role} after approval must invalidate the evidence`);
-    assert.ok(validation.errors.some((error) => error.includes('current actionable DOM tail')),
-      `${role} tail must be the explicit reason the authorization is stale`);
+    assert.deepEqual(validation, {valid:true, errors:[]});
   }
 });
 
@@ -1455,6 +1458,29 @@ test('successful inquiry receipt keeps an independent typed price reply for fres
     'price_reply_contains_unverified_availability');
   const failed=await workerModule.prepareKakaoGatewayDecision({config:{},job,turn,
     finalText:JSON.stringify(decision),trustedToolReceipts:[{...receipt,status:'failed',error:'lookup failed'}]});
+  assert.equal(failed.decision.reply_decision.replyMode,'draft_only');
+});
+
+test('registration readback preserves an independent price answer for fresh verification', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=confirmedRegistrationDecisionFixture({classification:'price',
+    price_quote:{source:'trade',id:'260907-001'},
+    reply_decision:{replyMode:'auto_send',text:'부가세 포함 33,000원입니다.',confidence:'high',
+      safetyClass:'sensitive_commitment',grounding:'authoritative_sheet',requiresRag:false,
+      attachmentKeys:[],alreadyDelivered:false,shouldCreateTask:false}});
+  decision.safety_checks.latest_customer_message_after_last_staff_reply=true;
+  const receipt=confirmedRegistrationReceiptFixture(job);
+  const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,
+    finalText:JSON.stringify(decision),trustedToolReceipts:[receipt]});
+  assert.deepEqual(prepared.gatewaySafetyFailures,[]);
+  assert.equal(prepared.decision.reply_decision.replyMode,'auto_send');
+  assert.equal(prepared.decision.reply_decision.text,'부가세 포함 33,000원입니다.');
+  assert.equal(prepared.decision.reply_decision.alreadyDelivered,false);
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision,{autoSendEnabled:true}).reason,'authoritative_price_verification_required');
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision,{autoSendEnabled:true},
+    {priceVerification:{complete:true,totalVatIncluded:33000}}).allowed,true);
+  const failed=await workerModule.prepareKakaoGatewayDecision({job,turn,
+    finalText:JSON.stringify(decision),trustedToolReceipts:[{...receipt,status:'failed',error:{type:'failed'}}]});
   assert.equal(failed.decision.reply_decision.replyMode,'draft_only');
 });
 
@@ -12908,7 +12934,8 @@ test('sendKakaoMessageViaChrome falls back to DevTools target when AX window is 
   assert.equal(result.via_devtools, true);
   assert.equal(result.readback_confirmed, true);
   assert.equal(result.observed_reply_hash, createHash('sha256').update('확인했습니다.').digest('hex'));
-  assert.ok(evalCalls[0].expression.includes('textarea[placeholder*="메시지"]'));
+  assert.equal(evalCalls.filter(call => call.expression.includes('textarea[placeholder*="메시지"]')).length, 1,
+    'the fallback performs one input operation, even when read-only duplicate checks run first');
 });
 
 test('actual auto-reply sender emits a source-correlated content-free readback receipt', async (t) => {
