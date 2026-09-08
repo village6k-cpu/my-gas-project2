@@ -7457,10 +7457,28 @@ test('semantic owner case contract accepts only the exact bounded executive repo
     { ...valid.owner_case, problemSummary: 'confirmation_request_conflict 상태입니다.' },
     { ...valid.owner_case, requestSummary: '네' }
   ]) {
-    const result = validateAiDecisionContract(completeSheetDecision({ owner_case: ownerCase }));
+    const result = validateAiDecisionContract(completeSheetDecision({ owner_case: ownerCase }), { requireOwnerCase: true });
     assert.equal(result.valid, false, JSON.stringify(ownerCase));
     assert.match(result.errors.join('|'), /owner_case/);
   }
+});
+
+test('owner card presentation cannot reject a valid inquiry or orphan a completed registration', async () => {
+  const card = { caseKey:'booking', title:'예약 확인', requestSummary:'RQ를 확인합니다.',
+    problemSummary:'confirmation_request_conflict 상태입니다.', nextActionSummary:'확인하세요.' };
+  const inquiry = completeSheetDecision({ owner_case:card });
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(inquiry).valid, true);
+  assert.ok(buildSheetAppendPayload(inquiry));
+  const {job,turn}=gatewayTurnFixture();
+  const receipt=confirmedRegistrationReceiptFixture(job);
+  const decision=confirmedRegistrationDecisionFixture({owner_case:card});
+  const prepared=await workerModule.prepareKakaoGatewayDecision({
+    config:{workOrchestratorV2WorkItemsEnabled:true},job,turn,
+    finalText:JSON.stringify(decision),trustedToolReceipts:[receipt]
+  });
+  assert.equal(prepared.decision.owner_review_required,false);
+  assert.deepEqual(prepared.gatewaySafetyFailures,[]);
+  assert.equal(prepared.decision.should_write_to_sheet,false);
 });
 
 test('confirmation execution validation rejects incomplete catalog decisions before the native tool reservation', () => {

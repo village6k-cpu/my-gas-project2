@@ -1307,10 +1307,11 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
     };
   }
 
-  if (options.requireOwnerCase === true && !Object.hasOwn(decision, 'owner_case')) {
-    errors.push('owner_case is required for v2 human work');
-  } else if (Object.hasOwn(decision, 'owner_case')) {
-    errors.push(...ownerCaseContractErrors(decision.owner_case));
+  // Card presentation is validated when building human work, independently of
+  // the typed booking operation. A poor summary must not cancel valid execution.
+  if (options.requireOwnerCase === true) {
+    if (!Object.hasOwn(decision, 'owner_case')) errors.push('owner_case is required for v2 human work');
+    else errors.push(...ownerCaseContractErrors(decision.owner_case));
   }
 
   if (Array.isArray(decision.follow_up_items) && decision.follow_up_items.length
@@ -11007,7 +11008,6 @@ export async function prepareKakaoGatewayDecision({
     const validationDecision = hasCustomerRevisionReceipt && decision.should_write_to_sheet === false
       ? {...decision,should_write_to_sheet:true} : decision;
     const validation = validateAiDecisionContract(validationDecision, {
-      requireOwnerCase: config.workOrchestratorV2WorkItemsEnabled === true,
       roomRevision,
       ...(decision.customer_requested_pending_revision ? {roomSnapshot:snapshot} : {})
     });
@@ -11510,9 +11510,7 @@ export async function prepareKakaoDecisionFromSnapshot({
       try {
         hermesDecision = await runHermesDecision(prompt, config, {
           signal: freshnessGuard.signal,
-          validateDecisionImpl: (candidate) => validateAiDecisionContract(candidate, {
-            requireOwnerCase: config.workOrchestratorV2WorkItemsEnabled === true
-          })
+          validateDecisionImpl: (candidate) => validateAiDecisionContract(candidate)
         });
       } finally {
         reportHandoffPhase('initial_hermes_finished');
