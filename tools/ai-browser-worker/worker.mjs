@@ -2447,20 +2447,9 @@ function normalizeP0FollowUpItems(decision = {}) {
 }
 
 export function buildFollowUpRows(decision, job = {}) {
-  let items = normalizeP0FollowUpItems(decision);
-  // Hermes has already inspected the opened conversation and determined turn
-  // ownership. Do not reinterpret staff prose as a new customer task here —
-  // 단, AI가 P0로 지정한 사고·즉시확인 항목은 사장이 마지막으로 말한 대화에서도
-  // 유지한다. 대화를 열고도 판정 필드를 빼먹은 결정은 fail-closed로 잠그되,
-  // 대화를 열지 못한 결정(discovery 실패)은 사람 분류용 후속 항목을 보존한다.
-  const turnChecks = decision?.safety_checks || {};
-  const staffLatestTurn = turnChecks.latest_customer_message_after_last_staff_reply === false
-    || (turnChecks.kakao_conversation_opened === true
-      && typeof turnChecks.latest_customer_message_after_last_staff_reply !== 'boolean');
-  if (staffLatestTurn) {
-    items = items.filter((item) => item && typeof item === 'object' && item.alertLevel === 'p0');
-    if (!items.length) return [];
-  }
+  // This is a projection of AI-selected unfinished work. Last-speaker metadata
+  // cannot decide whether staff actually resolved each request in the dialogue.
+  const items = normalizeP0FollowUpItems(decision);
   const rawJobId = text(job.id || job.jobId || '');
   const jobId = isUuid(rawJobId) ? rawJobId : null;
   const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || '').slice(0, 240);
@@ -3585,14 +3574,6 @@ export function buildInquiryCaseRow(decision = {}, job = {}, sourceRows = []) {
 
 export function buildCanonicalFollowUpCases(decision = {}, job = {}, rows = [], options = {}) {
   const sourceRows = (Array.isArray(rows) ? rows : []).filter(Boolean);
-  // With no independent operational failure row, a staff-latest conversation
-  // is already answered and must not become a customer inquiry Slack card.
-  // 대화를 열고도 판정 필드를 빼먹은 결정도 카드가 새지 않도록 함께 잠근다.
-  const caseTurnChecks = decision?.safety_checks || {};
-  const caseStaffLatestTurn = caseTurnChecks.latest_customer_message_after_last_staff_reply === false
-    || (caseTurnChecks.kakao_conversation_opened === true
-      && typeof caseTurnChecks.latest_customer_message_after_last_staff_reply !== 'boolean');
-  if (caseStaffLatestTurn && sourceRows.length === 0) return [];
   const inquiryBase = buildInquiryCaseRow(decision, job, sourceRows);
   if (!inquiryBase) return [];
   const replyDecision = decision?.reply_decision && typeof decision.reply_decision === 'object'
@@ -3617,6 +3598,9 @@ export function buildCanonicalFollowUpCases(decision = {}, job = {}, rows = [], 
     ));
   const requiresReply = ['auto_send', 'draft_only', 'reply_required', 'required'].includes(replyMode)
     || (replyMode !== 'no_reply' && explicitReplyRequired);
+  if (!sourceRows.length && !requiresReply
+    && replyDecision.shouldCreateTask !== true && replyDecision.should_create_task !== true
+    && decision.owner_review_required !== true && decision.ownerReviewRequired !== true) return [];
   const replyIntent = replyMode || (explicitReplyRequired ? 'reply_required' : 'no_reply');
   const coreFacts = Array.from(new Set(sourceRows.flatMap((row) => (
     Array.isArray(row?.evidence) ? row.evidence.map((value) => text(value).trim()).filter(Boolean) : []
