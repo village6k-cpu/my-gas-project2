@@ -10646,7 +10646,7 @@ function handleScheduleEdit(e) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * "목록" 시트를 생성/갱신하여 세트마스터 세트명과 장비마스터 장비명을
+ * "목록" 시트를 생성/갱신하여 대여 상품 정본인 세트마스터 A열 이름만
  * 중복 제거 후 정렬하여 A열에 나열합니다.
  * 그리고 확인요청 F열의 데이터 유효성을 목록!A:A 참조로 설정합니다.
  *
@@ -10657,19 +10657,13 @@ function refreshEquipmentList(skipIfUnchanged) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
   const setSheet = ss.getSheetByName("세트마스터");
-  const equipSheet = ss.getSheetByName("장비마스터");
-
-  // ── 목록 생성: 세트마스터 A열 + 장비마스터 D열 (중복 제거 + 정렬) ──
+  // 재고 실물명은 판매 상품이 아니다. 선택 목록과 가격(G열)의 정본을 일치시킨다.
+  // ── 목록 생성: 세트마스터 A열 (중복 제거 + 정렬) ──
   const names = new Set();
   if (setSheet && setSheet.getLastRow() >= 2) {
     setSheet.getRange(2, 1, setSheet.getLastRow() - 1, 1)
       .getValues().flat().forEach(n => { if (n) names.add(n.toString().trim()); });
   }
-  if (equipSheet && equipSheet.getLastRow() >= 2) {
-    equipSheet.getRange(2, 4, equipSheet.getLastRow() - 1, 1)
-      .getValues().flat().forEach(n => { if (n) names.add(n.toString().trim()); });
-  }
-
   const sorted = Array.from(names).sort();
 
   // ── 변경 없으면 스킵 (onOpen 자동 갱신용) ──
@@ -10772,6 +10766,7 @@ function refreshEquipmentList(skipIfUnchanged) {
   }
 
   // 전체 갱신 완료 — 다음 onOpen이 스킵 판단할 수 있게 해시 저장
+  try { CacheService.getScriptCache().remove("dashboardEquipNameList_v1"); } catch (cacheErr) {}
   if (refreshHash) {
     try { refreshProps.setProperty("EQUIP_LIST_REFRESH_HASH_V1", refreshHash); } catch (propErr) {}
   }

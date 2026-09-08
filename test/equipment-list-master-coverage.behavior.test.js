@@ -19,8 +19,10 @@ function extractFunction(name) {
   throw new Error(`unterminated function ${name}`);
 }
 
-test('equipment dropdown list contains both set-master and equipment-master names', () => {
+test('rental dropdowns use only the set-master product names and refresh their cached list', () => {
   let writtenNames = [];
+  const validations = [];
+  const removedCaches = [];
   const range = {
     getValues() { return []; },
     setValue() { return this; },
@@ -48,8 +50,8 @@ test('equipment dropdown list contains both set-master and equipment-master name
     '세트마스터': setSheet,
     '장비마스터': equipmentSheet,
     '목록': listSheet,
-    '확인요청': null,
-    '스케줄상세': null
+    '확인요청': { getMaxRows: () => 30, getRange: (row,col,count,width) => ({setDataValidation(rule) {validations.push({sheet:'확인요청',row,col,count,width,rule});}}) },
+    '스케줄상세': { getMaxRows: () => 40, getRange: (row,col,count,width) => ({setDataValidation(rule) {validations.push({sheet:'스케줄상세',row,col,count,width,rule});}}) }
   };
   const context = {
     SpreadsheetApp: {
@@ -80,13 +82,17 @@ test('equipment dropdown list contains both set-master and equipment-master name
       DigestAlgorithm: { MD5: 'MD5' },
       computeDigest: () => [1],
       base64Encode: () => 'hash'
-    }
+    },
+    CacheService: { getScriptCache: () => ({ remove: key => removedCaches.push(key) }) }
   };
 
   vm.runInNewContext(`${extractFunction('refreshEquipmentList')}\nrefreshEquipmentList(false);`, context);
 
   assert.deepEqual(
     JSON.parse(JSON.stringify(writtenNames)),
-    ['세트A', '세트B', '장비A', '장비B']
+    ['세트A', '세트B']
   );
+  assert.deepEqual(validations.filter(x=>x.sheet==='스케줄상세'||x.col===6).map(({sheet,col,count})=>({sheet,col,count})),
+    [{sheet:'확인요청',col:6,count:29},{sheet:'스케줄상세',col:3,count:39},{sheet:'스케줄상세',col:4,count:39}]);
+  assert.ok(removedCaches.includes('dashboardEquipNameList_v1'));
 });
