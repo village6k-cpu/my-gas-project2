@@ -15614,18 +15614,32 @@ function _applyConfirmedReservationExactSetComponents_(sheet, reqID, desiredComp
     if (currentRows.length !== desiredRows.length) {
       throw new Error("exact set projection row count mismatch: " + setItem);
     }
-    currentRows.forEach(function(row, index) {
+    // 구성품 배열 순서는 계약의 일부가 아니다. 그대로인 행을 먼저 보존한다.
+    // 특히 세트 동봉품은 목록에 없어도 정상 전개되므로 strict dropdown이
+    // 적용된 뒤 같은 F값을 다시 쓰면 Sheets가 유효성 오류를 발생시킨다.
+    var remainingDesired = desiredRows.slice();
+    var changedRows = [];
+    currentRows.forEach(function(row) {
+      var sameIndex = remainingDesired.findIndex(function(item) {
+        return item.component_item === row.component_item && item.quantity === row.quantity;
+      });
+      if (sameIndex >= 0) remainingDesired.splice(sameIndex, 1);
+      else changedRows.push(row);
+    });
+    changedRows.forEach(function(row, index) {
       writes.push({
         row: row.row,
-        component_item: desiredRows[index].component_item,
-        quantity: desiredRows[index].quantity
+        component_item: remainingDesired[index].component_item,
+        quantity: remainingDesired[index].quantity,
+        nameChanged: row.component_item !== remainingDesired[index].component_item,
+        quantityChanged: row.quantity !== remainingDesired[index].quantity
       });
     });
   });
 
   writes.forEach(function(write) {
-    sheet.getRange(write.row, 6).setValue(write.component_item);
-    sheet.getRange(write.row, 7).setValue(write.quantity);
+    if (write.nameChanged) sheet.getRange(write.row, 6).setValue(write.component_item);
+    if (write.quantityChanged) sheet.getRange(write.row, 7).setValue(write.quantity);
     sheet.getRange(write.row, 8).setValue("확인");
     sheet.getRange(write.row, 9, 1, 2).clearContent();
   });

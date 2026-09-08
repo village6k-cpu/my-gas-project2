@@ -24,7 +24,16 @@ class Sheet {
     const range = {
       getValues: values, getDisplayValues: () => values().map(r => r.map(String)),
       getValue: () => values()[0][0], getDisplayValue: () => String(values()[0][0]),
-      setValues(v) { each((r,c) => { s.rows[r][c] = v[r-row+1][c-col+1]; }); return this; },
+      setValues(v) {
+        each((r,c) => {
+          const rule = s.styles[r][c].validation;
+          const value = v[r-row+1][c-col+1];
+          if (rule?.allowInvalid === false && value !== '' && !rule.values.includes(String(value))) {
+            throw new Error(`strict validation rejected row ${r+1} col ${c+1}: ${value}`);
+          }
+        });
+        each((r,c) => { s.rows[r][c] = v[r-row+1][c-col+1]; }); return this;
+      },
       setValue(v) { return this.setValues([[v]]); },
       clearContent() { each((r,c) => { s.rows[r][c] = ''; }); return this; },
       setFontWeight: v => style('weight', v), setBackground: v => style('background', v?.toLowerCase() ?? null),
@@ -47,11 +56,21 @@ function harness() {
       ['카메라 세트', '배터리 / 앞캡 / 충전기', 1, '', '', 'Y'],
       ['렌즈', '', 1, '', '', 'Y']
     ]),
-    '목록': new Sheet(['카메라 세트', '카메라 바디', '메모리', '렌즈', '배터리 / 앞캡 / 충전기'].map(n => [n]))
+    // Included manifests are deliberately absent from the independent catalog.
+    '목록': new Sheet(['카메라 세트', '카메라 바디', '메모리', '렌즈'].map(n => [n]))
   };
   const ss = {getSheetByName: name => sheets[name] || null};
   Object.values(sheets).forEach(s => { s.parent = ss; });
-  const rule = () => { const r = {}; for (const method of ['requireValueInRange','requireValueInList','setAllowInvalid','setHelpText']) r[method] = () => r; r.build = () => ({}); return r; };
+  const rule = () => {
+    const state = {allowInvalid: true, values: []};
+    const r = {
+      requireValueInRange(range) { state.values = range.getDisplayValues().flat(); return r; },
+      requireValueInList(values) { state.values = values; return r; },
+      setAllowInvalid(value) { state.allowInvalid = value; return r; },
+      setHelpText() { return r; }, build: () => ({...state})
+    };
+    return r;
+  };
   const ctx = {Date, console, Logger: {log() {}}, SpreadsheetApp: {getActiveSpreadsheet: () => ss, flush() {}, newDataValidation: rule},
     Utilities: {formatDate: v => v.toISOString().slice(0,10)}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'checkAvailability.js'), 'utf8'), ctx);
@@ -91,4 +110,38 @@ test('rechecking a formerly flat incomplete request expands once and retains kno
   assert.equal(h.sheet.rows.length, 6);
   assert.match(h.sheet.rows[2][8], /✅ 가용/);
   assert.equal(h.sheet.rows[4][8], 'ℹ️ 기본구성');
+});
+
+const exactComponents = () => [
+  {set_item:'카메라 세트',component_item:'카메라 바디',quantity:2},
+  {set_item:'카메라 세트',component_item:'메모리',quantity:4},
+  {set_item:'카메라 세트',component_item:'배터리 / 앞캡 / 충전기',quantity:2}
+];
+
+test('exact projection preserves freshly expanded included manifests under strict catalog validation', () => {
+  const h = harness();
+  const result = h.insert({staff_confirmed_exact_set_components:exactComponents()});
+  assert.equal(result.reqID, 'RQ-260908-001');
+  assert.equal(h.sheet.rows[4][5], '배터리 / 앞캡 / 충전기');
+  assert.equal(h.sheet.rows[4][8], 'ℹ️ 기본구성');
+  assert.equal(h.sheet.styles[4][5].validation.allowInvalid, false);
+  const before = JSON.stringify({rows:h.sheet.rows,styles:h.sheet.styles});
+  const repeated = h.ctx._applyConfirmedReservationExactSetComponents_(h.sheet, result.reqID, exactComponents().reverse());
+  assert.equal(repeated.applied, 0);
+  assert.equal(JSON.stringify({rows:h.sheet.rows,styles:h.sheet.styles}), before);
+});
+
+test('an exact catalog substitution changes only the selected component and rechecks availability', () => {
+  const h = harness(); h.insert();
+  const desired = exactComponents(); desired[1] = {...desired[1],component_item:'렌즈',quantity:1};
+  const result = h.ctx._applyConfirmedReservationExactSetComponents_(h.sheet,'RQ-260908-001',desired);
+  assert.equal(result.applied, 1);
+  assert.equal(h.sheet.rows[3][5], '렌즈');
+  assert.equal(h.sheet.rows[3][6], 1);
+  assert.match(h.sheet.rows[3][8], /✅ 가용/);
+  assert.equal(h.sheet.rows[4][8], 'ℹ️ 기본구성');
+  const before = JSON.stringify(h.sheet.rows);
+  desired[1].component_item = '미보유 대체품';
+  assert.throws(() => h.ctx._applyConfirmedReservationExactSetComponents_(h.sheet,'RQ-260908-001',desired), /not an exact catalog item/);
+  assert.equal(JSON.stringify(h.sheet.rows), before);
 });
