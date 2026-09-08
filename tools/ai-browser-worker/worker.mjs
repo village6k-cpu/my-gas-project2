@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { resolveAlignedMessageRoles } from './conversation-role-alignment.mjs';
 import villageTimeContract from '../../scripts/windows/village-time-contract.js';
 import { INQUIRY_LIFECYCLE_PROMPT, inquiryLifecycleErrors, validatePendingInquiryRevision } from './inquiry-lifecycle.mjs';
 import { reconcileConfirmationBatchReceipt } from './confirmation-batch-reconciliation.mjs';
@@ -691,6 +692,7 @@ export function buildHermesPrompt(job, options = {}) {
 - For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit once before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
 - Fast/coalesced turn exception: if the customer equipment inquiry and a later clear staff authorization are both in this same immutable room snapshot but no RQ exists yet, still call village_confirmed_reservation_commit exactly once with request_id=null and pending_request_candidate copied from the internally consistent sheet_row_candidate, including the exact set_component_selections array when present. That one atomic operation creates or reuses the 확인요청 first, applies and rechecks those exact set choices, exact-fences its effective RQ, and only then registers it. Never invent an RQ ID and never split this into two tool calls.
 - Bind source_evidence to the immutable room snapshot: copy conversation_evidence_hash exactly, cite the exact customer_message_ids and staff_message_ids in DOM order, and copy those selected message texts verbatim (joined by newline) into customer_request and staff_confirmation. Never invent, summarize, or relabel message evidence.
+- A later customer question does not automatically revoke staff approval. Semantically review every later message. If all leave the approved reservation unchanged, add source_evidence.post_confirmation_review={message_ids:[every later customer DOM ID in order],reservation_unchanged:true,reason:your grounded explanation}. Never use this for cancellation, changed equipment, quantity, dates, conditions, or unresolved intent. Unknown sender evidence still requires review; do not relabel it. Join verbatim selected texts with real newline characters, not literal backslash-n.
 - Conditional/tentative, ambiguous-target, unresolved-inventory, customer-authored, or stale evidence is not authorization: use staff_confirmed_registration=null and do not call the tool.
 - Exact success is no_reply. Blocked/failed/partial/missing/contradictory receipt is one draft-only no-send owner review and is never auto-replayed.
 - A registered_trade mutation must not call village_confirmation_request again: the equipment inquiry RQ was created on the customer turn, and the registered tool atomically links/finalizes that exact RQ only after authoritative schedule readback.
@@ -699,6 +701,8 @@ export function buildHermesPrompt(job, options = {}) {
 - blocked, failed, partial_success, or contradictory registered readback is draft-only/no-send owner review. Never call either mutation tool again to replay it.
 - For an explicit registered-trade quote send, call village_document_send with the exact trade_id before FINAL_JSON. Choose tax_mode="supply_only" only for an explicit VAT-exclusive request; otherwise use "vat_included".
 - A successful correlated village_document_send receipt is the only delivery authority. Do not promise that a quote was or will be sent without that receipt; on tool failure use draft_only + owner review.
+- A pending quote_send task is not a delivery claim. Preserve it when document prerequisites are missing, while answering independently grounded price/policy questions where possible. State the specific unresolved prerequisite; do not silently replace a requested document with an incomplete price or a generic acknowledgment. Do not omit equipment or assume a missing price is free to make a quote complete.
+- A registration receipt proves registration only. If a later customer also requested a quote document, retain that exact open document follow-up after registration success; do not discard it or mark it delivered. Follow the single-operation receipt boundary and do not replay registration to generate a document.
 - If an RQ is absent, reconcile live contracts and schedules first. Do not retry the mutation tool under the consumed lease; absence can mean registration completed.
 - A no_action receipt is not creation success and grants no retry authority. Reconcile through read-only lookup, preserving any already completed operation.
 - Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
@@ -3106,7 +3110,15 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
   if (request.kind === 'request' && !/^RQ-\d{6}-\d{3}$/.test(request.query)
     || request.kind === 'trade' && !/^\d{6}-\d{3}$/.test(request.query)) throw new Error('invalid_read_id');
   const sources = await Promise.all(targets.map(async ([sheet,col]) => {
-    const {rows,headers} = await fetchGasSearch(config,sheet,col,request.query,{withHeaders:true});
+    let {rows,headers} = await fetchGasSearch(config,sheet,col,request.query,{withHeaders:true});
+    if (request.kind === 'catalog') {
+      const nameHeader = sheet === '장비마스터' ? '장비명' : '세트명';
+      const index = headers.findIndex(header => text(header).trim() === nameHeader);
+      if (index >= 0 && index < 26 && String.fromCharCode(65+index) !== col) {
+        col = String.fromCharCode(65+index);
+        ({rows,headers} = await fetchGasSearch(config,sheet,col,request.query,{withHeaders:true}));
+      }
+    }
     const matched = ['request','trade'].includes(request.kind)
       ? rows.filter(row => text(row?.data?.[col.charCodeAt(0)-65]).trim() === request.query) : rows;
     return {sheet,headers,rows:matched.slice(0,100),truncated:matched.length>100};
@@ -7143,10 +7155,10 @@ function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allow
   }.toString()})(${JSON.stringify(searchTerms)}, ${JSON.stringify(hints)}, ${JSON.stringify(Boolean(allowSearch))})`;
 }
 
-function buildKakaoConversationTextExpression() {
+export function buildKakaoConversationTextExpression() {
   // Must pierce shadow roots + same-origin iframes (Kakao 2026-08-06 deploy):
   // a plain body.innerText read returns only wrapper chrome labels.
-  return `(${function kakaoConversationText() {
+  return `(${function kakaoConversationText(resolveRoles) {
     const parts = [];
     const seen = new Set();
     const docs = [];
@@ -7255,7 +7267,7 @@ function buildKakaoConversationTextExpression() {
       const messageText = textFor(element);
       if (!messageText || messageText.length > 2_000) return;
       let rect;
-      try { rect = element.getBoundingClientRect(); } catch { return; }
+      try { rect = (element.querySelector?.('.bubble_g, [class*="bubble"]') || element).getBoundingClientRect(); } catch { return; }
       const role = roleFor(element);
       const key = `${role}\u0000${Math.round(rect.top)}\u0000${messageText}`;
       if (rows.some((row) => row.key === key)) return;
@@ -7263,6 +7275,7 @@ function buildKakaoConversationTextExpression() {
         key,
         top: Number(rect.top) || 0,
         left: Number(rect.left) || 0,
+        right: Number(rect.right),
         domIndex,
         role,
         text: messageText,
@@ -7275,14 +7288,14 @@ function buildKakaoConversationTextExpression() {
       });
     });
     rows.sort((left, right) => left.top - right.top || left.left - right.left || left.domIndex - right.domIndex);
-    const messages = rows.slice(-80).map((row, index) => ({
+    const messages = resolveRoles(rows).slice(-80).map((row, index) => ({
       message_id: /^[A-Za-z0-9._:-]{1,160}$/.test(row.nativeId) ? row.nativeId : `dom-${index + 1}`,
       role: row.role,
       order: index + 1,
       text: row.text
     }));
     return { title: document.title, href: location.href, text: parts.join('\n'), messages };
-  }.toString()})()`;
+  }.toString()})(${resolveAlignedMessageRoles.toString()})`;
 }
 
 export async function openKakaoTargetChatViaDevtools(job, {
@@ -10457,6 +10470,14 @@ function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
 }
 
 function gatewayDecisionHasStructuredDocumentClaim(decision = {}) {
+  // A pending document task is not proof that a separate answer claims delivery.
+  // Independent answers still pass their own fresh price/policy/RAG send checks.
+  const reply = decision.reply_decision || {};
+  const independentAnswer = ['sensitive_commitment', 'current_policy_answer', 'rag_grounded_answer'].includes(replySafetyClass(decision))
+    && (replySafetyClass(decision) !== 'sensitive_commitment' || decision.classification === 'price' && Boolean(decision.price_quote))
+    && reply.alreadyDelivered !== true && !(reply.attachmentKeys || []).length
+    && !/(견적서|pdf|서류|첨부|발송|전송|보냈|보내드|sent|attached|delivered)/i.test(text(reply.text));
+  if (independentAnswer) return false;
   return (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : []).some((item) => (
     text(item?.route || item?.follow_up_route).trim() === 'document'
     && text(item?.type).trim() === 'quote_send'
@@ -10797,6 +10818,10 @@ function exactConfirmedRegistrationAuthoritativeReadback(receipt, registration) 
 }
 
 function forceConfirmedRegistrationSuccess(decision = {}, receipt) {
+  const followUps = (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [])
+    .filter(item => text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done'
+      || item?.requiresHumanAction === true && text(item?.route).trim() === 'document'
+      && !['done', 'completed', 'resolved', 'cancelled', 'dismissed'].includes(text(item?.status).trim()));
   return {
     ...decision,
     should_write_to_sheet: false,
@@ -10806,8 +10831,7 @@ function forceConfirmedRegistrationSuccess(decision = {}, receipt) {
       ...(decision?.safety_checks && typeof decision.safety_checks === 'object' ? decision.safety_checks : {}),
       no_auto_reply_sent: true
     },
-    follow_up_items: (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [])
-      .filter((item) => text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done'),
+    follow_up_items: followUps,
     suggested_reply_draft: '',
     confirmed_registration_readback: receipt.authoritative_result,
     trusted_confirmed_reservation_commit_receipt: receipt,
@@ -10817,7 +10841,7 @@ function forceConfirmedRegistrationSuccess(decision = {}, receipt) {
       text: '',
       confidence: 'high',
       reason: '직원의 확정 답변으로 승인된 예약이 exact receipt와 권위 readback으로 검증되어 중복 답장을 보내지 않습니다.',
-      shouldCreateTask: false,
+      shouldCreateTask: followUps.some(item => item.requiresHumanAction === true),
       safetyClass: 'no_send',
       grounding: 'authoritative_sheet',
       requiresRag: false,

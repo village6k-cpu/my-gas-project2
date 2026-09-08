@@ -671,7 +671,10 @@ test('Gateway HTTP rejects confirmed registration evidence that is not bound to 
         }))
       });
       assert.equal(response.status, 422);
-      assert.deepEqual(await response.json(), { error: 'confirmed_reservation_evidence_mismatch' });
+      const rejected = await response.json();
+      assert.equal(rejected.error, 'confirmed_reservation_evidence_mismatch');
+      assert.ok(rejected.validation_errors.length > 0);
+      assert.ok(rejected.validation_errors.every(error => typeof error === 'string' && error.startsWith('source_evidence')));
       assert.equal(executions, 0);
       assert.equal(channel.calls.reservation.length, 0);
       assert.equal(channel.calls.receipt.length, 0);
