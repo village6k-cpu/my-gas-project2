@@ -3737,7 +3737,7 @@ test('buildCanonicalFollowUpCases creates one inquiry case for reply-only work',
   assert.equal(cases[0].payload.phase, 'customer_reply');
 });
 
-test('staff outbound as the latest turn never becomes a canonical Slack inquiry card', () => {
+test('an AI decision with no remaining task or reply produces no canonical card', () => {
   const decision = {
     customer: { name: 'Park' },
     latest_customer_message_cluster: 'The earlier customer question.',
@@ -4077,7 +4077,8 @@ test('two-channel routing never leaks card-kind-less rows into legacy agent chan
 });
 
 test('buildCanonicalFollowUpCases stamps whether the AI actually auto-replied', () => {
-  const decision = { customer: { name: '박민호' }, latest_customer_message_cluster: '9/12 A7S3 가능할까요?' };
+  const decision = { customer: { name: '박민호' }, latest_customer_message_cluster: '9/12 A7S3 가능할까요?',
+    reply_decision: { replyMode: 'auto_send', text: '문의하신 일정을 확인했습니다.' } };
   const job = { room_key: 'chat:auto-reply-stamp' };
   const sent = buildCanonicalFollowUpCases(decision, job, [], { autoReplySent: true });
   const notSent = buildCanonicalFollowUpCases(decision, job, []);
@@ -9263,30 +9264,38 @@ test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', (
   assert.match(rows[0].follow_up_key, /^room-label:홍길동:홍길동:quote_send:/);
 });
 
-test('buildFollowUpRows drops AI follow-ups when the latest meaningful turn is staff outbound', () => {
+test('AI-declared unresolved work survives a later staff acknowledgement', () => {
   const rows = buildFollowUpRows({
     classification: 'faq',
     confidence: 'high',
     customer: { name: 'Customer' },
     latest_customer_message_cluster: 'An earlier customer question.',
-    latest_staff_message: '렌즈 기스 사진까지 확인했고 고객에게 이미 답변했습니다.',
+    latest_staff_message: '네네',
     safety_checks: {
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
       latest_customer_message_after_last_staff_reply: false
     },
     follow_up_items: [{
-      type: 'reply_needed',
-      route: 'other',
-      taskKey: 'already_answered',
+      type: 'reservation_review',
+      route: 'schedule',
+      taskKey: 'unresolved_rental_dates',
+      requiresHumanAction: true,
+      actionFamily: 'reservation_change',
+      businessKey: 'rq:RQ-260908-001',
       priority: 'normal',
       status: 'open',
-      title: 'Must not become a Slack card',
-      summary: 'The latest message is staff outbound.'
+      title: '대여 일정 확인',
+      summary: '직원의 응답은 다른 질문에 대한 답변이며 대여 일정은 미정입니다.'
     }]
   }, { room_key: 'chat:staff-latest' });
 
-  assert.deepEqual(rows, []);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].payload.requires_human_action, true);
+  assert.equal(rows[0].payload.action_family, 'reservation_change');
+  assert.equal(buildCanonicalFollowUpCases({customer:{name:'Customer'},
+    safety_checks:{latest_customer_message_after_last_staff_reply:false},
+    reply_decision:{replyMode:'no_reply',shouldCreateTask:true}}, {room_key:'chat:staff-latest'}, rows).length,1);
 });
 
 test('routeFollowUpToSlack maps follow-up types to the agent channels', () => {
@@ -11047,7 +11056,7 @@ test('buildFollowUpRows preserves Hermes follow-ups even when conversation disco
   assert.equal(rows[0].payload.follow_up_task_key, 'manual_chat_discovery');
 });
 
-test('staff-latest turns keep only P0 follow-up rows and never leak inquiry cards', () => {
+test('staff-latest turns preserve all explicit AI work and P0 escalation independently', () => {
   const staffLatest = {
     classification: 'reservation',
     confidence: 'high',
@@ -11059,8 +11068,8 @@ test('staff-latest turns keep only P0 follow-up rows and never leak inquiry card
     ]
   };
   const rows = buildFollowUpRows(staffLatest, { roomKey: 'chat:staff-latest' });
-  assert.equal(rows.length, 1, 'P0 항목은 사장이 마지막으로 말한 대화에서도 살아남아야 한다');
-  assert.equal(rows[0].title, '장비 파손 즉시 확인');
+  assert.equal(rows.length, 2, 'AI가 명시한 업무를 마지막 발신자만으로 제거하지 않는다');
+  assert.equal(rows[1].title, '장비 파손 즉시 확인');
   assert.equal(buildCanonicalFollowUpCases(staffLatest, { room_key: 'chat:staff-latest' }, []).length, 0);
 
   // 대화를 열고도 판정 필드를 빼먹은 결정은 fail-closed로 잠근다.
