@@ -321,7 +321,8 @@ export async function fetchEquipmentCatalogSnapshot(config = {}, options = {}) {
   const gasApiUrl = config.gasApiUrl || DEFAULT_GAS_API_URL;
   const sheetApiKey = config.sheetApiKey || DEFAULT_SHEET_API_KEY;
   const sources = [
-    { sheet: '장비마스터', header: '장비명' },
+    // Rental selections share the set-master price authority. Inventory names
+    // remain available through inventory reads, not as additional rental SKUs.
     { sheet: '세트마스터', header: '세트명' }
   ];
   try {

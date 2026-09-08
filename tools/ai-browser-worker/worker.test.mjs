@@ -6133,7 +6133,7 @@ test('buildReadOnlyLookupContext fetches kill switch and exposes read-only looku
   assert.match(context.lookup_urls.contract_master_recent_gviz, /%EA%B3%84%EC%95%BD%EB%A7%88%EC%8A%A4%ED%84%B0/);
 });
 
-test('buildReadOnlyLookupContext gives Hermes the current exact equipment and set catalog without a terminal lookup', async () => {
+test('buildReadOnlyLookupContext gives Hermes only set-master rental products as the exact catalog', async () => {
   const fetchImpl = async (url) => {
     const parsed = new URL(url);
     const sheet = parsed.searchParams.get('sheet');
@@ -6169,8 +6169,8 @@ test('buildReadOnlyLookupContext gives Hermes the current exact equipment and se
 
   assert.deepEqual(context.equipment_catalog, {
     status: 'ok',
-    source_sheets: ['장비마스터', '세트마스터'],
-    exact_names: ['소니 캠 AX-700', 'V마운트 배터리', '아마란 300C', '마스 400S 프로'],
+    source_sheets: ['세트마스터'],
+    exact_names: ['아마란 300C', '마스 400S 프로'],
     error: null
   });
 });
@@ -6184,8 +6184,8 @@ test('native full catalog lookup exposes alternative spelling after a partial qu
       return {ok:true,status:200,text:async()=>JSON.stringify({headers:[equipment?'장비명':'세트명'],data:equipment?[['매슬리니'],['그립헤드']]:[['마스 400S']]})};
     }},{kind:'catalog',query:'*'});
   assert.equal(result.status,'ok');
-  assert.deepEqual(result.exact_names,['매슬리니','그립헤드','마스 400S']);
-  assert.deepEqual(calls,['read','read']);
+  assert.deepEqual(result.exact_names,['마스 400S']);
+  assert.deepEqual(calls,['read']);
 });
 
 test('buildReadOnlyLookupContext reads kill switch from GAS header-only read responses', async () => {
