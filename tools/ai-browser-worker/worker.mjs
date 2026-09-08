@@ -1646,7 +1646,6 @@ function isStaffConfirmedUnregisteredSheetCandidate(decision = {}) {
     && checks.latest_customer_message_after_last_staff_reply === false
     && checks.no_auto_reply_sent === true
     && hasReservationEvidence
-    && reservation.confirmed === true
     && reservation.already_registered === false;
 }
 
@@ -1675,9 +1674,6 @@ function sheetSafetyValidationErrors(decision = {}) {
     if (reservation.is_reservation_inquiry !== true && equipment.length === 0) {
       errors.push('staff-confirmed sheet writes require explicit reservation evidence');
     }
-    if (reservation.confirmed !== true) {
-      errors.push('staff-confirmed sheet writes require reservation_inquiry.confirmed=true');
-    }
     if (reservation.already_registered !== false) {
       errors.push('staff-confirmed sheet writes require reservation_inquiry.already_registered=false');
     }
@@ -1699,7 +1695,7 @@ function isIncompleteInquiryCapture(decision = {}, row = {}) {
     .some((value) => !text(value).trim());
   return decision.should_write_to_sheet === true
     && row.plan_complete === false
-    && hasMissingScheduleField
+    && (hasMissingScheduleField || equipment.some(item => item.catalog_match_status === 'ambiguous'))
     && reservation.is_reservation_inquiry === true
     && reservation.already_registered === false
     && equipment.length > 0
@@ -1980,7 +1976,8 @@ export function buildSheetAppendPayload(decision, options = {}) {
   const row = decision.sheet_row_candidate || {};
   const equipment = normalizeSheetEquipmentItems(decision);
   if (!equipment.length) return null;
-  const incompleteSchedule = isIncompleteInquiryCapture(decision, row);
+  const incompleteSchedule = isIncompleteInquiryCapture(decision, row)
+    && [row.start_date,row.pickup_time,row.end_date,row.return_time].some(value => !text(value).trim());
   const requestWindow = normalizeConfirmRequestWindowForSheet(row)
     || (incompleteSchedule ? partialConfirmRequestWindowForSheet(row) : null);
   if (!requestWindow) return null;

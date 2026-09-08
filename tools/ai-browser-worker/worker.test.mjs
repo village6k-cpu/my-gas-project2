@@ -4725,6 +4725,13 @@ test('AI catalog families preserve exact choices without inventing ownership or 
   assert.equal(resolved.ok,true);
   assert.deepEqual(buildSheetAppendPayload(resolved.decision).args.장비모델후보,[{name:'70-200',candidates}]);
   assert.deepEqual(buildSheetAppendPayload(resolved.decision).args.장비,[{이름:'70-200',수량:2}]);
+  const unselected=structuredClone(decision);
+  unselected.sheet_row_candidate.plan_complete=false;
+  unselected.reservation_inquiry.confirmed=false;
+  unselected.safety_checks.latest_customer_message_after_last_staff_reply=false;
+  unselected.safety_checks.no_auto_reply_sent=true;
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(unselected).valid,true);
+  assert.equal(buildSheetAppendPayload(unselected).args.일정미완성,undefined);
   for(const bad of [[candidates[0]], [candidates[0],candidates[0]], [candidates[0],'미보유 렌즈']]) {
     const invalid=structuredClone(decision);invalid.reservation_inquiry.equipment_requested[0].catalog_candidates=bad;
     assert.equal(workerModule.resolveEquipmentCatalogDecision(invalid,{status:'ok',exact_names:candidates}).ok,false);
