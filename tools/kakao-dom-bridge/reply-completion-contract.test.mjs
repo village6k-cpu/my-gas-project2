@@ -9,8 +9,40 @@ Object.assign(process.env, {
   KAKAO_FOLLOW_UP_ITEMS_ENABLED: '1', SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
   P0_SLACK_ESCALATION_ENABLED: '1', SLACK_ACTION_POLL_ENABLED: '1'
 });
+
 const { createGatewayResultApplicationCoordinator } = await import('./server.mjs');
 
+test('Gateway requires durable review when the host suppresses an originally requested reply', async () => {
+  for (const persisted of [false, true]) {
+    let audit, failure, finalized = false;
+    const job = { job_id: `suppressed-${persisted}`, room_key: 'chat:completion-test', room_revision: 1,
+      event: {}, local_context: { job: { jobId: `suppressed-${persisted}` }, turn_internal: { snapshot: {} } },
+      result: { content: '{}' }, application: { state: 'pending' } };
+    const prepared = { status: 'ai_prepared', snapshot: {}, replyExecutionIntent: { requested: true },
+      decision: { reply_decision: { replyMode: 'draft_only', text: '확인한 내용입니다.' }, follow_up_items: [] } };
+    const channel = {
+      async claimApplication() { return { claimed: true, application_id: job.job_id, job: structuredClone(job) }; },
+      async beginApplication() {},
+      async recordApplicationApplied({ audit: value }) { audit = value; },
+      async finalizeApplication() { finalized = true; },
+      async failApplication({ error }) { failure = error; return { ...job, application: { application_id: job.job_id, error } }; },
+      async listPendingApplicationFailureNotifications() { return []; },
+      async markApplicationFailureNotified() {}
+    };
+    const coordinator = createGatewayResultApplicationCoordinator({ channel, getConfig: () => ({}),
+      prepare: async () => prepared,
+      apply: async () => ({ prepared, autoReplyResult: { attempted: false, sent: false } }),
+      finalize: async () => ({ ...prepared, status: 'ai_reply_deferred',
+        followUpResult: { rows: persisted ? [{ id: 'durable-review' }] : [] } }),
+      onFailure: async () => {} });
+    await coordinator.enqueue(job);
+    await coordinator.idle();
+    assert.equal(audit.reply_execution.state, 'awaiting_review');
+    assert.equal(audit.reply_execution.requested, true);
+    assert.equal(finalized, persisted);
+    if (!persisted) assert.match(failure.message, /gateway_owner_review_not_persisted/);
+  }
+});
 test('Gateway persists the actual reply outcome before refusing a false completed result', async () => {
   for (const [name, replyResult, expectedState, fails] of [
     ['host-read-missing', { attempted: false, sent: false, gate: { reason: 'kill_switch_not_checked' } }, 'blocked', true],

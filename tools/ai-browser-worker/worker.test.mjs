@@ -1461,6 +1461,39 @@ test('successful inquiry receipt keeps an independent typed price reply for fres
   assert.equal(failed.decision.reply_decision.replyMode,'draft_only');
 });
 
+test('pending schedule work does not claim a mutation or suppress a separately grounded customer answer', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const followUp={type:'reservation_review',route:'schedule',taskKey:'inventory-review',
+    priority:'normal',status:'open',title:'대여 장비 재고 확인',customer_name:'테스트 고객',
+    summary:'요청 장비의 가용 여부 확인 필요',recommended_action:'현재 재고를 확인하세요.',
+    requiresHumanAction:true,actionFamily:'inventory_check',businessKey:'test-inventory'};
+  for (const [classification,safetyClass,grounding,replyText,quote] of [
+    ['price','sensitive_commitment','authoritative_sheet','부가세 포함 33,000원입니다.',{source:'trade',id:'260821-001'}],
+    ['reservation','sensitive_commitment','authoritative_sheet','부가세 포함 33,000원입니다.',{source:'trade',id:'260821-001'}],
+    ['faq','current_policy_answer','current_confirmed_policy','대여 요금은 최소 24시간 기준입니다.',null]
+  ]) {
+    const decision=gatewayDecisionFixture({classification,price_quote:quote,follow_up_items:[followUp],
+      reply_decision:{replyMode:'auto_send',text:replyText,safetyClass,grounding,requiresRag:false,shouldCreateTask:true}});
+    for (const receipts of [[],[confirmationReceiptFixture(job)]]) {
+      const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision),trustedToolReceipts:receipts});
+      assert.deepEqual(prepared.gatewaySafetyFailures,[],`${classification} / receipts ${receipts.length}`);
+      assert.deepEqual(prepared.decision.reply_decision,decision.reply_decision);
+      assert.ok(prepared.availabilityAwareRows.some(row=>JSON.stringify(row).includes('schedule')));
+      const gate=canAutoSendCustomerAnswer(prepared.decision,{autoSendEnabled:true},
+        quote?{priceVerification:{complete:true,totalVatIncluded:33000}}:{});
+      assert.equal(gate.allowed,true,gate.reason);
+    }
+  }
+});
+
+test('a rejected schedule execution retains the original AI reply intent for completion reconciliation', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=gatewayDecisionFixture({authoritative_sheet_result:{status:'available'}});
+  const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision)});
+  assert.equal(prepared.decision.reply_decision.replyMode,'draft_only');
+  assert.equal(prepared.replyExecutionIntent.requested,true);
+});
+
 test('registration readback preserves an independent price answer for fresh verification', async () => {
   const {job,turn}=gatewayTurnFixture();
   const decision=confirmedRegistrationDecisionFixture({classification:'price',
