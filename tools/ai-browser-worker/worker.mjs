@@ -35,7 +35,7 @@ export {
 } from './staff-confirmed-registration.mjs';
 import { buildHumanWorkCandidates } from '../work-orchestrator-v2/work-items.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
-import { deriveAutomationResolution } from '../work-orchestrator-v2/automation-resolution.mjs';
+import { deriveAutomationResolution, deriveCustomerReplyOutcome } from '../work-orchestrator-v2/automation-resolution.mjs';
 import {
   canonicalSourceEventKey,
   validateWorkOrchestratorV2CutoverConfig
@@ -357,6 +357,36 @@ export async function fetchEquipmentCatalogSnapshot(config = {}, options = {}) {
 
 function extractKillSwitchStatus(data) {
   return data?.data?.[0]?.[0] || data?.values?.[0]?.[0] || data?.value || data?.headers?.[0] || 'not_checked';
+}
+
+// Operator controls are host-owned facts. Never authorize or suppress delivery
+// using an LLM echo, a prior turn snapshot, or an agent-supplied receipt.
+export async function readCustomerReplyExecutionPolicy(config = {}) {
+  try {
+    const data = await fetchReadOnlyJson(buildGasReadUrl(
+      config.gasApiUrl || DEFAULT_GAS_API_URL,
+      config.sheetApiKey || DEFAULT_SHEET_API_KEY,
+      { action: 'read', sheet: '설정', range: 'A1' }
+    ), { fetchImpl: config.fetchImpl || fetch, timeoutMs: 10000 });
+    const observed = text(extractKillSwitchStatus(data)).trim();
+    return {
+      source: 'gas_settings_a1', checkedAt: new Date().toISOString(),
+      status: ['active', 'paused', 'price_paused'].includes(observed) ? observed : 'not_checked'
+    };
+  } catch {
+    // Do not log credential-bearing URLs or response bodies.
+    return { source: 'gas_settings_a1', checkedAt: new Date().toISOString(), status: 'not_checked', error: 'read_failed' };
+  }
+}
+
+export function canExecuteCustomerReply(decision, policy = {}) {
+  if (policy.error) return { allowed: false, reason: 'kill_switch_read_failed' };
+  if (policy.status === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
+  if (policy.status === 'price_paused' && ['price', 'price_review', 'quote_send'].includes(decision?.classification)) {
+    return { allowed: false, reason: 'kill_switch_price_paused' };
+  }
+  if (!['active', 'price_paused'].includes(policy.status)) return { allowed: false, reason: 'kill_switch_not_checked' };
+  return { allowed: true, reason: 'operator_control_active' };
 }
 
 export function parseVillageAiSse(textBody = '') {
@@ -1616,9 +1646,6 @@ export function canAutoSendCustomerDocumentAssets(decision = {}, config = {}) {
   if (!AI_REPLY_GROUNDING_CLASSES.has(grounding) || grounding === 'none') return { allowed: false, reason: 'reply_grounding_missing' };
   if (replyRequiresRag(decision) !== false) return { allowed: false, reason: 'document_handoff_requires_rag_must_be_false' };
   if (customerDocumentAssetsAlreadySent(decision)) return { allowed: false, reason: 'customer_document_assets_already_sent' };
-  const killSwitch = text(decision.kill_switch_observed).trim();
-  if (killSwitch === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
-  if (killSwitch !== 'active' && killSwitch !== 'price_paused') return { allowed: false, reason: `kill_switch_${killSwitch || 'unknown'}` };
   if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
   if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
   if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
@@ -7486,6 +7513,8 @@ function currencyAmountsInReply(value = '') {
     .filter((amount) => Number.isFinite(amount) && amount > 0);
 }
 
+// Validate the AI's reply plan. Live operator control belongs exclusively to
+// maybeAutoSendReply at the effect boundary, for text and document delivery alike.
 export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
   const typedPriceReply = decision.classification === 'price' && Boolean(decision.price_quote)
@@ -7501,15 +7530,9 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
   const mode = String(reply.replyMode || reply.reply_mode || '').trim();
   const confidence = String(reply.confidence || decision.confidence || '').trim();
   const textValue = text(reply.text || decision.suggested_reply_draft).trim();
-  const killSwitch = String(decision.kill_switch_observed || '').trim();
-  const classification = String(decision.classification || '').trim();
   const safetyClass = replySafetyClass(decision);
   const grounding = replyGrounding(decision);
   const requiresRag = replyRequiresRag(decision);
-  const priceLikeClassifications = new Set(['price', 'price_review', 'quote_send']);
-  if (killSwitch === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
-  if (killSwitch === 'price_paused' && priceLikeClassifications.has(classification)) return { allowed: false, reason: 'kill_switch_price_paused' };
-  if (killSwitch !== 'active' && killSwitch !== 'price_paused') return { allowed: false, reason: `kill_switch_${killSwitch || 'unknown'}` };
   if (mode !== 'auto_send') return { allowed: false, reason: `replyMode_${mode || 'missing'}` };
   if (confidence !== 'high') return { allowed: false, reason: `confidence_${confidence || 'missing'}` };
   if (!safetyClass) return { allowed: false, reason: 'reply_safety_class_missing' };
@@ -8605,6 +8628,15 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
     });
     return result;
   }
+  const executionPolicy = await readCustomerReplyExecutionPolicy(config);
+  const executionGate = canExecuteCustomerReply(decision, executionPolicy);
+  if (!executionGate.allowed) {
+    const result = { attempted: false, sent: false, gate: executionGate, executionPolicy };
+    logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
+    return result;
+  }
+  // Reads above may span a newer room event. The caller owns the room revision.
+  await dependencies.assertFreshBeforeSend?.();
   let sendResult;
   try {
     const sendMessage = dependencies.sendKakaoMessage || sendKakaoMessageViaChrome;
@@ -8640,6 +8672,7 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
     sendResult,
     ...(readbackReceipt ? { readbackReceipt } : {}),
     text: gate.text,
+    executionPolicy,
     ragSupport,
     ...(priceVerification ? { priceVerification } : {})
   };
@@ -11054,9 +11087,6 @@ export async function prepareKakaoGatewayDecision({
         ? 'available'
         : 'unavailable';
     }
-    if (!text(decision.kill_switch_observed).trim() && internal?.lookupContext?.kill_switch?.status) {
-      decision.kill_switch_observed = internal.lookupContext.kill_switch.status;
-    }
   }
 
   const receiptCoordinates = { jobId, roomKey, roomRevision };
@@ -11543,15 +11573,6 @@ export async function prepareKakaoDecisionFromSnapshot({
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
 
-    // grok-4.5 sometimes omits kill_switch_observed from FINAL_JSON even though
-    // the worker already read the switch authoritatively from the 설정 sheet.
-    // Backfill from our own read so the fail-closed auto-send gates judge the
-    // real switch state instead of a missing echo. A failed read stays
-    // 'not_checked' and still blocks sending.
-    if (!String(decision?.kill_switch_observed || '').trim() && lookupContext?.kill_switch?.status) {
-      decision.kill_switch_observed = lookupContext.kill_switch.status;
-    }
-
     reportHandoffPhase('sheet_mutation_boundary');
     let confirmationState = null;
     await executeVillageConfirmationRequest({
@@ -11726,11 +11747,17 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
     }
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
+    const replyDependencies = {
+      assertFreshBeforeSend: async () => {
+        await freshnessGuard.checkNow();
+        freshnessGuard.throwIfSuperseded();
+      }
+    };
     const autoReplyResult = prepared.sheetResult?.success === false
       ? (prepared.sheetResult.error_type === 'no_contact'
-          ? await sendReply({ config, decision: prepared.decision, job, navigationContext })
+          ? await sendReply({ config, decision: prepared.decision, job, navigationContext, dependencies: replyDependencies })
           : { attempted: false, sent: false, reason: 'sheet_write_rejected_no_auto_send', sheetErrorType: prepared.sheetResult.error_type })
-      : await sendReply({ config, decision: prepared.decision, job, navigationContext });
+      : await sendReply({ config, decision: prepared.decision, job, navigationContext, dependencies: replyDependencies });
     result = { prepared, freshSnapshot, snapshotChanged: false, autoReplyResult, closeResult };
     return result;
   } catch (error) {
@@ -11911,6 +11938,7 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
     return { ...prepared, workOrchestratorResult: emptyWorkOrchestratorResult(true) };
   }
   const autoReplyResult = applied.autoReplyResult || { attempted: false, sent: false, reason: 'missing_apply_result' };
+  const replyExecutionOutcome = deriveCustomerReplyOutcome({ ...applied, decision: prepared.decision, autoReplyResult });
   if (applied.superseded === true) {
     return {
       ...prepared,
@@ -11991,7 +12019,10 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
   }
   return {
     ...prepared,
-    status: applied.superseded ? 'superseded_by_newer_room_event' : 'ai_completed',
+    status: ['blocked', 'delivery_uncertain'].includes(replyExecutionOutcome.state)
+      ? 'ai_reply_unresolved'
+      : ['paused', 'superseded'].includes(replyExecutionOutcome.state) ? 'ai_reply_deferred' : 'ai_completed',
+    replyExecutionOutcome,
     followUpResult,
     workOrchestratorResult,
     automationResolutionResult: automationApplied.result,

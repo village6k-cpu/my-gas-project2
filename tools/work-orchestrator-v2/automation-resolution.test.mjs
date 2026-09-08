@@ -13,10 +13,37 @@ import test from 'node:test';
 
 const resolutionModule = import('./automation-resolution.mjs');
 
+test('reply execution distinguishes verified delivery, deliberate deferral, and unresolved sends', async () => {
+  const { deriveCustomerReplyOutcome: outcome } = await resolutionModule;
+  const decision = { reply_decision: { replyMode: 'auto_send' } };
+  assert.equal(outcome({ decision: {} }).state, 'not_requested');
+  for (const reason of ['kill_switch_paused', 'kill_switch_price_paused', 'auto_send_disabled']) {
+    assert.equal(outcome({ decision, autoReplyResult: { sent: false, gate: { reason } } }).state, 'paused');
+  }
+  assert.equal(outcome({ decision, snapshotChanged: true }).state, 'superseded');
+  assert.equal(outcome({ decision, autoReplyResult: { sent: false, gate: { reason: 'duplicate_recent_auto_reply' } } }).state, 'already_delivered');
+  assert.equal(outcome({ decision, autoReplyResult: { sent: true } }).state, 'delivery_uncertain');
+  assert.equal(outcome({ decision, autoReplyResult: { attempted: true, sent: false, sendResult: { reason: 'send_error' } } }).reason, 'send_error');
+  assert.equal(outcome({ decision, autoReplyResult: { sent: true, readbackReceipt: {
+    id: `reply-readback-${'a'.repeat(64)}`, confirmedAt: '2026-09-08T11:00:00.000Z'
+  } } }).state, 'delivered');
+});
+
 async function derive(input) {
   const { deriveAutomationResolution } = await resolutionModule;
   return deriveAutomationResolution(input);
 }
+
+test('a completed booking cannot resolve a promised customer reply that was never delivered', async () => {
+  const result = await derive({
+    decision: { reply_decision: { replyMode: 'auto_send' }, follow_up_items: [] },
+    sheetResult: { success: true },
+    operationReceipt: { state: 'completed', authoritativeReadback: true },
+    autoReplyResult: { attempted: false, sent: false, gate: { reason: 'kill_switch_not_checked' } }
+  });
+  assert.equal(result.state, 'needs_human');
+  assert.equal(result.resolutionKind, 'missing_authoritative_readback');
+});
 
 test('verified auto reply succeeds only with a content-free correlated readback receipt', async () => {
   const result = await derive({

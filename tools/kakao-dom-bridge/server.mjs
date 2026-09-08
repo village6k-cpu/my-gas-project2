@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
 import { isSharedHermesGatewayIdle } from '../ai-browser-worker/shared-hermes-browser.mjs';
+import { deriveCustomerReplyOutcome } from '../work-orchestrator-v2/automation-resolution.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
 import { executeVillageReadOnlyLookup } from '../ai-browser-worker/worker.mjs';
@@ -2537,8 +2538,11 @@ export function createGatewayResultApplicationCoordinator({
     return candidates.length ? Math.min(...candidates) : localStartedAt;
   }
 
-  function assertGatewayFinalizationSucceeded(finalized = {}, config = {}) {
+  function assertGatewayFinalizationSucceeded(finalized = {}, config = {}, replyOutcome = {}) {
     if (finalized?.superseded === true || finalized?.status === 'superseded_by_newer_room_event') return;
+    if (['blocked', 'delivery_uncertain'].includes(replyOutcome.state)) {
+      throw new Error(`gateway_reply_execution_unresolved: ${replyOutcome.reason}`);
+    }
     const decision = finalized?.decision || {};
     const reply = decision?.reply_decision || {};
     const ownerReviewExpected = decision?.owner_review_required === true
@@ -2649,12 +2653,15 @@ export function createGatewayResultApplicationCoordinator({
     });
     durableJob.application = { ...(durableJob.application || {}), state: 'applying' };
     const applied = await apply({ config, job, prepared });
+    const replyOutcome = deriveCustomerReplyOutcome({ ...applied, decision: prepared.decision });
     const autoReplyReadback = safeKakaoAutoReplyAuditProof({ durableJob, job, prepared, applied });
     const appliedAudit = {
       auto_reply_attempted: applied?.autoReplyResult?.attempted === true,
       auto_reply_sent: applied?.autoReplyResult?.sent === true,
       snapshot_changed: applied?.snapshotChanged === true,
       superseded: applied?.superseded === true,
+      reply_execution: replyOutcome,
+      ...(applied?.autoReplyResult?.executionPolicy ? { execution_policy: applied.autoReplyResult.executionPolicy } : {}),
       ...(autoReplyReadback ? { auto_reply_readback: autoReplyReadback } : {})
     };
     const persistedAppliedJob = await channel.recordApplicationApplied({
@@ -2666,7 +2673,7 @@ export function createGatewayResultApplicationCoordinator({
       ? cloneForAudit(persistedAppliedJob.application)
       : { ...(durableJob.application || {}), state: 'applied', applied_audit: appliedAudit };
     const finalized = await finalize({ config, job, applied });
-    assertGatewayFinalizationSucceeded(finalized, config);
+    assertGatewayFinalizationSucceeded(finalized, config, replyOutcome);
     const finishedAt = currentTimeMs();
     const elapsedMs = Math.max(0, finishedAt - elapsedBaselineAt);
     const localApplicationElapsedMs = Math.max(0, finishedAt - localStartedAt);
@@ -2677,7 +2684,8 @@ export function createGatewayResultApplicationCoordinator({
       audit: {
         status: String(finalized?.status || ''),
         follow_up_inserted: Number(finalized?.followUpResult?.inserted || 0),
-        auto_reply_sent: finalized?.autoReplyResult?.sent === true
+        auto_reply_sent: finalized?.autoReplyResult?.sent === true,
+        reply_execution: replyOutcome
       }
     });
     triggerAuditProjection({ durableJob, prepared, applied });

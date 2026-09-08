@@ -11659,7 +11659,7 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
     grounding: 'staff_confirmation'
   });
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'faq', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).allowed, true);
-  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
+  assert.equal(workerModule.canExecuteCustomerReply({ ...baseDecision, classification: 'price' }, { status: 'price_paused' }).reason, 'kill_switch_price_paused');
 });
 
 test('screenshot-like schedule warning is owner-only while an ordinary FAQ remains auto-sendable', () => {
@@ -11926,7 +11926,7 @@ test('canAutoSendCustomerAnswer gates by grounding instead of topic category', (
   });
   assert.equal(priceGate.allowed, true);
   assert.equal(priceGate.safetyClass, 'sensitive_commitment');
-  assert.equal(canAutoSendCustomerAnswer({ ...groundedPriceQuote, kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
+  assert.equal(workerModule.canExecuteCustomerReply(groundedPriceQuote, { status: 'price_paused' }).reason, 'kill_switch_price_paused');
   assert.equal(canAutoSendCustomerAnswer({
     ...groundedPriceQuote,
     reply_decision: { ...groundedPriceQuote.reply_decision, grounding: 'visible_conversation' }
@@ -13099,7 +13099,8 @@ test('actual auto-reply sender emits a source-correlated content-free readback r
   const result = await workerModule.maybeAutoSendReply({
     config: {
       autoSendEnabled: true,
-      autoSendLogPath: path.join(tmpDir, 'auto-replies.ndjson')
+      autoSendLogPath: path.join(tmpDir, 'auto-replies.ndjson'),
+      fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify({ data: [['active']] }) })
     },
     decision: {
       classification: 'simple_ack', confidence: 'high', kill_switch_observed: 'active',
