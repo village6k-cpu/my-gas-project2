@@ -4712,6 +4712,25 @@ test('executeVillageConfirmationRequest does not treat a missing catalog decisio
   assert.equal(receipt.error.type, 'invalid_decision');
 });
 
+test('AI catalog families preserve exact choices without inventing ownership or selecting a model', () => {
+  const candidates=['소니 GM 70-200mm','소니 GM 70-200mm II'];
+  const decision=completeSheetDecision({
+    reservation_inquiry:{is_reservation_inquiry:true,already_registered:false,equipment_requested:[{
+      raw_text:'70-200',normalized_guess:'70-200',catalog_match_status:'ambiguous',
+      exact_name_from_equipment_catalog:null,exact_name_from_set_master:null,catalog_candidates:candidates,quantity:2
+    }]},sheet_row_candidate:{equipment:[{item:'70-200',quantity:2}]}
+  });
+  assert.equal(workerModule.validateVillageConfirmationExecutionDecision(decision).valid,true);
+  const resolved=workerModule.resolveEquipmentCatalogDecision(decision,{status:'ok',exact_names:candidates});
+  assert.equal(resolved.ok,true);
+  assert.deepEqual(buildSheetAppendPayload(resolved.decision).args.장비모델후보,[{name:'70-200',candidates}]);
+  assert.deepEqual(buildSheetAppendPayload(resolved.decision).args.장비,[{이름:'70-200',수량:2}]);
+  for(const bad of [[candidates[0]], [candidates[0],candidates[0]], [candidates[0],'미보유 렌즈']]) {
+    const invalid=structuredClone(decision);invalid.reservation_inquiry.equipment_requested[0].catalog_candidates=bad;
+    assert.equal(workerModule.resolveEquipmentCatalogDecision(invalid,{status:'ok',exact_names:candidates}).ok,false);
+  }
+});
+
 test('executeVillageConfirmationRequest preserves customer wording only after an explicit AI unmatched decision', async () => {
   const decision = completeSheetDecision({
     reservation_inquiry: {
@@ -6096,6 +6115,19 @@ test('buildReadOnlyLookupContext gives Hermes the current exact equipment and se
   });
 });
 
+test('native full catalog lookup exposes alternative spelling after a partial query miss',async()=>{
+  const calls=[];
+  const result=await workerModule.executeVillageReadOnlyLookup({gasApiUrl:'https://script.example/exec',sheetApiKey:'test',
+    fetchImpl:async value=>{
+      const url=new URL(value);calls.push(url.searchParams.get('action'));
+      const equipment=url.searchParams.get('sheet')==='장비마스터';
+      return {ok:true,status:200,text:async()=>JSON.stringify({headers:[equipment?'장비명':'세트명'],data:equipment?[['매슬리니'],['그립헤드']]:[['마스 400S']]})};
+    }},{kind:'catalog',query:'*'});
+  assert.equal(result.status,'ok');
+  assert.deepEqual(result.exact_names,['매슬리니','그립헤드','마스 400S']);
+  assert.deepEqual(calls,['read','read']);
+});
+
 test('buildReadOnlyLookupContext reads kill switch from GAS header-only read responses', async () => {
   const fetchImpl = async () => ({
     ok: true,
@@ -6180,7 +6212,7 @@ test('buildHermesPrompt keeps customer-requested parenthetical accessories as co
 
   assert.match(prompt, /괄호.*장비.*별도 top-level.*equipment_requested.*sheet_row_candidate\.equipment/s);
   assert.match(prompt, /세트마스터.*포함 구성품.*확인.*때만.*set_component_selections/s);
-  assert.match(prompt, /모델이 모호.*누락.*unmatched.*고객 원문/s);
+  assert.match(prompt, /제품군은 확인됐으나 모델 선택.*ambiguous.*catalog_candidates.*고객 표현/s);
 });
 
 test('buildHermesPrompt requires existing RQ availability result before follow-up reporting', () => {

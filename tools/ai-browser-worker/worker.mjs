@@ -769,9 +769,9 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 세트 옵션은 set_component_selections로만 지정: 600X 젬볼 => 어퓨쳐 600X/소프트박스/젬볼 90. Never add set options as top-level equipment.
 - 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
 - RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
-- 불확실한 장비명도 코드 규칙으로 포기하지 말고 AI가 카탈로그 전체를 비교해 판단하고 대화 맥락으로 보강한다. 도저히 매칭할 수 없을 때만 catalog_match_status="unmatched", exact_name_from_equipment_catalog=null로 명시하고 고객 원문 장비명을 F열 item에 쓴다. 조회 실패·필드 누락을 unmatched로 가장하지 않는다. Q/R에는 원문/추론/가용확인 후 안내 같은 내부 설명을 넣지 않는다.
+- 불확실한 장비명도 코드 규칙으로 포기하지 말고 AI가 카탈로그 전체를 비교해 판단하고 대화 맥락으로 보강한다. 제품군의 정확 모델 후보가 여러 개면 ambiguous와 catalog_candidates를 사용한다. 도저히 매칭할 수 없을 때만 catalog_match_status="unmatched", exact_name_from_equipment_catalog=null로 명시하고 고객 원문 장비명을 F열 item에 쓴다. 부분 검색에 없거나 철자/브랜드가 다르면 village_read(request={kind:"catalog",query:"*"})로 전체 정확명을 비교한 뒤 unmatched를 판단한다. 조회 실패·필드 누락을 unmatched로 가장하지 않는다. Q/R에는 원문/추론/가용확인 후 안내 같은 내부 설명을 넣지 않는다.
 - reservation_inquiry.equipment_requested and sheet_row_candidate.equipment must be one-to-one in the same order. 세트 옵션은 양쪽 장비 배열에 별도 품목으로 넣지 말고 set_component_selections에만 둔다.
-- 고객이 괄호 안에도 장비/액세서리를 명시하면(예: 아마란 300C 1세트 (라이트돔)) 고객이 요청한 별도 top-level 장비로 보고 reservation_inquiry.equipment_requested와 sheet_row_candidate.equipment 양쪽에 모두 포함한다. 현재 세트마스터 조회에서 그 장비가 해당 세트의 포함 구성품임을 확인한 때만 top-level에서 제외하고 set_component_selections로 처리한다. 모델이 모호하면 임의 모델을 고르거나 누락하지 말고 catalog_match_status="unmatched"와 고객 원문을 별도 품목으로 보존해 사장 확인 대상으로 남긴다.
+- 고객이 괄호 안에도 장비/액세서리를 명시하면(예: 아마란 300C 1세트 (라이트돔)) 고객이 요청한 별도 top-level 장비로 보고 reservation_inquiry.equipment_requested와 sheet_row_candidate.equipment 양쪽에 모두 포함한다. 현재 세트마스터 조회에서 그 장비가 해당 세트의 포함 구성품임을 확인한 때만 top-level에서 제외하고 set_component_selections로 처리한다. 제품군은 확인됐으나 모델 선택만 남았다면 catalog_match_status="ambiguous", catalog_candidates=[실제 카탈로그 정확명 2~8개], exact_name 필드=null과 고객 표현을 보존한다. 미보유와 모델 미정을 혼동하지 않는다. 임의 모델/가격을 확정하지 않는다.
 - 약어/속어는 AI 의미 판단 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. confidently matchable이면 catalog_match_status="matched"와 정확 카탈로그명을 쓰며, 원문은 정말 매칭 불가능한 경우만 fallback이다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
@@ -835,7 +835,7 @@ The JSON schema:
   "reservation_inquiry": {
     "is_reservation_inquiry": boolean,
     "is_test_message": boolean,
-    "equipment_requested": [{ "raw_text": string, "normalized_guess": string | null, "exact_name_from_equipment_catalog": string | null, "exact_name_from_set_master": string | null, "catalog_match_status": "matched" | "unmatched", "quantity": number | string | null, "confidence": "low" | "medium" | "high" }],
+    "equipment_requested": [{ "raw_text": string, "normalized_guess": string | null, "exact_name_from_equipment_catalog": string | null, "exact_name_from_set_master": string | null, "catalog_match_status": "matched" | "unmatched" | "ambiguous", "catalog_candidates": optional array of 2-8 exact catalog model names, "quantity": number | string | null, "confidence": "low" | "medium" | "high" }],
     "rental_start": string | null,
     "rental_end": string | null,
     "pickup_time": string | null,
@@ -1750,8 +1750,16 @@ export function resolveEquipmentCatalogDecision(decision = {}, catalogSnapshot =
       if (exactName) return { ok: false, error: `equipment_requested[${index}] unmatched item must not claim an exact catalog name` };
       resolvedName = originalPlannedName || text(requestItem.normalized_guess || requestItem.raw_text).normalize('NFKC').trim();
       if (!resolvedName) return { ok: false, error: `equipment_requested[${index}] unmatched customer wording is required` };
+    } else if (matchStatus === 'ambiguous') {
+      const candidates = requestItem.catalog_candidates;
+      if (exactName || !Array.isArray(candidates) || candidates.length < 2 || candidates.length > 8
+        || new Set(candidates).size !== candidates.length || candidates.some(name => !catalogNames.has(name))) {
+        return { ok:false, error:`equipment_requested[${index}] ambiguous item requires 2-8 distinct exact catalog_candidates and no selected model` };
+      }
+      resolvedName = originalPlannedName || text(requestItem.raw_text).normalize('NFKC').trim();
+      if (!resolvedName || catalogNames.has(resolvedName)) return { ok:false, error:'ambiguous item must preserve the unselected customer wording' };
     } else {
-      return { ok: false, error: `equipment_requested[${index}].catalog_match_status must be matched or unmatched` };
+      return { ok: false, error: `equipment_requested[${index}].catalog_match_status must be matched, ambiguous, or unmatched` };
     }
 
     itemNameMap.set(originalPlannedName, resolvedName);
@@ -1997,6 +2005,10 @@ export function buildSheetAppendPayload(decision, options = {}) {
     장비: equipment.map((item) => ({ 이름: item.item, 수량: item.quantity }))
   };
   if (incompleteSchedule) args.일정미완성 = true;
+  const modelCandidates = (decision.reservation_inquiry?.equipment_requested || [])
+    .map((item,index) => item.catalog_match_status === 'ambiguous'
+      ? {name:equipment[index]?.item, candidates:item.catalog_candidates} : null).filter(Boolean);
+  if (modelCandidates.length) args.장비모델후보 = modelCandidates;
   if (decision.customer_requested_pending_revision) {
     args.customer_requested_pending_revision = structuredClone(decision.customer_requested_pending_revision);
     for (const field of ['할인유형', '비고', '추가요청']) delete args[field];
@@ -2055,12 +2067,17 @@ export function validateVillageConfirmationExecutionDecision(decision = {}, opti
       requested.forEach((item, index) => {
         const matchStatus = text(item?.catalog_match_status).trim();
         const exactCatalogName = text(item?.exact_name_from_equipment_catalog).trim();
-        if (!['matched', 'unmatched'].includes(matchStatus)) {
-          catalogErrors.push(`reservation_inquiry.equipment_requested[${index}].catalog_match_status must be matched or unmatched`);
+        if (!['matched', 'unmatched', 'ambiguous'].includes(matchStatus)) {
+          catalogErrors.push(`reservation_inquiry.equipment_requested[${index}].catalog_match_status must be matched, ambiguous, or unmatched`);
         } else if (matchStatus === 'matched' && !exactCatalogName) {
           catalogErrors.push(`reservation_inquiry.equipment_requested[${index}].exact_name_from_equipment_catalog is required when matched`);
-        } else if (matchStatus === 'unmatched' && exactCatalogName) {
-          catalogErrors.push(`reservation_inquiry.equipment_requested[${index}] must not claim an exact catalog name when unmatched`);
+        } else if (matchStatus !== 'matched' && exactCatalogName) {
+          catalogErrors.push(`reservation_inquiry.equipment_requested[${index}] must not claim an exact catalog name before model selection`);
+        } else if (matchStatus === 'ambiguous' && (!Array.isArray(item.catalog_candidates)
+          || item.catalog_candidates.length < 2 || item.catalog_candidates.length > 8
+          || new Set(item.catalog_candidates).size !== item.catalog_candidates.length
+          || item.catalog_candidates.some(name => typeof name !== 'string' || !name.trim() || name !== name.trim()))) {
+          catalogErrors.push(`reservation_inquiry.equipment_requested[${index}] requires 2-8 distinct catalog_candidates`);
         }
       });
     }
@@ -3079,6 +3096,11 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
   }
   requireReadKeys(request,['kind','query']);
   requireReadText(request.query);
+  if (request.kind === 'catalog' && request.query === '*') {
+    const catalog = await fetchEquipmentCatalogSnapshot(config, { fetchImpl: config.fetchImpl });
+    if (catalog.status !== 'ok') throw new Error(catalog.error || 'catalog_read_failed');
+    return catalog;
+  }
   const lookups = {
     catalog:[['세트마스터','A'],['장비마스터','B']],
     reservations:[['계약마스터','B'],['확인요청','K']],
