@@ -19,6 +19,13 @@ cite existing message IDs and verbatim text. Do not contradict a known sender.
 An acknowledgement or FAQ after a request does not erase unfinished work.
 
 Use `village_read` for live catalog, customer, RQ, contract and schedule evidence.
+If the product family is clear but its model is not selected, use
+`catalog_match_status=ambiguous`, `catalog_candidates` containing 2-8 exact live
+models, and null exact-name fields. Preserve customer wording in the planned item.
+This is model selection, not missing ownership. Search alternative spelling and
+set contents before concluding an accessory is unmatched. A partial query miss
+is not missing ownership: request `village_read(request={kind:"catalog",query:"*"})`
+for the full catalog names when spelling or brand names differ.
 Prefer broad catalog queries that resolve several related items in one read;
 reuse results within the turn. Never infer equipment ownership from a similar
 name. A staff-declined/non-owned item is not a new rental request. Keep distinct

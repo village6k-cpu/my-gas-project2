@@ -12190,6 +12190,8 @@ function _insertAndCheckRequest(req) {
   } catch(e) {}
 
   var preservePlannedNames = req.장비명원문보존 === true;
+  var aiModelCandidates = req.장비모델후보
+    ? _normalizeAiModelCandidates_(req.장비모델후보, req.장비 || [], _aiModelCandidateCatalogNames_(ss)) : [];
   var requestedEquipItems = (req.장비 || []).map(function(e) {
     var matchedName = _resolveConfirmRequestPlannedEquipmentName_(
       e.이름, equipNames, preservePlannedNames
@@ -12302,6 +12304,7 @@ function _insertAndCheckRequest(req) {
     if (!_canReuseConfirmedRegistrationBootstrap_(duplicateRequest, bootstrapIdentity)) duplicateRequest = null;
   }
   if (duplicateRequest) {
+    if (aiModelCandidates.length) _applyAiModelCandidatePrompts_(sheet, duplicateRequest.reqID, aiModelCandidates);
     var duplicateResponse = {
       reqID: duplicateRequest.reqID,
       duplicate: true,
@@ -12338,6 +12341,7 @@ function _insertAndCheckRequest(req) {
     sheet.getRange(firstExistingRow, 8).setValue("확인");
     SpreadsheetApp.flush();
     _processByReqID(sheet, firstExistingRow);
+    if (aiModelCandidates.length) _applyAiModelCandidatePrompts_(sheet, completable.reqID, aiModelCandidates);
     SpreadsheetApp.flush();
     var completedResponse = {
       reqID: completable.reqID,
@@ -12482,6 +12486,7 @@ function _insertAndCheckRequest(req) {
   }
 
   // 가용확인 결과 읽기 — 세트 전개로 행이 늘어날 수 있으므로 reqID 기준으로 전체 읽기
+  if (aiModelCandidates.length) _applyAiModelCandidatePrompts_(sheet, reqID, aiModelCandidates);
   SpreadsheetApp.flush();
   var results = [];
   var finalTopLevelPlan = [];
@@ -13989,6 +13994,59 @@ function checkSetHeaderAvail(sheet, row, 장비명, 수량, 반출일, 반출시
 /**
  * 단일 행 가용 확인 — 핵심 로직
  */
+function _aiModelCandidateCatalogNames_(ss) {
+  var names = [];
+  [["장비마스터", 4], ["세트마스터", 1]].forEach(function(entry) {
+    var master = ss.getSheetByName(entry[0]);
+    if (!master || master.getLastRow() < 2) throw new Error("모델 후보 카탈로그 조회 실패: " + entry[0]);
+    master.getRange(2, entry[1], master.getLastRow() - 1, 1).getDisplayValues().forEach(function(row) {
+      var name = String(row[0] || "").normalize("NFKC").trim();
+      if (name && names.indexOf(name) < 0) names.push(name);
+    });
+  });
+  return names;
+}
+
+function _normalizeAiModelCandidates_(groups, items, catalogNames) {
+  if (!Array.isArray(groups) || groups.length > 40) throw new Error("장비모델후보 형식 오류");
+  var seen = {};
+  return groups.map(function(group) {
+    var name = String(group && group.name || "").trim();
+    var candidates = group && group.candidates;
+    if (!name || seen[name] || !items.some(function(item) { return String(item.이름 || "").trim() === name; })
+      || catalogNames.indexOf(name) >= 0 || !Array.isArray(candidates) || candidates.length < 2 || candidates.length > 8) {
+      throw new Error("미선택 장비와 2~8개 모델 후보가 필요합니다: " + name);
+    }
+    seen[name] = true;
+    var unique = [];
+    candidates.forEach(function(candidate) {
+      if (typeof candidate !== "string" || catalogNames.indexOf(candidate) < 0 || unique.indexOf(candidate) >= 0) {
+        throw new Error("모델 후보가 실제 카탈로그 정확명과 일치하지 않습니다: " + candidate);
+      }
+      unique.push(candidate);
+    });
+    return { name: name, candidates: unique };
+  });
+}
+
+function _applyAiModelCandidatePrompts_(sheet, reqID, groups) {
+  if (!groups.length || sheet.getLastRow() < 2) return;
+  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 18).getDisplayValues();
+  rows.forEach(function(row, index) {
+    if (String(row[0]).trim() !== reqID || isRegisterCompletedStatus_(row[14]) || row[15]) return;
+    var group = groups.filter(function(item) { return item.name === String(row[5]).trim(); })[0];
+    if (group) _setModelSelectionPrompt_(sheet, index + 2, group.name, group.candidates, "");
+  });
+}
+
+function _modelCandidatesFromPromptNote_(note, name, catalogNames) {
+  var lines = String(note || "").split(/\r?\n/);
+  if (lines.indexOf("현재값: " + name) < 0 || lines[0] !== "⚠️ 구체적인 모델을 선택하세요") return [];
+  var names = lines.filter(function(line) { return line.indexOf("• ") === 0; }).map(function(line) { return line.substring(2); });
+  if (names.length < 2 || names.length > 8 || names.some(function(value) { return catalogNames.indexOf(value) < 0; })) return [];
+  return names;
+}
+
 function _modelSelectionCandidateNames_(categoryItems, maxCount) {
   var names = [];
   var seen = {};
@@ -14071,6 +14129,14 @@ function checkSingleRowWithData(sheet, row, reqID, 반출일, 반출시간, 반�
   // ── 장비마스터에서 정보 찾기 ──
   const equipInfo = findEquipment(장비명, equipSheet);
   if (!equipInfo) {
+    // The AI supplies exact candidate models; prose/brand/category interpretation
+    // stays with the AI. Rechecks preserve that unresolved choice until F changes.
+    var modelNote = sheet.getRange(row, 6).getNote();
+    if (String(modelNote || "").indexOf("현재값: " + 장비명) >= 0) {
+      var aiCandidates = _modelCandidatesFromPromptNote_(modelNote, 장비명,
+        _aiModelCandidateCatalogNames_(SpreadsheetApp.getActiveSpreadsheet()));
+      if (aiCandidates.length) { _setModelSelectionPrompt_(sheet, row, 장비명, aiCandidates, ""); return; }
+    }
     // 카테고리명인지 확인
     const catItems = findEquipmentByCategory(장비명, equipSheet);
     if (catItems.length > 0) {
