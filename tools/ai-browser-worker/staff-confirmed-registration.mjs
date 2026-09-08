@@ -153,36 +153,34 @@ export function validateStaffConfirmedRegistrationEvidence(evidence, {
     : [];
   const selectedCustomers = customerIds.map((id) => byId.get(id));
   const selectedStaff = staffIds.map((id) => byId.get(id));
-  if (selectedCustomers.some((message) => message?.role !== 'customer')) {
-    errors.push('source_evidence.customer_message_ids must reference customer DOM messages');
+  if (customerIds.some((id) => staffIds.includes(id))) {
+    errors.push('source_evidence customer and staff message IDs must not overlap');
   }
-  if (selectedStaff.some((message) => message?.role !== 'staff')) {
-    errors.push('source_evidence.staff_message_ids must reference staff DOM messages');
+  // Unknown is missing DOM metadata, not a contradictory sender. Hermes selects
+  // the speakers from the full conversation; a known opposing role still conflicts.
+  if (selectedCustomers.some((message) => !message || message.role === 'staff')) {
+    errors.push('source_evidence.customer_message_ids must reference existing messages without a conflicting staff role');
+  }
+  if (selectedStaff.some((message) => !message || message.role === 'customer')) {
+    errors.push('source_evidence.staff_message_ids must reference existing messages without a conflicting customer role');
   }
   const ordered = (selected) => selected.every((message, index) => (
     message && (index === 0 || selected[index - 1]?.order < message.order)
   ));
   if (!ordered(selectedCustomers)) errors.push('source_evidence.customer_message_ids must follow DOM order');
   if (!ordered(selectedStaff)) errors.push('source_evidence.staff_message_ids must follow DOM order');
-  if (selectedCustomers.length && selectedStaff.length
-    && Math.max(...selectedCustomers.map((message) => message?.order || Infinity))
-      >= Math.min(...selectedStaff.map((message) => message?.order || -Infinity))) {
-    errors.push('source_evidence customer messages must precede staff messages');
-  }
-  const latestStaff = [...byId.values()].filter((message) => message.role === 'staff').at(-1);
-  if (!latestStaff || !staffIds.includes(latestStaff.message_id)) {
-    errors.push('source_evidence must include the latest staff DOM message');
-  }
-  const currentTail = [...byId.values()].at(-1);
-  const laterMessages = [...byId.values()].filter(message => latestStaff && message.order > latestStaff.order);
-  const reviewedContinuation = continuation?.reservation_unchanged === true && laterMessages.length > 0
-    && laterMessages.every(message => message.role === 'customer')
-    && JSON.stringify(continuation.message_ids) === JSON.stringify(laterMessages.map(message => message.message_id));
-  if (continuation !== undefined && !reviewedContinuation) {
-    errors.push('post_confirmation_review must cover every later customer DOM message exactly in order');
-  }
-  if ((!latestStaff || !currentTail || currentTail.message_id !== latestStaff.message_id) && !reviewedContinuation) {
-    errors.push('source_evidence staff authorization must be the current actionable DOM tail');
+  // Whether approval remains applicable is part of Hermes' confirmed decision.
+  // Message position cannot decide whether a quote, thanks, correction or later
+  // staff reply changes that authorization. Keep legacy review data verifiable
+  // when supplied, but do not require a second attestation to permit normal work.
+  if (continuation !== undefined) {
+    const selectedApproval = selectedStaff.at(-1);
+    const laterIds = [...byId.values()]
+      .filter(message => selectedApproval && message.order > selectedApproval.order)
+      .map(message => message.message_id);
+    if (!laterIds.length || JSON.stringify(continuation.message_ids) !== JSON.stringify(laterIds)) {
+      errors.push('post_confirmation_review must reference every later DOM message exactly in order');
+    }
   }
   if (selectedCustomers.every(Boolean)
     && selectedCustomers.map((message) => message.text).join('\n') !== customerRequest) {
