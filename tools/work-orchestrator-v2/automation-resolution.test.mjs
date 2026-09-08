@@ -45,6 +45,17 @@ test('a completed booking cannot resolve a promised customer reply that was neve
   assert.equal(result.resolutionKind, 'missing_authoritative_readback');
 });
 
+test('host suppression cannot erase a valid original reply intent from completion accounting', async () => {
+  const { deriveCustomerReplyOutcome } = await resolutionModule;
+  const input={decision:{reply_decision:{replyMode:'draft_only'}},replyExecutionIntent:{requested:true},
+    autoReplyResult:{sent:false,attempted:false},sheetResult:{success:true},
+    operationReceipt:{state:'completed',authoritativeReadback:true}};
+  assert.deepEqual(deriveCustomerReplyOutcome(input),{
+    requested:true,state:'awaiting_review',reason:'reply_plan_requires_review'
+  });
+  assert.equal((await derive(input)).state,'needs_human');
+});
+
 test('verified auto reply succeeds only with a content-free correlated readback receipt', async () => {
   const result = await derive({
     autoReplyResult: {

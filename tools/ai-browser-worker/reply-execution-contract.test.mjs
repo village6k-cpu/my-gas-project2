@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { maybeAutoSendReply, finalizePreparedKakaoDecision } from './worker.mjs';
+import { canExecuteCustomerReply } from './worker.mjs';
 
 // Same decision shape as the registered pickup-time incident: the AI has an
 // authoritative answer and asks to send it, but echoes not_checked for control.
@@ -90,6 +91,10 @@ test('reply execution permits pickup guidance under price pause but does not exe
   decision.classification = 'price';
   assert.equal((await maybeAutoSendReply({ ...p, decision })).gate.reason, 'kill_switch_price_paused');
   assert.equal(p.calls.includes('send'), false);
+  const mixed=pickupDecision();
+  mixed.classification='reservation'; mixed.price_quote={source:'trade',id:'260901-001'};
+  mixed.reply_decision.safetyClass='sensitive_commitment';
+  assert.equal(canExecuteCustomerReply(mixed,{status:'price_paused'}).reason,'kill_switch_price_paused');
 });
 
 test('document delivery uses the same current operator control as text replies', async t => {

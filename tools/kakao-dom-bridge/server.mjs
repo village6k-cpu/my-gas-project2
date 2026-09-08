@@ -2545,7 +2545,8 @@ export function createGatewayResultApplicationCoordinator({
     }
     const decision = finalized?.decision || {};
     const reply = decision?.reply_decision || {};
-    const ownerReviewExpected = decision?.owner_review_required === true
+    const ownerReviewExpected = replyOutcome.state === 'awaiting_review'
+      || decision?.owner_review_required === true
       || decision?.ownerReviewRequired === true
       || reply?.shouldCreateTask === true
       || reply?.should_create_task === true;
@@ -2653,7 +2654,8 @@ export function createGatewayResultApplicationCoordinator({
     });
     durableJob.application = { ...(durableJob.application || {}), state: 'applying' };
     const applied = await apply({ config, job, prepared });
-    const replyOutcome = deriveCustomerReplyOutcome({ ...applied, decision: prepared.decision });
+    const replyOutcome = deriveCustomerReplyOutcome({ ...applied, decision: prepared.decision,
+      replyExecutionIntent: prepared.replyExecutionIntent });
     const autoReplyReadback = safeKakaoAutoReplyAuditProof({ durableJob, job, prepared, applied });
     const appliedAudit = {
       auto_reply_attempted: applied?.autoReplyResult?.attempted === true,

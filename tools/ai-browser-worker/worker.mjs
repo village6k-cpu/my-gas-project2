@@ -382,7 +382,7 @@ export async function readCustomerReplyExecutionPolicy(config = {}) {
 export function canExecuteCustomerReply(decision, policy = {}) {
   if (policy.error) return { allowed: false, reason: 'kill_switch_read_failed' };
   if (policy.status === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
-  if (policy.status === 'price_paused' && ['price', 'price_review', 'quote_send'].includes(decision?.classification)) {
+  if (policy.status === 'price_paused' && (isTypedPriceReply(decision) || ['price', 'price_review', 'quote_send'].includes(decision?.classification))) {
     return { allowed: false, reason: 'kill_switch_price_paused' };
   }
   if (!['active', 'price_paused'].includes(policy.status)) return { allowed: false, reason: 'kill_switch_not_checked' };
@@ -7517,9 +7517,8 @@ function currencyAmountsInReply(value = '') {
 // maybeAutoSendReply at the effect boundary, for text and document delivery alike.
 export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
-  const typedPriceReply = decision.classification === 'price' && Boolean(decision.price_quote)
-    && replySafetyClass(decision) === 'sensitive_commitment' && replyGrounding(decision) === 'authoritative_sheet';
-  if (!typedPriceReply && (decision?.post_action_reconciled === true
+  const typedPriceReply = isTypedPriceReply(decision);
+  if (!hasIndependentCustomerReply(decision) && (decision?.post_action_reconciled === true
     || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object'))) {
     return { allowed: false, reason: 'schedule_result_requires_owner_review' };
   }
@@ -10485,10 +10484,29 @@ function forceRegisteredInquiryReconciliationSuccess(decision, receipt) {
   };
 }
 
+function isTypedPriceReply(decision = {}) {
+  return Boolean(decision.price_quote) && replySafetyClass(decision) === 'sensitive_commitment'
+    && replyGrounding(decision) === 'authoritative_sheet';
+}
+
+// The topic of the conversation and its outstanding work do not define the
+// authority needed by a separate reply. Each answer retains its own price,
+// current-policy, or retrieved-knowledge verification at the send boundary.
+function hasIndependentCustomerReply(decision = {}) {
+  const reply = decisionReply(decision);
+  if ((reply.replyMode || reply.reply_mode) !== 'auto_send' || !text(reply.text).trim()
+    || (reply.confidence || decision.confidence) !== 'high' || replyAlreadyDelivered(decision) === true
+    || replyAttachmentKeys(decision).length || decision.owner_review_required === true || decision.ownerReviewRequired === true) return false;
+  const safety = replySafetyClass(decision);
+  const grounding = replyGrounding(decision);
+  return (isTypedPriceReply(decision) && replyRequiresRag(decision) === false)
+    || (safety === 'current_policy_answer' && grounding === 'current_confirmed_policy' && replyRequiresRag(decision) === false)
+    || (safety === 'rag_grounded_answer' && grounding === 'retrieved_rag' && replyRequiresRag(decision) === true);
+}
+
 function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
-  const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
   const classification = text(decision?.classification).trim();
-  const reservationAuthorityClaim = classification === 'reservation'
+  const reservationAuthorityClaim = classification === 'reservation' && !hasIndependentCustomerReply(decision)
     && (replySafetyClass(decision) === 'sensitive_commitment' || replyGrounding(decision) === 'authoritative_sheet');
   return decision?.should_write_to_sheet === true
     || (decision?.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object')
@@ -10496,8 +10514,7 @@ function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
     || decision?.post_action_reconciled === true
     || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object')
     || replySafetyClass(decision) === 'authoritative_availability_answer'
-    || reservationAuthorityClaim
-    || followUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule');
+    || reservationAuthorityClaim;
 }
 
 function gatewayDecisionHasStructuredDocumentClaim(decision = {}) {
@@ -10505,7 +10522,7 @@ function gatewayDecisionHasStructuredDocumentClaim(decision = {}) {
   // Independent answers still pass their own fresh price/policy/RAG send checks.
   const reply = decision.reply_decision || {};
   const independentAnswer = ['sensitive_commitment', 'current_policy_answer', 'rag_grounded_answer'].includes(replySafetyClass(decision))
-    && (replySafetyClass(decision) !== 'sensitive_commitment' || decision.classification === 'price' && Boolean(decision.price_quote))
+    && (replySafetyClass(decision) !== 'sensitive_commitment' || isTypedPriceReply(decision))
     && reply.alreadyDelivered !== true && !(reply.attachmentKeys || []).length
     && !/(견적서|pdf|서류|첨부|발송|전송|보냈|보내드|sent|attached|delivered)/i.test(text(reply.text));
   if (independentAnswer) return false;
@@ -10911,7 +10928,7 @@ function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, 
   };
 }
 
-function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason, receipt = null, authoritativeSheetResult = undefined, preservePriceReply = false } = {}) {
+function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason, receipt = null, authoritativeSheetResult = undefined, preserveIndependentReply = false } = {}) {
   const originalFollowUps = (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : []).map((item) => {
     if (!receipt || !item || typeof item !== 'object' || Array.isArray(item)) return item;
     const {
@@ -10939,7 +10956,7 @@ function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason,
     classification: text(safeBase.classification).trim() || (schedule ? 'reservation' : 'human_review'),
     confidence: text(safeBase.confidence).trim() || 'low',
     should_write_to_sheet: false,
-    owner_review_required: !preservePriceReply,
+    owner_review_required: !preserveIndependentReply,
     safety_checks: {
       ...(safeBase.safety_checks && typeof safeBase.safety_checks === 'object' ? safeBase.safety_checks : {}),
       latest_customer_message_after_last_staff_reply:
@@ -10950,7 +10967,7 @@ function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason,
     follow_up_items: followUpItems,
     suggested_reply_draft: text(safeBase.suggested_reply_draft || decisionReply(safeBase).text),
     ...(authoritativeSheetResult !== undefined ? { authoritative_sheet_result: authoritativeSheetResult } : {}),
-    reply_decision: preservePriceReply ? decisionReply(safeBase) : {
+    reply_decision: preserveIndependentReply ? decisionReply(safeBase) : {
       ...decisionReply(safeBase),
       replyMode: 'draft_only',
       text: text(decisionReply(safeBase).text || safeBase.suggested_reply_draft),
@@ -11169,6 +11186,9 @@ export async function prepareKakaoGatewayDecision({
   const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
   const structuredDocumentClaim = decision ? gatewayDecisionHasStructuredDocumentClaim(decision) : false;
   const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
+  const replyExecutionIntent = {
+    requested: Boolean(parsedDecisionValid && (decisionReply(decision).replyMode || decisionReply(decision).reply_mode) === 'auto_send')
+  };
 
   let sheetResult = null;
   let sheetPayload = null;
@@ -11377,10 +11397,8 @@ export async function prepareKakaoGatewayDecision({
     sheetResult = sheetResultFromTrustedReceipt(trustedConfirmationReceipt);
     const receiptFailed = trustedConfirmationReceipt.status === 'failed' || trustedConfirmationReceipt.error !== null;
     const report = buildSheetAvailabilityReport(sheetResult, null);
-    const independentPriceReply = parsedDecisionValid && decision.classification === 'price' && Boolean(decision.price_quote)
-      && replySafetyClass(decision) === 'sensitive_commitment' && replyGrounding(decision) === 'authoritative_sheet'
-      && decision.owner_review_required !== true && decision.ownerReviewRequired !== true;
-    const postActionValidation = independentPriceReply ? {valid:true,errors:[]} : parsedDecisionValid
+    const independentReply = parsedDecisionValid && hasIndependentCustomerReply(decision);
+    const postActionValidation = independentReply ? {valid:true,errors:[]} : parsedDecisionValid
       ? validateAiPostActionDecisionContract(decision, report || {})
       : { valid: false, errors: ['invalid base decision'] };
     const finalAuthority = decision?.authoritative_sheet_result;
@@ -11392,12 +11410,12 @@ export async function prepareKakaoGatewayDecision({
     reason = receiptFailed
       ? '권위 있는 확인요청 작업이 실패 또는 부분 실패하여 사장 확인이 필요합니다.'
       : '권위 있는 확인요청 결과는 사장 확인 후에만 고객에게 안내할 수 있습니다.';
-    // A pending schedule review does not invalidate a separate price question.
-    // The final send still re-reads prices and verifies the quoted total.
-    const preservePriceReply = !receiptFailed && independentPriceReply && exactTurn && safetyFailures.length === 0;
+    // Review applies to the schedule result; it does not veto an independently
+    // grounded answer. Its own authoritative verification still runs before send.
+    const preserveIndependentReply = !receiptFailed && independentReply && exactTurn && safetyFailures.length === 0;
     decision = forceGatewayOwnerReviewDecision(decision || {}, {
       job, schedule: true, reason, receipt: trustedConfirmationReceipt,
-      authoritativeSheetResult: trustedConfirmationReceipt.authoritative_sheet_result, preservePriceReply
+      authoritativeSheetResult: trustedConfirmationReceipt.authoritative_sheet_result, preserveIndependentReply
     });
     decision.post_action_reconciled = !receiptFailed && !safetyFailures.includes('trusted_receipt_decision_contradiction');
     decision.trusted_confirmation_receipt = trustedConfirmationReceipt;
@@ -11501,6 +11519,7 @@ export async function prepareKakaoGatewayDecision({
     hermesOutputTail: text(finalText).slice(-4000),
     postActionOutputTail: '',
     trustedToolReceipt,
+    replyExecutionIntent,
     gatewaySafetyFailures: Array.from(new Set(safetyFailures)),
     timings: {}
   };
@@ -11938,7 +11957,8 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
     return { ...prepared, workOrchestratorResult: emptyWorkOrchestratorResult(true) };
   }
   const autoReplyResult = applied.autoReplyResult || { attempted: false, sent: false, reason: 'missing_apply_result' };
-  const replyExecutionOutcome = deriveCustomerReplyOutcome({ ...applied, decision: prepared.decision, autoReplyResult });
+  const replyExecutionOutcome = deriveCustomerReplyOutcome({ ...applied, decision: prepared.decision, autoReplyResult,
+    replyExecutionIntent: prepared.replyExecutionIntent });
   if (applied.superseded === true) {
     return {
       ...prepared,
@@ -11952,6 +11972,7 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
   }
   const automationResolution = deriveAutomationResolution({
     decision: prepared.decision,
+    replyExecutionIntent: prepared.replyExecutionIntent,
     sheetResult: prepared.sheetResult,
     postActionResult: prepared.postActionResult,
     autoReplyResult,
@@ -12021,7 +12042,7 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
     ...prepared,
     status: ['blocked', 'delivery_uncertain'].includes(replyExecutionOutcome.state)
       ? 'ai_reply_unresolved'
-      : ['paused', 'superseded'].includes(replyExecutionOutcome.state) ? 'ai_reply_deferred' : 'ai_completed',
+      : ['paused', 'superseded', 'awaiting_review'].includes(replyExecutionOutcome.state) ? 'ai_reply_deferred' : 'ai_completed',
     replyExecutionOutcome,
     followUpResult,
     workOrchestratorResult,

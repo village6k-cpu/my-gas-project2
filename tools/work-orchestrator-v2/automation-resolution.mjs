@@ -95,9 +95,9 @@ function result(state, resolutionKind, evidence, noticeText) {
 // Completing model inference is not the same as executing its reply intent.
 // This describes the host result without inventing a business task or retrying
 // an ambiguous send. Only transport-owned evidence can establish delivery.
-export function deriveCustomerReplyOutcome({ decision = {}, autoReplyResult = {}, superseded = false, snapshotChanged = false } = {}) {
+export function deriveCustomerReplyOutcome({ decision = {}, autoReplyResult = {}, superseded = false, snapshotChanged = false, replyExecutionIntent = null } = {}) {
   const reply = decision.reply_decision || {};
-  const requested = (reply.replyMode || reply.reply_mode) === 'auto_send';
+  const requested = replyExecutionIntent?.requested ?? ((reply.replyMode || reply.reply_mode) === 'auto_send');
   if (!requested) return { requested: false, state: 'not_requested', reason: 'no_auto_reply_intent' };
   if (autoReplyResult.sent === true && typedAutoReplyReadbackReceipt(autoReplyResult.readbackReceipt)) {
     return { requested: true, state: 'delivered', reason: 'auto_reply_readback' };
@@ -109,6 +109,9 @@ export function deriveCustomerReplyOutcome({ decision = {}, autoReplyResult = {}
     return { requested: true, state: 'delivery_uncertain', reason };
   }
   if (superseded || snapshotChanged) return { requested: true, state: 'superseded', reason };
+  if ((reply.replyMode || reply.reply_mode) !== 'auto_send') {
+    return { requested: true, state: 'awaiting_review', reason: 'reply_plan_requires_review' };
+  }
   if (['duplicate_recent_auto_reply', 'duplicate_room_reply_text_24h'].includes(reason)) {
     return { requested: true, state: 'already_delivered', reason };
   }
@@ -196,7 +199,7 @@ export function deriveAutomationResolution(input = {}) {
     );
   }
 
-  const replyOutcome = deriveCustomerReplyOutcome({ decision, autoReplyResult });
+  const replyOutcome = deriveCustomerReplyOutcome({ decision, autoReplyResult, replyExecutionIntent: input.replyExecutionIntent });
   if (replyOutcome.requested && !['delivered', 'already_delivered'].includes(replyOutcome.state)) {
     return result(
       'needs_human', 'missing_authoritative_readback',
