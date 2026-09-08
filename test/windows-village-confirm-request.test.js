@@ -266,6 +266,7 @@ test('the CLI exposes help and a bounded update command for an existing partial 
 test('update replaces one existing partial request and verifies the complete readback', async () => {
   const calls = [];
   const request = requestFixture();
+  const reductions = [{ name: '시네로이드 CFL-800', beforeQty: 2, afterQty: 0, reason: '고객 취소 요청' }];
   const fetchImpl = async (url, options) => {
     const parsed = new URL(url);
     const action = parsed.searchParams.get('action');
@@ -281,6 +282,7 @@ test('update replaces one existing partial request and verifies the complete rea
       const payload = JSON.parse(parsed.searchParams.get('args'));
       assert.equal(payload.reqID, 'RQ-260723-003');
       assert.deepEqual(payload.장비, request.장비);
+      assert.deepEqual(payload.equipmentReductions, reductions);
       return response({ success: true, function: 'updateRequest', result: { reqID: payload.reqID } });
     }
     if (action === 'search' && sheet === '확인요청') {
@@ -302,6 +304,7 @@ test('update replaces one existing partial request and verifies the complete rea
     config,
     reqID: 'RQ-260723-003',
     request,
+    equipmentReductions: reductions,
     fetchImpl,
     readTimeoutMs: 1_000,
     writeTimeoutMs: 2_000

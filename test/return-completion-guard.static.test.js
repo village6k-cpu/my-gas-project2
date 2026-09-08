@@ -310,8 +310,8 @@ test('품목 추가는 완료를 재오픈해 기준선에 합치고, 삭제는 
   assert.match(gas, /function removeEquipmentFromContract[\s\S]{0,4500}invalidateDashboardReturnInspectionForTrade_/);
   assert.match(removeMany, /deleteDashboardRowsDescending_[\s\S]*scheduleDashboardStructureProjectionUnderLock_\(tid, \{ removeScheduleIds: removedScheduleIds \}\)/);
   assert.match(removeOne, /deleteRow[\s\S]*scheduleDashboardStructureProjectionUnderLock_\(거래ID, \{[\s\S]*removeScheduleIds:/);
-  assert.match(addMany, /scheduleDashboardStructureProjectionUnderLock_\(tid, \{ baselineItems: addedBaselineItems \}\)/);
-  assert.match(addOne, /scheduleDashboardStructureProjectionUnderLock_\(tid, \{ baselineItems: addedBaselineItems \}\)/);
+  assert.match(addMany, /setValues\(newRows\)[\s\S]{0,220}scheduleDashboardStructureProjectionUnderLock_\(tid, \{ syncStructure: true, addedScheduleIds: addedScheduleIds \}\)/);
+  assert.match(addOne, /setValues\(newRows\)[\s\S]{0,220}scheduleDashboardStructureProjectionUnderLock_\(tid, \{ syncStructure: true, addedScheduleIds: addedScheduleIds \}\)/);
   assert.match(store, /if \(baselineStarted\)[\s\S]{0,500}next === "excluded"[\s\S]{0,220}return;/);
   const onsiteStart = store.indexOf('export async function addOnsiteItems');
   const onsiteEnd = store.indexOf('\nexport function setOnsiteSettlement', onsiteStart);

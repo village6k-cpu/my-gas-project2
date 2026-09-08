@@ -107,7 +107,7 @@ function getVillageOperationCapabilities_() {
       { id: "operation.receipt", action: "operationReceipt", policy: "read_only", verification: "authoritative_read" },
       { id: "confirmation_request.create", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema },
       { id: "confirmation_request.create_batch", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema },
-      { id: "confirmation_request.update", action: "updateRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema, updateNote: "reqID(RQ-YYMMDD-NNN) 필수 + requestSchema의 필드를 함께 전달. 전체 요청을 항상 완전한 형태로 보낼 것" },
+      { id: "confirmation_request.update", action: "updateRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema, updateNote: "reqID(RQ-YYMMDD-NNN) 필수 + requestSchema의 필드를 함께 전달. 전체 요청을 항상 완전한 형태로 보낼 것. 기존 품목/수량 감소는 equipmentReductions:[{name,beforeQty,afterQty,reason}] 필수. 현재 원본과 정확히 일치해야 하며 누락을 임의 승인하지 말 것" },
       { id: "schedule.change_dates", action: "scheduleChangeDates", policy: "internal_write", verification: "authoritative_readback" },
       { id: "schedule.correct_registered_trade", action: "scheduleCorrectRegisteredTrade", policy: "internal_write", verification: "authoritative_readback" },
       { id: "schedule.clone_registered_no_send", action: "cloneScheduleNoSend", policy: "internal_write", verification: "authoritative_readback" },

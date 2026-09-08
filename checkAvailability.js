@@ -2803,6 +2803,12 @@ function scheduleDashboardStructureProjectionUnderLock_(tid, patch) {
   if (!task || !task.token) task = { token: token, tradeId: tid, attempts: 0 };
   if (patch.returnState) task.returnState = patch.returnState;
   if (patch.syncStructure) task.syncStructure = true;
+  if (patch.addedScheduleIds) {
+    var addedIds = (task.addedScheduleIds || []).concat(patch.addedScheduleIds).map(function(id) {
+      return String(id || '').trim();
+    }).filter(Boolean);
+    task.addedScheduleIds = addedIds.filter(function(id, idx) { return addedIds.indexOf(id) === idx; });
+  }
   if (patch.clearReturnCountIds) {
     var countIds = (task.clearReturnCountIds || []).concat(patch.clearReturnCountIds || []).map(function(id) {
       return String(id || '').trim();
@@ -2950,6 +2956,15 @@ function flushDashboardStructureProjectionQueue_() {
         var cfg = SUPA_CFG_();
         var built = buildSupabaseTrades_([tid]);
         if (built.trades && built.trades.length && !supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
+        if (ok) {
+          // 시트 추가 작업이 발급한 정확한 ID만 신규 생성한다. 기존 반출/반납 상태는
+          // ignore-duplicates로 보존하고, 이후 전체 PATCH에서 행 존재까지 검증한다.
+          var authorizedAddedIds = (task.addedScheduleIds || []).filter(function(id) {
+            return (task.removeScheduleIds || []).indexOf(id) < 0;
+          });
+          if (!supaInsertAuthorizedScheduleItems_(cfg, tid, built.items, authorizedAddedIds)) ok = false;
+          if (!ok) throw new Error('추가 스케줄 행 투영 실패');
+        }
         if (ok && built.items && built.items.length) {
           var structureOk = checkoutStarted
             ? supaPatchExistingScheduleItems_(cfg, built.items)
@@ -9176,6 +9191,10 @@ function dashboardAddEquipments(tid, entries, options) {
       sched.insertRowsAfter(insertRow - 1, newRows.length);
     }
     sched.getRange(insertRow, 1, newRows.length, 13).setValues(newRows);
+    if (!historicalCorrection) {
+      scheduleDashboardStructureProjectionUnderLock_(tid, { syncStructure: true, addedScheduleIds: addedScheduleIds });
+      structureProjectionQueued = true;
+    }
     // append 확정 직후 멱등 마커 커밋 — 이후 재시도는 중복 성공으로 dedupe된다.
     if (addMutationId) commitDashboardMutation_(addProps, tid, addMutationId, 'addEquip');
     // 지문 tombstone은 레거시(멱등 수단 없는) 호출에만 남긴다 — onsite/mutationId 경로의
@@ -9186,18 +9205,6 @@ function dashboardAddEquipments(tid, entries, options) {
     markProfile_('write_new_rows');
     applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidRow, hadFollowingRow);
     markProfile_('format_new_rows');
-    if (!historicalCorrection && isDashboardTradeCheckoutStarted_(ss, tid)) {
-      var addedBaselineItems = getDashboardReturnCheckableItems_(newRows.map(function(row) {
-        var setName = String(row[2] || '').trim();
-        var name = String(row[3] || '').trim();
-        return {
-          scheduleId: String(row[0] || '').trim(), name: name, qty: row[4], setName: setName,
-          isHeader: !setName || setName === name, isComponent: !!setName && setName !== name, onsite: true
-        };
-      }));
-      scheduleDashboardStructureProjectionUnderLock_(tid, { baselineItems: addedBaselineItems });
-      structureProjectionQueued = true;
-    }
     var contractResult = null;
     var contractRegenPending = !deferContractRegeneration;
     var contractRegenError = "";
@@ -9363,31 +9370,16 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
               return { error: '현장추가 예약 ID가 다른 장비 행과 충돌했습니다. 자동 재실행을 중단합니다.' };
             }
             if (reservation.all) {
-              existingIdem.state = 'done';
-              existingIdem.at = Date.now();
               existingIdem.scheduleIds = reservedRows.map(function(row) { return String(row.scheduleId || '').trim(); }).filter(Boolean);
-              PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
-
-              var recoveredSs = SpreadsheetApp.getActiveSpreadsheet();
-              var recoveredBaseline = getDashboardReturnCheckableItems_(reservedRows.map(function(row) {
-                return {
-                  scheduleId: String(row.scheduleId || '').trim(),
-                  name: String(row.name || '').trim(),
-                  qty: Number(row.qty || 0) || 1,
-                  setName: String(row.setName || '').trim(),
-                  isHeader: !!row.isHeader,
-                  isComponent: !!row.isComponent,
-                  onsite: true
-                };
-              }));
               scheduleDashboardStructureProjectionUnderLock_(String(tid || '').trim(),
-                isDashboardTradeCheckoutStarted_(recoveredSs, tid)
-                  ? { syncStructure: true, baselineItems: recoveredBaseline }
-                  : { syncStructure: true }
+                { syncStructure: true, addedScheduleIds: existingIdem.scheduleIds }
               );
               scheduleContractRegenUnderLock_(String(tid || '').trim());
               onsiteStructureQueued = true;
               onsiteContractQueued = true;
+              existingIdem.state = 'done';
+              existingIdem.at = Date.now();
+              PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
               addResult = {
                 success: true,
                 duplicate: true,
@@ -10041,6 +10033,8 @@ function dashboardAddEquipment(tid, equipName, qty) {
       sched.insertRowsAfter(insertRow - 1, newRows.length);
     }
     sched.getRange(insertRow, 1, newRows.length, 13).setValues(newRows);
+    scheduleDashboardStructureProjectionUnderLock_(tid, { syncStructure: true, addedScheduleIds: addedScheduleIds });
+    structureProjectionQueued = true;
     sched.getRange(insertRow, 6, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
     sched.getRange(insertRow, 7, newRows.length, 1).setNumberFormat("@");
     sched.getRange(insertRow, 8, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
@@ -10052,18 +10046,6 @@ function dashboardAddEquipment(tid, equipName, qty) {
       try { _inheritGroupBackground(sched, tid, inheritRows); } catch (e) {}
     }
 
-    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
-      var addedBaselineItems = getDashboardReturnCheckableItems_(newRows.map(function(row) {
-        var setName = String(row[2] || '').trim();
-        var name = String(row[3] || '').trim();
-        return {
-          scheduleId: String(row[0] || '').trim(), name: name, qty: row[4], setName: setName,
-          isHeader: !setName || setName === name, isComponent: !!setName && setName !== name, onsite: true
-        };
-      }));
-      scheduleDashboardStructureProjectionUnderLock_(tid, { baselineItems: addedBaselineItems });
-      structureProjectionQueued = true;
-    }
 
     try { formatScheduleSheet(sched); } catch (e) {}
     scheduleContractRegenUnderLock_(tid);
@@ -12784,7 +12766,8 @@ function updateRequestItem(req) {
  * 저장 한 번이 수십 초까지 늘어났다. 기존 결과는 그대로 두고 이름/수량/세트소속 또는
  * 대여기간이 바뀐 행만 I/J를 비워 processByReqID가 그 행만 다시 계산하게 한다.
  */
-function _normalizeConfirmRequestEquipmentForUpdate_(items, targetRows, data) {
+function _normalizeConfirmRequestEquipmentForUpdate_(items, targetRows, data, req) {
+  req = req || {};
   var existingSetNames = {};
   for (var i = 0; i < targetRows.length; i++) {
     var oldRow = data[targetRows[i] - 2] || [];
@@ -12793,10 +12776,19 @@ function _normalizeConfirmRequestEquipmentForUpdate_(items, targetRows, data) {
     }
   }
   var alignedRows = (items || []).length === targetRows.length;
+  var inPlaceRows = alignedRows && targetRows.every(function(row, index) { return row === targetRows[0] + index; });
   return (items || []).map(function(item, index) {
     var normalized = {};
     Object.keys(item || {}).forEach(function(key) { normalized[key] = item[key]; });
     var itemName = String(normalized.이름 || "").trim();
+    // 감소 검사와 실제 저장이 동일한 세트 소속을 보도록, 생략된 비고를 먼저 확정한다.
+    if (normalized.비고 === undefined) {
+      var noteRow = data[targetRows[index] - 2] || [];
+      var firstNote = (data[targetRows[0] - 2] || [])[16];
+      normalized.비고 = String(index === 0
+        ? (req.비고 !== undefined ? req.비고 || '' : firstNote || '')
+        : (inPlaceRows ? noteRow[16] || '' : ''));
+    }
     // 이전 세트 대표명과 이름이 달라졌는데 클라이언트가 오래된 "세트" 플래그를
     // 보내면 단품 가용확인을 건너뛴다. 같은 이름의 기존 헤더만 보존한다.
     if (String(normalized.결과 || "").trim() === "세트") {
@@ -12906,6 +12898,49 @@ function _updateConfirmRequestRowsInPlace_(sheet, targetRows, data, req, items) 
   };
 }
 
+/** 전체 목록 재작성 중 빠진 품목을 삭제 의사로 추측하지 않는다.
+ * 현재 잠금 안의 원본 수량과 정확히 맞는 감소 내역/근거가 있어야만 축소한다.
+ * 세트 구성품은 대표 품목 수량으로 검증하며 재전개 시 중복 합산하지 않는다. */
+function _assertConfirmRequestEquipmentReductions_(req, items, targetRows, data) {
+  var before = Object.create(null);
+  var after = Object.create(null);
+  function add_(map, name, qty, note, excluded) {
+    name = String(name || '').trim();
+    if (!name || excluded || /^\s*\[세트\]/.test(String(note || ''))) return;
+    var count = Number(qty);
+    if (!isFinite(count) || count <= 0 || Math.floor(count) !== count) {
+      throw new Error('확인요청 장비 수량이 올바르지 않습니다: ' + name);
+    }
+    map[name] = (map[name] || 0) + count;
+  }
+  targetRows.forEach(function(rowNum) {
+    var row = data[rowNum - 2] || [];
+    add_(before, row[5], row[6], row[16], String(row[14] || '').trim() === '제외');
+  });
+  items.forEach(function(item) { add_(after, item.이름, item.수량, item.비고, item.제외 === true); });
+  var reductions = req.equipmentReductions === undefined ? [] : req.equipmentReductions;
+  if (!Array.isArray(reductions)) throw new Error('equipmentReductions는 정확한 감소 내역 배열이어야 합니다');
+  var acknowledged = Object.create(null);
+  reductions.forEach(function(entry) {
+    var name = String(entry && entry.name || '').trim();
+    if (!entry || !name || acknowledged[name] || typeof entry.reason !== 'string' || !entry.reason.trim() ||
+        entry.reason.length > 500 || typeof entry.beforeQty !== 'number' || typeof entry.afterQty !== 'number' ||
+        entry.beforeQty !== before[name] || entry.afterQty !== (after[name] || 0) ||
+        !(entry.beforeQty > entry.afterQty) || entry.afterQty < 0) {
+      throw new Error('equipmentReductions 감소 내역/근거가 현재 요청과 다릅니다: ' + name);
+    }
+    acknowledged[name] = true;
+  });
+  var missing = Object.keys(before).filter(function(name) {
+    return (after[name] || 0) < before[name] && !acknowledged[name];
+  });
+  if (missing.length) {
+    throw new Error('기존 요청 장비 감소를 확인해야 합니다: ' + missing.map(function(name) {
+      return name + ' ' + before[name] + '→' + (after[name] || 0);
+    }).join(', ') + '. 누락이면 전체 목록을 복원하세요. 명시적 변경이면 equipmentReductions에 name/beforeQty/afterQty/reason을 전달하세요.');
+  }
+}
+
 function _updateRequestUnderLock_(req) {
   if (!req.reqID) throw new Error("reqID 필수");
 
@@ -12930,7 +12965,8 @@ function _updateRequestUnderLock_(req) {
 
   // 장비 목록 변경이 있으면: 기존 행 삭제 후 재입력
   if (req.장비 && req.장비.length > 0) {
-    var items = _normalizeConfirmRequestEquipmentForUpdate_(req.장비, targetRows, data);
+    var items = _normalizeConfirmRequestEquipmentForUpdate_(req.장비, targetRows, data, req);
+    _assertConfirmRequestEquipmentReductions_(req, items, targetRows, data);
     var inPlace = _updateConfirmRequestRowsInPlace_(sheet, targetRows, data, req, items);
     if (inPlace) {
       return {
