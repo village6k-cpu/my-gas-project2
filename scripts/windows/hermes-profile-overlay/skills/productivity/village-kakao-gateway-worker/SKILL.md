@@ -43,6 +43,14 @@ its exact-name lines too. The final operational item or supported set selection
 must retain every stated model/option; reason/raw_text alone cannot preserve a
 constraint lost from the actual request. Keep a specific unresolved item when
 the chosen generic catalog slot cannot represent it faithfully.
+A catalog entry that describes only an item count or billing unit is a pricing
+slot, not proof of an equipment model. An exact match to that slot does not
+establish the customer's requested focal length, generation, mount or other
+model constraints. Use a count/billing slot as `matched` only when an authoritative
+catalog-backed component selection identifies the actual requested equipment and
+the supported operation preserves that selection on the request. Without that
+selection, keep the specific requested equipment unresolved. This does not prevent
+selecting a normal real equipment model for an otherwise generic inquiry.
 Only when a material choice remains after that reasoning use `ambiguous`, 2-8
 exact `catalog_candidates`, null exact-name fields and customer wording. Every
 candidate must respect the customer's stated constraints and allowed alternatives.
