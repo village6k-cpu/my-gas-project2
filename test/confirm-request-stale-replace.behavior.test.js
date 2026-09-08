@@ -4,9 +4,6 @@ const path = require('path');
 const vm = require('vm');
 
 const source = fs.readFileSync(path.resolve(__dirname, '..', 'checkAvailability.js'), 'utf8');
-const start = source.indexOf('function _confirmRequestDateKey_');
-const end = source.indexOf('function _collectConfirmRequestResultsByReqID_');
-assert.ok(start > 0 && end > start, 'helper function block should be extractable');
 
 const context = {
   Utilities: {
@@ -19,7 +16,7 @@ const context = {
   isFinite
 };
 vm.createContext(context);
-vm.runInContext(source.slice(start, end), context);
+vm.runInContext(source, context);
 
 class FakeRange {
   constructor(rows) {

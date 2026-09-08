@@ -5678,6 +5678,8 @@ test('buildHermesPrompt exposes village-ai RAG only as optional read-only refere
   assert.equal(ragContext.tool.env.village_ai_url, 'VILLAGE_AI_URL');
   assert.equal(ragContext.tool.env.secret_env, 'ASK_API_SECRET');
   assert.equal(JSON.stringify(ragContext).includes('secret-value'), false);
+  assert.match(ragContext.query_policy.use_cases.join(' '), /equipment aliases and established default models/);
+  assert.doesNotMatch(ragContext.query_policy.forbidden_uses.join(' '), /equipment-name normalization/);
   const prompt = buildHermesPrompt({ id: 'job-rag', preview_text: '중요 홍길동 FX3 가격 문의' }, { ragContext });
   assert.match(prompt, /READ-ONLY VILLAGE-AI RAG TOOL/);
   assert.match(prompt, /long-term reference memory/);
@@ -5697,6 +5699,23 @@ test('buildReadOnlyRagContext disables gracefully when VILLAGE_AI_URL is absent'
   assert.equal(ragContext.enabled, false);
   assert.equal(ragContext.tool, null);
   assert.match(ragContext.unavailable_reason, /VILLAGE_AI_URL/);
+});
+
+test('native knowledge read reaches the reference service without granting business writes', async () => {
+  const {executeVillageReadOnlyLookup} = await import('./worker.mjs');
+  const calls = [];
+  const result = await executeVillageReadOnlyLookup({villageAiUrl:'https://knowledge.example',askApiSecret:'internal-secret',
+    fetchImpl: async (url, options) => { calls.push({url, options}); return {ok:true,text:async()=>
+      'data: {"type":"text","text":"기본 모델 참고"}\n\ndata: {"type":"meta","confidence":"high","knowledgeSource":"retrieved","usedSources":["운영지식"]}\n\ndata: {"type":"done"}\n\n'}; }
+  }, {kind:'knowledge',question:'고객이 100볼 트라이를 문의했습니다.\n매장 기본 품목은 무엇인가요?'});
+  assert.equal(result.mode, 'reference_only');
+  assert.equal(result.text, '기본 모델 참고');
+  assert.equal(result.knowledgeSource, 'retrieved');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://knowledge.example/api/ask');
+  assert.equal(JSON.parse(calls[0].options.body).userRole, 'customer');
+  assert.doesNotMatch(JSON.stringify(result), /internal-secret/);
+  await assert.rejects(executeVillageReadOnlyLookup({}, {kind:'knowledge',question:'질문',url:'https://other.example'}), /invalid_read_request/);
 });
 
 test('buildReadOnlyRagContext reports the Kakao fallback secret contract without exposing it', () => {
@@ -5914,7 +5933,7 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   assert.match(prompt, /new_inquiry.*capture the complete currently requested plan immediately/s);
   assert.match(prompt, /customer_requested_pending_revision.*staff_confirmed_mutation/s);
   assert.doesNotMatch(prompt, /예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다/);
-  assert.match(prompt, /불확실한 장비명.*AI가 카탈로그 전체를 비교해 판단/s);
+  assert.match(prompt, /불확실한 장비도 전체 카탈로그·세트 구성·대화·매장 기본값을 비교해 AI가 판단/s);
   assert.match(prompt, /연락처.*고객DB.*확인요청 생성은 막지 말고/s);
   assert.match(prompt, /일정 일부\/연락처\/모델 세부가 부족해도.*누락하지 않는다/s);
 });
@@ -6220,7 +6239,12 @@ test('buildHermesPrompt keeps customer-requested parenthetical accessories as co
 
   assert.match(prompt, /괄호.*장비.*별도 top-level.*equipment_requested.*sheet_row_candidate\.equipment/s);
   assert.match(prompt, /세트마스터.*포함 구성품.*확인.*때만.*set_component_selections/s);
-  assert.match(prompt, /제품군은 확인됐으나 모델 선택.*ambiguous.*catalog_candidates.*고객 표현/s);
+  assert.match(prompt, /실제로 해결되지 않은 모델 선택.*ambiguous.*catalog_candidates.*고객 표현/s);
+  assert.match(prompt, /후보가 여러 개라는 이유만으로 ambiguous로 넘기지 않는다/);
+  assert.match(prompt, /매장 기본 모델을 문의 정규화에 활용하고 현재 카탈로그 정확명으로 검증/);
+  assert.match(prompt, /matched.*문의 품목.*정규화.*고객이 모델을 명시했다거나.*뜻이 아니다/s);
+  assert.match(prompt, /명시된 모델·세대\(II\/GM2\).*보존/s);
+  assert.doesNotMatch(prompt, /RAG는 장비명 정규화.*금지|정확 모델 후보가 여러 개면 ambiguous/);
 });
 
 test('buildHermesPrompt requires existing RQ availability result before follow-up reporting', () => {

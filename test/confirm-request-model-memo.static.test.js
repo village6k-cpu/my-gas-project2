@@ -8,7 +8,7 @@ const sheetApi = fs.readFileSync(path.resolve(__dirname, '..', 'sheetAPI.js'), '
 
 assert.match(
   checkAvailability,
-  /F열에서 모델을 새로 선택했는데 I\/J가 예전 "모델 선택 필요"로 남아 있으면[\s\S]*existResult\.indexOf\("모델 선택 필요"\) < 0/,
+  /F열에서 모델을 새로 선택했는데 I\/J가 예전 "모델 선택 필요"로 남아 있으면[\s\S]*if \(existResult && !\/모델 선택 필요\|일정 확인 필요\|날짜\\\/시간 필요\/\.test\(existResult\)\) continue/,
   '모델 선택 후 I/J가 예전 경고로 남아도 등록 직전에는 다시 가용확인을 돌려야 한다'
 );
 
