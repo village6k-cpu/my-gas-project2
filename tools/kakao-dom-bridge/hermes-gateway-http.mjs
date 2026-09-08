@@ -756,7 +756,9 @@ export function createHermesGatewayHttpHandler({
           roomSnapshot
         });
         if (!evidenceValidation.valid) {
-          throw requestError(422, 'confirmed_reservation_evidence_mismatch');
+          throw requestError(422, 'confirmed_reservation_evidence_mismatch', {
+            validationErrors: evidenceValidation.errors
+          });
         }
         let inFlight = confirmedReservationCommitInFlight.get(claimKey);
         if (inFlight && inFlight.requestDigest !== requestDigest) {

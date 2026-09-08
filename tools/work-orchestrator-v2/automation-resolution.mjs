@@ -155,6 +155,13 @@ export function deriveAutomationResolution(input = {}) {
 
   if (autoReplyResult.sent === true
     && replyEvidence) {
+    const outstandingWork = (Array.isArray(decision.follow_up_items) ? decision.follow_up_items : []).some(item =>
+      item?.requiresHumanAction === true && !['reply_needed', 'completed_log'].includes(item.type)
+      && !['completed', 'resolved', 'cancelled', 'dismissed'].includes(item.status));
+    if (outstandingWork) {
+      return result('needs_human', 'owner_approval_required', {autoReply:replyEvidence},
+        'Owner approval is required before this automation can be resolved.');
+    }
     return result(
       'succeeded',
       'auto_reply_readback',

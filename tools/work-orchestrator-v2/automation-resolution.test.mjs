@@ -1,4 +1,14 @@
 import assert from 'node:assert/strict';
+
+test('a delivered price answer cannot complete an outstanding quote document task', async () => {
+  const result = await derive({
+    decision:{follow_up_items:[{type:'quote_send',status:'open',requiresHumanAction:true}]},
+    autoReplyResult:{sent:true,readbackReceipt:{id:`reply-readback-${'a'.repeat(64)}`,confirmedAt:'2026-09-08T00:00:00.000Z'}}
+  });
+  assert.equal(result.state,'needs_human');
+  assert.equal(result.resolutionKind,'owner_approval_required');
+  assert.ok(result.evidence.autoReply);
+});
 import test from 'node:test';
 
 const resolutionModule = import('./automation-resolution.mjs');

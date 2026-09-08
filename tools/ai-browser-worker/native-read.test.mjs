@@ -108,3 +108,17 @@ test('native record lookup keeps real headers and exact IDs with the GAS column 
   assert.deepEqual(result.sources[0].headers,['요청ID','반출일']);
   assert.equal(result.sources[0].rows.length,1);
 });
+
+test('catalog lookup follows the actual equipment-name header after sheet columns have moved',async()=>{
+  const c=config(); const columns=[];
+  c.fetchImpl=async(url)=>{
+    const u=new URL(url); const sheet=u.searchParams.get('sheet'),col=u.searchParams.get('col');
+    columns.push([sheet,col]);
+    const headers=sheet==='장비마스터'?['선택','장비ID','카테고리','장비명']:['세트명'];
+    return {ok:true,text:async()=>JSON.stringify({headers,results:sheet==='장비마스터'&&col==='D'
+      ? [{row:9,data:['','EQ-9','모니터','아이패드']}]:[]})};
+  };
+  const found=await worker.executeVillageReadOnlyLookup(c,{kind:'catalog',query:'아이패드'});
+  assert.equal(found.sources.find(s=>s.sheet==='장비마스터').rows.length,1);
+  assert.ok(columns.some(([sheet,col])=>sheet==='장비마스터'&&col==='D'));
+});

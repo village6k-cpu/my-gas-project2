@@ -11,7 +11,7 @@ const REGISTRATION_FIELDS = new Set([
 ]);
 const EVIDENCE_FIELDS = new Set([
   'customer_request', 'staff_confirmation', 'conversation_revision',
-  'conversation_evidence_hash', 'customer_message_ids', 'staff_message_ids'
+  'conversation_evidence_hash', 'customer_message_ids', 'staff_message_ids', 'post_confirmation_review'
 ]);
 const PERIOD_FIELDS = new Set(['start_date', 'start_time', 'end_date', 'end_time']);
 const PLAN_FIELDS = new Set(['name', 'quantity']);
@@ -98,6 +98,15 @@ export function validateStaffConfirmedRegistrationEvidence(evidence, {
   }
   errors.push(...evidenceMessageIdErrors(evidence.customer_message_ids, 'source_evidence.customer_message_ids'));
   errors.push(...evidenceMessageIdErrors(evidence.staff_message_ids, 'source_evidence.staff_message_ids'));
+  const continuation = evidence.post_confirmation_review;
+  if (continuation !== undefined) {
+    errors.push(...objectErrors(continuation, new Set(['message_ids', 'reservation_unchanged', 'reason']), 'post_confirmation_review'));
+    errors.push(...evidenceMessageIdErrors(continuation?.message_ids, 'post_confirmation_review.message_ids'));
+    if (continuation?.reservation_unchanged !== true) errors.push('post_confirmation_review must confirm the reservation is unchanged');
+    if (typeof continuation?.reason !== 'string' || !continuation.reason.trim() || continuation.reason.length > 1000) {
+      errors.push('post_confirmation_review.reason must explain why the later messages do not change the approved reservation');
+    }
+  }
 
   if (roomSnapshot === undefined) return errors;
   if (!roomSnapshot || typeof roomSnapshot !== 'object' || Array.isArray(roomSnapshot)
@@ -165,7 +174,14 @@ export function validateStaffConfirmedRegistrationEvidence(evidence, {
     errors.push('source_evidence must include the latest staff DOM message');
   }
   const currentTail = [...byId.values()].at(-1);
-  if (!latestStaff || !currentTail || currentTail.message_id !== latestStaff.message_id) {
+  const laterMessages = [...byId.values()].filter(message => latestStaff && message.order > latestStaff.order);
+  const reviewedContinuation = continuation?.reservation_unchanged === true && laterMessages.length > 0
+    && laterMessages.every(message => message.role === 'customer')
+    && JSON.stringify(continuation.message_ids) === JSON.stringify(laterMessages.map(message => message.message_id));
+  if (continuation !== undefined && !reviewedContinuation) {
+    errors.push('post_confirmation_review must cover every later customer DOM message exactly in order');
+  }
+  if ((!latestStaff || !currentTail || currentTail.message_id !== latestStaff.message_id) && !reviewedContinuation) {
     errors.push('source_evidence staff authorization must be the current actionable DOM tail');
   }
   if (selectedCustomers.every(Boolean)

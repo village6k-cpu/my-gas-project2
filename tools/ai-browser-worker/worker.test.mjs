@@ -1475,6 +1475,20 @@ test('exact confirmed registration receipt finalizes no-reply and removes duplic
   assert.deepEqual(prepared.gatewaySafetyFailures, []);
 });
 
+test('successful registration retains the separate requested quote document until delivery is verified', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const quote=documentDecisionFixture().follow_up_items[0];
+  const decision=confirmedRegistrationDecisionFixture({follow_up_items:[quote],
+    safety_checks:{...confirmedRegistrationDecisionFixture().safety_checks,latest_customer_message_after_last_staff_reply:true}});
+  const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision),
+    trustedToolReceipts:[confirmedRegistrationReceiptFixture(job)]});
+  assert.deepEqual(prepared.gatewaySafetyFailures,[]);
+  assert.ok(prepared.decision.follow_up_items.some(item=>item.type==='quote_send'));
+  assert.ok(prepared.availabilityAwareRows.length>0);
+  assert.equal(prepared.decision.reply_decision.shouldCreateTask,true);
+  assert.equal(prepared.decision.reply_decision.replyMode,'no_reply');
+});
+
 test('confirmed registration success fails closed when customer notification was attempted or sent', async () => {
   const { job, turn } = gatewayTurnFixture();
   const decision = confirmedRegistrationDecisionFixture();
@@ -2364,6 +2378,41 @@ test('document promise without a durable native receipt fails closed instead of 
   assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
   assert.equal(prepared.decision.owner_review_required, true);
   assert.equal(prepared.gatewaySafetyFailures.includes('document_execution_without_trusted_receipt'), true);
+});
+
+test('an open document handoff does not masquerade as a completed send or suppress an independent price reply', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=documentDecisionFixture({classification:'price',
+    price_quote:{source:'request',id:'RQ-260822-001'},
+    reply_decision:{replyMode:'auto_send',text:'부가세 포함 33,000원입니다.',confidence:'high',
+      safetyClass:'sensitive_commitment',grounding:'authoritative_sheet',requiresRag:false,shouldCreateTask:true}});
+  const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision)});
+  assert.deepEqual(prepared.gatewaySafetyFailures,[]);
+  assert.equal(prepared.decision.reply_decision.replyMode,'auto_send');
+  assert.ok(prepared.availabilityAwareRows.some(row=>JSON.stringify(row).includes('quote_send')));
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision,{autoSendEnabled:true}).allowed,false);
+});
+
+test('staff approval survives a fully reviewed customer follow-up without changing the reservation', () => {
+  const snapshot=createImmutableKakaoRoomSnapshot({job:{jobId:'continuation',roomKey:'chat:continuation',roomRevision:7},
+    capturedAt:'2026-09-08T00:00:00.000Z',navigationContext:{status:'opened_target_chat',conversation_evidence:{
+      title:'예약 고객',hint_matched:true,visible_static_text_tail:'장비 예약\n잡아드리겠습니다\n견적서를 부탁드립니다',
+      messages:[{message_id:'c1',role:'customer',order:1,text:'장비 예약'},
+        {message_id:'s1',role:'staff',order:2,text:'잡아드리겠습니다'},
+        {message_id:'c2',role:'customer',order:3,text:'견적서를 부탁드립니다'}]}}});
+  const evidence={customer_request:'장비 예약',staff_confirmation:'잡아드리겠습니다',conversation_revision:7,
+    conversation_evidence_hash:snapshot.evidenceHash,customer_message_ids:['c1'],staff_message_ids:['s1'],
+    post_confirmation_review:{message_ids:['c2'],reservation_unchanged:true,reason:'고객은 승인된 장비와 기간 변경 없이 견적서만 요청했습니다.'}};
+  const registration=confirmedRegistrationFixture({source_evidence:evidence});
+  const options={roomRevision:7,roomSnapshot:snapshot};
+  assert.equal(workerModule.validateStaffConfirmedRegistration(registration,options).valid,true);
+  for(const review of [{...evidence.post_confirmation_review,message_ids:[]},
+    {...evidence.post_confirmation_review,message_ids:['c1']},
+    {...evidence.post_confirmation_review,reservation_unchanged:false},
+    {...evidence.post_confirmation_review,reason:''}]) {
+    assert.equal(workerModule.validateStaffConfirmedRegistration({...registration,
+      source_evidence:{...evidence,post_confirmation_review:review}},options).valid,false);
+  }
 });
 
 test('successful durable native document receipt allows delivered wording and removes the stale send task', async () => {
