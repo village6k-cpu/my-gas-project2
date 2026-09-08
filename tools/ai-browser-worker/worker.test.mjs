@@ -1615,6 +1615,36 @@ test('exact fast-reply receipt finalizes the generated RQ without a duplicate ow
   assert.equal(prepared.decision.confirmed_registration_readback.effective_request_id, 'RQ-260907-009');
 });
 
+test('sealed registration receipt survives echoed tool results without trusting model result claims', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  for (const resultField of ['commit_result', 'execution_result']) {
+    const decision = confirmedRegistrationDecisionFixture();
+    decision.staff_confirmed_registration[resultField] = { success: true, trade_id: 'fabricated' };
+    const receipt = confirmedRegistrationReceiptFixture(job);
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      job, turn, finalText: JSON.stringify(decision), trustedToolReceipts: [receipt]
+    });
+    assert.equal(prepared.decision.owner_review_required, false);
+    assert.deepEqual(prepared.gatewaySafetyFailures, []);
+    assert.deepEqual(prepared.decision.staff_confirmed_registration, receipt.authorized_registration);
+    assert.equal(prepared.decision.should_write_to_sheet, false);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+    for (const broken of [
+      { receipts: [], decision },
+      { receipts: [{ ...receipt, status: 'blocked', authoritative_result: null, error: { type: 'blocked' } }], decision },
+      { receipts: [receipt], decision: { ...decision, staff_confirmed_registration: {
+        ...decision.staff_confirmed_registration, desired_after: [{ name: '소니 FX3', quantity: 99 }]
+      } } }
+    ]) {
+      const rejected = await workerModule.prepareKakaoGatewayDecision({
+        job, turn, finalText: JSON.stringify(broken.decision), trustedToolReceipts: broken.receipts
+      });
+      assert.equal(rejected.decision.owner_review_required, true);
+      assert.equal(rejected.decision.should_write_to_sheet, false);
+    }
+  }
+});
+
 test('missing, stale, conflicting, or failed confirmed registration receipt is one no-send owner review', async () => {
   const { job, turn } = gatewayTurnFixture();
   const decision = confirmedRegistrationDecisionFixture();
@@ -4466,7 +4496,7 @@ test('customer-only mutation request stays typed null and ambiguous typed eviden
   assert.equal(prepared.trustedToolReceipt, null);
 });
 
-test('sheet mutation rejects a 12-hour reinterpretation of a bare Village source hour', () => {
+test('sheet time validation preserves AI conversation semantics and validates structured times', () => {
   const wrong = completeSheetDecision({
     latest_customer_message_cluster: '8월 25일 5시~8월 26일 24시',
     sheet_row_candidate: {
@@ -4477,8 +4507,9 @@ test('sheet mutation rejects a 12-hour reinterpretation of a bare Village source
     }
   });
   const rejected = validateAiDecisionContract(wrong);
-  assert.equal(rejected.valid, false);
-  assert.ok(rejected.errors.some((error) => /5시.*05:00.*17:00|17:00.*5시.*05:00/i.test(error)));
+  // Source interpretation belongs to the AI, including earlier corrections and
+  // qualifiers outside the latest message cluster. The executor validates types.
+  assert.equal(rejected.valid, true);
 
   const literal = completeSheetDecision({
     latest_customer_message_cluster: '8월 25일 5시~8월 26일 24시',
@@ -4507,13 +4538,20 @@ test('sheet mutation rejects a 12-hour reinterpretation of a bare Village source
     latest_customer_message_cluster: '반출은 5시로 부탁드려요',
     sheet_row_candidate: { pickup_time: '17:00', return_time: '20:00' }
   });
-  assert.equal(validateAiDecisionContract(oneClockWrong).valid, false);
+  assert.equal(validateAiDecisionContract(oneClockWrong).valid, true);
 
   const oneClockLiteral = completeSheetDecision({
     latest_customer_message_cluster: '반출은 5시로 부탁드려요',
     sheet_row_candidate: { pickup_time: '05:00', return_time: '20:00' }
   });
   assert.equal(validateAiDecisionContract(oneClockLiteral).valid, true);
+  const evening = completeSheetDecision({
+    latest_customer_message_cluster: '오늘 저녁 10시~24시간 예약 가능할지요!',
+    sheet_row_candidate: { start_date: '2026-09-08', pickup_time: '22:00', end_date: '2026-09-09', return_time: '22:00' }
+  });
+  assert.deepEqual(validateAiDecisionContract(evening), { valid: true, errors: [] });
+  evening.sheet_row_candidate.pickup_time = '25:00';
+  assert.equal(validateAiDecisionContract(evening).valid, false);
 });
 
 function confirmationFreshnessGuard({ stale = false, staleAfterChecks = stale ? 1 : Number.POSITIVE_INFINITY } = {}) {
