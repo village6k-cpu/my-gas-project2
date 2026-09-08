@@ -447,13 +447,14 @@ export function buildReadOnlyRagContext(config = {}) {
       use_cases: [
         'current-safe FAQ, included components, pickup/return procedure, and non-mutable policy reference',
         'similar past Kakao conversations and village reply tone examples',
+        'trusted shop equipment aliases and established default models, verified against the current catalog for inquiry normalization',
         'follow-up questions such as 그거/이거/같이/아까 말한 것 where recent Kakao context must be summarized into the question',
         'homepage or village historical policy grounding before drafting a reviewed reply'
       ],
       forbidden_uses: [
         'do not replace Kakao screen evidence',
         'do not replace Sheets/GAS duplicate checks',
-        'do not use for equipment-name normalization, booking-name extraction, or phone extraction',
+        'do not use for booking-name extraction or phone extraction',
         'do not use for current inventory availability, actual booking confirmation, or schedule/contract mutations',
         'do not override the worker current_confirmed_policy block with older historical Kakao/RAG when they conflict',
         'do not send Kakao messages or write Sheets from RAG tool output',
@@ -654,8 +655,11 @@ export function buildHermesPrompt(job, options = {}) {
     : '';
   const recentBotSendsText = options.recentBotSends || '';
   const correctionsText = options.corrections || '';
+  const ragInvocation = options.gatewayConfirmationToolAvailable
+    ? 'native: village_read; input: {kind:"knowledge",question}'
+    : 'command: node tools/ai-browser-worker/worker.mjs --rag-lookup; input: {question,userRole:"customer",context?}';
   const ragContextText = options.ragContext
-    ? `\nREAD-ONLY VILLAGE-AI RAG TOOL:\n${options.ragContext.enabled ? 'enabled' : 'disabled'}; command: node tools/ai-browser-worker/worker.mjs --rag-lookup; input: {question,userRole:"customer",context?}; output: {text,confidence,ownerReview,knowledgeSource,usedSources,topSimilarity,logId,error}.\nUse as long-term reference memory after Kakao; put visible Kakao context in the question string itself. RAG must not replace current Kakao screen evidence or Sheets/GAS, and never covers inventory, booking, mutations, or duplicates. CURRENT_CONFIRMED_POLICY wins over older RAG conflicts. Uncovered policy FAQ: high/retrieved RAG may support auto_send; low/no_match/error ignore; ownerReview=true review. RAG 답변을 그대로 복붙하지 말고 현재 Kakao 대화와 합성한다.\n`
+    ? `\nREAD-ONLY VILLAGE-AI RAG TOOL:\n${options.ragContext.enabled ? 'enabled' : 'disabled'}; ${ragInvocation}; output: {text,confidence,ownerReview,knowledgeSource,usedSources,topSimilarity,logId,error}.\nUse as long-term reference memory after Kakao; put visible Kakao context in the question string itself. RAG must not replace current Kakao screen evidence or Sheets/GAS, and never covers inventory, booking, mutations, or duplicates. CURRENT_CONFIRMED_POLICY wins over older RAG conflicts. Uncovered policy FAQ: high/retrieved RAG may support auto_send; low/no_match/error ignore; ownerReview=true review. RAG 답변을 그대로 복붙하지 말고 현재 Kakao 대화와 합성한다.\n`
     : '';
   const promptPolicyConfig = loadCurrentConfirmedPolicyConfig();
   const currentConfirmedPolicyText = options.ragContext && promptPolicyConfig
@@ -673,6 +677,7 @@ export function buildHermesPrompt(job, options = {}) {
     ? `GATEWAY NATIVE SHEET EXECUTION CONTRACT:
 - In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
 - village_read is the native read-only tool; use it in this turn instead of unavailable terminal/file tools. request.kind=catalog with query finds exact 세트마스터 names and G-column prices; customer with name/phone reads 고객DB; reservations with query=customer name reads contracts and RQs; request/trade with query=exact ID reads that record. Results can be truncated: narrow the query before deciding absence or completeness. Reads do not consume the mutation lease.
+- Read shop terminology/defaults with village_read(request={kind:"knowledge",question:"context and question"}), or skills reading village-operations equipment references. Verify exact names in the current catalog. Knowledge cannot prove stock, price, identity or booking authority; historical procedures cannot override current policy.
 - For a price question, resolve the exact billable equipment and period from conversation plus village_read, then call kind=quote with quote={source:"catalog",customer_name,phone,discount_type,start_date,start_time,end_date,end_time,items:[{name,quantity}]}. Dates are YYYY-MM-DD, times HH:mm, phone may be empty, and items contain every billable set/standalone item once (not included accessories). Or use quote={source:"request"|"trade",id:the exact live ID}. The tool applies customerDB discount first, rental days, long-term discount and VAT; copy that exact quote object into FINAL_JSON.price_quote for fresh send-time verification.
 - If quote.complete=true, answer the customer's actual price question now using totalVatIncluded, clearly saying 부가세 포함. Use classification="price", sensitive_commitment, authoritative_sheet, requiresRag=false. Do not substitute "확인해볼게요/견적 확인 후 안내드릴게요" for a lookup you can do in this turn, or repeat an earlier empty acknowledgement. If a billable item/period is genuinely unresolved, ask the one specific missing question; never present a partial sum as the total. Sending a quote document still requires village_document_send; a computed price is not proof of delivery.
 - A successful inquiry receipt can require schedule review while its independent, complete price answer is still auto-sendable with price_quote. Keep the schedule review follow-up, but do not claim availability or registration in the price reply. Failed/partial mutations still require no-send owner review.
@@ -768,12 +773,16 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 세트/장비마스터를 조회한다. equipment_write_mode: genuinely new="full_plan"+전체; typed pending 추가/증가="additions_only"+delta; typed pending 삭제/교체/감소="replace_full_plan"+complete final plan. Do not repeat existing equipment in additions_only.
 - 세트 옵션은 set_component_selections로만 지정: 600X 젬볼 => 어퓨쳐 600X/소프트박스/젬볼 90. Never add set options as top-level equipment.
 - 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
-- RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
-- 불확실한 장비명도 코드 규칙으로 포기하지 말고 AI가 카탈로그 전체를 비교해 판단하고 대화 맥락으로 보강한다. 제품군의 정확 모델 후보가 여러 개면 ambiguous와 catalog_candidates를 사용한다. 도저히 매칭할 수 없을 때만 catalog_match_status="unmatched", exact_name_from_equipment_catalog=null로 명시하고 고객 원문 장비명을 F열 item에 쓴다. 부분 검색에 없거나 철자/브랜드가 다르면 village_read(request={kind:"catalog",query:"*"})로 전체 정확명을 비교한 뒤 unmatched를 판단한다. 조회 실패·필드 누락을 unmatched로 가장하지 않는다. Q/R에는 원문/추론/가용확인 후 안내 같은 내부 설명을 넣지 않는다.
+- 운영 지식/RAG의 장비 별칭·매장 기본 모델을 문의 정규화에 활용하고 현재 카탈로그 정확명으로 검증한다. 현재 재고·가격·예약은 시트, 신원은 대화·고객DB로 확인한다.
+- catalog_match_status="matched"는 문의 품목을 실제 카탈로그 장비/세트로 정규화했다는 뜻이다. 고객이 모델을 명시했다거나 재고·가격·등록을 확정했다는 뜻이 아니다. 일반명 문의는 전체 대화, 요청 기능, 신뢰할 수 있는 매장 기본값 또는 조건에 맞는 기본 품목을 종합해 정확한 장비/세트명을 선택한다. 후보가 여러 개라는 이유만으로 ambiguous로 넘기지 않는다. 판단 근거와 남은 불확실성은 구조화된 reason/evidence에 적는다. 완성된 장비 한 벌 요청은 개별 재고 부품보다 실제 대여 세트명을 우선한다.
+- 명시된 모델·세대(II/GM2)·마운트·크기·수량·수신기 비율·필터 종류/농도·제외 조건을 보존한다. 정확명을 만들려고 하위 세대, 다른 기능/모델, 단렌즈 하나를 전체 렌즈 세트로 바꾸지 않는다. 카탈로그의 구형/축약 표기가 요청 모델을 뜻하는지는 실제 상세나 운영 근거로 확인한다.
+- 기존 RQ의 정확명도 원문과 재검토한다. RQ는 동시 수정 baseline이지 해석의 정답이 아니다. 모델/옵션은 실제 F열·세트 선택에 남겨야 하며 reason/raw_text만으로 보존되지 않는다. 범용 품목에 구체 모델을 숨기지 않는다.
+- ambiguous 후보 각각도 고객의 명시 조건과 허용한 대안에 맞아야 한다. 비슷한 기능이라는 이유로 다른 제품군·필터·세대를 후보에 섞지 않는다.
+- 불확실한 장비도 전체 카탈로그·세트 구성·대화·매장 기본값을 비교해 AI가 판단한다. 이를 확인한 뒤에도 중요한 선택이 실제로 남은 경우에만 ambiguous와 catalog_candidates를 쓴다. 도저히 매칭할 수 없을 때만 catalog_match_status="unmatched", exact_name_from_equipment_catalog=null과 고객 원문을 쓴다. 부분 검색에 없거나 철자/브랜드가 다르면 village_read(request={kind:"catalog",query:"*"})로 전체 정확명을 비교한 뒤 unmatched를 판단한다. 조회 실패·필드 누락을 unmatched로 가장하지 않는다. 일부 미정이 있어도 해결된 품목은 정상 카탈로그명과 세트 전개로 처리한다. Q/R에는 원문/추론/가용확인 후 안내 같은 내부 설명을 넣지 않는다.
 - reservation_inquiry.equipment_requested and sheet_row_candidate.equipment must be one-to-one in the same order. 세트 옵션은 양쪽 장비 배열에 별도 품목으로 넣지 말고 set_component_selections에만 둔다.
-- 고객이 괄호 안에도 장비/액세서리를 명시하면(예: 아마란 300C 1세트 (라이트돔)) 고객이 요청한 별도 top-level 장비로 보고 reservation_inquiry.equipment_requested와 sheet_row_candidate.equipment 양쪽에 모두 포함한다. 현재 세트마스터 조회에서 그 장비가 해당 세트의 포함 구성품임을 확인한 때만 top-level에서 제외하고 set_component_selections로 처리한다. 제품군은 확인됐으나 모델 선택만 남았다면 catalog_match_status="ambiguous", catalog_candidates=[실제 카탈로그 정확명 2~8개], exact_name 필드=null과 고객 표현을 보존한다. 미보유와 모델 미정을 혼동하지 않는다. 임의 모델/가격을 확정하지 않는다.
+- 고객이 괄호 안에도 장비/액세서리를 명시하면(예: 아마란 300C 1세트 (라이트돔)) 고객이 요청한 별도 top-level 장비로 보고 reservation_inquiry.equipment_requested와 sheet_row_candidate.equipment 양쪽에 모두 포함한다. 현재 세트마스터 조회에서 그 장비가 해당 세트의 포함 구성품임을 확인한 때만 top-level에서 제외하고 set_component_selections로 처리한다. 실제로 해결되지 않은 모델 선택은 catalog_match_status="ambiguous", catalog_candidates=[실제 카탈로그 정확명 2~8개], exact_name 필드=null과 고객 표현을 보존한다. 미보유와 모델 미정을 혼동하지 않는다. 문의의 품목 선택과 고객의 예약/가격 확정을 구분한다.
 - 약어/속어는 AI 의미 판단 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. confidently matchable이면 catalog_match_status="matched"와 정확 카탈로그명을 쓰며, 원문은 정말 매칭 불가능한 경우만 fallback이다.
-- 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
+- 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II. 세대가 명시되지 않은 16-35는 소니 GM 16-35mm를 검토할 수 있지만, 16-35 GM2를 근거 없이 그 이름으로 바꾸지 않는다.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
 - 할인유형: 고객DB I열이 카톡보다 우선. DB 값(학생/개인사업자/프리랜서/단골/제휴/일반)이 있으면 sheet_row_candidate.discount_type에 그대로 쓰고, 없을 때만 카톡에서 학생/개사프/일반 추론.
 - 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리한다. 없거나 동명이인이어도 확인요청 생성은 막지 말고 sheet_row_candidate.phone=""로 둔다. 연락처는 등록 단계 필수라 follow_up/답장에서는 연락처 요청을 남긴다.
@@ -3013,6 +3022,13 @@ function requireReadText(value, limit = 120, allowEmpty = false) {
 // Only fixed read operations are exposed to native Hermes. Credentials and API
 // selection stay in the bridge; the model chooses the business query/quote plan.
 export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
+  if (request.kind === 'knowledge') {
+    requireReadKeys(request, ['kind', 'question']);
+    if (typeof request.question !== 'string' || !request.question.trim() || request.question.length > 4000
+      || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(request.question)) throw new Error('invalid_read_request');
+    const reference = await askVillageAi({question:request.question,userRole:'customer'}, config, {fetchImpl:config.fetchImpl});
+    return {kind:'knowledge',mode:'reference_only',...reference};
+  }
   if (request.kind === 'quote') {
     requireReadKeys(request, ['kind', 'quote']);
     const quote = request.quote;

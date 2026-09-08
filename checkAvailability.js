@@ -12463,26 +12463,17 @@ function _insertAndCheckRequest(req) {
   if (!req.반출시간) missingScheduleFields.push("반출시간");
   if (!req.반납일) missingScheduleFields.push("반납일");
   if (!req.반납시간) missingScheduleFields.push("반납시간");
-  if (req.일정미완성 === true) {
-    var missingScheduleDetail = missingScheduleFields.join("·") + " 확인 필요";
-    for (var incompleteIndex = 0; incompleteIndex < items.length; incompleteIndex++) {
-      sheet.getRange(startRow + incompleteIndex, 8, 1, 3).setValues([[
-        "", "❓ 일정 확인 필요", missingScheduleDetail
-      ]]);
-    }
-    SpreadsheetApp.flush();
-  } else {
-    // 일정이 완전한 요청만 자동 가용확인을 실행한다.
-    sheet.getRange(startRow, 8).setValue("확인");
-    SpreadsheetApp.flush();
-    _processByReqID(sheet, startRow);
-    if (Object.prototype.hasOwnProperty.call(req, "staff_confirmed_exact_set_components")) {
-      _applyConfirmedReservationExactSetComponents_(
-        sheet,
-        reqID,
-        req.staff_confirmed_exact_set_components
-      );
-    }
+  // 일정 유무와 관계없이 같은 세트 전개·서식 경로를 사용한다.
+  // 개별 가용성 계산만 날짜가 필요하며, 미정 일정은 그대로 남긴다.
+  sheet.getRange(startRow, 8).setValue("확인");
+  SpreadsheetApp.flush();
+  _processByReqID(sheet, startRow);
+  if (Object.prototype.hasOwnProperty.call(req, "staff_confirmed_exact_set_components")) {
+    _applyConfirmedReservationExactSetComponents_(
+      sheet,
+      reqID,
+      req.staff_confirmed_exact_set_components
+    );
   }
 
   // 가용확인 결과 읽기 — 세트 전개로 행이 늘어날 수 있으므로 reqID 기준으로 전체 읽기
@@ -13377,14 +13368,23 @@ function _processByReqID(sheet, triggerRow) {
 
   // ── 같은 요청ID의 첫 행에서 날짜 정보 가져오기 ──
   let 반출일, 반출시간, 반납일, 반납시간;
+  var partialScheduleRow = null;
   for (let i = 0; i < allData.length; i++) {
-    if (allData[i][0] === triggerReqID && allData[i][1]) {
+    if (allData[i][0] !== triggerReqID) continue;
+    if (!partialScheduleRow) partialScheduleRow = allData[i];
+    if (allData[i][1]) {
       반출일 = allData[i][1];
       반출시간 = allData[i][2];
       반납일 = allData[i][3];
       반납시간 = allData[i][4];
       break;
     }
+  }
+  if (!반출일 && partialScheduleRow) {
+    반출일 = partialScheduleRow[1];
+    반출시간 = partialScheduleRow[2];
+    반납일 = partialScheduleRow[3];
+    반납시간 = partialScheduleRow[4];
   }
 
   // 수동 편집으로 들어온 24:00·분 단위 시각을 입력 경로와 같은 경계로 맞춘다.
@@ -13588,7 +13588,7 @@ function _processByReqID(sheet, triggerRow) {
       var existResult = String(newAllData[i][8]).trim();
       // F열에서 모델을 새로 선택했는데 I/J가 예전 "모델 선택 필요"로 남아 있으면
       // 등록 직전 재확인에서 반드시 다시 계산해야 한다.
-      if (existResult && existResult !== "" && existResult.indexOf("모델 선택 필요") < 0) continue; // 이미 결과 있으면 스킵
+      if (existResult && !/모델 선택 필요|일정 확인 필요|날짜\/시간 필요/.test(existResult)) continue; // 확정 결과는 보존
 
       checkSingleRowWithData(sheet, row, triggerReqID, 반출일, 반출시간, 반납일, 반납시간,
         장비명, newAllData[i][6] || 1, schedData, equipSheet);
@@ -13611,7 +13611,7 @@ function _processByReqID(sheet, triggerRow) {
       var existResult2 = String(latestData[i][8]).trim();
       // F열에서 모델을 새로 선택했는데 I/J가 예전 "모델 선택 필요"로 남아 있으면
       // 등록 직전 재확인에서 반드시 다시 계산해야 한다.
-      if (existResult2 && existResult2 !== "" && existResult2.indexOf("모델 선택 필요") < 0) continue;
+      if (existResult2 && !/모델 선택 필요|일정 확인 필요|날짜\/시간 필요/.test(existResult2)) continue;
 
       checkSingleRowWithData(sheet, row, triggerReqID, 반출일, 반출시간, 반납일, 반납시간,
         장비명, latestData[i][6] || 1, schedData, equipSheet);
@@ -13937,6 +13937,11 @@ function findEquipmentForSetHeader_(name, equipSheet) {
 }
 
 function checkSetHeaderAvail(sheet, row, 장비명, 수량, 반출일, 반출시간, 반납일, 반납시간, schedData, equipSheet) {
+  var missingSchedule = _confirmRequestMissingScheduleFields_(반출일, 반출시간, 반납일, 반납시간);
+  if (missingSchedule.length) {
+    sheet.getRange(row, 10).setValue(missingSchedule.join("·") + " 확인 필요");
+    return;
+  }
   var equipInfo = findEquipmentForSetHeader_(장비명, equipSheet);
   if (!equipInfo) return; // 장비마스터에 없으면 패스 (순수 세트)
 
@@ -14109,22 +14114,14 @@ function refreshModelSelectionPrompts() {
   return { success: true, updated: updated.length, rows: updated };
 }
 
+function _confirmRequestMissingScheduleFields_(반출일, 반출시간, 반납일, 반납시간) {
+  return [["반출일", 반출일], ["반출시간", 반출시간], ["반납일", 반납일], ["반납시간", 반납시간]]
+    .filter(function(pair) { return pair[1] === null || pair[1] === undefined || pair[1] === ""; })
+    .map(function(pair) { return pair[0]; });
+}
+
 function checkSingleRowWithData(sheet, row, reqID, 반출일, 반출시간, 반납일, 반납시간,
   장비명, 수량, schedData, equipSheet) {
-
-  // ── 날짜 검증 ──
-  if (!반출일 || !반납일 || (반출시간 === null || 반출시간 === undefined || 반출시간 === "") || (반납시간 === null || 반납시간 === undefined || 반납시간 === "")) {
-    sheet.getRange(row, 9).setValue("❌ 날짜/시간 필요");
-    return;
-  }
-
-  const reqStartDT = parseDT(반출일, 반출시간);
-  const reqEndDT = parseDT(반납일, 반납시간);
-
-  if (!reqStartDT || !reqEndDT || reqStartDT >= reqEndDT) {
-    sheet.getRange(row, 9).setValue("❌ 날짜범위 오류");
-    return;
-  }
 
   // ── 장비마스터에서 정보 찾기 ──
   const equipInfo = findEquipment(장비명, equipSheet);
@@ -14159,6 +14156,19 @@ function checkSingleRowWithData(sheet, row, reqID, 반출일, 반출시간, 반�
     return;
   }
 
+  // 세트 동봉품·카탈로그 분류는 일정이 없어도 확인할 수 있다.
+  // 재고 점유 계산만 완전하고 유효한 기간을 요구한다.
+  var missingSchedule = _confirmRequestMissingScheduleFields_(반출일, 반출시간, 반납일, 반납시간);
+  if (missingSchedule.length) {
+    sheet.getRange(row, 9, 1, 2).setValues([["❓ 일정 확인 필요", missingSchedule.join("·") + " 확인 필요"]]);
+    return;
+  }
+  const reqStartDT = parseDT(반출일, 반출시간);
+  const reqEndDT = parseDT(반납일, 반납시간);
+  if (!reqStartDT || !reqEndDT || reqStartDT >= reqEndDT) {
+    sheet.getRange(row, 9).setValue("❌ 날짜범위 오류");
+    return;
+  }
   const 총보유 = equipInfo.total;
 
   // ── 겹치는 기존 예약 수집 ──
