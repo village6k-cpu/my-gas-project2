@@ -2108,6 +2108,51 @@ test('exact registered receipt carries the server-authorized mutation so a minim
   assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
 });
 
+test('registered replacement without a remaining RQ finalizes from exact trade readback', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  delete mutation.request_id;
+  const receipt = registeredReceiptFixture(job, { authorized_mutation: mutation });
+  delete receipt.authoritative_result.requestFinalization;
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: mutation, existing_confirm_request_ids: [] }))}`,
+    trustedToolReceipts: [receipt]
+  });
+  assert.equal(prepared.decision.owner_review_required, false);
+  assert.deepEqual(prepared.decision.staff_confirmed_mutation, mutation);
+  assert.deepEqual(prepared.gatewaySafetyFailures, []);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+});
+
+test('malformed model mutation cannot orphan an exact durable blocked change receipt', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const receipt = registeredReceiptFixture(job, {
+    authorized_mutation: mutation, status: 'blocked', authoritative_result: null,
+    applied_stages: [], attempted_stage: 'scheduleCorrectRegisteredTrade',
+    error: { code: 'gas_rejected', message: 'sourceRequestId no longer exists', details: null }
+  });
+  const malformed = { ...mutation, execution_status: 'blocked' };
+  delete malformed.expected_period;
+  delete malformed.request_id;
+  let replayCalls = 0;
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: malformed }))}`,
+    trustedToolReceipts: [receipt],
+    dependencies: { executeRegisteredReservationChange: async () => { replayCalls += 1; } }
+  });
+  assert.equal(replayCalls, 0);
+  assert.deepEqual(prepared.decision.staff_confirmed_mutation, mutation);
+  assert.deepEqual(prepared.decision.registered_mutation_review.error, receipt.error);
+  assert.deepEqual(prepared.decision.registered_mutation_review.applied_stages, []);
+  assert.equal(prepared.decision.follow_up_items.length, 1);
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.gatewaySafetyFailures.includes('invalid_gateway_decision'), false);
+});
+
 test('registered receipt authorization stays fail-closed when its bound mutation is invalid or contradicts receipt identity', async () => {
   const { job, turn } = gatewayTurnFixture();
   const mutation = registeredMutationFixture();
@@ -8074,7 +8119,7 @@ test('a new equipment inquiry is captured as an RQ even when the same customer a
   );
 });
 
-test('registered equipment mutations require the exact source RQ while date-only changes do not invent one', () => {
+test('registered equipment mutations allow absent source RQ and strictly match any supplied RQ', () => {
   const equipmentMutation = registeredMutationFixture('equipment_add', { request_id: 'RQ-260906-013' });
   const equipmentDecision = registeredDecisionFixture({
     staff_confirmed_mutation: equipmentMutation,
@@ -8084,8 +8129,9 @@ test('registered equipment mutations require the exact source RQ while date-only
 
   const missingRqMutation = registeredMutationFixture('equipment_add');
   delete missingRqMutation.request_id;
-  const missingRq = registeredDecisionFixture({ staff_confirmed_mutation: missingRqMutation });
-  assert.equal(validateAiDecisionContract(missingRq).valid, false);
+  const missingRq = registeredDecisionFixture({ staff_confirmed_mutation: missingRqMutation, existing_confirm_request_ids: [] });
+  assert.deepEqual(validateAiDecisionContract(missingRq), { valid: true, errors: [] });
+  assert.equal(validateAiDecisionContract({ ...missingRq, existing_confirm_request_ids: ['RQ-260906-014'] }).valid, false);
 
   const wrongRq = structuredClone(equipmentDecision);
   wrongRq.existing_confirm_request_ids = ['RQ-260906-014'];

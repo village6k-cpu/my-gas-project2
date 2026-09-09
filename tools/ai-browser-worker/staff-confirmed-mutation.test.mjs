@@ -290,7 +290,7 @@ test('projects a registered mutation with exact expected period and quantities',
   assert.throws(() => buildRegisteredTradeCorrectionInput(PENDING_MUTATION, 'operation-260827-001'));
 });
 
-test('registered equipment mutation carries one exact source RQ into the correction boundary', () => {
+test('registered equipment mutation uses trade authority and carries a source RQ only when supplied', () => {
   const mutation = { ...clone(MUTATION), request_id: 'RQ-260906-013' };
   assert.deepEqual(valid(mutation), { valid: true, errors: [] });
   const projected = buildRegisteredTradeCorrectionInput(mutation, 'operation-260906-013');
@@ -298,12 +298,36 @@ test('registered equipment mutation carries one exact source RQ into the correct
 
   const missingRequest = clone(MUTATION);
   delete missingRequest.request_id;
-  assert.equal(valid(missingRequest).valid, false);
+  assert.deepEqual(valid(missingRequest), { valid: true, errors: [] });
+  assert.equal(Object.hasOwn(buildRegisteredTradeCorrectionInput(missingRequest, 'operation-no-rq'), 'sourceRequestId'), false);
 
   const dateOnly = registeredMutation('date_time_change');
   delete dateOnly.request_id;
   assert.deepEqual(valid(dateOnly), { valid: true, errors: [] });
   assert.equal(Object.hasOwn(buildRegisteredTradeCorrectionInput(dateOnly, 'operation-date-only'), 'sourceRequestId'), false);
+});
+
+test('approved equipment replacement without a remaining RQ executes once through the real runner', async (t) => {
+  const mutation = clone(MUTATION);
+  delete mutation.request_id;
+  const before = authoritativeState({ rows: [
+    { scheduleId: '260824-008-07', setName: '', name: '소니 FE 28-135mm', qty: 1, isComponent: false }
+  ] });
+  const after = authoritativeState({ rows: [
+    { scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false }
+  ] });
+  const events = [];
+  const calls = installAuthenticatedCorrectionFetch(t, { before, after, events, sourceRequestId: null });
+  const receipt = await executeVillageRegisteredReservationChange(
+    realRunnerRequest(mutation, async () => { events.push('claim'); })
+  );
+  assert.deepEqual(events, ['claim', 'fetch']);
+  assert.equal(calls.length, 1);
+  assert.equal(Object.hasOwn(calls[0].args, 'sourceRequestId'), false);
+  assert.deepEqual(calls[0].args.remove, [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }]);
+  assert.equal(receipt.status, 'ok');
+  assert.equal(receipt.customer_reply, 'no_reply');
+  assert.deepEqual(receipt.authoritative_result, { before, after });
 });
 
 test('projects a registered date change with the exact new date-time field names', () => {

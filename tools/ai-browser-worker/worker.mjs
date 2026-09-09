@@ -720,7 +720,7 @@ export function buildHermesPrompt(job, options = {}) {
 - 최초 고객 장비 문의는 직원 확인 없이 즉시 확인요청에 입력한다. 이후 같은 방의 최신 직원 답변은 exact pending RQ의 등록 권한 증거가 될 수 있다.
 - 최초 확인요청 입력에는 staff_confirmed_mutation이 필요 없다. 고객 장비 문의 자체만으로 village_confirmation_request를 호출하고, 직원의 이후 답변은 별도의 등록·변경 권한으로 의미 판단한다.
 - Clear, unconditional staff authorization of an exact pending RQ must use village_confirmed_reservation_commit. Use village_confirmation_request maintenance only for an explicit RQ edit that does not authorize registration.
-- Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use only village_registered_reservation_change exactly once before FINAL_JSON. Equipment changes must carry the exact existing inquiry request_id and the same single ID in existing_confirm_request_ids; date_time_change must carry neither. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
+- Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use only village_registered_reservation_change exactly once before FINAL_JSON. Authority comes from the current registered trade, exact schedule rows/period and staff approval. A prior intake RQ may have been finalized or removed; its absence does not block a registered change. For equipment changes, include request_id only when a live pending inquiry for this exact change exists, with the same single ID in existing_confirm_request_ids; otherwise omit request_id and use existing_confirm_request_ids=[]. date_time_change carries neither. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
 - Read the full same-room conversation. Native Hermes—not code or keywords—semantically decides whether a Village staff reply clearly and unconditionally authorizes the exact customer request; wording is open-ended.
 - For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit once before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
 - Fast/coalesced turn: if this same snapshot contains the inquiry and clear staff authorization but no RQ exists, call village_confirmed_reservation_commit once with request_id=null. pending_request_candidate contains exactly customer_name, phone, discount_type, memo and extra_request. Put set_component_selections at registration top level, never inside pending_request_candidate. This atomic operation creates/reuses and verifies the RQ, applies exact choices and registers it. Never invent an RQ ID or split intake and registration into two calls.
@@ -729,7 +729,7 @@ export function buildHermesPrompt(job, options = {}) {
 - Evaluate the customer's current plan and whether staff authorization still applies across ALL subsequent turns. Quote requests, thanks and administrative replies can leave an earlier approval valid; cancellation, replacement requests, new conditions or withdrawn approval can invalidate it. Choose the applicable staff evidence semantically, even when it is not the last staff message or the final message. confirmed=true asserts your review of the current full conversation; no separate post_confirmation_review object is required. Do not register cancelled or not-yet-approved changes.
 - Conditional/tentative, ambiguous-target, unresolved-inventory, customer-authored, or stale evidence is not authorization: use staff_confirmed_registration=null and do not call the tool.
 - After exact registration success, do not repeat the staff's confirmation. Use no_reply when no customer question remains. A separate later price question still deserves village_read and its independently verified price answer; retain any unfinished document task. A registration receipt does not mean that answer or document has already been delivered. Blocked/failed/partial/missing/contradictory receipt is one draft-only no-send owner review and is never auto-replayed.
-- A registered_trade mutation must not call village_confirmation_request again: the equipment inquiry RQ was created on the customer turn, and the registered tool atomically links/finalizes that exact RQ only after authoritative schedule readback.
+- A registered_trade mutation must not call village_confirmation_request to create or recreate an RQ as a prerequisite. If a live pending inquiry for this exact change exists, the registered tool links/finalizes it after authoritative schedule readback. If none exists, execute against the verified trade directly without request_id.
 - Do not parse RQ or trade IDs from prose. Only exact typed fields backed by authoritative lookups count.
 - For ambiguous authorization or target of an existing registered change, do not execute that change or claim success. This does not block a new unresolved rental inquiry or an evidence-bound pending inquiry revision: capture what the customer currently requests, retain genuine uncertainties for review, and do not imply inventory/registration approval.
 - blocked, failed, partial_success, or contradictory registered readback is draft-only/no-send owner review. Never call either mutation tool again to replay it.
@@ -1195,6 +1195,8 @@ function staffConfirmedMutationDecisionErrors(decision, mutation, options = {}) 
       if (existingIds.length > 0 || Object.hasOwn(mutation, 'request_id')) {
         errors.push('registered date_time_change must not claim a confirmation request ID');
       }
+    } else if (!Object.hasOwn(mutation, 'request_id')) {
+      if (existingIds.length > 0) errors.push('registered equipment mutation without request_id must not claim existing_confirm_request_ids');
     } else if (existingIds.length !== 1 || existingIds[0] !== mutation.request_id) {
       errors.push('registered equipment mutation requires one exact matching existing_confirm_request_ids entry');
     }
@@ -10286,7 +10288,7 @@ function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
     tradeId: text(mutation?.trade_id).trim(), requireLedger: true
   });
   if (!before || !after) return false;
-  if (mutation?.kind === 'date_time_change') {
+  if (!Object.hasOwn(mutation || {}, 'request_id')) {
     if (Object.hasOwn(authoritative || {}, 'requestFinalization')) return false;
   } else {
     const finalization = authoritative?.requestFinalization;
@@ -11184,9 +11186,10 @@ export async function prepareKakaoGatewayDecision({
     ? trustedAuthorizedRegisteredMutation(trustedRegisteredChangeReceipt, { roomRevision })
     : null;
   const modelMutation = decision?.staff_confirmed_mutation;
-  if ((modelMutation === undefined || modelMutation === null) && authorizedRegisteredMutation) {
+  const modelMutationValid = validateStaffConfirmedMutation(modelMutation, { roomRevision }).valid;
+  if (!modelMutationValid && authorizedRegisteredMutation) {
     decision = { staff_confirmed_mutation: authorizedRegisteredMutation };
-    for (const failure of ['malformed_gateway_final', 'invalid_gateway_decision']) {
+    for (const failure of ['malformed_gateway_final', 'invalid_gateway_decision', 'invalid_staff_confirmed_mutation']) {
       let index = safetyFailures.indexOf(failure);
       while (index >= 0) {
         safetyFailures.splice(index, 1);
