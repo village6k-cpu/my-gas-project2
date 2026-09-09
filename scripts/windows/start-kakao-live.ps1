@@ -84,7 +84,7 @@ if ($ConfirmKakaoGatewayCutover.IsPresent -and -not $RollbackToCli.IsPresent) {
     $modelContractPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'hermes-model-contract.json') -ErrorAction Stop).Path
     $modelContract = [IO.File]::ReadAllText($modelContractPath, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
     if ($modelContract.kakaoworker.provider -ne 'xai-oauth' -or $modelContract.kakaoworker.model -ne 'grok-4.5' -or
-        $modelContract.kakaoworker.reasoning_effort -ne 'xhigh' -or [int]$modelContract.kakaoworker.max_turns -ne 90) {
+        $modelContract.kakaoworker.reasoning_effort -ne 'high' -or [int]$modelContract.kakaoworker.max_turns -ne 90) {
         throw 'Gateway cutover model contract drifted.'
     }
 }
