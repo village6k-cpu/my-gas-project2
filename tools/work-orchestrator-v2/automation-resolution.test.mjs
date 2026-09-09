@@ -20,7 +20,7 @@ test('reply execution distinguishes verified delivery, deliberate deferral, and 
   for (const reason of ['kill_switch_paused', 'kill_switch_price_paused', 'auto_send_disabled']) {
     assert.equal(outcome({ decision, autoReplyResult: { sent: false, gate: { reason } } }).state, 'paused');
   }
-  assert.equal(outcome({ decision, snapshotChanged: true }).state, 'superseded');
+  assert.equal(outcome({ decision, snapshotChanged: true }).state, 'blocked');
   assert.equal(outcome({ decision, autoReplyResult: { sent: false, gate: { reason: 'duplicate_recent_auto_reply' } } }).state, 'already_delivered');
   assert.equal(outcome({ decision, autoReplyResult: { sent: true } }).state, 'delivery_uncertain');
   assert.equal(outcome({ decision, autoReplyResult: { attempted: true, sent: false, sendResult: { reason: 'send_error' } } }).reason, 'send_error');

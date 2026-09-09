@@ -2648,6 +2648,10 @@ export function createGatewayResultApplicationCoordinator({
       finalText: String(durableJob?.result?.content ?? durableJob?.result?.final_text ?? ''),
       trustedToolReceipts: exactDurableToolReceipts(durableJob)
     });
+    if ((prepared.gatewaySafetyFailures || []).some(failure =>
+      ['malformed_gateway_final', 'invalid_gateway_decision'].includes(failure))) {
+      throw new Error('gateway_invalid_model_result: no valid final decision was produced');
+    }
     await channel.beginApplication({
       job_id: durableJob.job_id,
       application_id: claimed.application_id
@@ -2674,6 +2678,9 @@ export function createGatewayResultApplicationCoordinator({
     durableJob.application = persistedAppliedJob?.application
       ? cloneForAudit(persistedAppliedJob.application)
       : { ...(durableJob.application || {}), state: 'applied', applied_audit: appliedAudit };
+    if (applied?.snapshotChanged === true && applied?.superseded !== true) {
+      throw new Error('gateway_snapshot_unverified: current conversation could not be reconciled before send');
+    }
     const finalized = await finalize({ config, job, applied });
     assertGatewayFinalizationSucceeded(finalized, config, replyOutcome);
     const finishedAt = currentTimeMs();

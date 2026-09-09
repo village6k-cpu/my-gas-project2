@@ -108,7 +108,8 @@ export function deriveCustomerReplyOutcome({ decision = {}, autoReplyResult = {}
   if (autoReplyResult.attempted === true || autoReplyResult.sent === true) {
     return { requested: true, state: 'delivery_uncertain', reason };
   }
-  if (superseded || snapshotChanged) return { requested: true, state: 'superseded', reason };
+  if (superseded) return { requested: true, state: 'superseded', reason };
+  if (snapshotChanged) return { requested: true, state: 'blocked', reason };
   if ((reply.replyMode || reply.reply_mode) !== 'auto_send') {
     return { requested: true, state: 'awaiting_review', reason: 'reply_plan_requires_review' };
   }
