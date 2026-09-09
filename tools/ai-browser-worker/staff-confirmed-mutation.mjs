@@ -191,8 +191,8 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
     if (!TRADE_ID.test(text(mutation.trade_id))) errors.push('trade_id is invalid');
     if (mutation.kind === 'date_time_change') {
       if (Object.hasOwn(mutation, 'request_id')) errors.push('request_id is forbidden for registered date_time_change');
-    } else if (!REQUEST_ID.test(text(mutation.request_id))) {
-      errors.push('registered equipment mutation requires one exact request_id');
+    } else if (Object.hasOwn(mutation, 'request_id') && !REQUEST_ID.test(text(mutation.request_id))) {
+      errors.push('registered equipment mutation request_id must be exact when supplied');
     }
     validatePeriod(mutation.expected_period, 'expected_period', errors);
     const expectedInstant = periodInstant(mutation.expected_period);
@@ -231,7 +231,7 @@ export function buildRegisteredTradeCorrectionInput(mutation, operationId) {
   return {
     tradeId: mutation.trade_id,
     operationId: normalizedOperationId,
-    ...(mutation.kind === 'date_time_change' ? {} : { sourceRequestId: mutation.request_id }),
+    ...(Object.hasOwn(mutation, 'request_id') ? { sourceRequestId: mutation.request_id } : {}),
     expectedPeriod: {
       startDate: mutation.expected_period.start_date,
       startTime: mutation.expected_period.start_time,
@@ -313,8 +313,10 @@ export async function executeVillageRegisteredReservationChange(request = {}, op
     const result = await runner({ config, input });
     const authoritativeReadback = result?.authoritativeReadback;
     const requestFinalization = result?.requestFinalization;
-    const requiresRequestFinalization = mutation.kind !== 'date_time_change';
-    const hasExactRequestFinalization = !requiresRequestFinalization || (
+    const requiresRequestFinalization = Object.hasOwn(mutation, 'request_id');
+    const hasExactRequestFinalization = !requiresRequestFinalization ? (
+      requestFinalization == null && !Object.hasOwn(authoritativeReadback || {}, 'requestFinalization')
+    ) : (
       isRecord(requestFinalization)
       && requestFinalization.requestId === mutation.request_id
       && requestFinalization.tradeId === mutation.trade_id
