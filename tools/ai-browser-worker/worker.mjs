@@ -11141,7 +11141,21 @@ export async function prepareKakaoGatewayDecision({
     ...exactConfirmedRegistrationReceipts
   ];
   if (suppliedReceipts.length !== exactReceipts.length) safetyFailures.push('invalid_trusted_receipt');
-  if (exactReceipts.length > 1 && exactReceipts.some((receipt) => !sameGatewayDecisionValue(receipt, exactReceipts[0]))) {
+  const confirmationStage = exactConfirmationReceipts[0];
+  const registeredStage = exactRegisteredChangeReceipts[0];
+  const linkedRegisteredChange = suppliedReceipts.length === 2 && exactReceipts.length === 2
+    && exactConfirmationReceipts.length === 1 && exactRegisteredChangeReceipts.length === 1
+    && confirmationStage.status === 'ok' && confirmationStage.error === null
+    && confirmationStage.authoritative_sheet_result?.success === true
+    && extractSheetRequestId(confirmationStage.authoritative_sheet_result) === registeredStage.authorized_mutation?.request_id
+    && (!confirmationStage.authoritative_sheet_result?.matchedRegisteredTradeId
+      || confirmationStage.authoritative_sheet_result.matchedRegisteredTradeId === registeredStage.trade_id)
+    && Boolean(confirmationStage.lease_id) && confirmationStage.lease_id === registeredStage.lease_id
+    && Boolean(confirmationStage.operation_id) && Boolean(registeredStage.operation_id)
+    && confirmationStage.operation_id !== registeredStage.operation_id
+    && Date.parse(confirmationStage.created_at) <= Date.parse(registeredStage.created_at);
+  if (!linkedRegisteredChange && exactReceipts.length > 1
+    && exactReceipts.some((receipt) => !sameGatewayDecisionValue(receipt, exactReceipts[0]))) {
     safetyFailures.push('conflicting_trusted_receipts');
   }
   const trustedConfirmationReceipt = exactConfirmationReceipts[0] || null;
@@ -11161,8 +11175,7 @@ export async function prepareKakaoGatewayDecision({
     ? trustedAuthorizedConfirmedRegistration(trustedConfirmedRegistrationReceipt, { roomRevision })
     : null;
   const registeredReceiptSetValid = Boolean(trustedRegisteredChangeReceipt)
-    && suppliedReceipts.length === 1
-    && exactReceipts.length === 1
+    && ((suppliedReceipts.length === 1 && exactReceipts.length === 1) || linkedRegisteredChange)
     && !safetyFailures.includes('invalid_trusted_receipt')
     && !safetyFailures.includes('conflicting_trusted_receipts');
   const authorizedMutationPresent = Boolean(trustedRegisteredChangeReceipt)
@@ -11760,6 +11773,11 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
       prepared,
       autoReplyResult: prepared.autoReplyResult || { attempted: false, sent: false, reason: prepared.status || 'not_prepared' }
     };
+  }
+  // Freshness before customer delivery must not cancel already executed
+  // internal work or its unresolved follow-up when there is no delivery intent.
+  if (prepared.replyExecutionIntent?.requested === false) {
+    return { prepared, autoReplyResult: { attempted: false, sent: false, reason: 'no_auto_reply_intent' } };
   }
   const freshnessGuard = createJobFreshnessGuard({
     bridgeUrl: config.bridgeUrl,

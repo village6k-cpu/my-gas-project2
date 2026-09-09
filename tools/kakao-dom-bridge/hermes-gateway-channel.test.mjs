@@ -68,6 +68,41 @@ function confirmedReservationCommitOperation(claim, requestDigest = 'confirmed-r
   return { ...confirmationOperation(claim, requestDigest), tool: 'confirmed_reservation_commit' };
 }
 
+test('completed confirmation can advance to registered change while preserving both replay fences after restart', async () => {
+  await withChannel(async ({ channel, directory }) => {
+    await channel.enqueue(event('job-two-stages', 'room-two-stages', 1));
+    const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+    const first = await channel.reserveToolOperation(confirmationOperation(claim));
+    await channel.recordToolReceipt(confirmationReceipt(claim, first.reservation.operation_id));
+    const second = await channel.reserveToolOperation(registeredReservationChangeOperation(claim));
+    assert.equal(second.created, true);
+    assert.notEqual(second.reservation.operation_id, first.reservation.operation_id);
+    await channel.recordToolReceipt(registeredReservationChangeReceipt(claim, second.reservation.operation_id));
+    const restarted = createHermesGatewayChannel({ directory });
+    const replay = await restarted.reserveToolOperation(confirmationOperation(claim));
+    assert.equal(replay.created, false);
+    assert.equal(replay.reservation.operation_id, first.reservation.operation_id);
+    assert.equal((await restarted.get(claim.job_id)).tool_receipts.length, 2);
+    await assert.rejects(restarted.reserveToolOperation(confirmationOperation(claim, 'different-plan')),
+      { code: 'confirmation_operation_conflict' });
+  });
+});
+
+for (const status of ['pending', 'error']) {
+  test(`another tool cannot advance after ${status} confirmation`, async () => {
+    await withChannel(async ({ channel }) => {
+      await channel.enqueue(event('job-incomplete', 'room-incomplete', 1));
+      const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+      const first = await channel.reserveToolOperation(confirmationOperation(claim));
+      if (status === 'error') await channel.recordToolReceipt({
+        ...confirmationReceipt(claim, first.reservation.operation_id), status: 'error', error: 'failed'
+      });
+      await assert.rejects(channel.reserveToolOperation(registeredReservationChangeOperation(claim)),
+        { code: 'confirmation_operation_conflict' });
+    });
+  });
+}
+
 function confirmedReservationCommitReceipt(claim, operationId, requestDigest = 'confirmed-registration-digest-1', overrides = {}) {
   return {
     schema: 'village-confirmed-reservation-commit-receipt/v1', receipt_id: 'confirmed-registration-receipt-1',

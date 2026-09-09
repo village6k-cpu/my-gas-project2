@@ -2042,6 +2042,49 @@ test('exact registered success retains the typed mutation and produces no duplic
   assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
 });
 
+test('confirmation and its approved registered change form one verified execution chain', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const changed = registeredReceiptFixture(job, { authorized_mutation: mutation });
+  const confirmation = confirmationReceiptFixture(job, {
+    lease_id: changed.lease_id, operation_id: 'previous-confirmation-operation',
+    authoritative_sheet_result: { success: true, reqID: mutation.request_id,
+      matchedRegisteredTradeId: mutation.trade_id }
+  });
+  for (const mismatch of [false, true]) {
+    const first = structuredClone(confirmation);
+    if (mismatch) first.authoritative_sheet_result.reqID = 'RQ-260827-099';
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn, finalText: 'FINAL_JSON\n{"replyMode":"no_reply"}',
+      trustedToolReceipts: [first, changed]
+    });
+    assert.equal(prepared.decision.owner_review_required, mismatch);
+    if (!mismatch) {
+      assert.deepEqual(prepared.gatewaySafetyFailures, []);
+      assert.deepEqual(prepared.decision.staff_confirmed_mutation, mutation);
+      assert.deepEqual(prepared.decision.follow_up_items, []);
+    }
+  }
+});
+
+test('no-reply internal work is finalized without consulting customer-send freshness', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const prepared = { status: 'ai_prepared', snapshot: turn.internal.snapshot,
+    replyExecutionIntent: { requested: false }, decision: { reply_decision: { replyMode: 'no_reply' } },
+    availabilityAwareRows: [{ title: '승인된 추가 장비 반영 필요' }] };
+  const applied = await applyPreparedKakaoDecision({
+    config: { bridgeUrl: 'http://bridge.invalid', openTargetChat: true,
+      fetchImpl: async () => ({ ok: true, json: async () => ({ superseded: true }) }) },
+    job, prepared,
+    dependencies: { openTargetChat: async () => assert.fail('no outgoing action'),
+      sendReply: async () => assert.fail('no outgoing action') }
+  });
+  assert.notEqual(applied.superseded, true);
+  assert.equal(applied.prepared, prepared);
+  assert.equal(applied.autoReplyResult.sent, false);
+  assert.equal(applied.autoReplyResult.reason, 'no_auto_reply_intent');
+});
+
 test('exact registered receipt carries the server-authorized mutation so a minimal Hermes final cannot orphan successful post-processing', async () => {
   const { job, turn } = gatewayTurnFixture();
   const mutation = registeredMutationFixture();
