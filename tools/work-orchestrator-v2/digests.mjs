@@ -412,11 +412,10 @@ export function buildReportDigestSnapshot(highlights, now) {
 }
 
 function reportHighlightText(items) {
-  const lines = items.map((item, index) => {
-    const priority = item.priority === 'p0' ? '즉시 확인' : item.priority === 'urgent' ? '긴급' : item.workTypeLabel;
-    const title = escapeSlackText(item.title, 180);
-    const action = escapeSlackText(item.recommendedAction || item.summary || item.title, 240);
-    return `${index + 1}. *[${priority}] ${title}*\n   → ${action}`;
+  const lines = items.map((item) => {
+    const marker = item.priority === 'p0' ? '🚨' : item.priority === 'urgent' ? '⚡' : '📌';
+    const title = escapeSlackText(item.title.replace(/\s+/gu, ' ').trim(), 80);
+    return `${marker} *${title}*`;
   });
   const text = lines.join('\n');
   if (!text || text.length > MAX_SLACK_SECTION_TEXT) throw invalidInput();
@@ -446,15 +445,12 @@ export function buildDigestSlackMessage(highlights, config = {}) {
       ordinaryParts: [], dailyReminderParts: []
     };
   }
-  const categoryText = REPORT_CATEGORIES
-    .map(([key, label]) => `${label} ${summary.byCategory[key]}`)
-    .join(' · ');
-  const totalsText = `*지금 할 일 ${summary.now}건* · 즉시 확인 ${summary.p0}건 · 미뤄둔 일 ${summary.snoozed}건\n업무별 전체: ${categoryText}`;
+  const totalsText = `*📌 할 일 ${summary.now}건*${summary.p0 > 0 ? `  ·  🚨 즉시 확인 ${summary.p0}건` : ''}`;
   const highlightText = reportHighlightText(items);
   const omitted = summary.now - items.length;
   const link = dashboardUrl.replaceAll('&', '&amp;').replaceAll('>', '%3E').replaceAll('|', '%7C');
-  const contextText = `<${link}|헤이빌리 후속조치에서 처리> · ${omitted > 0 ? `나머지 ${omitted}건` : '모든 업무 표시'}`;
-  const fallback = `오늘 처리할 일 요약 — 지금 ${summary.now}건, 즉시 확인 ${summary.p0}건, ${omitted > 0 ? `나머지 ${omitted}건` : '전체 표시'} · 헤이빌리 후속조치에서 처리`;
+  const contextText = `👉 <${link}|전체 보기 · 처리하기>${omitted > 0 ? ` · 나머지 ${omitted}건` : ''}${summary.snoozed > 0 ? ` · ⏸ 미뤄둠 ${summary.snoozed}건` : ''}`;
+  const fallback = `📋 오늘 할 일 · ${summary.now}건${summary.p0 > 0 ? ` · 🚨 즉시 ${summary.p0}건` : ''}\n${highlightText}\n${contextText}`;
   const ordinaryParts = [{
     kind: 'ordinary',
     partNumber: 1,
@@ -462,7 +458,7 @@ export function buildDigestSlackMessage(highlights, config = {}) {
     itemIds: items.map(({ id }) => id),
     text: fallback,
     blocks: [
-      { type: 'header', text: { type: 'plain_text', text: '오늘 처리할 일 요약', emoji: true } },
+      { type: 'header', text: { type: 'plain_text', text: '📋 오늘 할 일', emoji: true } },
       { type: 'section', text: { type: 'mrkdwn', text: totalsText } },
       { type: 'section', text: { type: 'mrkdwn', text: highlightText } },
       { type: 'context', elements: [{ type: 'mrkdwn', text: contextText }] }

@@ -323,10 +323,10 @@ test('owner report renders one buttonless Slack summary with five highlights and
   for (const forbidden of ['"type":"actions"', '"type":"button"', 'action_id', 'village_work_v2_', 'automation_error_review', 'reservation_review_timeout']) {
     assert.equal(serialized.includes(forbidden), false, `report leaked ${forbidden}`);
   }
-  assert.match(rendered.ordinaryParts[0].text, /오늘 처리할 일 요약/);
+  assert.match(rendered.ordinaryParts[0].text, /📋 오늘 할 일/);
   assert.match(rendered.ordinaryParts[0].text, /나머지 118건/);
-  assert.match(serialized, /예약·스케줄 30/);
-  assert.match(serialized, /헤이빌리 후속조치에서 처리/);
+  assert.match(serialized, /전체 보기 · 처리하기/);
+  assert.equal(serialized.includes('업무별 전체'), false);
 });
 
 test('zero current work returns the exact no-send result', () => {
@@ -369,6 +369,9 @@ test('report text is escaped, bounded, deterministic, and does not consult ambie
     const serialized = JSON.stringify(first);
     assert.equal(serialized.includes('<@UATTACK>'), false);
     assert.match(serialized, /&lt;@UATTACK&gt;/);
+    assert.equal(serialized.includes('a'.repeat(100)), false, 'long action details belong in Heybilli');
+    assert.equal(first.ordinaryParts[0].blocks[2].text.text.split('\n').length, 1);
+    assert.ok(first.ordinaryParts[0].blocks[2].text.text.length <= 90);
     assert.ok(first.ordinaryParts[0].blocks.every((block) => block.type !== 'section' || block.text.text.length <= 3000));
     assert.ok(first.ordinaryParts[0].text.length <= 4000);
   } finally {
