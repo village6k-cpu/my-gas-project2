@@ -183,8 +183,7 @@ function sameToolOperationEnvelope(reservation, operation) {
     && reservation?.request_digest === operation.request_digest;
 }
 
-function exactReceiptForToolOperation(job) {
-  const reservation = job?.tool_operation;
+function exactReceiptForToolOperation(job, reservation = job?.tool_operation) {
   if (!reservation || reservation.state !== 'completed') return null;
   return (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).find((receipt) => (
     receipt?.schema === TOOL_RECEIPT_SCHEMAS.get(reservation.tool)
@@ -196,6 +195,16 @@ function exactReceiptForToolOperation(job) {
     && receipt.lease_id === reservation.lease_id
     && receipt.request_digest === reservation.request_digest
   )) || null;
+}
+
+// Fences belong to individual tool actions. A completed action must not consume
+// the entire AI turn; its durable receipt still prevents that action replaying.
+export function toolOperationForRequest(job, tool) {
+  const operations = [...(job?.tool_operation_history || []), job?.tool_operation].filter(Boolean);
+  const existing = operations.find((operation) => operation.tool === tool);
+  if (existing) return existing;
+  const current = job?.tool_operation;
+  return current && exactReceiptForToolOperation(job)?.status !== 'ok' ? current : null;
 }
 
 function unresolvedToolOperationForAudit(job) {
@@ -213,6 +222,23 @@ function unresolvedToolOperationForAudit(job) {
 }
 
 function validatePersistedToolOperation(job) {
+  if (job.tool_operation_history !== undefined) {
+    if (!Array.isArray(job.tool_operation_history)
+      || job.tool_operation_history.length >= TOOL_RECEIPT_SCHEMAS.size) {
+      throw channelError('invalid_persisted_job', 'persisted tool operation history is invalid');
+    }
+    const seen = new Set(job.tool_operation ? [job.tool_operation.tool] : []);
+    for (const previous of job.tool_operation_history) {
+      if (!previous || seen.has(previous.tool)) {
+        throw channelError('invalid_persisted_job', 'duplicate or invalid historical tool operation');
+      }
+      seen.add(previous.tool);
+      validatePersistedToolOperation({ ...job, tool_operation: previous, tool_operation_history: undefined });
+      if (exactReceiptForToolOperation(job, previous)?.status !== 'ok') {
+        throw channelError('invalid_persisted_job', 'historical tool operation has no successful receipt');
+      }
+    }
+  }
   const reservation = job?.tool_operation;
   if (reservation == null) return;
   if (reservation.schema !== 'village-tool-operation-reservation/v1'
@@ -708,12 +734,13 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const job = jobs.get(normalized.job_id);
         if (!job) throw channelError('unknown_job', 'job does not exist');
         assertEnvelope(job, normalized);
-        if (job.tool_operation) {
-          if (!sameToolOperationEnvelope(job.tool_operation, normalized)
-            || !sameResult(job.tool_operation.audit_target ?? null, auditTarget)) {
+        const existing = toolOperationForRequest(job, normalized.tool);
+        if (existing) {
+          if (!sameToolOperationEnvelope(existing, normalized)
+            || !sameResult(existing.audit_target ?? null, auditTarget)) {
             throw channelError('confirmation_operation_conflict', 'job already has another confirmation operation');
           }
-          return { created: false, reservation: clone(job.tool_operation) };
+          return { created: false, reservation: clone(existing) };
         }
         assertCurrentLease(job, normalized);
         const reservation = {
@@ -726,7 +753,12 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           receipt_id: null,
           completed_at: null
         };
-        const next = await update(job, { tool_operation: reservation });
+        const next = await update(job, {
+          ...(job.tool_operation ? {
+            tool_operation_history: [...(job.tool_operation_history || []), job.tool_operation]
+          } : {}),
+          tool_operation: reservation
+        });
         return { created: true, reservation: clone(next.tool_operation) };
       });
     },

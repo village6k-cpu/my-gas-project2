@@ -391,6 +391,51 @@ test('Gateway HTTP claims a snake-case event with its opaque lease id', async ()
   }
 });
 
+test('Gateway HTTP completes confirmation then registered change and replays both without repeating writes', async () => {
+  await withRealGatewayChannel(async ({ channel, clock, directory }) => {
+    await channel.enqueue({ schema: 'village-kakao-gateway-event/v1', job_id: 'job-1', room_key: 'room-1',
+      room_revision: 3, detected_at: new Date(clock.now).toISOString(), prompt: 'approved equipment addition', raw: {} });
+    const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+    const confirmation = { job_id: claim.job_id, room_key: claim.room_key, room_revision: 3,
+      lease_id: claim.lease_id, decision: { should_write_to_sheet: true, sheet_row_candidate: {} } };
+    const change = registeredChangeBody({ lease_id: claim.lease_id });
+    let writes = 0;
+    const handlers = {
+      token, transport: 'gateway', now: () => clock.now,
+      executeConfirmation: async () => {
+        writes++;
+        return { schema: 'village-confirmation-receipt/v1', receipt_id: 'first-receipt',
+          job_id: claim.job_id, room_key: claim.room_key, room_revision: 3, status: 'ok',
+          availability_report: [], authoritative_sheet_result: { success: true, reqID: change.mutation.request_id },
+          created_at: new Date(clock.now).toISOString(), error: null };
+      },
+      executeRegisteredReservationChange: async (body) => { writes++; return registeredChangeReceipt(body); }
+    };
+    let app = await start(createHermesGatewayHttpHandler({ ...handlers, channel }));
+    const post = (route, body) => gatewayFetch(app.url, '/hermes/v1/tools/' + route,
+      { method: 'POST', body: JSON.stringify(body) });
+    try {
+      const first = await post('confirmation-request', confirmation);
+      const firstReceipt = await first.json();
+      assert.equal(first.status, 200);
+      const second = await post('registered-reservation-change', change);
+      const secondReceipt = await second.json();
+      assert.equal(second.status, 200, JSON.stringify(secondReceipt));
+      await app.close();
+      const restarted = createHermesGatewayChannel({ directory, now: () => clock.now });
+      app = await start(createHermesGatewayHttpHandler({ ...handlers, channel: restarted }));
+      for (const [route, body, receipt] of [
+        ['confirmation-request', confirmation, firstReceipt], ['registered-reservation-change', change, secondReceipt]
+      ]) {
+        const replay = await post(route, body);
+        assert.equal(replay.status, 200);
+        assert.deepEqual(await replay.json(), receipt);
+      }
+      assert.equal(writes, 2);
+    } finally { await app.close(); }
+  });
+});
+
 test('Gateway HTTP executes and durably receipts one exact native supply-only quote send', async () => {
   const channel = makeChannel();
   let executions = 0;

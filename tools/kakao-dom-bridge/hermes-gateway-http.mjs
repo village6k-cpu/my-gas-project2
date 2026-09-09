@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { toolOperationForRequest } from './hermes-gateway-channel.mjs';
 import {
   registeredReservationChangeRequestDigest,
   validateStaffConfirmedMutation
@@ -147,7 +148,7 @@ function durableOperationForRequest(job, body, leaseId, requestDigest) {
     || Number(job.room_revision) !== Number(body?.room_revision)) {
     return { reservation: null, receipt: null, conflict: false };
   }
-  const reservation = job.tool_operation;
+  const reservation = toolOperationForRequest(job, 'confirmation_request');
   if (!reservation) return { reservation: null, receipt: null, conflict: false };
   const matches = reservation.schema === 'village-tool-operation-reservation/v1'
     && reservation.tool === 'confirmation_request'
@@ -187,7 +188,7 @@ function durableDocumentOperationForRequest(job, body, leaseId, requestDigest) {
     || Number(job.room_revision) !== Number(body?.room_revision)) {
     return { reservation: null, receipt: null, conflict: false };
   }
-  const reservation = job.tool_operation;
+  const reservation = toolOperationForRequest(job, 'document_send');
   if (!reservation) return { reservation: null, receipt: null, conflict: false };
   const matches = reservation.schema === 'village-tool-operation-reservation/v1'
     && reservation.tool === 'document_send'
@@ -217,7 +218,7 @@ function durableTypedOperationForRequest(job, body, leaseId, requestDigest, { to
     || Number(job.room_revision) !== Number(body?.room_revision)) {
     return { reservation: null, receipt: null, conflict: false };
   }
-  const reservation = job.tool_operation;
+  const reservation = toolOperationForRequest(job, tool);
   if (!reservation) return { reservation: null, receipt: null, conflict: false };
   const matches = reservation.schema === 'village-tool-operation-reservation/v1'
     && reservation.tool === tool
