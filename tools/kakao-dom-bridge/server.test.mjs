@@ -2589,6 +2589,30 @@ test('Gateway result coordinator serializes prepare, fresh DOM apply, finalize, 
   assert.deepEqual(order, ['prepare', 'persist_applying', 'apply_fresh_dom', 'persist_applied', 'finalize_followup', 'audit', 'persist_finalized']);
 });
 
+test('Gateway result coordinator never completes invalid provider output or an unverified snapshot', async () => {
+  for(const kind of ['invalid_result','snapshot_unverified']){
+    const order=[];
+    const durableJob={job_id:kind,room_key:'room-fixture',room_revision:1,
+      event:{},local_context:{job:{jobId:kind},turn_internal:{snapshot:{}}},result:{content:''}};
+    const channel={
+      async claimApplication(){return {claimed:true,application_id:kind,job:durableJob};},
+      async beginApplication(){},async recordApplicationApplied(){},
+      async finalizeApplication(){order.push('completed');},
+      async failApplication({error}){order.push(error.message);return {...durableJob,application:{state:'failed',error}};},
+      async listPendingApplicationFailureNotifications(){return [];},async markApplicationFailureNotified(){}
+    };
+    const coordinator=createGatewayResultApplicationCoordinator({channel,getConfig:()=>({}),
+      prepare:async()=>({status:'ai_prepared',gatewaySafetyFailures:kind==='invalid_result'?['invalid_gateway_decision']:[],
+        replyExecutionIntent:{requested:false},decision:{owner_review_required:true}}),
+      apply:async()=>({snapshotChanged:true,autoReplyResult:{sent:false,attempted:false}}),
+      finalize:async()=>({status:'ai_completed'}),onFailure:async()=>{order.push('failure_reported');}});
+    await coordinator.enqueue(durableJob);await coordinator.idle();
+    assert.equal(order.includes('completed'),false,kind);
+    assert.match(order[0],kind==='invalid_result'?/gateway_invalid_model_result/:/gateway_snapshot_unverified/);
+    assert.ok(order.includes('failure_reported'));
+  }
+});
+
 test('Gateway result coordinator keeps one application lane across rooms', async () => {
   const order = [];
   const states = new Map();

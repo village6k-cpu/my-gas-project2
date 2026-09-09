@@ -10501,6 +10501,7 @@ function hasIndependentCustomerReply(decision = {}) {
   const safety = replySafetyClass(decision);
   const grounding = replyGrounding(decision);
   return (isTypedPriceReply(decision) && replyRequiresRag(decision) === false)
+    || (safety === 'simple_ack' && grounding === 'visible_conversation' && replyRequiresRag(decision) === false)
     || (safety === 'current_policy_answer' && grounding === 'current_confirmed_policy' && replyRequiresRag(decision) === false)
     || (safety === 'rag_grounded_answer' && grounding === 'retrieved_rag' && replyRequiresRag(decision) === true);
 }
@@ -11036,6 +11037,7 @@ export async function prepareKakaoGatewayDecision({
   const roomRevision = Number(job.roomRevision ?? job.room_revision);
   const safetyFailures = [];
   let decision = null;
+  let replyExecutionIntent = { requested: false };
 
   const exactTurn = event?.schema === 'village-kakao-gateway-event/v1'
     && snapshot?.schema === 'kakao-room-snapshot/v1'
@@ -11047,6 +11049,9 @@ export async function prepareKakaoGatewayDecision({
   if (exactTurn) {
     try {
       decision = extractJsonObject(finalText);
+      replyExecutionIntent = {
+        requested: (decisionReply(decision).replyMode || decisionReply(decision).reply_mode) === 'auto_send'
+      };
     } catch {
       safetyFailures.push('malformed_gateway_final');
     }
@@ -11071,12 +11076,20 @@ export async function prepareKakaoGatewayDecision({
     // A final no-write statement may describe a completed customer inquiry revision.
     // Validate its execution intent only against this turn's trusted receipt; the exact
     // target and before/after state are checked again below before accepting success.
-    const hasCustomerRevisionReceipt = decision.customer_requested_pending_revision &&
-      (Array.isArray(trustedToolReceipts) ? trustedToolReceipts : []).some(receipt =>
+    const customerRevisionReceipt = decision.customer_requested_pending_revision &&
+      (Array.isArray(trustedToolReceipts) ? trustedToolReceipts : []).find(receipt =>
         exactTrustedConfirmationReceipt(receipt, {jobId,roomKey,roomRevision}) &&
         receipt.authoritative_sheet_result?.customer_requested_pending_revision);
-    const validationDecision = hasCustomerRevisionReceipt && decision.should_write_to_sheet === false
+    const validationDecision = customerRevisionReceipt && decision.should_write_to_sheet === false
       ? {...decision,should_write_to_sheet:true} : decision;
+    // FINAL describes the post-write request. Only an exact durable before/after
+    // receipt can translate that replacement ID back to the pre-write validator.
+    if (validationDecision !== decision && customerRevisionReceipt.status === 'ok'
+      && customerRevisionReceipt.error === null && exactCustomerPendingRevisionReadback(customerRevisionReceipt, decision)
+      && sameGatewayDecisionValue(decision.existing_confirm_request_ids,
+        [customerRevisionReceipt.authoritative_sheet_result.reqID])) {
+      validationDecision.existing_confirm_request_ids = [decision.customer_requested_pending_revision.request_id];
+    }
     const validation = validateAiDecisionContract(validationDecision, {
       roomRevision,
       ...(decision.customer_requested_pending_revision ? {roomSnapshot:snapshot} : {})
@@ -11187,9 +11200,6 @@ export async function prepareKakaoGatewayDecision({
   const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
   const structuredDocumentClaim = decision ? gatewayDecisionHasStructuredDocumentClaim(decision) : false;
   const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
-  const replyExecutionIntent = {
-    requested: Boolean(parsedDecisionValid && (decisionReply(decision).replyMode || decisionReply(decision).reply_mode) === 'auto_send')
-  };
 
   let sheetResult = null;
   let sheetPayload = null;
@@ -11375,7 +11385,8 @@ export async function prepareKakaoGatewayDecision({
       ? '고객 요청에 따라 기존 문의를 교체했고 최종 장비·기간을 확인했습니다. 대기 문의의 가용 결과를 검토하세요.'
       : '고객 문의 수정의 정확한 교체 대상·결과를 검증하지 못해 현재 문의 상태 확인이 필요합니다. 변경을 재실행하지 마세요.';
     decision = forceGatewayOwnerReviewDecision(decision || {}, {job,schedule:true,reason,receipt:trustedConfirmationReceipt,
-      authoritativeSheetResult:trustedConfirmationReceipt?.authoritative_sheet_result});
+      authoritativeSheetResult:trustedConfirmationReceipt?.authoritative_sheet_result,
+      preserveIndependentReply:reconciled && safetyFailures.length === 0 && hasIndependentCustomerReply(decision)});
     decision.post_action_reconciled = reconciled;
     if (reconciled) decision.customer_pending_revision_readback = trustedConfirmationReceipt.authoritative_sheet_result.customer_requested_pending_revision;
     if (trustedConfirmationReceipt) decision.trusted_confirmation_receipt = trustedConfirmationReceipt;
@@ -11717,6 +11728,31 @@ export async function prepareKakaoDecisionFromSnapshot({
   }
 }
 
+export function kakaoConversationStillCurrent(previous, fresh) {
+  if (!previous || !fresh || previous.roomKey !== fresh.roomKey || previous.roomRevision !== fresh.roomRevision) return false;
+  if (previous.evidenceHash === fresh.evidenceHash) return true;
+  const before = previous.navigation?.conversation_evidence;
+  const after = fresh.navigation?.conversation_evidence;
+  if (before?.hint_matched !== true || after?.hint_matched !== true) return false;
+  const oldMessages = before.messages || [];
+  const newMessages = after.messages || [];
+  if (!oldMessages.length || !newMessages.length) return false;
+  const [shorter,longer] = oldMessages.length <= newMessages.length
+    ? [oldMessages,newMessages] : [newMessages,oldMessages];
+  // Panel/popup titles, layout, read dividers and DOM ordinals are presentation.
+  // The shorter viewport must match exactly one suffix of the longer history.
+  // Older history may enter/leave the viewport; latest messages must stay equal.
+  const matches = [];
+  for (let offset = 0; offset <= longer.length - shorter.length; offset += 1) {
+    if (shorter.every((message,index) => {
+      const current = longer[offset + index];
+      return message.text === current.text && message.text_hash === current.text_hash
+        && (message.role === current.role || message.role === 'unknown' || current.role === 'unknown');
+    })) matches.push(offset);
+  }
+  return matches.length === 1 && matches[0] + shorter.length === longer.length;
+}
+
 export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun = false, dependencies = {}, signal = null } = {}) {
   if (!prepared || !prepared.snapshot) throw new Error('prepared Kakao decision is required');
   if (dryRun || prepared.status !== 'ai_prepared') {
@@ -11755,7 +11791,7 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
       }).catch((error) => ({ status: 'navigation_failed', reason: error.message.slice(0, 500) }));
     }
     const freshSnapshot = createImmutableKakaoRoomSnapshot({ job, navigationContext });
-    if (freshSnapshot.roomRevision !== prepared.snapshot.roomRevision || freshSnapshot.evidenceHash !== prepared.snapshot.evidenceHash) {
+    if (!kakaoConversationStillCurrent(prepared.snapshot, freshSnapshot)) {
       result = {
         prepared,
         freshSnapshot,

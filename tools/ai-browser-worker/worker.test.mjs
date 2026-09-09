@@ -1494,6 +1494,80 @@ test('a rejected schedule execution retains the original AI reply intent for com
   assert.equal(prepared.replyExecutionIntent.requested,true);
 });
 
+test('invalid business validation does not erase the original requested reply', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=gatewayDecisionFixture({reply_decision:{safetyClass:'sensitive_commitment',grounding:'visible_conversation'}});
+  const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision)});
+  assert.ok(prepared.gatewaySafetyFailures.includes('invalid_gateway_decision'));
+  assert.equal(prepared.replyExecutionIntent.requested,true);
+  assert.equal(prepared.decision.reply_decision.replyMode,'draft_only');
+});
+
+test('completed customer revision validates the replacement request and preserves an independent answer', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const snapshot=createImmutableKakaoRoomSnapshot({job,navigationContext:{status:'opened_target_chat',
+    conversation_evidence:{title:'테스트 고객',hint_matched:true,
+      messages:[{message_id:'customer-7',role:'customer',text:'1대로 바꿔 주세요'}]}}});
+  turn.internal.snapshot=snapshot;
+  const revision={target_scope:'pending_request',request_id:'RQ-260907-001',
+    expected_before:[{name:'소니 FX3 바디세트',quantity:3}],expected_set_components:[],
+    expected_period:{start_date:'2026-07-24',start_time:'09:00',end_date:'2026-07-25',end_time:'18:00'},
+    source_evidence:{customer_request:'1대로 바꿔 주세요',conversation_revision:7,
+      conversation_evidence_hash:snapshot.evidenceHash,customer_message_ids:['customer-7']}};
+  const evidence={target_scope:'pending_request',target_request_id:revision.request_id,
+    replacement_request_id:'RQ-260909-001',expected_before:revision.expected_before,
+    expected_period:revision.expected_period,final_plan:[{name:'소니 FX3 바디세트',quantity:1}],
+    final_period:revision.expected_period};
+  for(const safetyClass of ['simple_ack','sensitive_commitment']){
+    const decision=completeSheetDecision({...gatewayDecisionFixture(),classification:'reservation',
+      should_write_to_sheet:false,inquiry_disposition:'pending_revision',
+      existing_confirm_request_ids:['RQ-260909-001'],customer_requested_pending_revision:revision,
+      price_quote:{source:'trade',id:'260821-001'},
+      sheet_row_candidate:{equipment_write_mode:'replace_full_plan'},
+      reply_decision:{...gatewayDecisionFixture().reply_decision,safetyClass,
+        grounding:safetyClass==='simple_ack'?'visible_conversation':'authoritative_sheet',
+        text:safetyClass==='simple_ack'?'변경 요청 확인했습니다.':'부가세 포함 33,000원입니다.'}});
+    const receipt=confirmationReceiptFixture(job,{authoritative_sheet_result:{success:true,reqID:'RQ-260909-001',
+      replacedReqIDs:[revision.request_id],customer_requested_pending_revision:evidence}});
+    const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision),trustedToolReceipts:[receipt]});
+    assert.deepEqual(prepared.gatewaySafetyFailures,[],safetyClass);
+    assert.equal(prepared.decision.post_action_reconciled,true);
+    assert.equal(prepared.decision.reply_decision.replyMode,'auto_send');
+    assert.deepEqual(prepared.decision.existing_confirm_request_ids,['RQ-260909-001']);
+    const bad=await workerModule.prepareKakaoGatewayDecision({job,turn,
+      finalText:JSON.stringify({...decision,existing_confirm_request_ids:['RQ-260909-999']}),trustedToolReceipts:[receipt]});
+    assert.ok(bad.gatewaySafetyFailures.includes('invalid_gateway_decision'));
+    assert.equal(bad.decision.reply_decision.replyMode,'draft_only');
+  }
+});
+
+test('fresh DOM accepts identical message history across panel and popup but rejects changed conversation', async () => {
+  const {job}=gatewayTurnFixture();
+  const messages=[{role:'customer',text:'날짜를 9월로 정정합니다.'},{role:'customer',text:'가격이 얼마인가요?'}];
+  const navigation={status:'opened_target_chat',conversation_evidence:{title:'카카오비즈니스 파트너센터',
+    hint_matched:true,visible_static_text_tail:'panel UI',messages}};
+  const snapshot=createImmutableKakaoRoomSnapshot({job,navigationContext:navigation});
+  for(const [name,extra,allowed] of [
+    ['older history and popup title',{title:'테스트 고객 - 빌리지',visible_static_text_tail:'popup UI',
+      messages:[{role:'staff',text:'과거 메시지'},...messages]},true],
+    ['new customer text',{messages:[...messages,{role:'customer',text:'취소할게요'}]},false],
+    ['changed text',{messages:[messages[0],{role:'customer',text:'가격 문의 취소합니다'}]},false],
+    ['changed known role',{messages:[messages[0],{role:'staff',text:messages[1].text}]},false],
+    ['older history outside viewport',{messages:[messages[1]]},true],
+    ['no messages',{messages:[]},false],
+    ['ambiguous repeated sequence',{messages:[...messages,...messages]},false],
+    ['wrong room',{hint_matched:false},false]
+  ]){
+    let sends=0;
+    const applied=await applyPreparedKakaoDecision({config:{openTargetChat:true,bridgeUrl:'',jobLogPath:''},job,
+      prepared:{status:'ai_prepared',snapshot,decision:gatewayDecisionFixture()},dependencies:{
+        openTargetChat:async()=>({...navigation,conversation_evidence:{...navigation.conversation_evidence,...extra}}),
+        sendReply:async()=>{sends++;return {sent:true,attempted:true};},closeNavigation:async()=>({})}});
+    assert.equal(sends,allowed?1:0,name);
+    assert.equal(applied.snapshotChanged,!allowed,name);
+  }
+});
+
 test('registration readback preserves an independent price answer for fresh verification', async () => {
   const {job,turn}=gatewayTurnFixture();
   const decision=confirmedRegistrationDecisionFixture({classification:'price',
