@@ -1,5 +1,7 @@
 import "server-only";
 
+import { resolveSlackEvidence, validateSlackResolutionQuery, type SlackResolutionQuery } from "./slackOpsResolution";
+
 import { gasPost } from "./gasPublic";
 import { getInventoryAuditServiceClient } from "./inventoryAuditDb";
 
@@ -58,6 +60,7 @@ export type SlackOpsApplyPlan = {
   tradeId: string;
   phase: "checkout" | "checkin";
   summary: string;
+  resolution?: SlackResolutionQuery;
   actions?: Array<ItemCorrectionAction | ItemMemoAction | ReturnCountAction | OnsiteAddAction>;
 };
 
@@ -123,6 +126,7 @@ type Candidate = {
   score: number;
   tradeId: string;
   customerName: string;
+  company?: string | null;
   checkoutAt: string;
   returnAt: string;
   contractStatus: string;
@@ -289,25 +293,39 @@ async function upsertScannedEvents(events: SlackOpsIncomingEvent[]): Promise<Sto
   return (data ?? []) as StoredEvent[];
 }
 
-async function loadCandidateRows(events: SlackOpsIncomingEvent[]): Promise<{ trades: TradeRow[]; items: ItemRow[] }> {
+async function loadCandidateRows(events: SlackOpsIncomingEvent[], research?: SlackResolutionQuery): Promise<{ trades: TradeRow[]; items: ItemRow[] }> {
   const db = getInventoryAuditServiceClient();
   const times = events.map((event) => eventEpochMs(event.messageTs)).filter(Boolean);
   const min = Math.min(...times, Date.now()) - 45 * 86_400_000;
   const max = Math.max(...times, Date.now()) + 14 * 86_400_000;
-  const { data: trades, error: tradeError } = await db
-    .from("trades")
-    .select("trade_id,customer_name,customer_phone,company,checkout_at,return_at,contract_status,setup_done,return_done,note_checkout,note_checkin,return_counts")
-    .gte("return_at", new Date(min).toISOString())
-    .lte("checkout_at", new Date(max).toISOString())
-    .limit(1_000);
-  if (tradeError) throw tradeError;
-  const tradeRows = (trades ?? []) as TradeRow[];
-  const ids = Array.from(new Set(events.flatMap((event) => tradeRows
+  const fields = "trade_id,customer_name,customer_phone,company,checkout_at,return_at,contract_status,setup_done,return_done,note_checkout,note_checkin,return_counts";
+  const tradeRows: TradeRow[] = [];
+  // Stable pagination prevents a full page from being mistaken for the whole search.
+  for (let from = 0; ; from += 1_000) {
+    let query = db.from("trades").select(fields).order("trade_id", { ascending: true });
+    if (research?.tradeId) query = query.eq("trade_id", research.tradeId);
+    else query = query.gte("return_at", new Date(min).toISOString()).lte("checkout_at", new Date(max).toISOString());
+    const { data: page, error } = await query.range(from, from + 999);
+    if (error) throw error;
+    tradeRows.push(...((page ?? []) as TradeRow[]));
+    if ((page ?? []).length < 1_000) break;
+    if (from >= 19_000) throw new Error("거래 조회 범위가 너무 넓습니다. 조회 단서를 좁혀 주세요");
+  }
+  const compact = (s: unknown) => String(s || "").replace(/[^a-zA-Z0-9가-힣]/g, "").toLowerCase();
+  const researchRows = research ? tradeRows.filter(trade => {
+    const name = compact(research.customer);
+    if (name && !compact(trade.customer_name).includes(name) && !compact(trade.company).includes(name)) return false;
+    if (!name && !research.tradeId) {
+      if (!research.equipment?.length) return false;
+      const at = relevantTradeMs(trade, research.phase || "unknown");
+      return Math.abs(at - eventEpochMs(events[0].messageTs)) <= 3 * 86_400_000;
+    }
+    return true;
+  }) : tradeRows;
+  const ids = research ? researchRows.map(trade => trade.trade_id) : Array.from(new Set(events.flatMap((event) => tradeRows
     .map((trade) => ({ id: trade.trade_id, score: candidateScore(event, trade) }))
     .filter((candidate) => candidate.score >= 40)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5)
-    .map((candidate) => candidate.id))));
+    .sort((a, b) => b.score - a.score).slice(0, 5).map((candidate) => candidate.id))));
   if (!ids.length) return { trades: [], items: [] };
   const items: ItemRow[] = [];
   for (let offset = 0; offset < ids.length; offset += 50) {
@@ -324,7 +342,7 @@ async function loadCandidateRows(events: SlackOpsIncomingEvent[]): Promise<{ tra
       if ((page ?? []).length < 1_000) break;
     }
   }
-  return { trades: tradeRows, items };
+  return { trades: researchRows, items };
 }
 
 function candidateFromTrade(trade: TradeRow, items: ItemRow[], score: number): Candidate {
@@ -333,6 +351,7 @@ function candidateFromTrade(trade: TradeRow, items: ItemRow[], score: number): C
     score,
     tradeId: trade.trade_id,
     customerName: trade.customer_name,
+    company: trade.company,
     checkoutAt: trade.checkout_at,
     returnAt: trade.return_at,
     contractStatus: trade.contract_status,
@@ -400,6 +419,26 @@ function incomingFromStored(event: StoredEvent): SlackOpsIncomingEvent {
   };
 }
 
+async function researchSlackEvent(event: StoredEvent, query: unknown) {
+  const incoming = incomingFromStored(event);
+  const grounded = validateSlackResolutionQuery(incoming, query);
+  const { trades, items } = await loadCandidateRows([incoming], grounded);
+  return resolveSlackEvidence(incoming, grounded, trades.map(trade => candidateFromTrade(trade, items, 0)));
+}
+
+/** Read only: the agent can investigate without replaying scan/apply/ask. */
+export async function lookupSlackOpsEvent(value: unknown, query: unknown) {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const messageTs = cleanText(raw.messageTs, 32), sourceHash = cleanText(raw.sourceHash, 128);
+  if (!/^\d{9,12}\.\d{4,8}$/.test(messageTs) || !/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error("잘못된 이벤트 식별자");
+  const db = getInventoryAuditServiceClient();
+  const {data, error} = await db.from("slack_ops_events").select("*")
+    .eq("channel_id", SLACK_OPS_CHANNEL_ID).eq("message_ts", messageTs).maybeSingle();
+  if (error) throw error;
+  if (!data || data.source_hash !== sourceHash) throw new Error("Slack 스레드가 바뀌었거나 이벤트가 없습니다");
+  return {ok: true, ...(await researchSlackEvent(data as StoredEvent, query))};
+}
+
 async function assertUniqueTopCandidate(event: StoredEvent, tradeId: string): Promise<void> {
   const incoming = incomingFromStored(event);
   const { trades, items } = await loadCandidateRows([incoming]);
@@ -453,6 +492,7 @@ function sanitizePlan(value: unknown): SlackOpsApplyPlan {
     tradeId,
     phase,
     summary,
+    ...(raw.resolution && typeof raw.resolution === "object" ? { resolution: raw.resolution as SlackResolutionQuery } : {}),
     actions: actions.map((action) => sanitizeAction(action)),
   };
 }
@@ -711,7 +751,14 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
     return { ok: true, duplicate: true, execute, tradeId: plan.tradeId };
   }
 
-  await assertUniqueTopCandidate(event, plan.tradeId);
+  if (plan.resolution) {
+    const resolved = await researchSlackEvent(event, plan.resolution);
+    if (resolved.selectedTradeId !== plan.tradeId || resolved.query.phase !== plan.phase) throw new Error("조회 근거로 거래 하나가 확정되지 않았습니다. lookup을 다시 실행하세요");
+    if (resolved.notesOnly && (plan.actions ?? []).some(action => action.type !== "item_memo")) throw new Error("이 조회 근거는 메모만 허용합니다. 수량/상태 변경은 명시적인 단계 확인이 필요합니다");
+    plan.resolution = resolved.query;
+  } else {
+    await assertUniqueTopCandidate(event, plan.tradeId);
+  }
 
   const { trade, items } = await loadTradeAndItems(plan.tradeId);
   validateActions(plan, items, event);

@@ -209,7 +209,7 @@ export function extractTradeIdFromConversation(root, replies = []) {
 function isGenericCustomerHint(hint) {
   const value = String(hint || '').trim();
   return /^헤이빌리/u.test(value)
-    || /^(?:어느|어떤|무슨|누구|고객|감독|대여자|성함|이름|오늘|내일|어제|금일|이번|다음|지난|저번|며칠|며칠전|몇일|몇일전|방금|아까|그저께|엊그제|해당|관련|추가|기타|일부|전체|반출|반납|대여|예약|거래|문의|확인|입금|결제|정산|장비|수량)$/u.test(value)
+    || /^(?:이건|그건|저건|이거|그거|저거|앱|어플|어느|어떤|무슨|누구|고객|감독|대여자|성함|이름|오늘|내일|어제|금일|이번|다음|지난|저번|며칠|며칠전|몇일|몇일전|방금|아까|그저께|엊그제|해당|관련|추가|기타|일부|전체|반출|반납|대여|예약|거래|문의|확인|입금|결제|정산|장비|수량)$/u.test(value)
     || /^[네넵예응옙]{1,5}$/u.test(value);
 }
 
@@ -224,6 +224,13 @@ export function extractCustomerHint(text) {
     .replace(/(?:감독|대표|실장|팀장)?님.*$/u, '')
     .trim();
   if (/^[가-힣A-Za-z0-9][가-힣A-Za-z0-9 ._()]{1,30}$/.test(taggedName) && !/^(장비|미등록|앱|헤이빌리|현장)/.test(taggedName) && !isGenericHint(taggedName)) return taggedName;
+
+  // An explicit honorific is stronger evidence than a later descriptive "깨진건".
+  const namedPerson = value.match(/(?:^|\n|\s)([가-힣]{2,5})\s*(?:감독|대표|실장|팀장)?님(?:[\s,.]|$)/u)?.[1];
+  if (namedPerson && !isGenericHint(namedPerson)) return namedPerson;
+  // A plain leading name is only a search hint; the server still validates identity.
+  const leading = value.match(/^\s*([가-힣]{1}\s+[가-힣]{2}|[가-힣]{2,5})\s+(?=[^\n]*(?:반출|반납|미반납|그리드|메모리))/u)?.[1];
+  if (leading && !isGenericHint(leading) && !/(?:에|는|은|가|을|를|에서|입니다|없음)$/u.test(leading) && !/^(?:매장|장비|반출|반납|소프트|메모리|블랙매직|오늘|내일|어제)/u.test(leading)) return leading.replace(/\s/g, '');
 
   // "조승신 반출건 팬바…", "며칠전 조승 신 반출건…", "이한욱 FX9 건", 리플의 "조승신 건" —
   // 단톡방에서 사건을 지칭하는 가장 흔한 형태. 선두 시간 부사는 건너뛰고 이름만 힌트로 쓴다.
@@ -526,11 +533,14 @@ function hermesPrompt(result, config) {
     `쓰기 모드: ${config.writeEnabled ? '활성' : 'DRY-RUN 전용'}`,
     'slack-heybilli-sync 스킬 규칙을 정확히 따르세요. 새 보드/후속조치 항목은 절대 만들지 마세요.',
     config.writeEnabled
-      ? 'LIVE 모드입니다. 확정 건은 apply --write, 불명확 건은 ask, 무관한 건은 ignore로 처리하세요.'
+      ? 'LIVE 모드입니다. 먼저 lookup으로 거래 근거를 조사하고 확정 건은 apply --write, 끝까지 구분할 수 없는 거래 사건만 ask, 거래와 무관한 공유는 ignore로 처리하세요.'
       : 'DRY-RUN입니다. apply를 --write 없이 실행해 검증만 하세요. ask/ignore 및 Slack 메시지 전송은 금지합니다. 불명확 건은 최종 요약에만 남기세요.',
     config.writeEnabled && config.backfillCutoffTs > 0
       ? `초기 이관 기준 시각은 Slack ts ${config.backfillCutoffTs}입니다. 이보다 오래된 사건은 확실한 건만 적용하고, 불명확하면 과거 질문을 새로 만들지 말고 ignore하세요. 이 시각 이후 사건은 정보가 부족하면 같은 Slack 스레드에 ask하세요.`
       : '',
+    'candidate 목록은 초기 검색 힌트일 뿐 전부가 아닙니다. 후보 없음/이름 추출 오류/동일 날짜 복수 거래이면 직원 원문의 이름·장비·시간으로 lookup을 수행하세요. lookup은 읽기 전용이며 query를 바꿔 최대 3회 조사할 수 있습니다.',
+    'lookup 결과가 notesOnly이면 actions는 [] 또는 item_memo만 허용합니다. selectedTradeId가 있어도 이미 같은 내용이면 ignore하세요. 모호한 고객 약칭을 임의의 정식 이름으로 바꾸지 마세요.',
+    '매장 보관·물품 발견·일반 장비 문의·사진 공유처럼 특정 대여 거래의 정정이 필요 없는 대화에는 거래ID를 요구하지 마세요. ignore 사유에 운영 공유임을 남기세요.',
     '각 이벤트의 전체 스레드에서 최신 직원 답변을 우선해 사실을 추출하고, 후보 거래·품목과 대조하세요.',
     'bot_thread_replies는 헤이빌리(봇)가 이미 이 스레드에 남긴 답글입니다. 이미 반영/적용 완료를 공지했거나 후보 카드가 요구 상태와 일치해 정정할 차이가 없으면 apply하지 말고 ignore로 종료하세요. 같은 사실의 재적용·재공지는 금지입니다.',
     '명시되지 않은 결제 상태나 분실을 추측하지 마세요. 미반납은 lost가 아닙니다.',
@@ -629,8 +639,16 @@ async function applyCommand(config, args) {
 export function findExistingAskReply(messages = []) {
   return (Array.isArray(messages) ? messages : []).find((message) => {
     const text = String(message?.text || '');
-    return text.includes('[SLACK_HEYBILLI_SYNC]') && text.includes('정보가 조금 더 필요합니다');
+    return text.includes('[SLACK_HEYBILLI_SYNC]') && (text.includes('정보가 조금 더 필요합니다') || text.includes('거래 확인이 필요합니다'));
   }) || null;
+}
+
+export async function prepareContextQuestion(config, body, lookup) {
+  if (!config.writeEnabled) throw new Error('DRY-RUN에서는 질문을 전송할 수 없습니다');
+  if (!Object.hasOwn(body, 'query') || !body.query || typeof body.query !== 'object') throw new Error('질문 전에 lookup 조회 단서(query)가 필요합니다');
+  const result = await lookup({ mode: 'lookup', event: body.event || body, query: body.query });
+  if (result.selectedTradeId) throw new Error(`추가 조회로 ${result.selectedTradeId} 거래가 확인됐습니다. 질문 대신 반영할 차이를 검토하세요`);
+  return result;
 }
 
 async function markCommand(config, mode) {
@@ -638,7 +656,9 @@ async function markCommand(config, mode) {
   const event = body.event || body;
   const reason = String(body.reason || body.question || '').trim();
   if (!reason) throw new Error('reason/question이 비어 있습니다');
+  if (!config.writeEnabled) throw new Error('DRY-RUN에서는 이벤트 상태를 변경할 수 없습니다');
   if (mode === 'needs_context') {
+    await prepareContextQuestion(config, body, (query) => syncApi(config, query));
     // 직원 답글이 달릴 때마다 source_hash가 바뀌어 같은 사건이 다시 pending으로 돌아온다.
     // 스레드당 정보 요청은 한 번이면 충분하다 — 이미 물어봤으면 서버 상태만 갱신하고 침묵한다.
     const thread = await slackApi(config, 'conversations.replies', {
@@ -650,9 +670,9 @@ async function markCommand(config, mode) {
       process.stderr.write('slack-heybilli-sync: 같은 스레드에 이미 정보 요청이 있어 재질문을 생략합니다\n');
     } else {
       await postThread(config, event.messageTs, [
-        '🔎 헤이빌리 연결에 정보가 조금 더 필요합니다.',
+        '🔎 헤이빌리 거래 확인이 필요합니다.',
         reason,
-        '이 스레드에 거래ID(예: 260721-001)나 정확한 대여자명을 답해주시면 다음 동기화 때 같은 거래 카드에 반영하겠습니다. [SLACK_HEYBILLI_SYNC]',
+        '이 스레드에 답해주시면 확인 후 반영하겠습니다. [SLACK_HEYBILLI_SYNC]',
       ].join('\n'));
     }
   }
@@ -664,7 +684,11 @@ async function main() {
   const [command = 'scan', ...rest] = process.argv.slice(2);
   const args = new Set(rest);
   let result;
-  if (command === 'scan') result = await scanCommand(config, args);
+  if (command === 'lookup') {
+    const body = await readStdinJson();
+    result = await syncApi(config, { mode: 'lookup', event: body.event || body, query: body.query || {} });
+  }
+  else if (command === 'scan') result = await scanCommand(config, args);
   else if (command === 'apply') result = await applyCommand(config, args);
   else if (command === 'ask') result = await markCommand(config, 'needs_context');
   else if (command === 'ignore') result = await markCommand(config, 'ignored');

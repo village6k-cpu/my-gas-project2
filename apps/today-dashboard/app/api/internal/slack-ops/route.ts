@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 
-import { applySlackOpsPlan, markSlackOpsEvent, scanSlackOpsEvents } from "@/lib/server/slackOps";
+import { applySlackOpsPlan, lookupSlackOpsEvent, markSlackOpsEvent, scanSlackOpsEvents } from "@/lib/server/slackOps";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -32,6 +32,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json() as Record<string, unknown>;
     const mode = String(body.mode || "");
     if (mode === "scan") return NextResponse.json(await scanSlackOpsEvents(Array.isArray(body.events) ? body.events : []));
+    if (mode === "lookup") return NextResponse.json(await lookupSlackOpsEvent(body.event, body.query));
     if (mode === "apply") return NextResponse.json(await applySlackOpsPlan(body.plan, body.execute === true));
     if (mode === "needs_context" || mode === "ignored") {
       return NextResponse.json(await markSlackOpsEvent(body.event, mode, String(body.reason || "")));
