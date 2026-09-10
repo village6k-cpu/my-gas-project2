@@ -6,6 +6,13 @@ import { gasPost } from "./gasPublic";
 import { getInventoryAuditServiceClient } from "./inventoryAuditDb";
 
 export const SLACK_OPS_CHANNEL_ID = process.env.SLACK_OPS_CHANNEL_ID?.trim() || "C0B6ZJZ2XU3";
+const SLACK_OPS_CHANNEL_IDS = (process.env.SLACK_OPS_CHANNEL_IDS || `${SLACK_OPS_CHANNEL_ID},C0BMNA501R9`).split(",").map(id => id.trim()).filter(Boolean);
+
+function checkedChannelId(value: unknown, legacyDefault = false): string {
+  const id = cleanText(value, 80) || (legacyDefault ? SLACK_OPS_CHANNEL_ID : "");
+  if (!SLACK_OPS_CHANNEL_IDS.includes(id)) throw new Error(`허용되지 않은 Slack 채널: ${id || "없음"}`);
+  return id;
+}
 
 type Phase = "checkout" | "checkin" | "unknown";
 type SlackReply = { ts: string; userId?: string; userName?: string; text: string };
@@ -214,7 +221,7 @@ function sanitizeReply(value: unknown): SlackReply {
 
 function sanitizeIncomingEvent(value: unknown): SlackOpsIncomingEvent {
   const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
-  const channelId = cleanText(raw.channelId, 80);
+  const channelId = checkedChannelId(raw.channelId);
   const messageTs = cleanText(raw.messageTs, 32);
   const sourceHash = cleanText(raw.sourceHash, 128);
   const phaseRaw = cleanText(raw.phaseHint, 20);
@@ -222,7 +229,6 @@ function sanitizeIncomingEvent(value: unknown): SlackOpsIncomingEvent {
   const root = sanitizeReply(raw.root);
   const replies = Array.isArray(raw.replies) ? raw.replies.slice(0, 100).map(sanitizeReply) : [];
 
-  if (channelId !== SLACK_OPS_CHANNEL_ID) throw new Error(`허용되지 않은 Slack 채널: ${channelId || "없음"}`);
   if (!/^\d{9,12}\.\d{4,8}$/.test(messageTs)) throw new Error("잘못된 Slack message_ts");
   if (!/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error("잘못된 source_hash");
   if (!root.text) throw new Error("Slack 원문이 비어 있습니다");
@@ -249,11 +255,12 @@ function rawContextHasVisionEvidence(context: StoredEvent["raw_context"]): boole
 
 async function upsertScannedEvents(events: SlackOpsIncomingEvent[]): Promise<StoredEvent[]> {
   const db = getInventoryAuditServiceClient();
+  const channelId = events[0].channelId;
   const ids = events.map((event) => event.messageTs);
   const { data: oldRows, error: oldError } = await db
     .from("slack_ops_events")
     .select("*")
-    .eq("channel_id", SLACK_OPS_CHANNEL_ID)
+    .eq("channel_id", channelId)
     .in("message_ts", ids);
   if (oldError) throw oldError;
   const oldByTs = new Map<string, StoredEvent>((oldRows ?? []).map((row: StoredEvent) => [row.message_ts, row]));
@@ -287,7 +294,7 @@ async function upsertScannedEvents(events: SlackOpsIncomingEvent[]): Promise<Sto
   const { data, error } = await db
     .from("slack_ops_events")
     .select("*")
-    .eq("channel_id", SLACK_OPS_CHANNEL_ID)
+    .eq("channel_id", channelId)
     .in("message_ts", ids);
   if (error) throw error;
   return (data ?? []) as StoredEvent[];
@@ -382,6 +389,7 @@ export async function scanSlackOpsEvents(values: unknown[]): Promise<{ pending: 
     throw new Error(`events는 1~${MAX_EVENTS}건이어야 합니다`);
   }
   const events = values.map(sanitizeIncomingEvent);
+  if (events.some(event => event.channelId !== events[0].channelId)) throw new Error("scan은 한 채널씩 처리해야 합니다");
   const stored = await upsertScannedEvents(events);
   const storedByTs = new Map(stored.map((row) => [row.message_ts, row]));
   const pendingEvents = events.filter((event) => {
@@ -429,11 +437,12 @@ async function researchSlackEvent(event: StoredEvent, query: unknown) {
 /** Read only: the agent can investigate without replaying scan/apply/ask. */
 export async function lookupSlackOpsEvent(value: unknown, query: unknown) {
   const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const channelId = checkedChannelId(raw.channelId, true);
   const messageTs = cleanText(raw.messageTs, 32), sourceHash = cleanText(raw.sourceHash, 128);
   if (!/^\d{9,12}\.\d{4,8}$/.test(messageTs) || !/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error("잘못된 이벤트 식별자");
   const db = getInventoryAuditServiceClient();
   const {data, error} = await db.from("slack_ops_events").select("*")
-    .eq("channel_id", SLACK_OPS_CHANNEL_ID).eq("message_ts", messageTs).maybeSingle();
+    .eq("channel_id", channelId).eq("message_ts", messageTs).maybeSingle();
   if (error) throw error;
   if (!data || data.source_hash !== sourceHash) throw new Error("Slack 스레드가 바뀌었거나 이벤트가 없습니다");
   return {ok: true, ...(await researchSlackEvent(data as StoredEvent, query))};
@@ -477,7 +486,7 @@ function sanitizePlan(value: unknown): SlackOpsApplyPlan {
   const tradeId = cleanText(raw.tradeId, 20);
   const sourceHash = cleanText(raw.sourceHash, 128);
   const summary = conciseOperationalNote(raw.summary);
-  if (cleanText(raw.channelId, 80) !== SLACK_OPS_CHANNEL_ID) throw new Error("허용되지 않은 Slack 채널");
+  const channelId = checkedChannelId(raw.channelId);
   if (!/^\d{9,12}\.\d{4,8}$/.test(cleanText(raw.messageTs, 32))) throw new Error("잘못된 messageTs");
   if (!/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error("잘못된 sourceHash");
   if (!TRADE_ID_RE.test(tradeId)) throw new Error("잘못된 거래ID");
@@ -486,7 +495,7 @@ function sanitizePlan(value: unknown): SlackOpsApplyPlan {
   if (summary.length > 500) throw new Error("summary는 필요한 업무 사실만 500자 이내로 작성해야 합니다");
   const actions = Array.isArray(raw.actions) ? raw.actions.slice(0, 30) : [];
   return {
-    channelId: SLACK_OPS_CHANNEL_ID,
+    channelId,
     messageTs: cleanText(raw.messageTs, 32),
     sourceHash,
     tradeId,
@@ -863,12 +872,13 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
 
 export async function markSlackOpsEvent(value: unknown, status: "needs_context" | "ignored", reason: string) {
   const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const channelId = checkedChannelId(raw.channelId, true);
   const messageTs = cleanText(raw.messageTs, 32);
   const sourceHash = cleanText(raw.sourceHash, 128);
   if (!/^\d{9,12}\.\d{4,8}$/.test(messageTs) || !/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error("잘못된 이벤트 식별자");
   const db = getInventoryAuditServiceClient();
   const result = await db.from("slack_ops_events").update({ status, last_error: cleanText(reason, 2_000) || null })
-    .eq("channel_id", SLACK_OPS_CHANNEL_ID).eq("message_ts", messageTs).eq("source_hash", sourceHash)
+    .eq("channel_id", channelId).eq("message_ts", messageTs).eq("source_hash", sourceHash)
     .select("message_ts").maybeSingle();
   if (result.error) throw result.error;
   if (!result.data) throw new Error("Slack 스레드가 바뀌었거나 이벤트가 없습니다");
