@@ -1,0 +1,14 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const vm=require('node:vm');
+const source=fs.readFileSync('sheetAPI.js','utf8');
+const fn=source.slice(source.indexOf('function syncEquipmentMaster('),source.indexOf('function cloneScheduleNoSend_'));
+let note='직원이 방금 적은 비고',writes=[],released=0;
+const sheet={getLastRow:()=>2,getRange:(r,c)=>({getValues:()=>[['CAM-001']],getValue:()=>note,setValue:value=>{writes.push({r,c,value});note=value;}})};
+const context={SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:()=>sheet}),flush:()=>{}},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock:()=>released++})}};
+vm.createContext(context);vm.runInContext(fn,context);
+const conflict=context.syncEquipmentMaster([{id:'CAM-001',expectedNote:'이전 조회',note:'새 기록'}],[]);
+assert.equal(conflict.success,false);assert.equal(writes.length,0);assert.equal(note,'직원이 방금 적은 비고');assert.equal(released,1);
+const ok=context.syncEquipmentMaster([{id:'CAM-001',expectedNote:note,note:note+' · 고장 의심'}],[]);
+assert.equal(ok.success,true);assert.equal(ok.notePreconditionsChecked,true);assert.equal(writes.length,1);assert.equal(writes[0].c,10);assert.equal(released,2);
+console.log('Slack equipment sheet precondition and notes-only checks passed');

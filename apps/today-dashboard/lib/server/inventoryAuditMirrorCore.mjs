@@ -170,6 +170,41 @@ export function mirrorNote(row) {
   return [...new Set([row.note, ...labels].filter(Boolean))].join(" · ");
 }
 
+/** Slack reports mirror only the note column. Never project stock, state or verification counts. */
+export async function syncEquipmentMasterNotes({ledger, gasUrl, gasKey, dryRun = false, prepareLedger, fetchImpl = globalThis.fetch, timeoutMs = 40_000}) {
+  const config = getInventoryAuditMirrorConfig({GAS_SYNC_URL: gasUrl, VILLAGE_GAS_INTERNAL_KEY: gasKey});
+  const signal = AbortSignal.timeout(timeoutMs);
+  function diff(sheet) {
+    const indexes = requiredColumnIndexes(sheet.headers);
+    // syncEquipmentMaster itself addresses B and J, so fail closed if columns moved.
+    if (indexes['장비ID'] !== 1 || indexes['비고'] !== 9) throw new InventoryAuditMirrorError('mirror_sheet_contract_invalid');
+    const ids = new Map();
+    for (const row of sheet.data) {
+      const id = String(row[1] || '').trim();
+      if (!id) continue;
+      if (ids.has(id)) throw new InventoryAuditMirrorError('mirror_duplicate_equipment_id');
+      ids.set(id, String(row[9] || ''));
+    }
+    return ledger.flatMap(row => {
+      if (!ids.has(row.equipment_id)) throw new InventoryAuditMirrorError('mirror_sheet_contract_invalid');
+      const note = mirrorNote(row);
+      return ids.get(row.equipment_id) === note ? [] : [{id:row.equipment_id, note, expectedNote:ids.get(row.equipment_id)}];
+    });
+  }
+  const before = await readEquipmentMaster({...config, fetchImpl, signal});
+  const columns = requiredColumnIndexes(before.headers);
+  if(columns['장비ID'] !== 1 || columns['비고'] !== 9) throw new InventoryAuditMirrorError('mirror_sheet_contract_invalid');
+  const sheetIds = before.data.map(row=>String(row[1] || '').trim()).filter(Boolean);
+  if(new Set(sheetIds).size !== sheetIds.length) throw new InventoryAuditMirrorError('mirror_duplicate_equipment_id');
+  if (prepareLedger) ledger = await prepareLedger(ledger, new Map(before.data.map(row=>[String(row[1] || '').trim(),String(row[9] || '')])), dryRun);
+  const changes = diff(before);
+  if (dryRun || !changes.length) return {dryRun, updateCount:changes.length, wrote:false};
+  const written = validateWriteResult(await postGasJson({...config, fetchImpl, signal, action:'equipmentMasterSync', body:{rows:changes, append:[]}}), changes.length, 0);
+  if(written.notePreconditionsChecked !== true) throw new InventoryAuditMirrorError('mirror_verification_failed');
+  if (diff(await readEquipmentMaster({...config, fetchImpl, signal})).length) throw new InventoryAuditMirrorError('mirror_verification_failed');
+  return {dryRun:false, updateCount:changes.length, wrote:true};
+}
+
 function requiredColumnIndexes(sheetHeaders) {
   if (!Array.isArray(sheetHeaders)) {
     throw new InventoryAuditMirrorError("mirror_sheet_contract_invalid");

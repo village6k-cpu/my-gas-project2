@@ -15,7 +15,7 @@ import nameLinkQueueJson from "@/lib/data/nameLinkQueue.json";
 
 type VerifyStatus = "unverified" | "verified" | "attention";
 
-type OpenIssue = { label: string; tradeId?: string; at?: string };
+type OpenIssue = { label: string; tradeId?: string; at?: string; key?: string; source?: string; kind?: string };
 
 type LedgerRow = {
   equipment_id: string;
@@ -97,6 +97,9 @@ function asIssues(v: unknown): OpenIssue[] {
       label: String(x.label ?? ""),
       tradeId: x.tradeId != null ? String(x.tradeId) : undefined,
       at: x.at != null ? String(x.at) : undefined,
+      key: x.key != null ? String(x.key) : undefined,
+      source: x.source != null ? String(x.source) : undefined,
+      kind: x.kind != null ? String(x.kind) : undefined,
     }))
     .filter((x) => x.label);
 }
@@ -438,9 +441,10 @@ export function InventoryView() {
       const cleaned: OpenIssue[] = [];
       for (const it of editDraft.issues) {
         const label = it.label.trim();
-        if (!label || seen.has(label)) continue;
-        seen.add(label);
-        cleaned.push({ label, ...(it.tradeId ? { tradeId: it.tradeId } : {}), at: it.at ?? nowIso });
+        const identity = it.key || label;
+        if (!label || seen.has(identity)) continue;
+        seen.add(identity);
+        cleaned.push({ ...it, label, at: it.at ?? nowIso });
       }
       const note = editDraft.note.trim() || null;
 

@@ -21,7 +21,7 @@ function messagePhase(text: string): string {
   const checkout = /반출|출고/.test(text), checkin = /반납|회수|미반납/.test(text);
   return checkout === checkin ? 'unknown' : checkout ? 'checkout' : 'checkin';
 }
-function employeeMessages(event: Event): string[] {
+export function employeeMessages(event: Event): string[] {
   const root = typedText(event.root.text), subject = explicitSubject(root);
   return [root, ...(event.replies || []).map(m => typedText(m.text)).filter(text => {
     const replySubject = explicitSubject(text), phase = messagePhase(text);

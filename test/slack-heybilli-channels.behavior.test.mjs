@@ -19,6 +19,16 @@ async function run(command,body,extra={}){
  }finally{await rm(dir,{recursive:true,force:true});}
 }
 const event={channelId:second,messageTs:'1789041616.664879',sourceHash:'a'.repeat(64)};
+test('equipment CLI preserves source channel and never announces to Slack',async()=>{
+ const r=await run(['record-equipment','--write'],{event,reports:[],finish:true});
+ assert.equal(r.code,0,r.err);assert.equal(r.calls.length,1);
+ assert.equal(r.calls[0].body.mode,'equipment_record');assert.equal(r.calls[0].body.event.channelId,second);assert.equal(r.calls[0].body.execute,true);
+ const dry=await run(['record-equipment'],{event,reports:[],finish:true},{SLACK_HEYBILLI_WRITE_ENABLED:'0'});
+ assert.equal(dry.calls[0].body.execute,false);
+ const scan=await run(['scan'],null,{SLACK_HEYBILLI_WRITE_ENABLED:'0'});
+ assert.ok(!scan.calls.some(c=>c.body?.mode==='equipment_sync'));
+ const live=await run(['scan']);assert.equal(live.calls.find(c=>c.body?.mode==='equipment_sync').body.execute,true);
+});
 test('one scan reads both channels independently and applies the new-channel start boundary',async()=>{
  const r=await run(['scan']);assert.equal(r.code,0,r.err);
  const histories=r.calls.filter(c=>c.url.includes('conversations.history')).map(c=>new URL(c.url));

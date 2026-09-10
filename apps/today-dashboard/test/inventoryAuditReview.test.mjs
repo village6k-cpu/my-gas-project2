@@ -7,6 +7,13 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REVIEW_MODULE = path.join(HERE, "../lib/inventory-audit/review.ts");
 
+test('audit approval preserves source keys needed to correct Slack equipment reports',async()=>{
+  const {mergeOpenIssues}=await import('../lib/inventory-audit/review.ts');
+  const existing=[{key:'slack:C1:123:CAM-001',source:'slack',kind:'damage',label:'고장 의심',at:'2026-09-10'},
+    {key:'slack:C2:124:CAM-001',source:'slack',label:'고장 의심'}];
+  assert.deepEqual(mergeOpenIssues(existing,[{label:'고장 의심'},{label:'실사 메모'}]),[...existing,{label:'실사 메모'}]);
+});
+
 test("owner review has a pure reconciliation module", () => {
   assert.equal(fs.existsSync(REVIEW_MODULE), true);
   const source = fs.readFileSync(REVIEW_MODULE, "utf8");
