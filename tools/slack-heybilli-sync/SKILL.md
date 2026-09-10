@@ -1,11 +1,11 @@
 ---
 name: slack-heybilli-sync
-description: Reconcile Village Slack #단톡방 outbound/return exceptions directly into the existing Heybilli transaction card without creating a follow-up board.
+description: Reconcile Village Slack #단톡방 and #업무지시 outbound/return exceptions directly into the existing Heybilli transaction card without creating a follow-up board.
 metadata:
-  version: 1.1.0
+  version: 1.2.0
 ---
 
-# Slack #단톡방 → 헤이빌리 기존 거래 직접 정정
+# Slack #단톡방·#업무지시 → 헤이빌리 기존 거래 직접 정정
 
 ## 절대 원칙
 
@@ -39,6 +39,11 @@ Windows PowerShell에서는 bash heredoc을 쓰지 말고 다음처럼 stdin으�
 DRY-RUN에서는 읽기 전용 `lookup`과 `apply`를 `--write` 없이 실행하는 것만 허용한다. `ask`, `ignore`, Slack 메시지
 전송은 하지 않고, 불명확한 건은 최종 요약에만 남긴다. LIVE 모드에서만 아래 질문·제외 절차를 쓴다.
 
+## 채널별 처리
+
+- 단톡방과 업무지시의 이벤트는 별개다. 모든 lookup/apply/ask/ignore JSON에 해당 event.channel_id를 channelId로 넣는다. 다른 채널의 스레드나 메시지를 한 사건으로 합치지 않는다.
+- 업무지시의 요청·예정 내용을 이미 수행된 사실로 바꾸지 않는다. 특정 거래의 미실행 지시는 메모로만 보존하고, 실제 반출·반납 수량은 수행 결과가 확인된 경우에만 정정한다.
+
 ## 거래 조사와 선택
 
 초기 후보는 정규식 힌트의 검색 결과일 뿐이다. 후보가 비었다고 정보가 없는 것으로 판단하지 않는다.
@@ -47,7 +52,7 @@ AI가 전체 직원 대화의 뜻을 읽고 이름, 장비, 예정 시각을 골
 
 ```powershell
 @'
-{"event":{"messageTs":"원문 event.message_ts","sourceHash":"원문 event.source_hash"},"query":{"customer":"원문에 적힌 이름","equipment":["원문 장비명"],"phase":"checkin"}}
+{"event":{"channelId":"원문 event.channel_id","messageTs":"원문 event.message_ts","sourceHash":"원문 event.source_hash"},"query":{"customer":"원문에 적힌 이름","equipment":["원문 장비명"],"phase":"checkin"}}
 '@ | node tools/slack-heybilli-sync/slack-heybilli-sync.mjs lookup
 ```
 
@@ -103,7 +108,7 @@ AI가 전체 직원 대화의 뜻을 읽고 이름, 장비, 예정 시각을 골
 
 ```json
 {
-  "channelId": "C0B6ZJZ2XU3",
+  "channelId": "원문 event.channel_id",
   "messageTs": "원문 event.message_ts",
   "sourceHash": "원문 event.source_hash",
   "tradeId": "260721-001",
@@ -125,7 +130,7 @@ AI가 전체 직원 대화의 뜻을 읽고 이름, 장비, 예정 시각을 골
 
 ```bash
 node tools/slack-heybilli-sync/slack-heybilli-sync.mjs ask <<'JSON'
-{"event":{"messageTs":"...","sourceHash":"..."},"query":{"customer":"원문 이름","phase":"checkin"},"question":"조회 후에도 구분되지 않은 최소 정보 한 가지"}
+{"event":{"channelId":"원문 event.channel_id","messageTs":"...","sourceHash":"..."},"query":{"customer":"원문 이름","phase":"checkin"},"question":"조회 후에도 구분되지 않은 최소 정보 한 가지"}
 JSON
 ```
 
@@ -135,7 +140,7 @@ Windows PowerShell에서는 동일 JSON을 `@' ... '@ | node ... ask` 형태로 
 
 ```bash
 node tools/slack-heybilli-sync/slack-heybilli-sync.mjs ignore <<'JSON'
-{"event":{"messageTs":"...","sourceHash":"..."},"reason":"운영 기록이 아닌 이유"}
+{"event":{"channelId":"원문 event.channel_id","messageTs":"...","sourceHash":"..."},"reason":"운영 기록이 아닌 이유"}
 JSON
 ```
 

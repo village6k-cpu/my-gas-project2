@@ -271,6 +271,8 @@ test('Slack images are analyzed in one Hermes batch and temporary files are remo
     assert.match(results[0].text, /장희광 감독님 반납/);
     const temporaryPaths = JSON.parse(await readFile(pathLog, 'utf8'));
     for (const path of temporaryPaths) await assert.rejects(readFile(path));
+    const expired = await analyzeSlackImages({ visionBin: adapter, token: 'test-token', visionDeadlineMs: Date.now() - 1 }, candidates);
+    assert.deepEqual(expired, [], 'the next channel must defer images after the shared scan deadline');
   } finally {
     if (previousPython == null) delete process.env.SLACK_HEYBILLI_PYTHON;
     else process.env.SLACK_HEYBILLI_PYTHON = previousPython;
