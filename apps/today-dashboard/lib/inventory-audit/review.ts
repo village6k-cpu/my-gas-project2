@@ -159,18 +159,22 @@ function issueLabels(rows: DbRow[]): Array<{ label: string }> {
   return labels.map((label) => ({ label }));
 }
 
-function mergeOpenIssues(
+export function mergeOpenIssues(
   existingValue: unknown,
   auditIssues: Array<{ label: string }>,
 ): Array<{ label: string }> {
+  const issues = new Map<string, {label:string}>();
   const labels = new Set<string>();
   for (const issue of list(existingValue)) {
     if (!issue || typeof issue !== "object" || Array.isArray(issue)) continue;
     const label = text((issue as DbRow).label).trim();
-    if (label) labels.add(label);
+    if (label) {
+      labels.add(label);
+      issues.set(text((issue as DbRow).key) || label, {...issue as DbRow,label});
+    }
   }
-  for (const issue of auditIssues) labels.add(issue.label);
-  return [...labels].map((label) => ({ label }));
+  for (const issue of auditIssues) if(!labels.has(issue.label)) {issues.set(issue.label,issue);labels.add(issue.label);}
+  return [...issues.values()];
 }
 
 function classify(

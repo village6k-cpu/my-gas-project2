@@ -8,7 +8,7 @@ import { getInventoryAuditServiceClient } from "./inventoryAuditDb";
 export const SLACK_OPS_CHANNEL_ID = process.env.SLACK_OPS_CHANNEL_ID?.trim() || "C0B6ZJZ2XU3";
 const SLACK_OPS_CHANNEL_IDS = (process.env.SLACK_OPS_CHANNEL_IDS || `${SLACK_OPS_CHANNEL_ID},C0BMNA501R9`).split(",").map(id => id.trim()).filter(Boolean);
 
-function checkedChannelId(value: unknown, legacyDefault = false): string {
+export function checkedChannelId(value: unknown, legacyDefault = false): string {
   const id = cleanText(value, 80) || (legacyDefault ? SLACK_OPS_CHANNEL_ID : "");
   if (!SLACK_OPS_CHANNEL_IDS.includes(id)) throw new Error(`허용되지 않은 Slack 채널: ${id || "없음"}`);
   return id;

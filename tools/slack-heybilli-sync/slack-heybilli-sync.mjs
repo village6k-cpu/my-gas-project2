@@ -300,7 +300,8 @@ export function isOperationalMessage(text) {
   const tradeContextException = /(?:반출|반납).{0,40}(?:없|안|고장|불량|다르|틀리|부족)|(?:없|안|고장|불량|다르|틀리|부족).{0,40}(?:반출|반납)/.test(withoutNoException);
   const taggedException = isTaggedReport(withoutNoException)
     && /없(?:음|습니다|어요|다)(?![가-힣])|안\s*(?:적|올|들어|가져|나갔|나감|맞|됐|되|보이)|고장|불량|다르|틀리|부족/.test(withoutNoException);
-  return explicitException || tradeContextException || taggedException;
+  const equipmentReport = /재고|실사|정비|수리|고장|불량|파손|깨졌|깨진|메인보드|분실|찾았|찾음|발견/.test(withoutNoException);
+  return explicitException || tradeContextException || taggedException || equipmentReport;
 }
 
 function isTaggedReport(text) {
@@ -551,7 +552,7 @@ function hermesPrompt(result, config) {
       : '',
     'candidate 목록은 초기 검색 힌트일 뿐 전부가 아닙니다. 후보 없음/이름 추출 오류/동일 날짜 복수 거래이면 직원 원문의 이름·장비·시간으로 lookup을 수행하세요. lookup은 읽기 전용이며 query를 바꿔 최대 3회 조사할 수 있습니다.',
     'lookup 결과가 notesOnly이면 actions는 [] 또는 item_memo만 허용합니다. selectedTradeId가 있어도 이미 같은 내용이면 ignore하세요. 모호한 고객 약칭을 임의의 정식 이름으로 바꾸지 마세요.',
-    '매장 보관·물품 발견·일반 장비 문의·사진 공유처럼 특정 대여 거래의 정정이 필요 없는 대화에는 거래ID를 요구하지 마세요. ignore 사유에 운영 공유임을 남기세요.',
+    '재고·분실·파손·고장·수리·발견 보고는 거래 정정과 별개로 먼저 lookup-equipment → record-equipment로 장비마스터 비고에 기록하세요. 거래번호 없이도 처리하며 원문 불확실성을 유지합니다. 거래 반영 공지가 이미 있어도 장비 기록 누락 여부는 별도로 판단합니다. 일반 문의·사진·위치 공유만 있으면 ignore하세요.',
     '각 이벤트의 전체 스레드에서 최신 직원 답변을 우선해 사실을 추출하고, 후보 거래·품목과 대조하세요.',
     'bot_thread_replies는 헤이빌리(봇)가 이미 이 스레드에 남긴 답글입니다. 이미 반영/적용 완료를 공지했거나 후보 카드가 요구 상태와 일치해 정정할 차이가 없으면 apply하지 말고 ignore로 종료하세요. 같은 사실의 재적용·재공지는 금지입니다.',
     '명시되지 않은 결제 상태나 분실을 추측하지 마세요. 미반납은 lost가 아닙니다.',
@@ -591,7 +592,13 @@ async function scanCommand(config, args) {
   const visionBudget = {remaining: MAX_VISION_IMAGES_PER_SCAN};
   // The installed runner caps the whole scan at 180s. All channels share this
   // earlier vision deadline so slow images leave time for ready text events.
-  const visionDeadlineMs = Date.now() + 120_000;
+  const visionDeadlineMs = Date.now() + (config.writeEnabled ? 90_000 : 120_000);
+  // Durable notes are independent of event status and trade writes. Even a
+  // quiet channel retries an earlier failed sheet delivery, without an AI run.
+  if (config.writeEnabled) {
+    try { result.equipmentMirror = await syncApi(config, {mode:'equipment_sync',execute:true}); }
+    catch { process.stderr.write('slack-heybilli-sync: 장비마스터 비고 반영 실패, 다음 실행에서 재시도합니다\n'); }
+  }
   let succeeded = 0;
   for (const channelId of config.channelIds) {
     try {
@@ -732,6 +739,14 @@ async function main() {
     const event = body.event || body;
     const scoped = configForEvent(config, event);
     result = await syncApi(scoped, { mode: 'lookup', event: {...event, channelId: scoped.channelId}, query: body.query || {} });
+  }
+  else if (command === 'lookup-equipment' || command === 'record-equipment') {
+    const body = await readStdinJson();
+    const scoped = configForEvent(config, body.event);
+    if (args.has('--write') && !config.writeEnabled) throw new Error('DRY-RUN에서는 장비 보고를 저장할 수 없습니다');
+    result = await syncApi(scoped, {mode:command === 'lookup-equipment' ? 'equipment_lookup' : 'equipment_record',
+      event:{...body.event,channelId:scoped.channelId},query:body.query,reports:body.reports,
+      execute:command === 'record-equipment' && args.has('--write') && config.writeEnabled,finish:body.finish === true});
   }
   else if (command === 'scan') result = await scanCommand(config, args);
   else if (command === 'apply') result = await applyCommand(config, args);

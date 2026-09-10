@@ -2395,6 +2395,9 @@ function jsonResponse(data, statusCode) {
 // F(가용)/G(대여중)/K(최근실사)는 절대 건드리지 않는다.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function syncEquipmentMaster(rows, newRows) {
+  var mirrorLock = LockService.getScriptLock();
+  if (!mirrorLock.tryLock(5000)) return {success:false,error:"장비마스터 반영 중입니다. 다시 시도해 주세요"};
+  try {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("장비마스터");
   if (!sheet) return { error: "장비마스터 시트 없음" };
@@ -2406,6 +2409,16 @@ function syncEquipmentMaster(rows, newRows) {
     if (id && !rowById[id]) rowById[id] = i + 2;
   }
   var updated = 0, appended = 0, skipped = [];
+  // Slack notes use a read precondition so an intervening sheet edit is retried.
+  // Check the whole batch before any write. Existing full-ledger callers remain compatible.
+  for (var guardIndex = 0; guardIndex < (rows || []).length; guardIndex++) {
+    var guarded = rows[guardIndex];
+    if (guarded.expectedNote === undefined) continue;
+    var guardedRow = rowById[String(guarded.id || "").trim()];
+    if (!guardedRow || String(sheet.getRange(guardedRow, 10).getValue() || "") !== String(guarded.expectedNote)) {
+      return {success:false,error:"장비마스터 비고가 변경되었습니다. 다시 조회해 주세요",updated:0,appended:0,skipped:[guarded.id]};
+    }
+  }
   (rows || []).forEach(function (r) {
     var rowNum = rowById[String(r.id || "").trim()];
     if (!rowNum) { skipped.push(r.id || "(no id)"); return; }
@@ -2429,7 +2442,9 @@ function syncEquipmentMaster(rows, newRows) {
     rowById[idNew] = target;
     appended++;
   });
-  return { success: true, updated: updated, appended: appended, skipped: skipped };
+  SpreadsheetApp.flush();
+  return { success: true, updated: updated, appended: appended, skipped: skipped, notePreconditionsChecked:true };
+  } finally { mirrorLock.releaseLock(); }
 }
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Registered schedule exact clone — no confirmation request / no Alimtalk
