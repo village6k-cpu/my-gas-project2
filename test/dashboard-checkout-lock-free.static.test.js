@@ -31,8 +31,13 @@ assert.doesNotMatch(
 );
 assert.match(
   toggleSetupDone,
-  /nextDashboardCompletionRevision_\(props, tid, 'setup'\)[\s\S]*props\.setProperties\(completed, false\)/,
-  '반출 완료 상태는 단조 revision과 함께 로컬 정본에 확정해야 한다'
+  /nextDashboardCompletionRevision_\(props, tid, 'setup'\)[\s\S]*trySetScriptProperties_\(props, completed\)/,
+  '반출 완료는 단조 revision을 발급하고 용량 회수가 가능한 표시 캐시 경로로 저장해야 한다'
+);
+assert.match(
+  backend,
+  /function trySetScriptProperties_\(props, values\)[\s\S]*?props\.setProperties\(values, false\)/,
+  '표시 캐시 저장은 기존의 다른 Script Properties를 삭제하면 안 된다'
 );
 
 const toggleSetup = store.match(/export async function toggleSetup\(tradeId: string\): Promise<ToggleSetupResult> \{[\s\S]*?\n\}/);
