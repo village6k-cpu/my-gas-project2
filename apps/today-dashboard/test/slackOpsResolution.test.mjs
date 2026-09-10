@@ -74,3 +74,9 @@ test('attached honorific does not become part of the customer name',()=>{
  const t=trade('260904-005','이소연','2026-09-06T05:00:00Z','2026-09-07T05:00:00Z',['FX3']);
  assert.equal(resolve(event('이소연감독님 FX3 반납','checkin'),{customer:'이소연',equipment:['FX3'],phase:'checkin'},[t]).selectedTradeId,t.tradeId);
 });
+test('untagged spaced surname cannot be discarded to authorize another customer',()=>{
+ const rows=['김민수','민수'].map((name,i)=>trade(`260907-00${i+1}`,name,'2026-09-06T05:00:00Z','2026-09-07T05:00:00Z',['FX3']));
+ const e=event('김 민수 FX3 반납','checkin');
+ assert.equal(resolve(e,{customer:'민수',equipment:['FX3'],phase:'checkin'},rows).selectedTradeId,null);
+ assert.equal(resolve(e,{customer:'김민수',equipment:['FX3'],phase:'checkin'},rows).selectedTradeId,'260907-001');
+});

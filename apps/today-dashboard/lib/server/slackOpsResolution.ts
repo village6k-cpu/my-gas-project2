@@ -38,7 +38,12 @@ function completeNameInSource(event: Event, name: string): boolean {
   const pattern = compact(name).split('').join('\\s*');
   const subject = explicitSubject(typedText(event.root.text));
   if (subject && subject !== compact(name)) return false;
-  return identityMessages(event).some(text => new RegExp(`(?:^|[^a-zA-Z0-9가-힣])${pattern}(?=$|[^a-zA-Z0-9가-힣]|(?:감독|대표|실장|팀장)?님(?:$|[^가-힣]))`, 'iu').test(text));
+  return identityMessages(event).some(text => {
+    // A space between surname and given name is not an identity boundary.
+    const spaced = text.match(/^\s*(?:\[\s*(?:반출|반납)\s*\]\s*)?([가-힣]\s+[가-힣]{2})(?=\s|$)/u)?.[1];
+    if (spaced && compact(spaced) !== compact(name) && compact(spaced).endsWith(compact(name))) return false;
+    return new RegExp(`(?:^|[^a-zA-Z0-9가-힣])${pattern}(?=$|[^a-zA-Z0-9가-힣]|(?:감독|대표|실장|팀장)?님(?:$|[^가-힣]))`, 'iu').test(text);
+  });
 }
 export function validateSlackResolutionQuery(event: Event, raw: unknown): SlackResolutionQuery {
   const q = (raw && typeof raw === 'object' ? raw : {}) as SlackResolutionQuery;
