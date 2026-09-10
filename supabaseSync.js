@@ -675,6 +675,71 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
 }
 
 /**
+ * 대시보드 checkedCheckout 정본 조회.
+ * Script Properties itemCheck_* 는 용량 초과/완료 후 정리로 자주 비어 있다.
+ * 앱 품목 체크 쓰기는 Supabase schedule_items.checkout_state 가 정본이므로
+ * 대시보드 응답도 여기서 읽어 합친다. 실패 시 빈 맵(호출부가 props 폴백).
+ */
+function supaGetScheduleItemCheckoutStateMap_(tradeIds) {
+  var byScheduleId = {};
+  var ids = [];
+  var seen = {};
+  (tradeIds || []).forEach(function(tid) {
+    tid = String(tid || '').trim();
+    if (!tid || seen[tid]) return;
+    seen[tid] = true;
+    ids.push(tid);
+  });
+  if (!ids.length) return { ok: true, byScheduleId: byScheduleId };
+
+  try {
+    var cfg = SUPA_CFG_();
+    var token = supaToken_(cfg);
+    if (!token) return { ok: false, byScheduleId: byScheduleId, error: 'Supabase 봇 토큰 없음' };
+    var headers = {
+      apikey: cfg.apikey,
+      Authorization: 'Bearer ' + token,
+      'Accept-Profile': 'village'
+    };
+    var CHUNK = 40;
+    for (var offset = 0; offset < ids.length; offset += CHUNK) {
+      var chunk = ids.slice(offset, offset + CHUNK);
+      var inList = '(' + chunk.map(function(tid) {
+        return '"' + String(tid).replace(/"/g, '') + '"';
+      }).join(',') + ')';
+      var res = UrlFetchApp.fetch(
+        cfg.url + '/rest/v1/schedule_items?select=schedule_id,checkout_state'
+          + '&trade_id=in.' + encodeURIComponent(inList)
+          + '&limit=2000',
+        { method: 'get', headers: headers, muteHttpExceptions: true }
+      );
+      var code = res.getResponseCode();
+      if (code >= 300) {
+        return {
+          ok: false,
+          byScheduleId: byScheduleId,
+          error: 'Supabase 품목 체크 조회 실패 (' + code + ')'
+        };
+      }
+      var rows = [];
+      try { rows = JSON.parse(res.getContentText() || '[]') || []; } catch (parseErr) { rows = []; }
+      rows.forEach(function(row) {
+        var sid = String(row && row.schedule_id || '').trim();
+        if (!sid) return;
+        byScheduleId[sid] = String(row.checkout_state || '').trim();
+      });
+    }
+    return { ok: true, byScheduleId: byScheduleId };
+  } catch (err) {
+    return {
+      ok: false,
+      byScheduleId: byScheduleId,
+      error: 'Supabase 품목 체크 조회 오류: ' + (err && err.message ? err.message : String(err))
+    };
+  }
+}
+
+/**
  * 반납완료 서버 검증용 상세 수량 조회.
  * 브라우저가 보낸 boolean을 신뢰하지 않고, 먼저 내구 저장된 village.trades.return_counts를
  * GAS가 봇 세션으로 직접 읽는다. 조회 실패/행 없음은 완료 허용이 아니라 명시적 실패다.

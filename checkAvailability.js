@@ -982,6 +982,17 @@ function getDashboardData(targetDate, skipCache, options) {
   markDash_('trade_extras');
   var equipmentChecks = getEquipmentCheckMapForIds_(dashboardTradeIds);
   markDash_('equipment_checks');
+  // 품목 체크 정본: Supabase checkout_state (Script Properties 는 용량/정리로 자주 비어 있음)
+  var checkoutStateMap = {};
+  try {
+    if (typeof supaGetScheduleItemCheckoutStateMap_ === 'function') {
+      var checkoutMapRes = supaGetScheduleItemCheckoutStateMap_(dashboardTradeIds);
+      checkoutStateMap = (checkoutMapRes && checkoutMapRes.byScheduleId) || {};
+    }
+  } catch (checkoutMapErr) {
+    checkoutStateMap = {};
+  }
+  markDash_('equipment_checkout_states', { keys: Object.keys(checkoutStateMap).length });
 
   dashboardTradeIds.forEach(function(tid) {
     var g = tradeGroups[tid];
@@ -1002,7 +1013,8 @@ function getDashboardData(targetDate, skipCache, options) {
       contractStatusForTrade === '반출' || contractStatusForTrade === '반출중' ||
       contractStatusForTrade === '반납완료';
     var displayEquip = g.equipments.map(function(eq) {
-      var checkoutChecked = props['itemCheck_' + eq.scheduleId + '_checkout'] === '1';
+      var checkoutChecked = String(checkoutStateMap[eq.scheduleId] || '') === 'taken'
+        || props['itemCheck_' + eq.scheduleId + '_checkout'] === '1';
       return {
         scheduleId: eq.scheduleId,
         name: eq.name,
@@ -1309,6 +1321,16 @@ function getDashboardSearchData(query, options) {
   markProfile_('visible_extras');
   var visibleEquipmentChecks = getEquipmentCheckMapForIds_(visibleTradeIds);
   markProfile_('visible_details');
+  var visibleCheckoutStateMap = {};
+  try {
+    if (typeof supaGetScheduleItemCheckoutStateMap_ === 'function') {
+      var visibleCheckoutMapRes = supaGetScheduleItemCheckoutStateMap_(visibleTradeIds);
+      visibleCheckoutStateMap = (visibleCheckoutMapRes && visibleCheckoutMapRes.byScheduleId) || {};
+    }
+  } catch (visibleCheckoutMapErr) {
+    visibleCheckoutStateMap = {};
+  }
+  markProfile_('visible_checkout_states');
 
   var builtByTid = {};
   var checkoutList = [];
@@ -1334,7 +1356,7 @@ function getDashboardSearchData(query, options) {
         visibleExtras[tid] || {},
         getEquipmentCheckForTrade_(visibleEquipmentChecks, tid),
         props,
-        {}
+        { checkoutStateMap: visibleCheckoutStateMap }
       );
     }
 
@@ -1742,8 +1764,10 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, option
   });
 
   var setupDoneForTrade = props['setupDone_' + tid] === '1';
+  var checkoutStateMap = (options && options.checkoutStateMap) || {};
   var displayEquip = g.equipments.map(function(eq) {
-    var checkoutChecked = props['itemCheck_' + eq.scheduleId + '_checkout'] === '1';
+    var checkoutChecked = String(checkoutStateMap[eq.scheduleId] || '') === 'taken'
+      || props['itemCheck_' + eq.scheduleId + '_checkout'] === '1';
     return {
       scheduleId: eq.scheduleId,
       name: eq.name,
@@ -3292,11 +3316,172 @@ function dashboardCompletionRevisionKey_(tid, scope) {
   return 'dashboardCompletionRevision_' + String(scope || '').trim() + '_' + String(tid || '').trim();
 }
 
+
+/** Script Properties 용량 초과 여부 */
+function isScriptPropertiesQuotaError_(err) {
+  var msg = String(err && err.message ? err.message : err || '');
+  return /속성 저장용량|storage quota|Argument too large|Exceeded maximum|LIMIT_EXCEEDED/i.test(msg);
+}
+
+/**
+ * 대시보드 운영용 휘발 속성 회수.
+ * 설정값(API 키, 봇 계정 등)은 절대 삭제하지 않는다.
+ * 완료 정본은 Supabase이므로 setupDone_/itemCheck_ 과거분은 안전하게 비울 수 있다.
+ */
+function reclaimDashboardScriptProperties_(props, options) {
+  options = options || {};
+  props = props || PropertiesService.getScriptProperties();
+  var dryRun = options.dryRun === true;
+  var keepDays = Math.max(0, Number(options.keepDays) || 14);
+  var now = new Date();
+  var cutoff = new Date(now.getTime() - keepDays * 24 * 60 * 60 * 1000);
+  var yy = String(cutoff.getFullYear()).slice(-2);
+  var mm = ('0' + (cutoff.getMonth() + 1)).slice(-2);
+  var dd = ('0' + cutoff.getDate()).slice(-2);
+  var cutoffYYMMDD = options.cutoffYYMMDD || (yy + mm + dd);
+
+  var all;
+  try { all = props.getProperties() || {}; } catch (readErr) { return { ok: false, error: String(readErr), deleted: 0 }; }
+  var keys = Object.keys(all);
+  var toDelete = [];
+  var keepPrefixes = {
+    // 설정/인증 — 삭제 금지
+  };
+  keys.forEach(function(k) {
+    // 허용된 캐시 접두만 삭제. REG_ALIM_SENT/설정값은 절대 건드리지 않는다.
+    var reclaimable =
+      /^(itemCheck|itemCheckQty)_/.test(k) ||
+      /^(setupDone|setupDoneAt|returnDone|returnDoneAt)_/.test(k) ||
+      /^checkoutBaselineStarted_/.test(k) ||
+      /^returnForced_v1_/.test(k) ||
+      /^returnPrevContractStatus_/.test(k) ||
+      /^setupClosing_/.test(k) ||
+      /^setupMutation_/.test(k) ||
+      /^returnMutation_/.test(k) ||
+      /^checkoutItemMutation_/.test(k) ||
+      /^dashboardCompletionRevision_/.test(k) ||
+      /^dashboardMutationLog_/.test(k) ||
+      /^dashboardStructureMutation_/.test(k) ||
+      /^dashboardStructureQueue_/.test(k) ||
+      /^dashboardReturnProjectionLease_/.test(k) ||
+      k.indexOf(DASHBOARD_RETIRED_PHOTO_PROPERTY_CHUNK_PREFIX_ || 'dashboardRetiredPhotoChunk_') === 0 ||
+      k === (DASHBOARD_RETIRED_PHOTO_PROPERTY_MANIFEST_KEY_ || 'dashboardRetiredPhotoManifest');
+    if (!reclaimable) return;
+
+    var always = (
+      /^dashboardMutationLog_/.test(k) ||
+      /^dashboardStructureMutation_/.test(k) ||
+      /^dashboardStructureQueue_/.test(k) ||
+      /^dashboardReturnProjectionLease_/.test(k) ||
+      /^setupClosing_/.test(k) ||
+      /^setupMutation_/.test(k) ||
+      /^returnMutation_/.test(k) ||
+      /^checkoutItemMutation_/.test(k) ||
+      k.indexOf(DASHBOARD_RETIRED_PHOTO_PROPERTY_CHUNK_PREFIX_ || 'dashboardRetiredPhotoChunk_') === 0 ||
+      k === (DASHBOARD_RETIRED_PHOTO_PROPERTY_MANIFEST_KEY_ || 'dashboardRetiredPhotoManifest')
+    );
+    if (always) {
+      toDelete.push(k);
+      return;
+    }
+
+    var yymmdd = '';
+    var m = k.match(/(\d{6})-\d{3}/);
+    if (m) yymmdd = m[1];
+    if (!yymmdd) {
+      var m2 = k.match(/_(\d{6})(?:_|$)/);
+      if (m2) yymmdd = m2[1];
+    }
+    if (yymmdd && yymmdd < cutoffYYMMDD) {
+      toDelete.push(k);
+      return;
+    }
+    if (options.aggressive === true && /^(itemCheck|itemCheckQty|setupDone|setupDoneAt|returnDone|returnDoneAt)_/.test(k)) {
+      toDelete.push(k);
+    }
+  });
+
+  // 중복 제거
+  var seen = {};
+  toDelete = toDelete.filter(function(k) {
+    if (seen[k]) return false;
+    seen[k] = true;
+    return true;
+  });
+
+  if (!dryRun) {
+    toDelete.forEach(function(k) {
+      try { props.deleteProperty(k); } catch (delErr) {}
+    });
+  }
+  var remaining = 0;
+  try { remaining = Object.keys(props.getProperties() || {}).length; } catch (e) {}
+  return {
+    ok: true,
+    dryRun: dryRun,
+    cutoffYYMMDD: cutoffYYMMDD,
+    deleted: dryRun ? 0 : toDelete.length,
+    wouldDelete: toDelete.length,
+    remaining: remaining,
+    sample: toDelete.slice(0, 20)
+  };
+}
+
+/** setProperty 실패 시 1회 회수 후 재시도. 그래도 실패하면 throw 없이 false */
+function trySetScriptProperty_(props, key, value) {
+  try {
+    props.setProperty(key, value);
+    return true;
+  } catch (err) {
+    if (!isScriptPropertiesQuotaError_(err)) throw err;
+    try { reclaimDashboardScriptProperties_(props, { keepDays: 7, aggressive: true }); } catch (reclaimErr) {}
+    try {
+      props.setProperty(key, value);
+      return true;
+    } catch (err2) {
+      Logger.log('ScriptProperties set 포기: ' + key + ' / ' + (err2 && err2.message ? err2.message : err2));
+      return false;
+    }
+  }
+}
+
+function trySetScriptProperties_(props, values) {
+  try {
+    props.setProperties(values, false);
+    return true;
+  } catch (err) {
+    if (!isScriptPropertiesQuotaError_(err)) throw err;
+    try { reclaimDashboardScriptProperties_(props, { keepDays: 7, aggressive: true }); } catch (reclaimErr) {}
+    try {
+      props.setProperties(values, false);
+      return true;
+    } catch (err2) {
+      // 개별 키로 한 번 더
+      var ok = true;
+      Object.keys(values || {}).forEach(function(k) {
+        if (!trySetScriptProperty_(props, k, values[k])) ok = false;
+      });
+      return ok;
+    }
+  }
+}
+
+function tryDeleteScriptProperty_(props, key) {
+  try { props.deleteProperty(key); return true; } catch (err) {
+    if (!isScriptPropertiesQuotaError_(err)) return false;
+    try { reclaimDashboardScriptProperties_(props, { keepDays: 7, aggressive: true }); } catch (e) {}
+    try { props.deleteProperty(key); return true; } catch (err2) { return false; }
+  }
+}
+
+
 function nextDashboardCompletionRevision_(props, tid, scope) {
   var key = dashboardCompletionRevisionKey_(tid, scope);
-  var previous = Number(props.getProperty(key) || 0);
+  var previous = 0;
+  try { previous = Number(props.getProperty(key) || 0); } catch (readErr) { previous = 0; }
   var next = Math.max(Date.now(), isFinite(previous) ? previous + 1 : 1);
-  props.setProperty(key, String(next));
+  // 속성 용량이 가득 차도 completionRevision 자체는 반환해야 앱 서버 CAS가 진행된다.
+  trySetScriptProperty_(props, key, String(next));
   return next;
 }
 
@@ -3389,6 +3574,11 @@ function toggleSetupDone(tid, done, options) {
   var key = 'setupDone_' + tid;
   var atKey = 'setupDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
+  try {
+    // 용량이 빡빡하면 완료 전에 휘발 속성을 비운다 (설정값 보존)
+    var propCount = props.getKeys().length;
+    if (propCount > 400) reclaimDashboardScriptProperties_(props, { keepDays: 10, aggressive: propCount > 450 });
+  } catch (reclaimStartErr) {}
   var isDone = done === true || done === "true" || done === "1" || done === 1;
   var mutationId = normalizeDashboardMutationId_(options && options.mutationId);
   var remoteDoneAt = String(options && options.remoteDoneAt || '').trim();
@@ -3439,14 +3629,14 @@ function toggleSetupDone(tid, done, options) {
         closingToken = String(existingSetupLease.token || existingClosing || '');
       } else {
         closingToken = String(Date.now()) + '|' + (mutationId || String(Math.random()).slice(2));
-        props.setProperty(setupLeaseKey, JSON.stringify({
+        trySetScriptProperty_(props, setupLeaseKey, JSON.stringify({
           token: closingToken,
           mutationId: mutationId,
           target: isDone ? '1' : '0',
           at: Date.now()
         }));
       }
-      props.setProperty(closingKey, closingToken);
+      trySetScriptProperty_(props, closingKey, closingToken);
       closingMarked = true;
     } finally {
       if (transitionLocked) try { transitionLock.releaseLock(); } catch (transitionReleaseErr) {}
@@ -3461,10 +3651,11 @@ function toggleSetupDone(tid, done, options) {
       var completed = {};
       completed[key] = '1';
       completed[atKey] = doneAt;
-      props.setProperties(completed, false);
+      // 표시 캐시 — 실패해도 Supabase 정본 경로(앱 서버)는 계속 진행
+      trySetScriptProperties_(props, completed);
     } else {
-      props.deleteProperty(key);
-      props.deleteProperty(atKey);
+      tryDeleteScriptProperty_(props, key);
+      tryDeleteScriptProperty_(props, atKey);
     }
     try { supaMarkTradeDirty_(tid); } catch (dirtyErr) {}
     var setupCommitLock = LockService.getScriptLock();
@@ -3849,6 +4040,10 @@ function toggleReturnDone(tid, done, options) {
   var key = 'returnDone_' + tid;
   var atKey = 'returnDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
+  try {
+    var propCount = props.getKeys().length;
+    if (propCount > 400) reclaimDashboardScriptProperties_(props, { keepDays: 10, aggressive: propCount > 450 });
+  } catch (reclaimStartErr) {}
   var isDone = done === true || done === "true" || done === "1" || done === 1;
   var mutationId = normalizeDashboardMutationId_(options && options.mutationId);
   var remoteDoneAt = String(options && options.remoteDoneAt || '').trim();
@@ -3966,8 +4161,8 @@ function toggleReturnDone(tid, done, options) {
       if (contractResult && contractResult.error) return contractResult;
       var doneAt = isDone ? (remoteDoneAt || formatDashboardDoneAt_(new Date())) : "";
       if (isDone) {
-        props.setProperty(key, '1');
-        props.setProperty(atKey, doneAt);
+        trySetScriptProperty_(props, key, '1');
+        trySetScriptProperty_(props, atKey, doneAt);
       } else {
         props.deleteProperty(key);
         props.deleteProperty(atKey);
@@ -4674,8 +4869,8 @@ function toggleItemChecksBatch(tid, entries) {
           result.superseded = true;
         } else {
           var propertyKey = 'itemCheck_' + item.scheduleId + '_checkout';
-          if (item.done) props.setProperty(propertyKey, '1');
-          else props.deleteProperty(propertyKey);
+          if (item.done) trySetScriptProperty_(props, propertyKey, '1');
+          else tryDeleteScriptProperty_(props, propertyKey);
           try { commitDashboardMutation_(props, tid, item.mutationId, 'item:checkout:' + item.scheduleId); } catch (commitErr) {}
           result.checked = item.done;
         }
@@ -21348,3 +21543,29 @@ function changeRegisteredTradeDates(args, options) {
     releaseOwnedLock_();
   }
 }
+
+
+/** 운영 복구: 계약마스터 J열 계약상태를 지정값으로 되돌린다. */
+function repairTradeContractStatus(tid, status) {
+  tid = String(tid || '').trim();
+  status = String(status || '').trim();
+  if (!tid || !status) return { error: 'tid/status 필수' };
+  var allowed = { '예약': true, '반출': true, '반출중': true, '반납완료': true, '취소': true };
+  if (!allowed[status]) return { error: '허용되지 않은 상태: ' + status };
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('계약마스터');
+  if (!sheet || sheet.getLastRow() < 2) return { error: '계약마스터 없음' };
+  var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0] || '').trim() !== tid) continue;
+    var row = i + 2;
+    var prev = String(sheet.getRange(row, 10).getDisplayValue() || '').trim();
+    sheet.getRange(row, 10).setValue(status);
+    try { applyContractMasterStatusRowStyle_(sheet, row, status); } catch (e) {}
+    try { PropertiesService.getScriptProperties().deleteProperty('returnPrevContractStatus_' + tid); } catch (e2) {}
+    try { CacheService.getScriptCache().remove('dashStarted_' + tid); } catch (e3) {}
+    return { success: true, tradeId: tid, row: row, previousStatus: prev, status: status };
+  }
+  return { error: '거래 없음: ' + tid };
+}
+

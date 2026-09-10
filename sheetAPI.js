@@ -1613,7 +1613,11 @@ function runFunction(funcName, params) {
     "testRegisterAlimtalk",
     "testGuideAlimtalk",
     "diagGuideAlimtalkSchedule",
-    "markGuideAlimtalkSent"
+    "markGuideAlimtalkSent",
+    "repairTradeContractStatus",
+    "cleanupOldTradeProps",
+    "auditScriptProperties",
+    "reclaimDashboardScriptProperties_"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -1846,6 +1850,28 @@ function runFunction(funcName, params) {
       return { success: !!result.ok, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     // 일반 함수 호출 (인자 없는 함수)
+    if (funcName === "auditScriptProperties") {
+      var auditResult = auditScriptProperties();
+      return { success: true, function: funcName, result: auditResult || "완료", executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "cleanupOldTradeProps") {
+      var cleanupArgs = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : [];
+      if (!Array.isArray(cleanupArgs)) cleanupArgs = [cleanupArgs];
+      var cleanupResult = cleanupOldTradeProps.apply(null, cleanupArgs);
+      return { success: true, function: funcName, result: cleanupResult || "완료", executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "reclaimDashboardScriptProperties_") {
+      var reclaimArgs = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : {};
+      if (Array.isArray(reclaimArgs)) reclaimArgs = reclaimArgs[0] || {};
+      var reclaimResult = reclaimDashboardScriptProperties_(PropertiesService.getScriptProperties(), reclaimArgs || {});
+      return { success: true, function: funcName, result: reclaimResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "repairTradeContractStatus") {
+      var rsArgs = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : [];
+      if (!Array.isArray(rsArgs)) rsArgs = [rsArgs];
+      var rsResult = repairTradeContractStatus.apply(null, rsArgs);
+      return { success: true, function: funcName, result: rsResult, executionTime: (new Date() - startTime) + "ms" };
+    }
     var globalFuncs = {
       refreshEquipmentList: typeof refreshEquipmentList !== "undefined" ? refreshEquipmentList : null,
       syncAuditFromMaster: typeof syncAuditFromMaster !== "undefined" ? syncAuditFromMaster : null,
