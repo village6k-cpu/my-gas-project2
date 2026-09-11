@@ -20955,7 +20955,18 @@ function correctRegisteredTrade(args) {
   }
 
   if (failure) {
-    if (!mutationStarted) throw failure;
+    if (!mutationStarted) return {
+      success: false,
+      status: 'ERROR',
+      code: 'REGISTERED_CORRECTION_PREFLIGHT_REJECTED',
+      noMutationPerformed: true,
+      tradeId: correction.tradeId,
+      operationId: correction.operationId,
+      appliedStages: [],
+      attemptedStage: 'preflight',
+      error: failure.message || String(failure),
+      customerNotificationSent: false
+    };
     return partialResult_(failure);
   }
 
@@ -21568,4 +21579,3 @@ function repairTradeContractStatus(tid, status) {
   }
   return { error: '거래 없음: ' + tid };
 }
-

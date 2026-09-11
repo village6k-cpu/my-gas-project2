@@ -327,6 +327,15 @@ const input = {
   add: [{ name: 'BURANO 8K', qty: 1 }],
 };
 
+function assertPreflightRejected(run, expected) {
+  let result;
+  try { result = run(); } catch (error) { assert.match(error.message, expected); return; }
+  assert.equal(result.success, false);
+  assert.equal(result.noMutationPerformed, true);
+  assert.equal(result.code, 'REGISTERED_CORRECTION_PREFLIGHT_REJECTED');
+  assert.match(result.error, expected);
+}
+
 function assertNoWriteSideEffects(calls) {
   assert.deepEqual(calls.mutate, []);
   assert.equal(calls.regenerations, 0);
@@ -334,10 +343,22 @@ function assertNoWriteSideEffects(calls) {
   assert.deepEqual(calls.triggerLockStates, []);
 }
 
+test('a preflight rejection carries operation-bound zero-write evidence for AI input correction', () => {
+  const { context, calls } = harness({ addPreflightError: 'source request does not match the proposed change' });
+  const result = context.correct(input);
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'REGISTERED_CORRECTION_PREFLIGHT_REJECTED');
+  assert.equal(result.noMutationPerformed, true);
+  assert.equal(result.operationId, input.operationId);
+  assert.equal(result.tradeId, input.tradeId);
+  assert.deepEqual(Array.from(result.appliedStages), []);
+  assertNoWriteSideEffects(calls);
+});
+
 test('a removal quantity baseline mismatch fails before every write', () => {
   const { context, calls } = harness({ useRealRemovalPreflight: true });
 
-  assert.throws(
+  assertPreflightRejected(
     () => context.correct({
       ...input,
       expectedPeriod: undefined,
@@ -352,7 +373,7 @@ test('a removal quantity baseline mismatch fails before every write', () => {
 test('a contract period baseline mismatch fails before removal or add preflight', () => {
   const { context, calls } = harness();
 
-  assert.throws(
+  assertPreflightRejected(
     () => context.correct({
       ...input,
       expectedPeriod: { ...input.expectedPeriod, endTime: '05:00' },
@@ -367,7 +388,7 @@ test('a contract period baseline mismatch fails before removal or add preflight'
 test('a replacement stock conflict after target allocation exclusion fails before every write', () => {
   const { context, calls } = harness({ addPreflightError: 'BURANO unavailable' });
 
-  assert.throws(() => context.correct(input), /BURANO unavailable/);
+  assertPreflightRejected(() => context.correct(input), /BURANO unavailable/);
 
   assert.deepEqual(calls.preflight, ['remove', 'add']);
   assertNoWriteSideEffects(calls);
@@ -506,7 +527,7 @@ test('an exact source RQ is fenced before writes and finalized only after contra
 
 test('a source RQ plan mismatch blocks before any registered schedule write', () => {
   const { context, calls } = harness({ sourceEquipment: [{ name: '다른 장비', qty: 1 }] });
-  assert.throws(
+  assertPreflightRejected(
     () => context.correct({ ...input, sourceRequestId: 'RQ-260906-013' }),
     /sourceRequestId 장비 plan/i,
   );
@@ -587,14 +608,14 @@ test('BUSY is terminal for this invocation and never spins or mutates', () => {
 
 test('an add preflight failure prevents every mutation', () => {
   const { context, calls } = harness({ addPreflightError: 'BURANO unavailable' });
-  assert.throws(() => context.correct(input), /BURANO unavailable/);
+  assertPreflightRejected(() => context.correct(input), /BURANO unavailable/);
   assert.deepEqual(calls.mutate, []);
   assert.equal(calls.lockTries, 1);
 });
 
 test('removing every schedule row without a replacement fails before the first mutation', () => {
   const { context, calls } = harness();
-  assert.throws(
+  assertPreflightRejected(
     () => context.correct({
       tradeId: input.tradeId,
       operationId: input.operationId,
@@ -608,7 +629,7 @@ test('removing every schedule row without a replacement fails before the first m
 
 test('a checkout-started removal is rejected before date or add mutation', () => {
   const { context, calls } = harness({ checkoutStarted: true });
-  assert.throws(() => context.correct(input), /반출/);
+  assertPreflightRejected(() => context.correct(input), /반출/);
   assert.deepEqual(calls.mutate, []);
   assert.equal(calls.regenerations, 0);
 });
@@ -738,7 +759,7 @@ test('a returned trade correction fails closed before writes when the target bel
     },
   });
 
-  assert.throws(() => context.correct({
+  assertPreflightRejected(() => context.correct({
     tradeId: input.tradeId,
     operationId: input.operationId,
     expectedPeriod: input.expectedPeriod,
@@ -756,7 +777,7 @@ test('a returned trade correction fails closed before writes when durable checko
     durableCheckoutState: { ok: false, error: 'authority unavailable', started: false, items: [] },
   });
 
-  assert.throws(() => context.correct({
+  assertPreflightRejected(() => context.correct({
     tradeId: input.tradeId,
     operationId: input.operationId,
     expectedPeriod: input.expectedPeriod,
@@ -800,7 +821,7 @@ test('a returned historical correction reports partial state if its exact Supaba
 
 test('an active cross-operation lease blocks even a date-only correction before mutation', () => {
   const { context, calls } = harness({ leaseError: '같은 거래의 반납 상태를 처리 중입니다.' });
-  assert.throws(
+  assertPreflightRejected(
     () => context.correct({
       tradeId: input.tradeId,
       operationId: input.operationId,

@@ -342,7 +342,7 @@ const CONFIRMED_REGISTRATION_FIELDS = new Set([
 ]);
 const CONFIRMED_REGISTRATION_EVIDENCE_FIELDS = new Set([
   'customer_request', 'staff_confirmation', 'conversation_revision',
-  'conversation_evidence_hash', 'customer_message_ids', 'staff_message_ids'
+  'conversation_evidence_hash', 'customer_message_ids', 'staff_message_ids', 'post_confirmation_review'
 ]);
 const CONFIRMED_REGISTRATION_PERIOD_FIELDS = new Set([
   'start_date', 'start_time', 'end_date', 'end_time'
@@ -524,6 +524,16 @@ function normalizeConfirmedReservationCommit(value) {
   if (staffMessageIds.some((messageId) => customerMessageIds.includes(messageId))) {
     throw new Error('source_evidence customer and staff message IDs must not overlap');
   }
+  const review = value.source_evidence.post_confirmation_review;
+  if (review !== undefined) {
+    const field = 'source_evidence.post_confirmation_review';
+    assertOnlyAllowedFields(review, new Set(['message_ids', 'reservation_unchanged', 'reason']), field);
+    normalizeMessageIds(review.message_ids, `${field}.message_ids`);
+    if (review.reservation_unchanged !== true) throw new Error(`${field}.reservation_unchanged must be true`);
+    requiredText(review.reason, `${field}.reason`, 1_000);
+  }
+  // The bridge validates continuation coverage against its immutable snapshot and
+  // keeps that review in the receipt. GAS receives only its six evidence fields below.
   const desiredAfter = normalizeConfirmedRegistrationPlan(value.desired_after, 'desired_after');
   const identityUpdate = normalizePendingCustomerIdentity(value.customer_identity_update, value.source_evidence.customer_request);
   if (identityUpdate && requestId === null) throw new Error('customer_identity_update requires an existing pending RQ');

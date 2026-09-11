@@ -436,6 +436,49 @@ test('Gateway HTTP completes confirmation then registered change and replays bot
   });
 });
 
+test('Gateway HTTP lets AI correct a server-proven no-write input and replays both receipts after restart', async () => {
+  await withRealGatewayChannel(async ({ channel, clock, directory }) => {
+    await channel.enqueue({ schema: 'village-kakao-gateway-event/v1', job_id: 'job-1', room_key: 'room-1',
+      room_revision: 3, detected_at: new Date(clock.now).toISOString(), prompt: 'approved addition', raw: {} });
+    const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+    const wrong = registeredChangeBody({ lease_id: claim.lease_id });
+    const corrected = structuredClone(wrong);
+    delete corrected.mutation.request_id;
+    let executions = 0;
+    const handlers = { token, transport: 'gateway', now: () => clock.now,
+      executeRegisteredReservationChange: async (body, { operationFence }) => {
+        executions++;
+        return registeredChangeReceipt(body, body.mutation.request_id ? {
+          receipt_id: 'no-write-rejected', status: 'blocked', applied_stages: [], authoritative_result: null,
+          error: { code: 'gas_rejected', details: {
+            code: 'REGISTERED_CORRECTION_PREFLIGHT_REJECTED', noMutationPerformed: true,
+            operationId: operationFence.operation_id, tradeId: body.mutation.trade_id,
+            appliedStages: [], attemptedStage: 'preflight'
+          } }
+        } : { receipt_id: 'corrected-success' });
+      } };
+    let app = await start(createHermesGatewayHttpHandler({ ...handlers, channel }));
+    const post = (body) => gatewayFetch(app.url, '/hermes/v1/tools/registered-reservation-change',
+      { method: 'POST', body: JSON.stringify(body) });
+    try {
+      const first = await post(wrong); const rejection = await first.json();
+      assert.equal(first.status, 200);
+      const second = await post(corrected); const success = await second.json();
+      assert.equal(second.status, 200, JSON.stringify(success));
+      assert.equal(success.status, 'ok');
+      await app.close();
+      app = await start(createHermesGatewayHttpHandler({ ...handlers,
+        channel: createHermesGatewayChannel({ directory, now: () => clock.now }) }));
+      for (const [body, receipt] of [[wrong, rejection], [corrected, success]]) {
+        const replay = await post(body);
+        assert.equal(replay.status, 200);
+        assert.deepEqual(await replay.json(), receipt);
+      }
+      assert.equal(executions, 2);
+    } finally { await app.close(); }
+  });
+});
+
 test('Gateway HTTP executes and durably receipts one exact native supply-only quote send', async () => {
   const channel = makeChannel();
   let executions = 0;

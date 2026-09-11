@@ -218,7 +218,7 @@ function durableTypedOperationForRequest(job, body, leaseId, requestDigest, { to
     || Number(job.room_revision) !== Number(body?.room_revision)) {
     return { reservation: null, receipt: null, conflict: false };
   }
-  const reservation = toolOperationForRequest(job, tool);
+  const reservation = toolOperationForRequest(job, tool, requestDigest);
   if (!reservation) return { reservation: null, receipt: null, conflict: false };
   const matches = reservation.schema === 'village-tool-operation-reservation/v1'
     && reservation.tool === tool

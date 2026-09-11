@@ -68,6 +68,90 @@ function confirmedReservationCommitOperation(claim, requestDigest = 'confirmed-r
   return { ...confirmationOperation(claim, requestDigest), tool: 'confirmed_reservation_commit' };
 }
 
+function preflightRejectedReceipt(claim, operationId, digest, overrides = {}) {
+  return registeredReservationChangeReceipt(claim, operationId, digest, {
+    receipt_id: `rejected-${digest}`, status: 'blocked', applied_stages: [], authoritative_result: null,
+    error: { code: 'gas_rejected', details: {
+      code: 'REGISTERED_CORRECTION_PREFLIGHT_REJECTED', noMutationPerformed: true,
+      tradeId: '260824-008', operationId, appliedStages: [], attemptedStage: 'preflight'
+    } }, ...overrides
+  });
+}
+
+test('AI may correct a proven zero-write rejection while every prior payload remains fenced after restart', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-correct-input', 'room-correct-input', 1));
+    const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+    const first = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, 'wrong-rq'));
+    await channel.recordToolReceipt(preflightRejectedReceipt(claim, first.reservation.operation_id, 'wrong-rq'));
+    const second = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, 'corrected-plan'));
+    assert.equal(second.created, true);
+    await channel.recordToolReceipt(registeredReservationChangeReceipt(claim, second.reservation.operation_id, 'corrected-plan'));
+    const restarted = createHermesGatewayChannel({ directory, now: () => clock.now });
+    for (const [digest, id] of [['wrong-rq', first.reservation.operation_id], ['corrected-plan', second.reservation.operation_id]]) {
+      const replay = await restarted.reserveToolOperation(registeredReservationChangeOperation(claim, digest));
+      assert.equal(replay.created, false);
+      assert.equal(replay.reservation.operation_id, id);
+    }
+    assert.equal((await restarted.get(claim.job_id)).tool_receipts.length, 2);
+    await assert.rejects(restarted.reserveToolOperation(registeredReservationChangeOperation(claim, 'third-plan')),
+      { code: 'confirmation_operation_conflict' });
+  });
+});
+
+test('partial, uncertain, uncorrelated and legacy rejections never permit another mutation', async () => {
+  for (const failure of ['legacy', 'partial', 'applied', 'wrong-operation', 'wrong-trade', 'missing-proof']) {
+    await withChannel(async ({ channel }) => {
+      await channel.enqueue(event('job-unsafe-retry', 'room-unsafe-retry', 1));
+      const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+      const first = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, 'original'));
+      const receipt = preflightRejectedReceipt(claim, first.reservation.operation_id, 'original');
+      if (failure === 'legacy') receipt.error.details.code = '';
+      if (failure === 'partial') receipt.status = 'partial';
+      if (failure === 'applied') receipt.applied_stages = ['scheduleAddEquips'];
+      if (failure === 'wrong-operation') receipt.error.details.operationId = 'other-operation';
+      if (failure === 'wrong-trade') receipt.error.details.tradeId = '260824-999';
+      if (failure === 'missing-proof') delete receipt.error.details.noMutationPerformed;
+      await channel.recordToolReceipt(receipt);
+      await assert.rejects(channel.reserveToolOperation(registeredReservationChangeOperation(claim, 'changed')),
+        { code: 'confirmation_operation_conflict' });
+    });
+  }
+});
+
+test('zero-write input corrections are bounded and an expired lease cannot execute them', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('job-retry-limit', 'room-retry-limit', 1));
+    const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+    for (const digest of ['attempt-1', 'attempt-2', 'attempt-3']) {
+      const reserved = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, digest));
+      await channel.recordToolReceipt(preflightRejectedReceipt(claim, reserved.reservation.operation_id, digest));
+    }
+    await assert.rejects(channel.reserveToolOperation(registeredReservationChangeOperation(claim, 'attempt-4')),
+      { code: 'confirmation_operation_conflict' });
+  });
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('job-expired-correction', 'room-expired-correction', 1));
+    const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, 'rejected'));
+    await channel.recordToolReceipt(preflightRejectedReceipt(claim, reserved.reservation.operation_id, 'rejected'));
+    clock.now += 1001;
+    await assert.rejects(channel.reserveToolOperation(registeredReservationChangeOperation(claim, 'corrected')));
+  });
+});
+
+test('finishing an AI turn cannot hide an unsuccessful booking operation behind completed state', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-failed-booking', 'room-failed-booking', 1));
+    const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, 'failed'));
+    await channel.recordToolReceipt(preflightRejectedReceipt(claim, reserved.reservation.operation_id, 'failed'));
+    const done = await channel.complete({ job_id: claim.job_id, room_key: claim.room_key,
+      room_revision: claim.room_revision, lease_id: claim.lease_id, final_text: '{}' });
+    assert.equal(done.human_review_required, true);
+  });
+});
+
 test('completed confirmation can advance to registered change while preserving both replay fences after restart', async () => {
   await withChannel(async ({ channel, directory }) => {
     await channel.enqueue(event('job-two-stages', 'room-two-stages', 1));
