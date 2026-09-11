@@ -198,6 +198,7 @@ function tradeStructureRow(trade: Trade): any {
   delete row.contract_status;
   delete row.setup_done;
   delete row.setup_done_at;
+  delete row.kakao_conversation_checked;
   delete row.return_done;
   delete row.return_done_at;
   delete row.return_counts;

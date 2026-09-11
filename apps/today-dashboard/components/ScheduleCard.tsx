@@ -3,7 +3,7 @@
 import { memo, useEffect, useState } from "react";
 import type { TabKey, Trade } from "@/lib/domain/types";
 import { isCancelledTrade, phaseForDate, returnCompletionBlockers, setupProgress, timeLabel } from "@/lib/domain/status";
-import { ensureTradePhotos, toggleReturn, toggleSetup } from "@/lib/data/store";
+import { ensureTradePhotos, setKakaoConversationChecked, toggleReturn, toggleSetup } from "@/lib/data/store";
 import { HandoverChecklist } from "./HandoverChecklist";
 import { RiskPanel } from "./RiskPanel";
 import { PhotoStrip } from "./PhotoStrip";
@@ -155,6 +155,24 @@ export const ScheduleCard = memo(function ScheduleCard({
       <div className="px-4 pl-5 pt-3">
         <TradeActions trade={trade} compact />
       </div>
+
+      {isCheckout && (
+        <div className="px-4 pl-5 pt-3">
+          <label className={`tap flex min-h-11 cursor-pointer items-center gap-2.5 rounded-xl px-3 py-2.5 text-[13px] font-bold ring-1 ${
+            trade.kakaoConversationChecked
+              ? "bg-checkin-bg text-checkin-fg ring-checkin-ring"
+              : "bg-warn-bg text-warn-fg ring-warn-ring"
+          }`}>
+            <input
+              type="checkbox"
+              checked={!!trade.kakaoConversationChecked}
+              onChange={(event) => setKakaoConversationChecked(trade.tradeId, event.target.checked)}
+              className="h-5 w-5 shrink-0 cursor-pointer accent-brand-600"
+            />
+            <span>카카오톡 대화 내용 확인</span>
+          </label>
+        </div>
+      )}
 
       {/* 진행 + 토글 */}
       <div className="flex items-center gap-2.5 px-4 pl-5 pt-3">

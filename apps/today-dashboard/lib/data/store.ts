@@ -589,7 +589,12 @@ function enqueueTradePersist(tradeId: string, fallback: Trade): Promise<Trade> {
 // TTL을 두고, persist 성공 시에만 ACK한다.
 const TRADE_NOTE_OUTBOX_KEY = "heybilly:trade-note-outbox:v1";
 const TRADE_NOTE_OUTBOX_TTL_MS = 60 * 60 * 1000;
-type TradeNoteOutboxEntry = { note_checkout?: string | null; note_checkin?: string | null; at: number };
+type TradeNoteOutboxEntry = {
+  note_checkout?: string | null;
+  note_checkin?: string | null;
+  kakao_conversation_checked?: boolean;
+  at: number;
+};
 
 function readTradeNoteOutbox_(): Record<string, TradeNoteOutboxEntry> {
   if (typeof window === "undefined") return {};
@@ -602,7 +607,7 @@ function readTradeNoteOutbox_(): Record<string, TradeNoteOutboxEntry> {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
       const entry = raw as TradeNoteOutboxEntry;
       if (!Number(entry.at) || now - Number(entry.at) >= TRADE_NOTE_OUTBOX_TTL_MS) continue;
-      if (!("note_checkout" in entry) && !("note_checkin" in entry)) continue;
+      if (!("note_checkout" in entry) && !("note_checkin" in entry) && typeof entry.kakao_conversation_checked !== "boolean") continue;
       fresh[tradeId] = entry;
     }
     return fresh;
@@ -628,17 +633,17 @@ function putTradeNoteOutboxPatch_(tradeId: string, fields: Omit<TradeNoteOutboxE
 
 /** persist 성공한 patch의 노트 값과 outbox 목표가 같을 때만 지운다(전송 중 새 입력 보존). */
 function acknowledgeTradeNoteOutbox_(tradeId: string, patch: Record<string, unknown>): void {
-  if (!("note_checkout" in patch) && !("note_checkin" in patch)) return;
+  if (!("note_checkout" in patch) && !("note_checkin" in patch) && !("kakao_conversation_checked" in patch)) return;
   const outbox = readTradeNoteOutbox_();
   const entry = outbox[tradeId];
   if (!entry) return;
   const next: TradeNoteOutboxEntry = { ...entry };
-  (["note_checkout", "note_checkin"] as const).forEach((field) => {
-    if (field in patch && field in next && (next[field] ?? null) === ((patch[field] as string | null) ?? null)) {
+  (["note_checkout", "note_checkin", "kakao_conversation_checked"] as const).forEach((field) => {
+    if (field in patch && field in next && (next[field] ?? null) === ((patch[field] as string | boolean | null) ?? null)) {
       delete next[field];
     }
   });
-  if (!("note_checkout" in next) && !("note_checkin" in next)) delete outbox[tradeId];
+  if (!("note_checkout" in next) && !("note_checkin" in next) && !("kakao_conversation_checked" in next)) delete outbox[tradeId];
   else outbox[tradeId] = next;
   writeTradeNoteOutbox_(outbox);
 }
@@ -665,6 +670,7 @@ function tradeFieldPatch(before: Trade | undefined, after: Trade): Record<string
   add(before.estimateSent !== after.estimateSent, "estimate_sent", !!after.estimateSent);
   add(before.noteCheckout !== after.noteCheckout, "note_checkout", after.noteCheckout ?? null);
   add(before.noteCheckin !== after.noteCheckin, "note_checkin", after.noteCheckin ?? null);
+  add(!!before.kakaoConversationChecked !== !!after.kakaoConversationChecked, "kakao_conversation_checked", !!after.kakaoConversationChecked);
   return patch;
 }
 
@@ -724,10 +730,11 @@ function schedulePersistTrade(trade: Trade, before?: Trade) {
   const patch = tradeFieldPatch(before, trade);
   if (!Object.keys(patch).length) return;
   tradeFieldPersistTargets[tradeId] = { ...(tradeFieldPersistTargets[tradeId] ?? {}), ...patch };
-  // 특이사항은 전송 전 새로고침에도 살아남게 내구 outbox에 목표를 남긴다
+  // 특이사항과 대화 확인 체크는 전송 전 새로고침에도 살아남게 내구 outbox에 목표를 남긴다
   const noteFields: Omit<TradeNoteOutboxEntry, "at"> = {};
   if ("note_checkout" in patch) noteFields.note_checkout = (patch.note_checkout as string | null) ?? null;
   if ("note_checkin" in patch) noteFields.note_checkin = (patch.note_checkin as string | null) ?? null;
+  if ("kakao_conversation_checked" in patch) noteFields.kakao_conversation_checked = !!patch.kakao_conversation_checked;
   if (Object.keys(noteFields).length) putTradeNoteOutboxPatch_(tradeId, noteFields);
   if (tradeFieldPersistRetryTimers[tradeId]) {
     clearTimeout(tradeFieldPersistRetryTimers[tradeId]);
@@ -3732,20 +3739,24 @@ function replayDurableMutationOutboxes(): void {
 
     const noteEntry = noteOutbox[trade.tradeId];
     if (noteEntry) {
-      // 전송 전 새로고침으로 유실된 특이사항 목표를 재적용하고 persist를 재무장한다.
+      // 전송 전 새로고침으로 유실된 메모·대화 확인 목표를 재적용하고 persist를 재무장한다.
       // 서버가 이미 같은 값이면(다른 탭이 저장 완료) 조용히 ACK만 한다.
-      const notePatch: Record<string, string | null> = {};
+      const notePatch: Omit<TradeNoteOutboxEntry, "at"> = {};
       if ("note_checkout" in noteEntry && (nextTrade.noteCheckout ?? null) !== (noteEntry.note_checkout ?? null)) {
         notePatch.note_checkout = noteEntry.note_checkout ?? null;
       }
       if ("note_checkin" in noteEntry && (nextTrade.noteCheckin ?? null) !== (noteEntry.note_checkin ?? null)) {
         notePatch.note_checkin = noteEntry.note_checkin ?? null;
       }
+      if (typeof noteEntry.kakao_conversation_checked === "boolean" && !!nextTrade.kakaoConversationChecked !== noteEntry.kakao_conversation_checked) {
+        notePatch.kakao_conversation_checked = noteEntry.kakao_conversation_checked;
+      }
       if (Object.keys(notePatch).length) {
         nextTrade = {
           ...nextTrade,
           ...("note_checkout" in notePatch ? { noteCheckout: notePatch.note_checkout ?? undefined } : {}),
           ...("note_checkin" in notePatch ? { noteCheckin: notePatch.note_checkin ?? undefined } : {}),
+          ...("kakao_conversation_checked" in notePatch ? { kakaoConversationChecked: notePatch.kakao_conversation_checked } : {}),
         };
         tradeFieldPersistTargets[trade.tradeId] = { ...(tradeFieldPersistTargets[trade.tradeId] ?? {}), ...notePatch };
         pendingPersistTrades.add(trade.tradeId);
@@ -5238,6 +5249,11 @@ export function resizeEquipment(tradeId: string, scheduleId: string, edge: "star
 }
 
 // ── 반출/반납 전체 메모 (분리) ──────────────────────────────────
+export function setKakaoConversationChecked(tradeId: string, checked: boolean) {
+  mutateTrade(tradeId, (t) => ({ ...t, kakaoConversationChecked: checked }));
+  flashSave(tradeId);
+}
+
 export function setPhaseNote(tradeId: string, phase: Phase, text: string) {
   mutateTrade(tradeId, (t) => (phase === "checkout" ? { ...t, noteCheckout: text } : { ...t, noteCheckin: text }));
   flashSave(tradeId);
