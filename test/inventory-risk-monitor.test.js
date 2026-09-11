@@ -60,3 +60,10 @@ test('accepted-but-timed-out post is reconciled from history before any retry',(
  assert.equal(c.flushInventoryRiskAlerts().status,'pending');
  assert.equal(c.flushInventoryRiskAlerts().status,'unchanged');assert.equal(sends,1);
 });
+test('Slack read methods use query arguments and rate-limit retries honor Retry-After',()=>{
+ const {ctx:c,props}=env();props.setProperty('inventoryRisk_v1_slackToken','test-token');let calls=0;
+ c.UrlFetchApp={fetch:(url,options)=>{calls++;assert.equal(options.method,'get');assert.match(url,/channel=C123/);assert.equal(options.payload,undefined);return {getResponseCode:()=>429,getAllHeaders:()=>({'Retry-After':'120'}),getContentText:()=>'{"ok":false,"error":"ratelimited"}'};}};
+ assert.throws(()=>c.inventoryRiskSlack_('conversations.history',{channel:'C123'}));
+ assert.throws(()=>c.inventoryRiskSlack_('conversations.history',{channel:'C123'}));
+ assert.equal(calls,1);
+});
