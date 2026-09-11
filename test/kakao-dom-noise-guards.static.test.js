@@ -148,11 +148,9 @@ assert.match(
   'Bridge must not queue a generic read backstop row without a visible unread count'
 );
 
-assert.match(
-  bridge,
-  /return event\.reason === 'top_row_changed'\s*&& isLiveTopRowPreview\(event\.previewText\);/,
-  'Bridge may queue only a genuinely live top-row change when an unread count is absent'
-);
+// server.test.mjs exercises unread-free clock and same-day date changes,
+// including stale rows and periodic backstop noise. Do not freeze the
+// clock-only implementation here: it drops same-day staff approvals.
 
 assert.match(
   bridge,
@@ -332,12 +330,6 @@ assert.match(
   bridge,
   /function isRecentReadCatchupPreview\(text, now = new Date\(\)\)/,
   'Bridge may keep an explicit catch-up helper, but stale read top-row changes must not enter the live worker path'
-);
-
-assert.match(
-  bridge,
-  /event\.reason === 'top_row_changed'\s+&& isLiveTopRowPreview\(event\.previewText\)/,
-  'Bridge must only queue unread-free top-row changes inside the short live window'
 );
 
 assert.doesNotMatch(
