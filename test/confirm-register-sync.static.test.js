@@ -368,8 +368,11 @@ console.log('audit-round-6 checks OK');
 // ── 감사 7차: 운영판 — 조기 반납 점유 제외 ──
 const sheetApi7 = read('sheetAPI.js');
 assert(
-  (sheetApi7.match(/status !== "반납완료"/g) || []).length >= 2,
-  'operations utilization and conflict maps must exclude early-returned rows like the availability engine'
+  sheetApi7.includes('status !== "반납완료"') &&
+    sheetApi7.includes('inventoryRiskOperationsAlerts_(inventoryReport)') &&
+    read('inventoryRisk.js').includes("['취소','거절','반납완료','제외'].indexOf(status)") &&
+    read('inventoryRisk.js').includes('row.returned===true'),
+  'operations utilization and its shared risk engine must both exclude completed returns'
 );
 console.log('audit-round-7 checks OK');
 

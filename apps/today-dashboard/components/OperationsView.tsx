@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { authFetch } from "@/lib/data/authFetch";
 import { ViewHeader } from "@/components/ViewHeader";
 import { Refresh } from "@/components/icons";
+import { InventoryRiskPanel, type InventoryRiskViewData } from "@/components/InventoryRiskPanel";
 
 // 운영판 — GAS action=operations(/api/operations) 단일 응답을 네이티브로 렌더. 읽기전용 + 60초 폴링.
 // 디자인은 통합앱 토큰으로. 고객명 클릭 → 오늘일정(?tid=)로 이동.
@@ -13,9 +14,7 @@ type Row = { tid?: string; customer?: string; time?: string; items?: Eq[] };
 type Imm = Row & { date?: string; daysAway?: number };
 type Unconf = { reqID?: string; customer?: string; company?: string; checkoutDate?: string; checkoutTime?: string };
 type Maint = { name?: string; status?: string; note?: string };
-type Booking = { tid?: string; customer?: string; from?: string; to?: string; qty?: number };
-type Alert = { date?: string; equipment?: string; stock?: number; booked?: number; overBy?: number; severity?: string; bookings?: Booking[] };
-type Ops = {
+type Ops = InventoryRiskViewData & {
   success?: boolean;
   date?: string;
   generatedAt?: string;
@@ -30,8 +29,6 @@ type Ops = {
   unconfirmed?: Unconf[];
   imminent?: Imm[];
   maintenance?: Maint[];
-  inventoryAlerts?: Alert[];
-  inventoryHorizonDays?: number;
 };
 
 const WD = ["일", "월", "화", "수", "목", "금", "토"];
@@ -53,7 +50,7 @@ function mdDow(ymd?: string): string {
   return `${dt.getMonth() + 1}월 ${dt.getDate()}일 (${WD[dt.getDay()]})`;
 }
 
-const OPS_CACHE_KEY = "village-operations-cache-v1";
+const OPS_CACHE_KEY = "village-operations-cache-v2";
 function readOpsCache(): Ops | null {
   if (typeof window === "undefined") return null;
   try {
@@ -109,7 +106,7 @@ export function OperationsView({ active = true }: { active?: boolean }) {
       if (typeof document !== "undefined" && document.hidden) return;
       load();
     };
-    const t = setInterval(tick, 90000);
+    const t = setInterval(tick, 60000);
     const onVisible = () => {
       if (typeof document !== "undefined" && !document.hidden) load();
     };
@@ -121,8 +118,6 @@ export function OperationsView({ active = true }: { active?: boolean }) {
   }, [load, active]);
 
   const s = data?.summary || {};
-  const conflicts = (data?.inventoryAlerts || []).filter((a) => a.severity === "conflict");
-  const horizon = data?.inventoryHorizonDays ?? 90;
   const util = data?.health?.utilization;
   const pace = data?.health?.checkoutPace;
 
@@ -146,32 +141,7 @@ export function OperationsView({ active = true }: { active?: boolean }) {
 
         {data && (
           <>
-            {/* 재고 충돌 알림 */}
-            {conflicts.length === 0 ? (
-              <div className="rounded-xl bg-checkin-bg/60 px-3.5 py-2.5 text-[13px] font-semibold text-checkin-fg ring-1 ring-checkin-ring">✅ 향후 {horizon}일 재고 충돌 없음</div>
-            ) : (
-              <details className="overflow-hidden rounded-xl bg-attention-bg ring-1 ring-attention-ring" open>
-                <summary className="cursor-pointer px-3.5 py-2.5 text-[13px] font-extrabold text-attention-fg">🔴 재고 충돌 {conflicts.length}건 — 펼쳐서 확인</summary>
-                <div className="space-y-2 px-2.5 pb-2.5">
-                  {conflicts.slice(0, 30).map((a, i) => (
-                    <div key={i} className="rounded-lg bg-white p-2.5 ring-1 ring-attention-ring">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="text-[13px] font-extrabold text-ink">{a.equipment}</span>
-                        <span className="text-[12px] font-bold text-attention-fg">🔴 {a.overBy}개 부족</span>
-                      </div>
-                      <div className="mt-0.5 text-[11.5px] text-ink-mute">{mdDow(a.date)} · 보유 {a.stock} / 예약 <b className="text-attention-fg">{a.booked}</b></div>
-                      <div className="mt-1.5 space-y-0.5">
-                        {(a.bookings || []).map((b, j) => (
-                          <div key={j} className="text-[11.5px] text-ink-soft">
-                            {b.customer} · {md(b.from)}{b.to && b.to !== b.from ? `~${md(b.to)}` : ""} · {b.qty}개
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
+            <InventoryRiskPanel data={data} />
 
             {/* KPI 4칸 */}
             <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
