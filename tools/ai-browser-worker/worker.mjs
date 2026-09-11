@@ -725,6 +725,7 @@ export function buildHermesPrompt(job, options = {}) {
 - Read the full same-room conversation. Native Hermes—not code or keywords—semantically decides whether a Village staff reply clearly and unconditionally authorizes the exact customer request; wording is open-ended.
 - Before choosing pending registration, compare the customer and period with active registered trades. An existing RQ can represent additions to that trade; in that case use village_registered_reservation_change with the exact missing delta and matching RQ, not a second pending registration. Only an independent rental should become a separate trade.
 - For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit once before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
+- After a successful village_confirmed_reservation_commit receipt, FINAL_JSON may omit staff_confirmed_registration instead of copying the full input and set components again. The host retains the sealed authorization and exact readback. Report remaining questions with their reply_decision, price_quote and grounding context; do not re-read or re-register a verified successful operation just to restate it in FINAL_JSON.
 - Fast/coalesced turn: if this same snapshot contains the inquiry and clear staff authorization but no RQ exists, call village_confirmed_reservation_commit once with request_id=null. pending_request_candidate contains exactly customer_name, phone, discount_type, memo and extra_request. Put set_component_selections at registration top level, never inside pending_request_candidate. This atomic operation creates/reuses and verifies the RQ, applies exact choices and registers it. Never invent an RQ ID or split intake and registration into two calls.
 - Bind source_evidence to the immutable room snapshot: copy conversation_evidence_hash exactly, cite the exact customer_message_ids and staff_message_ids in DOM order, and copy those selected message texts verbatim (joined by real newline characters, not literal backslash-n) into customer_request and staff_confirmation. Never invent or summarize message evidence.
 - You own sender and authorization interpretation from the complete conversation. A DOM role of unknown means the extractor lacks explicit sender metadata; it does not mean the message is unusable. Use the visible conversation, adjacent turns, known sender roles and supplied bubble layout together to identify who spoke. Cite the existing message IDs under the roles you determined; never modify the snapshot or contradict a known opposing sender. If the actual speaker remains ambiguous after that review, do not claim authorization.
@@ -8479,7 +8480,9 @@ function minutesSinceKakaoPreviewClock(value = '', now = new Date()) {
 }
 
 function parseKakaoKoreanMonthDayLabels(value = '') {
-  const matches = [...text(value).matchAll(/(\d{1,2})월\s*(\d{1,2})일/g)];
+  // Only the trailing list timestamp describes message age. Rental dates in
+  // the customer's preview are business content, including future dates.
+  const matches = [...text(value).matchAll(/(\d{1,2})월\s*(\d{1,2})일(?:\s+(?:오전|오후)\s*\d{1,2}:\d{2})?\s*$/g)];
   return matches.map((match) => ({
     month: Number(match[1]),
     day: Number(match[2]),
@@ -8571,7 +8574,7 @@ export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWind
     if (hasStaleKakaoDateLabel(preview, referenceNow)) return { eligible: false, reason: 'preview_has_old_date' };
     return { eligible: true, reason: hasUnread ? 'top_row_unread' : 'top_row_live_time_format' };
   }
-  if (/\d{4}\.\d{1,2}\.\d{1,2}/.test(preview)) return { eligible: false, reason: 'preview_has_absolute_date' };
+  if (/\d{4}\.\d{1,2}\.\d{1,2}\s*$/.test(preview)) return { eligible: false, reason: 'preview_has_absolute_date' };
   if (hasNonCurrentKakaoDateLabel(preview, referenceNow)) return { eligible: false, reason: 'preview_has_old_date' };
   if (hasUnread) return { eligible: true, reason: 'top_row_unread' };
   if (parseKakaoKoreanMonthDayLabels(preview).length) return { eligible: true, reason: 'top_row_current_date_label' };
@@ -10077,6 +10080,14 @@ function sameGatewayDecisionValue(left, right) {
   return JSON.stringify(canonicalGatewayDecisionValue(left)) === JSON.stringify(canonicalGatewayDecisionValue(right));
 }
 
+function isSealedInputProjection(input, sealed) {
+  if (input == null) return true;
+  if (typeof input !== 'object' || Array.isArray(input)) return false;
+  return Object.entries(input).every(([key, value]) =>
+    ['commit_result', 'execution_result'].includes(key)
+      || Object.hasOwn(sealed, key) && sameGatewayDecisionValue(value, sealed[key]));
+}
+
 function validGatewayReceiptTimestamp(value) {
   return typeof value === 'string'
     && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)
@@ -11066,6 +11077,17 @@ export async function prepareKakaoGatewayDecision({
     }
   }
   if (decision) {
+    // A native tool has already performed this exact turn's intake. FINAL is a
+    // post-action report, never a second write request, even when it repeats true.
+    const receiptsForIntake = Array.isArray(trustedToolReceipts) ? trustedToolReceipts : [];
+    if (receiptsForIntake.length === 1
+      && exactTrustedConfirmationReceipt(receiptsForIntake[0], {jobId,roomKey,roomRevision})
+      && receiptsForIntake[0].status === 'ok' && receiptsForIntake[0].error === null
+      && receiptsForIntake[0].authoritative_sheet_result?.success === true
+      && !decision.staff_confirmed_mutation && !decision.customer_requested_pending_revision
+      && !decision.confirmation_requests) {
+      decision.should_write_to_sheet = false;
+    }
     // FINAL may echo a tool result inside its input object. Results are never
     // authority: recover only the exact server-sealed input, with one exact receipt.
     const receipts = Array.isArray(trustedToolReceipts) ? trustedToolReceipts : [];
@@ -11205,9 +11227,14 @@ export async function prepareKakaoGatewayDecision({
     }
   }
   const modelRegistration = decision?.staff_confirmed_registration;
-  if ((modelRegistration === undefined || modelRegistration === null) && authorizedConfirmedRegistration) {
-    decision = { staff_confirmed_registration: authorizedConfirmedRegistration };
-    for (const failure of ['malformed_gateway_final', 'invalid_gateway_decision']) {
+  if (!validateStaffConfirmedRegistration(modelRegistration, { roomRevision }).valid && authorizedConfirmedRegistration
+    && isSealedInputProjection(modelRegistration, authorizedConfirmedRegistration)) {
+    const completed = { ...decision, staff_confirmed_registration: authorizedConfirmedRegistration };
+    decision = validateAiDecisionContract(completed, {roomRevision}).valid ? completed
+      : { staff_confirmed_registration: authorizedConfirmedRegistration,
+      reply_decision: {replyMode:'no_reply',text:'',safetyClass:'no_send',grounding:'staff_confirmation',
+        confidence:'high',reason:'durable_registration_readback',requiresRag:false,shouldCreateTask:false} };
+    for (const failure of ['malformed_gateway_final', 'invalid_gateway_decision', 'invalid_staff_confirmed_registration']) {
       let index = safetyFailures.indexOf(failure);
       while (index >= 0) {
         safetyFailures.splice(index, 1);

@@ -205,7 +205,7 @@ export function deriveAutomationResolution(input = {}) {
     return result(
       'needs_human', 'missing_authoritative_readback',
       { ...(operationEvidence && { operationReceipt: operationEvidence }) },
-      'The requested customer reply has not been confirmed by authoritative readback.'
+      'Human review is required because authoritative resolution is unavailable.'
     );
   }
 

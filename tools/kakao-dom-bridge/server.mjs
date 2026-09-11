@@ -3672,12 +3672,14 @@ function isLiveTopRowPreview(text, now = new Date()) {
     && ageMinutes <= CONFIG.topRowLiveWindowMinutes;
 }
 
-export function shouldQueueTopRowEvent(event) {
+export function shouldQueueTopRowEvent(event, { now = new Date() } = {}) {
   if (isActionChromePreview(event.previewText)) return false;
   if (hasUnreadCount(event)) return !hasDatedPreview(event.previewText) || isRecentDatedPreview(event.previewText);
   if (event.reason === 'top_rows_backstop') return false;
+  // A changed row is a new observation even after staff read/replied. Kakao may
+  // render today's date instead of a clock; the unread badge is not authority.
   return event.reason === 'top_row_changed'
-    && isLiveTopRowPreview(event.previewText);
+    && (isLiveTopRowPreview(event.previewText, now) || daysSinceDatedPreview(event.previewText, now) === 0);
 }
 
 function hasLivePreviewTime(text) {
