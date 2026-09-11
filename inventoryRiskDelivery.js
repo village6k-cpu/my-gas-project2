@@ -22,13 +22,23 @@ function inventoryRiskSaveState_(state) {
 }
 
 function inventoryRiskSlack_(method,payload) {
-  var token=PropertiesService.getScriptProperties().getProperty(INVENTORY_RISK_PREFIX_+'slackToken');
+  var p=PropertiesService.getScriptProperties(),token=p.getProperty(INVENTORY_RISK_PREFIX_+'slackToken');
   if(!token)throw new Error('재고 경보 Slack 연결 필요');
-  var response=UrlFetchApp.fetch('https://slack.com/api/'+method,{method:'post',contentType:'application/json; charset=utf-8',
-    headers:{Authorization:'Bearer '+token},payload:JSON.stringify(payload || {}),muteHttpExceptions:true});
-  if(response.getResponseCode()!==200)throw new Error('Slack 응답 확인 필요 ('+response.getResponseCode()+')');
+  var backoffKey=INVENTORY_RISK_PREFIX_+'retryAfter_'+method;
+  if(Number(p.getProperty(backoffKey) || 0)>Date.now())throw new Error('Slack 재시도 대기: '+method);
+  var read=['auth.test','conversations.info','conversations.history'].indexOf(method)>=0;
+  var url='https://slack.com/api/'+method,options={method:read?'get':'post',headers:{Authorization:'Bearer '+token},muteHttpExceptions:true};
+  if(read){var query=Object.keys(payload || {}).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(String(payload[k]));}).join('&');if(query)url+='?'+query;}
+  else{options.contentType='application/json; charset=utf-8';options.payload=JSON.stringify(payload || {});}
+  var response=UrlFetchApp.fetch(url,options);
+  if(response.getResponseCode()===429){
+    var headers=response.getAllHeaders(),retry=Number(headers['Retry-After'] || headers['retry-after'] || 60);
+    p.setProperty(backoffKey,String(Date.now()+Math.max(1,retry || 60)*1000));throw new Error('Slack 재시도 대기: '+method);
+  }
+  if(response.getResponseCode()!==200)throw new Error('Slack 응답 확인 필요: '+method+' ('+response.getResponseCode()+')');
   var result=JSON.parse(response.getContentText());
-  if(!result.ok)throw new Error('Slack 연결 확인 필요: '+String(result.error || 'unknown_error').replace(/[^a-z0-9_]/gi,''));
+  if(!result.ok)throw new Error('Slack 연결 확인 필요: '+method+' '+String(result.error || 'unknown_error').replace(/[^a-z0-9_]/gi,''));
+  p.deleteProperty(backoffKey);
   return result;
 }
 
@@ -165,9 +175,8 @@ function setupInventoryRiskMonitor(options) {
   if(options.turnaroundMinutes!==undefined)p.setProperty(INVENTORY_RISK_PREFIX_+'turnaroundMinutes',String(options.turnaroundMinutes));
   var channel=p.getProperty(INVENTORY_RISK_PREFIX_+'channel');if(!channel)throw new Error('Slack 채널 설정 필요');
   inventoryRiskSlack_('auth.test',{});
-  var info=inventoryRiskSlack_('conversations.info',{channel:channel});
-  if(info.channel?.is_archived)throw new Error('Slack 채널 보관 상태 확인 필요');
-  if(!info.channel?.is_member)inventoryRiskSlack_('conversations.join',{channel:channel});
+  // The preselected channel's readable history proves both identity and access.
+  // Do not block useful delivery behind a separate, rate-limited channel-info call.
   inventoryRiskSlack_('conversations.history',{channel:channel,limit:1});
   var existing=ScriptApp.getProjectTriggers().filter(function(t){return t.getHandlerFunction()==='inventoryRiskHeartbeat';});
   if(!existing.length)ScriptApp.newTrigger('inventoryRiskHeartbeat').timeBased().everyMinutes(1).create();
