@@ -83,6 +83,43 @@ test('the CLI exposes one explicit staff-authorized pending registration command
   assert.equal(parseCliArgs(['commit-registration']).command, 'commit-registration');
 });
 
+test('reviewed later conversation crosses the real registration transport without leaking bridge-only evidence to GAS', async () => {
+  const { executeVillageConfirmedReservationCommit } = await import('../tools/ai-browser-worker/staff-confirmed-registration.mjs');
+  const registration = confirmedRegistrationFixture();
+  registration.source_evidence.post_confirmation_review = {
+    message_ids: ['customer-message-3'], reservation_unchanged: true,
+    reason: 'The later message discusses payment only; the approved rental is unchanged.'
+  };
+  const posts = [];
+  // Keep the real client/normalizer in this integration: only the external HTTP boundary is replaced.
+  await executeVillageConfirmedReservationCommit({
+    config, job: { job_id: 'reviewed-registration', room_key: 'room-review', room_revision: 9 },
+    roomRevision: 9, registration,
+    dependencies: {
+      operationFence: { operation_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' },
+      commitConfirmedReservation: (args) => commitConfirmedReservation({ ...args, fetchImpl: async (_url, options) => {
+        posts.push(JSON.parse(options.body));
+        return response({ success: false, error: 'synthetic server rejection after transport' });
+      } })
+    }
+  });
+  assert.equal(posts.length, 1, 'bridge-approved evidence must reach the GAS transport');
+  const transmitted = posts[0].args.registration;
+  assert.equal(Object.hasOwn(transmitted.source_evidence, 'post_confirmation_review'), false);
+  assert.equal(registration.source_evidence.post_confirmation_review.reservation_unchanged, true);
+});
+
+test('registration transport rejects malformed continuation evidence before HTTP', () => {
+  for (const review of [null, {}, { message_ids: ['later'], reservation_unchanged: false, reason: 'changed' },
+    { message_ids: ['later', 'later'], reservation_unchanged: true, reason: 'unchanged' },
+    { message_ids: ['later'], reservation_unchanged: true, reason: '' },
+    { message_ids: ['later'], reservation_unchanged: true, reason: 'unchanged', bypass: true }]) {
+    const registration = confirmedRegistrationFixture();
+    registration.source_evidence.post_confirmation_review = review;
+    assert.throws(() => normalizeConfirmedReservationCommit(registration), /post_confirmation_review/);
+  }
+});
+
 test('confirmed registration normalization requires one exact full-state authorization without prose routing', () => {
   const normalized = normalizeConfirmedReservationCommit(confirmedRegistrationFixture());
   assert.equal(normalized.request_id, 'RQ-260906-001');

@@ -31,6 +31,7 @@ function correctionFailureDetails(payload) {
     code: String(payload.code || ''),
     tradeId: String(payload.tradeId || ''),
     operationId: String(payload.operationId || ''),
+    noMutationPerformed: payload.noMutationPerformed === true,
     attemptedStage: String(payload.attemptedStage || ''),
     stages: Array.isArray(payload.stages) ? payload.stages.slice() : [],
     appliedStages: Array.isArray(payload.appliedStages) ? payload.appliedStages.slice() : [],

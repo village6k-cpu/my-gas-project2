@@ -1881,7 +1881,8 @@ test('staff-confirmed mutation prompt captures initial customer inquiries immedi
   assert.match(prompt, /최초 확인요청 입력에는 staff_confirmed_mutation이 필요 없다/s);
   assert.match(prompt, /pending_request[\s\S]*equipment_add[\s\S]*village_confirmation_request[\s\S]*additions_only/i);
   assert.match(prompt, /pending_request[\s\S]*(equipment_remove|equipment_replace|equipment_quantity_change)[\s\S]*replace_full_plan/i);
-  assert.match(prompt, /registered_trade[\s\S]*village_registered_reservation_change[\s\S]*exactly once[\s\S]*before FINAL_JSON/i);
+  assert.match(prompt, /registered_trade[\s\S]*village_registered_reservation_change before FINAL_JSON/i);
+  assert.match(prompt, /REGISTERED_CORRECTION_PREFLIGHT_REJECTED[\s\S]*noMutationPerformed=true[\s\S]*correct the typed input/i);
   assert.match(prompt, /registered_trade[\s\S]*must not call village_confirmation_request/i);
   assert.match(prompt, /equipment_write_mode[\s\S]*pending/i);
   assert.doesNotMatch(prompt, /registered booking or pending-RQ additions="additions_only"/i);
@@ -2123,6 +2124,35 @@ test('registered replacement without a remaining RQ finalizes from exact trade r
   assert.deepEqual(prepared.decision.staff_confirmed_mutation, mutation);
   assert.deepEqual(prepared.gatewaySafetyFailures, []);
   assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+});
+
+test('a corrected registered operation uses the final verified receipt while preserving no-write rejection history', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const success = registeredReceiptFixture(job, { authorized_mutation: mutation });
+  const rejectedMutation = registeredMutationFixture('equipment_replace', { request_id: 'RQ-260827-999' });
+  const rejected = registeredReceiptFixture(job, {
+    receipt_id: 'prior-rejected-receipt', operation_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    authorized_mutation: rejectedMutation, status: 'blocked', applied_stages: [], authoritative_result: null,
+    error: { code: 'gas_rejected', details: {
+      code: 'REGISTERED_CORRECTION_PREFLIGHT_REJECTED', noMutationPerformed: true,
+      operationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', tradeId: mutation.trade_id,
+      attemptedStage: 'preflight', appliedStages: []
+    } }
+  });
+  for (const valid of [true, false]) {
+    const prior = structuredClone(rejected);
+    if (!valid) delete prior.error.details.noMutationPerformed;
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn, finalText: 'FINAL_JSON\n{}', trustedToolReceipts: [prior, success]
+    });
+    assert.equal(prepared.decision.owner_review_required, !valid);
+    if (valid) {
+      assert.deepEqual(prepared.gatewaySafetyFailures, []);
+      assert.deepEqual(prepared.decision.staff_confirmed_mutation, mutation);
+      assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+    }
+  }
 });
 
 test('malformed model mutation cannot orphan an exact durable blocked change receipt', async () => {
