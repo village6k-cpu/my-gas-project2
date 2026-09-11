@@ -116,6 +116,8 @@ export interface Trade {
   // 검수 (PG 마스터)
   setupDone: boolean;
   setupDoneAt?: string | null;
+  /** 직원이 이 거래의 카카오톡 대화를 직접 확인했는지. 반출 완료와 별개다. */
+  kakaoConversationChecked?: boolean;
   returnDone: boolean;
   returnDoneAt?: string | null;
 

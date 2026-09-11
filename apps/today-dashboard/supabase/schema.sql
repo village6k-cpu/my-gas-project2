@@ -16,6 +16,7 @@ create table if not exists village.trades (
   discount_type       text,
   setup_done          boolean not null default false,
   setup_done_at       timestamptz,
+  kakao_conversation_checked boolean not null default false,
   setup_state_revision bigint not null default 0,
   return_done         boolean not null default false,
   return_done_at      timestamptz,
