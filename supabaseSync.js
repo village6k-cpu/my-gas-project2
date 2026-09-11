@@ -997,6 +997,7 @@ function supaMarkTradeDirty_(tid) {
       supaDirtyPropertyKey_(tid),
       String(Date.now()) + ':' + String(Math.random()).slice(2)
     );
+    if (typeof requestInventoryRiskScan_ === 'function') requestInventoryRiskScan_();
   } catch (err) {
     // 동기화 마킹 실패가 본 작업을 막으면 안 됨
   }

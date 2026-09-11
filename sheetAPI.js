@@ -1604,6 +1604,10 @@ function runFunction(funcName, params) {
     "repairTradeBillingCompanyDropdown",
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
+    "getInventoryRiskReport",
+    "getInventoryRiskMonitorStatus",
+    "setupInventoryRiskMonitor",
+    "flushInventoryRiskAlerts",
     "listAllTriggers",
     "setupInstallableTrigger",
     "diagEquipmentRiskBackendConfig",
@@ -1872,6 +1876,13 @@ function runFunction(funcName, params) {
       var rsResult = repairTradeContractStatus.apply(null, rsArgs);
       return { success: true, function: funcName, result: rsResult, executionTime: (new Date() - startTime) + "ms" };
     }
+    if (["getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts"].indexOf(funcName)>=0) {
+      var inventoryArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
+      if(!Array.isArray(inventoryArgs))inventoryArgs=[inventoryArgs];
+      var inventoryFunctions={getInventoryRiskReport:getInventoryRiskReport,getInventoryRiskMonitorStatus:getInventoryRiskMonitorStatus,
+        setupInventoryRiskMonitor:setupInventoryRiskMonitor,flushInventoryRiskAlerts:flushInventoryRiskAlerts};
+      return {success:true,function:funcName,result:inventoryFunctions[funcName].apply(null,inventoryArgs),executionTime:(new Date()-startTime)+'ms'};
+    }
     var globalFuncs = {
       refreshEquipmentList: typeof refreshEquipmentList !== "undefined" ? refreshEquipmentList : null,
       syncAuditFromMaster: typeof syncAuditFromMaster !== "undefined" ? syncAuditFromMaster : null,
@@ -2000,9 +2011,9 @@ function getOperationsData_(targetDate, skipCache) {
   var cache = CacheService.getScriptCache();
   var cacheKey = "operations_v2_" + todayStr;
   if (!skipCache) {
-    var cached = cache.get(cacheKey);
+    var cached = inventoryRiskCacheRead_(cache, cacheKey);
     if (cached) {
-      try { return JSON.parse(cached); } catch (e) {}
+      try { return inventoryRiskAttachOperations_(cached); } catch (e) {}
     }
   }
 
@@ -2021,12 +2032,6 @@ function getOperationsData_(targetDate, skipCache) {
   var paceThisWeekTids = {};
   var pacePrev4WeeksTids = {};
   var activeQtySum = 0;  // 오늘 활성 스케줄(반출일 ≤ 오늘 ≤ 반납일) 수량 합 → 가동률 분자
-
-  // 재고 충돌 — 향후 90일까지의 일자×장비 예약 누적
-  // bookingMap[dateStr][equipName] = [{ tid, customer, qty }]
-  var bookingMap = {};
-  var conflictHorizonEnd = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 90);
-  var conflictHorizonEndStr = Utilities.formatDate(conflictHorizonEnd, tz, "yyyy-MM-dd");
 
   // 출고 페이스 비교 구간: 이번주 시작 기준 직전 4주 (28일)
   var weekStartDate = new Date(weekRange.start + "T00:00:00");
@@ -2097,31 +2102,6 @@ function getOperationsData_(targetDate, skipCache) {
       activeQtySum += (Number(row[4]) || 0);
     }
 
-    // 재고 충돌 — 향후 90일 이내 활성 스케줄을 일자×장비별로 누적 (세트 헤더 행 제외, 반납완료 제외)
-    if (status !== "반납완료" && coDate && ciDate && opItem && opItem.name) {
-      var winStart = coDate < todayStr ? todayStr : coDate;
-      var winEnd = ciDate > conflictHorizonEndStr ? conflictHorizonEndStr : ciDate;
-      if (winStart <= winEnd) {
-        var bookQty = Number(row[4]) || 0;
-        if (bookQty > 0) {
-          var iterStart = new Date(winStart + "T00:00:00");
-          var iterEnd = new Date(winEnd + "T00:00:00");
-          for (var dIter = new Date(iterStart); dIter <= iterEnd; dIter.setDate(dIter.getDate() + 1)) {
-            var dStr = Utilities.formatDate(dIter, tz, "yyyy-MM-dd");
-            if (!bookingMap[dStr]) bookingMap[dStr] = {};
-            if (!bookingMap[dStr][opItem.name]) bookingMap[dStr][opItem.name] = { totalQty: 0, bookings: [] };
-            bookingMap[dStr][opItem.name].totalQty += bookQty;
-            bookingMap[dStr][opItem.name].bookings.push({
-              tid: String(tid),
-              customer: customer,
-              qty: bookQty,
-              from: coDate,
-              to: ciDate
-            });
-          }
-        }
-      }
-    }
   }
 
   var sortByTime = function(a, b) { return (a.time || "").localeCompare(b.time || ""); };
@@ -2219,7 +2199,6 @@ function getOperationsData_(targetDate, skipCache) {
 
   var maintenance = [];
   var totalStockSum = 0;
-  var stockByName = {};  // 장비명 → 총보유 수량
   for (var m = 0; m < equips.length; m++) {
     var st = String(equips[m][8] || "").trim();
     var equipName = String(equips[m][3] || "").trim();
@@ -2233,9 +2212,6 @@ function getOperationsData_(targetDate, skipCache) {
     }
     var stockNum = Number(equips[m][4]) || 0;
     totalStockSum += stockNum;
-    if (equipName && stockNum > 0) {
-      stockByName[equipName] = (stockByName[equipName] || 0) + stockNum;
-    }
   }
 
   // ── 건강 지표: 장비 가동률 (스케줄상세 활성 수량 / 장비마스터 총보유) + 이번주 출고 페이스 ──
@@ -2243,56 +2219,8 @@ function getOperationsData_(targetDate, skipCache) {
     ? Math.round((activeQtySum / totalStockSum) * 1000) / 10
     : 0;
 
-  // ── 재고 충돌/부족 ──
-  // 각 (date, equipment)에서 sum vs 총보유 비교
-  var inventoryAlerts = [];
-  var inventoryUnknownNames = {};
-  var dateKeys = Object.keys(bookingMap).sort();
-  for (var di = 0; di < dateKeys.length; di++) {
-    var dStr = dateKeys[di];
-    var byEquip = bookingMap[dStr];
-    var equipNames = Object.keys(byEquip);
-    for (var ei = 0; ei < equipNames.length; ei++) {
-      var ename = equipNames[ei];
-      var entry = byEquip[ename];
-      var stock = stockByName[ename];
-      if (stock == null) {
-        // 장비마스터에 없는 이름은 충돌 판정 불가 — 한 번만 기록
-        if (!inventoryUnknownNames[ename]) inventoryUnknownNames[ename] = true;
-        continue;
-      }
-      var ratio = entry.totalQty / stock;
-      if (entry.totalQty > stock) {
-        inventoryAlerts.push({
-          date: dStr,
-          equipment: ename,
-          booked: entry.totalQty,
-          stock: stock,
-          overBy: entry.totalQty - stock,
-          ratio: Math.round(ratio * 1000) / 10,
-          severity: "conflict",
-          bookings: entry.bookings
-        });
-      } else if (ratio >= 0.9) {
-        inventoryAlerts.push({
-          date: dStr,
-          equipment: ename,
-          booked: entry.totalQty,
-          stock: stock,
-          overBy: 0,
-          ratio: Math.round(ratio * 1000) / 10,
-          severity: "tight",
-          bookings: entry.bookings
-        });
-      }
-    }
-  }
-  // 충돌 먼저 → 부족 우려 / 같은 severity 안에서는 날짜 빠른 순
-  inventoryAlerts.sort(function(a, b) {
-    if (a.severity !== b.severity) return a.severity === "conflict" ? -1 : 1;
-    if (a.date !== b.date) return a.date.localeCompare(b.date);
-    return b.ratio - a.ratio;
-  });
+  var inventoryReport = getInventoryRiskReport(skipCache === true);
+  var inventoryAlerts = inventoryRiskOperationsAlerts_(inventoryReport);
 
   var paceThisWeekCount = countKeys_(paceThisWeekTids);
   var pacePrevCount = countKeys_(pacePrev4WeeksTids);
@@ -2315,7 +2243,7 @@ function getOperationsData_(targetDate, skipCache) {
       maintenance: maintenance.length,
       weeklyReservations: countKeys_(weeklyTids),
       inventoryConflicts: inventoryAlerts.filter(function(a) { return a.severity === "conflict"; }).length,
-      inventoryTight: inventoryAlerts.filter(function(a) { return a.severity === "tight"; }).length
+      inventoryTight: inventoryAlerts.filter(function(a) { return a.severity !== "conflict"; }).length
     },
     health: {
       utilization: {
@@ -2338,12 +2266,12 @@ function getOperationsData_(targetDate, skipCache) {
     imminent: imminent,
     maintenance: maintenance,
     inventoryAlerts: inventoryAlerts,
-    inventoryHorizonDays: 90,
-    inventoryUnknownCount: Object.keys(inventoryUnknownNames).length
+    inventoryCoverage: inventoryReport.coverage,
+    inventoryGeneratedAt: inventoryReport.generatedAt
   };
 
-  try { cache.put(cacheKey, JSON.stringify(result), 300); } catch (cacheErr) {}
-  return result;
+  inventoryRiskCacheWrite_(cache, cacheKey, result, 300);
+  return inventoryRiskAttachOperations_(result, inventoryReport);
 }
 
 function mapValues_(obj) {
@@ -2443,6 +2371,7 @@ function syncEquipmentMaster(rows, newRows) {
     appended++;
   });
   SpreadsheetApp.flush();
+  if ((updated || appended) && typeof requestInventoryRiskScan_ === 'function') requestInventoryRiskScan_();
   return { success: true, updated: updated, appended: appended, skipped: skipped, notePreconditionsChecked:true };
   } finally { mirrorLock.releaseLock(); }
 }

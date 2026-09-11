@@ -255,6 +255,10 @@ function onEditInstallable(e) {
   const editColCount = e.range.getNumColumns ? e.range.getNumColumns() : 1;
   if (row === 1 && editRowCount === 1) return;
 
+  if (["스케줄상세", "계약마스터", "장비마스터", "세트마스터"].indexOf(sheet.getName()) >= 0 && typeof requestInventoryRiskScan_ === "function") {
+    requestInventoryRiskScan_();
+  }
+
   // 확인요청 시트를 사람이 직접 편집하면 헤이빌리 확인요청 목록 캐시를 비운다
   if (sheet.getName() === "확인요청" && typeof invalidateConfirmListCache_ === "function") {
     invalidateConfirmListCache_();
