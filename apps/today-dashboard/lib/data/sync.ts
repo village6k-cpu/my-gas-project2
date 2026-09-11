@@ -219,7 +219,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
   const baseById = new Map(base.equipments.map((e) => [e.scheduleId, e]));
   const incoming: EquipmentItem[] = (it.equipments ?? []).map((e: any) => {
     const prev = baseById.get(e.scheduleId);
-    return {
+    const next: EquipmentItem = {
       scheduleId: e.scheduleId,
       name: e.name,
       qty: Number(e.qty) || 1,
@@ -248,7 +248,14 @@ function mergeDashboard(base: Trade, it: any): Trade {
       settlement: prev?.settlement,
       offCatalog: prev?.offCatalog,
       onsite: prev?.onsite, // 시트에 기록된 현장추가도 '현장 추가' 구획에 계속 묶이도록 보존
-    } as EquipmentItem;
+    };
+    // 체크의 정본은 Supabase의 항목 PATCH다. GAS 상세는 캐시되거나 조회 실패 시
+    // 과거 props 값으로 폴백하므로, 같은 실제 품목의 체크/해제를 덮어쓰면 안 된다.
+    // 합성 행·새 품목·제외 후 복구는 위의 원장 초기값을 그대로 사용한다.
+    if (prev && !prev.synthetic && prev.checkoutState !== "excluded" && sameReturnEvidenceIdentity(prev, next)) {
+      next.checkoutState = prev.checkoutState;
+    }
+    return next;
   });
   // 시트에 없는 앱 전용 품목(무상/미정 현장추가 등)은 절대 삭제하지 않음.
   // 단, 거래ID-숫자 형태의 원장 스케줄ID는 onsite/offCatalog 플래그가 남아 있어도 시트 행으로 본다.
@@ -296,11 +303,13 @@ function mergeDashboard(base: Trade, it: any): Trade {
     customerPhone: it.tel || base.customerPhone,
     company: it.company || base.company,
     discountType: it.discountType || base.discountType,
-    contractStatus: it.contractStatus || base.contractStatus,
-    setupDone: !!it.setupDone,
-    returnDone: !!it.returnDone,
-    setupDoneAt: it.setupDoneAt || undefined,
-    returnDoneAt: it.returnDoneAt || undefined,
+    // 완료 상태도 전용 writer → Supabase realtime 경로로만 갱신한다.
+    // 계약서/장비 상세 복구 때문에 캐시된 완료 플래그가 화면을 되돌리지 않게 한다.
+    contractStatus: base.contractStatus,
+    setupDone: base.setupDone,
+    returnDone: base.returnDone,
+    setupDoneAt: base.setupDoneAt,
+    returnDoneAt: base.returnDoneAt,
     ...payment,
     paymentWarning: base.paymentWarning, // 에러 문자열을 경고 플래그로 둔갑시키지 않음
     contractUrl: it.contractUrl || base.contractUrl,

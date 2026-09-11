@@ -306,11 +306,17 @@ function mergeTradeChanges(base: Trade[], changed: Trade[]): Trade[] {
 async function applyDashboardRepairs(
   changed: Trade[],
   _mutationSeqAtStart: number,
-  versionsAtStart: Record<string, number> = {},
+  versionsAtStart: Record<string, number>,
+  tradesAtStart: Trade[],
 ): Promise<boolean> {
   if (!changed.length) return false;
+  const previousById = new Map(tradesAtStart.map((trade) => [trade.tradeId, trade]));
+  const currentById = new Map(state.trades.map((trade) => [trade.tradeId, trade]));
   const applicable = changed.filter((trade) =>
     !hasTradeSyncPending(trade.tradeId) &&
+    // 다른 기기의 realtime 반영은 local mutation 번호를 바꾸지 않는다.
+    // 조회의 기준 객체도 비교해 그 사이 들어온 최신 체크/해제를 보호한다.
+    currentById.get(trade.tradeId) === previousById.get(trade.tradeId) &&
     (tradeMutationSeq[trade.tradeId] ?? 0) === (versionsAtStart[trade.tradeId] ?? 0),
   );
   if (!applicable.length) return false;
@@ -321,9 +327,10 @@ async function applyDashboardRepairs(
 
 async function repairDayDetails(date: string, mutationSeqAtStart = localMutationSeq, opts?: { fresh?: boolean }): Promise<boolean> {
   if (!isSupabase) return false;
-  const versionsAtStart = Object.fromEntries(state.trades.map((trade) => [trade.tradeId, tradeMutationSeq[trade.tradeId] ?? 0]));
-  const changed = await repairDashboardDateDetails(state.trades, date, opts);
-  return applyDashboardRepairs(changed, mutationSeqAtStart, versionsAtStart);
+  const tradesAtStart = state.trades;
+  const versionsAtStart = Object.fromEntries(tradesAtStart.map((trade) => [trade.tradeId, tradeMutationSeq[trade.tradeId] ?? 0]));
+  const changed = await repairDashboardDateDetails(tradesAtStart, date, opts);
+  return applyDashboardRepairs(changed, mutationSeqAtStart, versionsAtStart, tradesAtStart);
 }
 
 export async function repairSearchResults(query: string): Promise<void> {
@@ -331,10 +338,11 @@ export async function repairSearchResults(query: string): Promise<void> {
   const q = query.trim();
   if (q.length < 2) return;
   const mutationSeqAtSearch = localMutationSeq;
-  const versionsAtSearch = Object.fromEntries(state.trades.map((trade) => [trade.tradeId, tradeMutationSeq[trade.tradeId] ?? 0]));
+  const tradesAtSearch = state.trades;
+  const versionsAtSearch = Object.fromEntries(tradesAtSearch.map((trade) => [trade.tradeId, tradeMutationSeq[trade.tradeId] ?? 0]));
   // 운영 윈도우 밖 과거 거래도 검색되도록 Supabase에서 지연 로드(원장 검색 복구와 병렬)
   const [changed, remoteMatches] = await Promise.all([
-    repairDashboardSearchResults(state.trades, q),
+    repairDashboardSearchResults(tradesAtSearch, q),
     searchTradesRemote(q).catch(() => [] as Trade[]),
   ]);
   if (remoteMatches.length) {
@@ -345,7 +353,7 @@ export async function repairSearchResults(query: string): Promise<void> {
       set({ trades: [...state.trades, ...fresh] });
     }
   }
-  await applyDashboardRepairs(changed, mutationSeqAtSearch, versionsAtSearch);
+  await applyDashboardRepairs(changed, mutationSeqAtSearch, versionsAtSearch, tradesAtSearch);
 }
 
 // ── realtime 변경 반영: 전량 refetch 대신 바뀐 거래만 재조회 ──────
@@ -537,13 +545,17 @@ export async function pollSheetChangesNow(opts?: { mode?: "light" | "full"; rese
   pollInFlight = true;
   try {
     if (state.date && await repairDayDetails(state.date, mutationSeqAtPoll, { fresh: mode === "full" })) return;
+    const previousById = new Map(state.trades.map((trade) => [trade.tradeId, trade]));
     const changed = await pollTimelineChanges(
       state.trades,
       mode === "light" ? { fromDays: -7, toDays: 45 } : undefined,
     );
     if (!changed.length) return;
+    const currentById = new Map(state.trades.map((trade) => [trade.tradeId, trade]));
     const applicable = changed.filter(
-      (trade) => !hasTradeSyncPending(trade.tradeId) && (tradeMutationSeq[trade.tradeId] ?? 0) === (versionAtPoll[trade.tradeId] ?? 0),
+      (trade) => !hasTradeSyncPending(trade.tradeId) &&
+        currentById.get(trade.tradeId) === previousById.get(trade.tradeId) &&
+        (tradeMutationSeq[trade.tradeId] ?? 0) === (versionAtPoll[trade.tradeId] ?? 0),
     );
     changed.filter((trade) => !applicable.includes(trade)).forEach((trade) => realtimeTradeIds.add(trade.tradeId));
     if (!applicable.length) return;

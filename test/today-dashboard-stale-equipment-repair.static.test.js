@@ -70,13 +70,15 @@ assert(
     /repairDayDetails\(date\)/.test(storeSource),
   'store loadDay path must trigger date-level dashboard repair for stale partial equipment caches'
 );
+// A source-pattern check missed remote updates arriving during detail repair.
+// Exercise the complete store/sync path with delayed network responses instead.
+require('node:child_process').execFileSync(process.execPath, [
+  '--test', path.join(root, 'apps/today-dashboard/test/checkoutSnapshotStability.test.js'),
+], { cwd: root, stdio: 'inherit' });
 assert(
-  /repairDashboardSearchResults\(state\.trades, q\)/.test(storeSource) &&
-    /await applyDashboardRepairs\(changed, mutationSeqAtSearch, versionsAtSearch\)/.test(storeSource) &&
-    /function applyDashboardRepairs[\s\S]*!hasTradeSyncPending\(trade\.tradeId\)[\s\S]*tradeMutationSeq\[trade\.tradeId\][\s\S]*enqueueTradePersist\(t\.tradeId, t\)/.test(storeSource) &&
-    /function enqueueTradePersist[\s\S]*await persistTrade\(latest\)/.test(storeSource) &&
+  /function enqueueTradePersist[\s\S]*await persistTrade\(latest\)/.test(storeSource) &&
     !/function enqueueTradePersist[\s\S]*gasMutation\("repairTradeProjection"/.test(storeSource),
-  'search repair must gate each trade against pending writes/version drift and persist ordinary fields without reintroducing the completion/baseline GAS bottleneck'
+  'search repair must persist ordinary fields without reintroducing the completion/baseline GAS bottleneck'
 );
 assert(
   !/function applyDashboardRepairs[\s\S]*pruneMissingSheetBacked: true/.test(storeSource),
