@@ -1722,6 +1722,65 @@ test('exact fast-reply receipt finalizes the generated RQ without a duplicate ow
   assert.equal(prepared.decision.confirmed_registration_readback.effective_request_id, 'RQ-260907-009');
 });
 
+test('completed registration survives an incomplete repeated FINAL input with no replay or reply', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=confirmedRegistrationDecisionFixture();
+  const receipt=confirmedRegistrationReceiptFixture(job);
+  delete decision.staff_confirmed_registration.expected_set_components;
+  delete decision.staff_confirmed_registration.set_component_selections;
+  const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,
+    finalText:JSON.stringify(decision),trustedToolReceipts:[receipt]});
+  assert.deepEqual(prepared.gatewaySafetyFailures,[]);
+  assert.equal(prepared.decision.owner_review_required,false);
+  assert.equal(prepared.decision.should_write_to_sheet,false);
+  assert.equal(prepared.decision.reply_decision.replyMode,'no_reply');
+  assert.deepEqual(prepared.decision.staff_confirmed_registration,receipt.authorized_registration);
+});
+
+test('sealed registration keeps an independently validated unanswered price question', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=confirmedRegistrationDecisionFixture();
+  delete decision.staff_confirmed_registration.expected_set_components;
+  decision.reply_decision={replyMode:'auto_send',text:'견적 안내',confidence:'high',reason:'별도 금액 질문',
+    shouldCreateTask:false,safetyClass:'sensitive_commitment',grounding:'authoritative_sheet',
+    requiresRag:false,attachmentKeys:[],alreadyDelivered:false};
+  const p=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision),
+    trustedToolReceipts:[confirmedRegistrationReceiptFixture(job)]});
+  assert.deepEqual(p.gatewaySafetyFailures,[]);
+  assert.equal(p.decision.reply_decision.replyMode,'auto_send');
+  assert.equal(p.decision.reply_decision.text,'견적 안내');
+  assert.equal(p.decision.should_write_to_sheet,false);
+});
+
+test('rental dates inside a live preview are not message age', () => {
+  const now=new Date('2026-09-11T13:57:06Z');
+  assert.equal(isAutoSendEligibleLiveJob({
+    preview_text:'중요 예약자 1 장비 대여 9월 12일 (토) 11시 ~ 23시 9월 11일',
+    unread_count:1,detectedAt:'2026-09-11T13:57:04Z',events:[{reason:'top_row_changed'}]
+  },{now}).eligible,true);
+  assert.equal(isAutoSendEligibleLiveJob({
+    preview_text:'중요 예약자 1 장비 대여 10월 5일 7시 ~ 16일 7시 9월 11일',
+    unread_count:1,detectedAt:'2026-09-11T13:57:04Z',events:[{reason:'top_row_changed'}]
+  },{now}).eligible,true);
+  assert.equal(isAutoSendEligibleLiveJob({
+    preview_text:'중요 예약자 1 장비 대여 2026.09.12 11:00 ~ 2026.09.13 11:00 9월 11일',
+    unread_count:1,detectedAt:'2026-09-11T13:57:04Z',events:[{reason:'top_row_changed'}]
+  },{now}).eligible,true);
+});
+
+test('intake success is post-action even when FINAL repeats its completed write intent', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=gatewayDecisionFixture({should_write_to_sheet:true,
+    inquiry_disposition:'new_inquiry',existing_confirm_request_ids:['RQ-260821-001'],
+    sheet_row_candidate:{equipment_write_mode:'full_plan'},
+    reply_decision:{replyMode:'draft_only',text:'',safetyClass:'no_send',grounding:'authoritative_sheet'}});
+  const p=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision),
+    trustedToolReceipts:[confirmationReceiptFixture(job)]});
+  assert.equal(p.gatewaySafetyFailures.includes('invalid_gateway_decision'),false);
+  assert.equal(p.decision.should_write_to_sheet,false);
+  assert.equal(p.sheetResult.reqID,'RQ-260821-001');
+});
+
 test('sealed registration receipt survives echoed tool results without trusting model result claims', async () => {
   const { job, turn } = gatewayTurnFixture();
   for (const resultField of ['commit_result', 'execution_result']) {
@@ -13162,7 +13221,8 @@ test('isAutoSendEligibleLiveJob allows unread same-day rows and blocks dated/bac
   }, { now }).eligible, false);
   assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'top_rows_backstop' }] }, { now }).eligible, false);
   assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 한시우/60x 파손 video 5월 25일', events: [{ reason: 'top_row_changed' }] }, { now }).eligible, false);
-  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 배성문 1월 15일 건은 4만원입니다. 오후 3:45', events: [{ reason: 'top_row_changed' }] }, { now }).eligible, false);
+  // A live discussion about an older rental is still a current message.
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 배성문 1월 15일 건은 4만원입니다. 오후 3:45', events: [{ reason: 'top_row_changed' }] }, { now }).eligible, true);
 });
 
 test('auto reply dedupe key uses customer message and outgoing text', () => {

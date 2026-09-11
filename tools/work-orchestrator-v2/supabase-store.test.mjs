@@ -2,6 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createWorkOrchestratorStore } from './supabase-store.mjs';
+import { deriveAutomationResolution } from './automation-resolution.mjs';
+
+test('unresolved reply resolution crosses the real store validation boundary', async () => {
+  const resolution=deriveAutomationResolution({replyExecutionIntent:{requested:true},
+    decision:{reply_decision:{replyMode:'draft_only'}},autoReplyResult:{attempted:false,sent:false}});
+  let called=false;
+  const store=createWorkOrchestratorStore({supabaseUrl:'https://example.invalid',serviceRoleKey:'test',
+    fetchImpl:async()=>{called=true;return {ok:true,json:async()=>({applied:false,row:null}),
+      text:async()=>JSON.stringify({applied:false,row:null})};}});
+  await store.markAutomationState({id:WORK_ID,expectedVersion:1,resolution});
+  assert.equal(called,true);
+});
 
 const serviceRoleKey = 'test-service-role';
 const WORK_ID = '11111111-1111-4111-8111-111111111111';

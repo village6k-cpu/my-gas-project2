@@ -6557,6 +6557,15 @@ test('Windows workers stay in the owned tree and timeout cleanup targets the who
   assert.equal(buildWorkerTreeKillInvocation(1234, 'SIGTERM', 'linux'), null);
 });
 
+test('live dated staff approval reaches AI without an unread badge', () => {
+  const event = {reason:'top_row_changed', previewText:'중요 예약자 네네 9월 11일',
+    unreadCount:null, detectedAt:'2026-09-11T14:13:04.735Z'};
+  assert.equal(shouldQueueTopRowEvent(event,{now:new Date('2026-09-11T14:13:06Z')}),true);
+  assert.equal(shouldQueueTopRowEvent({...event,reason:'top_rows_backstop'},
+    {now:new Date('2026-09-11T14:13:06Z')}),false);
+  assert.equal(shouldQueueTopRowEvent(event,{now:new Date('2026-09-12T14:13:06Z')}),false);
+});
+
 test('generic DOM unreadSignal does not turn a read top-row backstop into a worker job', () => {
   const staleOutgoingRow = {
     reason: 'top_rows_backstop',
