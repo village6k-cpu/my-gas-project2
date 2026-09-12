@@ -61,13 +61,17 @@ function inventoryRiskReceipt_(pending) {
   return {found:false,complete:false};
 }
 
-function inventoryRiskDeliver_(state) {
+function inventoryRiskDeliver_(state, options) {
+  options=options || {};
   var pending=state.pending,receipt;
   if(pending.attemptedAt) {
     receipt=inventoryRiskReceipt_(pending);
     if(!receipt.found && (!receipt.complete || pending.ts || Date.now()-pending.attemptedAt<60000))return false;
   }
   if(!receipt?.found) {
+    // Reconcile uncertain receipts at any time, but send/retry only in the daily window.
+    if(options.allowSend!==true)return false;
+    if(options.draft){pending.text=options.draft.text;pending.entries=options.draft.entries;}
     pending.attemptedAt=Date.now();inventoryRiskSaveState_(state);
     var response=inventoryRiskSlack_('chat.postMessage',{channel:pending.channel,text:pending.text,unfurl_links:false,unfurl_media:false,
       client_msg_id:pending.id,metadata:{event_type:'inventory_risk_alert',event_payload:{id:pending.id}}});
@@ -102,6 +106,25 @@ function inventoryRiskDetailUrl_() {
   return 'https://today-dashboard-ten.vercel.app/operations';
 }
 
+function inventoryRiskNotificationSchedule_(state, now) {
+  var offset=9*3600000,local=new Date(now+offset),today=local.toISOString().slice(0,10),hour=inventoryRiskNotificationHour_();
+  var receipt=state.lastReceipt,deliveredAt=receipt && (Number(receipt.ts)>0?Number(receipt.ts)*1000:Date.parse(receipt.at));
+  // A legacy/change alert sent earlier today also consumes today's one delivery.
+  // Use Slack's actual send time, not a later reconciliation time across midnight.
+  var lastDate=deliveredAt && Number.isFinite(deliveredAt)?new Date(deliveredAt+offset).toISOString().slice(0,10):null;
+  var due=lastDate!==today && local.getUTCHours()===hour;
+  var next=new Date(Date.parse(today+'T00:00:00Z')+hour*3600000-offset);
+  if(lastDate===today || local.getUTCHours()>hour)next=new Date(next.getTime()+24*3600000);
+  return {date:today,due:due,hour:hour,lastNotificationDate:lastDate,nextNotificationAt:next.toISOString()};
+}
+
+function inventoryRiskDailyDraft_(report, state) {
+  var plan=inventoryRiskNotificationPlan_(report,state.entries);
+  // Each morning summarizes current unresolved risks, even when nothing changed.
+  plan.daily=true;plan.changed=report.alerts;
+  return {text:inventoryRiskSlackText_(report,plan,inventoryRiskDetailUrl_()),entries:plan.entries};
+}
+
 function flushInventoryRiskAlerts(event) {
   if(event?.triggerUid)ScriptApp.getProjectTriggers().forEach(function(t){
     if(t.getUniqueId()===event.triggerUid && t.getHandlerFunction()==='flushInventoryRiskAlerts')ScriptApp.deleteTrigger(t);
@@ -112,7 +135,6 @@ function flushInventoryRiskAlerts(event) {
   var started=Date.now();p.deleteProperty(INVENTORY_RISK_PREFIX_+'queuedAt');
   try {
     var state=inventoryRiskLoadState_();
-    if(state.pending && !inventoryRiskDeliver_(state))return {status:'pending'};
     var report;
     try{report=getInventoryRiskReport(true);}
     catch(error){
@@ -121,20 +143,25 @@ function flushInventoryRiskAlerts(event) {
       p.setProperty(INVENTORY_RISK_PREFIX_+'lastScanError','시트·보조 데이터 조회 확인 필요');
     }
     if(!report.sourceUnavailable)p.deleteProperty(INVENTORY_RISK_PREFIX_+'lastScanError');
-    var plan=inventoryRiskNotificationPlan_(report,state.entries);
     p.setProperty(INVENTORY_RISK_PREFIX_+'lastScan',JSON.stringify({at:report.generatedAt,elapsedMs:Date.now()-started,
       coverage:report.coverage,conflicts:report.conflictCount,risks:report.riskCount,sourceUnavailable:!!report.sourceUnavailable}));
-    if(!plan.notify){
-      // Baselines can change when a resolved warning leaves other active risks.
-      if(JSON.stringify(state.entries)!==JSON.stringify(plan.entries)){state.entries=plan.entries;inventoryRiskSaveState_(state);}
-      p.deleteProperty(INVENTORY_RISK_PREFIX_+'lastError');return {status:'unchanged',conflicts:report.conflictCount,risks:report.riskCount};
+    var schedule=inventoryRiskNotificationSchedule_(state,Date.now());
+    if(state.pending && !inventoryRiskDeliver_(state,{allowSend:schedule.due,draft:schedule.due?inventoryRiskDailyDraft_(report,state):null})){
+      return {status:schedule.due?'pending':'scheduled',nextNotificationAt:schedule.nextNotificationAt};
     }
+    schedule=inventoryRiskNotificationSchedule_(state,Date.now());
+    if(!schedule.due){
+      p.deleteProperty(INVENTORY_RISK_PREFIX_+'lastError');
+      return {status:schedule.lastNotificationDate===schedule.date?'already_sent':'scheduled',
+        nextNotificationAt:schedule.nextNotificationAt,conflicts:report.conflictCount,risks:report.riskCount};
+    }
+    var draft=inventoryRiskDailyDraft_(report,state);
     state.pending={id:Utilities.getUuid(),createdAt:Date.now(),channel:p.getProperty(INVENTORY_RISK_PREFIX_+'channel'),
-      text:inventoryRiskSlackText_(report,plan,inventoryRiskDetailUrl_()),entries:plan.entries};
+      text:draft.text,entries:draft.entries};
     inventoryRiskSaveState_(state);
-    if(!inventoryRiskDeliver_(state))return {status:'pending'};
+    if(!inventoryRiskDeliver_(state,{allowSend:true}))return {status:'pending'};
     p.deleteProperty(INVENTORY_RISK_PREFIX_+'lastError');
-    return {status:'sent',changed:plan.changed.length,conflicts:report.conflictCount,risks:report.riskCount,receipt:state.lastReceipt};
+    return {status:'sent',conflicts:report.conflictCount,risks:report.riskCount,receipt:state.lastReceipt};
   }catch(error){
     // Do not expose request headers/tokens or mark an uncertain delivery as sent.
     var reason=/^(Slack |재고 )/.test(String(error.message))?String(error.message).slice(0,160):'재고 경보 전송·상태 확인 필요';
@@ -159,8 +186,11 @@ function requestInventoryRiskScan_() {
 
 function getInventoryRiskMonitorStatus() {
   var p=PropertiesService.getScriptProperties(),state=inventoryRiskLoadState_();
+  var schedule=inventoryRiskNotificationSchedule_(state,Date.now());
   return {enabled:p.getProperty(INVENTORY_RISK_PREFIX_+'enabled')==='true',channel:p.getProperty(INVENTORY_RISK_PREFIX_+'channel'),
     turnaroundMinutes:Number(p.getProperty(INVENTORY_RISK_PREFIX_+'turnaroundMinutes') || 60),
+    notificationFrequency:'daily',notificationHour:schedule.hour,notificationTimeZone:'Asia/Seoul',
+    nextNotificationAt:schedule.nextNotificationAt,lastNotificationDate:schedule.lastNotificationDate,
     triggerCount:ScriptApp.getProjectTriggers().filter(function(t){return t.getHandlerFunction()==='inventoryRiskHeartbeat';}).length,
     lastScan:JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lastScan') || 'null'),lastReceipt:state.lastReceipt || null,
     pending:!!state.pending,lastError:p.getProperty(INVENTORY_RISK_PREFIX_+'lastError'),lastScanError:p.getProperty(INVENTORY_RISK_PREFIX_+'lastScanError')};
@@ -170,9 +200,11 @@ function setupInventoryRiskMonitor(options) {
   options=options || {};var p=PropertiesService.getScriptProperties();
   if(options.channel && !/^[CG][A-Z0-9]{8,}$/.test(options.channel))throw new Error('Slack 채널 ID 확인 필요');
   if(options.turnaroundMinutes!==undefined && (!Number.isInteger(options.turnaroundMinutes) || options.turnaroundMinutes<0 || options.turnaroundMinutes>1440))throw new Error('반납 여유시간 확인 필요');
+  if(options.notificationHour!==undefined && (!Number.isInteger(options.notificationHour) || options.notificationHour<0 || options.notificationHour>23))throw new Error('재고 알림 시간 확인 필요');
   if(options.slackToken)p.setProperty(INVENTORY_RISK_PREFIX_+'slackToken',String(options.slackToken));
   if(options.channel)p.setProperty(INVENTORY_RISK_PREFIX_+'channel',options.channel);
   if(options.turnaroundMinutes!==undefined)p.setProperty(INVENTORY_RISK_PREFIX_+'turnaroundMinutes',String(options.turnaroundMinutes));
+  if(options.notificationHour!==undefined)p.setProperty(INVENTORY_RISK_PREFIX_+'notificationHour',String(options.notificationHour));
   var channel=p.getProperty(INVENTORY_RISK_PREFIX_+'channel');if(!channel)throw new Error('Slack 채널 설정 필요');
   inventoryRiskSlack_('auth.test',{});
   // The preselected channel's readable history proves both identity and access.
