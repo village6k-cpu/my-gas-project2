@@ -10,6 +10,13 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { customerClusterHash } from './follow-up-policy.mjs';
 import * as workerModule from './worker.mjs';
+
+test('confirmed supply policy is present even when RAG is not needed', () => {
+  const prompt=workerModule.buildHermesPrompt({job_id:'supply-policy-test',room_key:'test:local',room_revision:1});
+  assert.match(prompt,/메모리·배터리는 재고 충돌에서 제외/);
+  assert.match(prompt,/소니 GM 70-200mm→소니 GM 70-200mm II/);
+  assert.match(prompt,/등록 거래가 있으면 추가·변경은 그 거래에 반영/);
+});
 import { loadWorkOrchestratorConfig } from '../work-orchestrator-v2/contracts.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
 import { registeredReservationChangeRequestDigest } from './staff-confirmed-mutation.mjs';
@@ -5940,8 +5947,8 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.match(prompt, /JOB EVIDENCE FROM SUPABASE/);
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
-  // Bound the complete policy/schema including explicit inquiry lifecycle evidence.
-  assert.ok(prompt.length < 28000, `prompt too large: ${prompt.length}`);
+  // Bound the complete policy/schema including always-present owner supply rules.
+  assert.ok(prompt.length < 29000, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {
