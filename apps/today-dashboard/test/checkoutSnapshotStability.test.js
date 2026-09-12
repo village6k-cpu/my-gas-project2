@@ -206,3 +206,13 @@ test("카카오톡 체크와 해제는 해당 열만 저장하며 재시작 후�
   assert.deepEqual(restarted.patches, [{ kakao_conversation_checked: false }]);
   assert.equal(restarted.server().kakaoConversationChecked, false);
 });
+
+
+test("상위 대체·외부 조달 메모는 늦은 GAS 상세 복구에도 보존된다", async () => {
+  const supplyNote = "[외부조달] 아나키 | 소니 GM 16-35mm | 2대";
+  const h = await harness(trade({ equipments: [{ scheduleId, name: "테스트 카메라", qty: 1, checkoutState: "taken", supplyNote }] }));
+  h.gas(async () => ({ checkout: [detail()], checkin: [] }));
+  await h.poll();
+  assert.equal(h.current().equipments[0].supplyNote, supplyNote);
+  assert.equal(h.current().equipments[0].checkoutState, "taken");
+});

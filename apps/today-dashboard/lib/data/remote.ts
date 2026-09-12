@@ -223,6 +223,7 @@ function scheduleStructureRow(row: any): any {
   delete structural.actual_name;
   delete structural.actual_taken_qty;
   delete structural.actual_source;
+  delete structural.supply_note; // GAS 공급 배정은 앱의 구조 재저장으로 덮어쓰지 않는다.
   delete structural.checkout_state;
   delete structural.settlement;
   delete structural.start_shift_days;

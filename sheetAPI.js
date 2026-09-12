@@ -1604,6 +1604,8 @@ function runFunction(funcName, params) {
     "repairTradeBillingCompanyDropdown",
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
+    "getInventorySupplyPolicy",
+    "setScheduleSupplyAllocation",
     "getInventoryRiskReport",
     "getInventoryRiskMonitorStatus",
     "setupInventoryRiskMonitor",
@@ -1876,10 +1878,10 @@ function runFunction(funcName, params) {
       var rsResult = repairTradeContractStatus.apply(null, rsArgs);
       return { success: true, function: funcName, result: rsResult, executionTime: (new Date() - startTime) + "ms" };
     }
-    if (["getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts"].indexOf(funcName)>=0) {
+    if (["getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts"].indexOf(funcName)>=0) {
       var inventoryArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
       if(!Array.isArray(inventoryArgs))inventoryArgs=[inventoryArgs];
-      var inventoryFunctions={getInventoryRiskReport:getInventoryRiskReport,getInventoryRiskMonitorStatus:getInventoryRiskMonitorStatus,
+      var inventoryFunctions={getInventorySupplyPolicy:getInventorySupplyPolicy,setScheduleSupplyAllocation:setScheduleSupplyAllocation,getInventoryRiskReport:getInventoryRiskReport,getInventoryRiskMonitorStatus:getInventoryRiskMonitorStatus,
         setupInventoryRiskMonitor:setupInventoryRiskMonitor,flushInventoryRiskAlerts:flushInventoryRiskAlerts};
       return {success:true,function:funcName,result:inventoryFunctions[funcName].apply(null,inventoryArgs),executionTime:(new Date()-startTime)+'ms'};
     }
@@ -2434,7 +2436,7 @@ function cloneScheduleNoSend_(input) {
 
     var writeState = { tradeId: newTradeId, contractRow: 0, scheduleStartRow: 0, scheduleCount: 0, ledgerRow: 0, ledgerSheet: ledger.sheet };
     try {
-      cloneWriteTrade_(ss, source, target, newTradeId, ledger.sheet, writeState);
+      cloneWriteTrade_(ss, source, target, newTradeId, ledger.sheet, writeState, availability);
       PropertiesService.getScriptProperties().setProperty('cloneNoSend_' + newTradeId, JSON.stringify({
         sourceTradeId: source.tradeId,
         sourceFingerprint: sourceFingerprint,
@@ -2684,7 +2686,7 @@ function cloneRentalRounds_(start, end) {
   return Math.max(1, Math.ceil((hours - 3) / 24));
 }
 
-function cloneWriteTrade_(ss, source, target, tradeId, ledgerSheet, state) {
+function cloneWriteTrade_(ss, source, target, tradeId, ledgerSheet, state, supplyPlan) {
   var contractSheet = ss.getSheetByName('계약마스터');
   var scheduleSheet = ss.getSheetByName('스케줄상세');
   if (!contractSheet || !scheduleSheet) throw new Error('contract or schedule sheet is missing');
@@ -2707,6 +2709,11 @@ function cloneWriteTrade_(ss, source, target, tradeId, ledgerSheet, state) {
       target.start.date, target.start.time, target.end.date, target.end.time, '대기', row[10] || '', row[11] || 0, source.name
     ];
   });
+  if(typeof inventorySupplyApplyRows_==='function'){
+    // Supplier commitments belong only to their original rental period.
+    scheduleValues.forEach(function(row){row[10]=String(row[10] || '').split(/\r?\n/).filter(function(line){return !/^\[(외부조달|상위대체)\]/.test(line);}).join('\n');});
+    inventorySupplyApplyRows_(scheduleValues,supplyPlan);
+  }
   scheduleSheet.getRange(scheduleStartRow, 1, count, 13).setValues(scheduleValues);
   scheduleSheet.getRange(scheduleStartRow, 5, count, 1).setNumberFormat('#,##0');
   scheduleSheet.getRange(scheduleStartRow, 6, count, 4).setNumberFormat('@');

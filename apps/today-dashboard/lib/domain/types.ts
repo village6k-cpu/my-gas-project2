@@ -42,6 +42,8 @@ export interface EquipmentItem {
   actualTakenQty?: number;
   /** 실제값 정정 출처. */
   actualSource?: EquipmentActualSource;
+  /** 요청 품목과 별도로 배정한 상위 기종 또는 외부 공급처 (GAS 정본). */
+  supplyNote?: string;
   setName?: string | null;
   isSetHeader?: boolean;
   isComponent?: boolean;

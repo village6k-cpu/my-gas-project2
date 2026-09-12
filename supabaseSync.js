@@ -1337,7 +1337,7 @@ function buildSupabaseTrades_(tids) {
   try {
     var sSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('스케줄상세');
     if (sSheet && sSheet.getLastRow() >= 2) {
-      var sRows = sSheet.getRange(2, 1, sSheet.getLastRow() - 1, 5).getValues();
+      var sRows = sSheet.getRange(2, 1, sSheet.getLastRow() - 1, 11).getValues();
       for (var si = 0; si < sRows.length; si++) {
         var sTid = String(sRows[si][1] || '').trim();
         if (!want[sTid]) continue;
@@ -1348,6 +1348,7 @@ function buildSupabaseTrades_(tids) {
           scheduleId: String(sRows[si][0] || '').trim(),
           name: sName,
           qty: Number(sRows[si][4]) || 1,
+          supplyNote: String(sRows[si][10] || "").split(/\r?\n/).filter(function(line){return /^\[(외부조달|상위대체)\]/.test(line);}).join("\n"),
           setName: sSet,
           // dashboard displayEquip과 같은 규칙: 단품 또는 세트 대표행
           isHeader: sSet === '' || sSet === sName
@@ -1371,6 +1372,7 @@ function buildSupabaseTrades_(tids) {
           sort: k,
           name: eq.name,
           qty: eq.qty,
+          supply_note: eq.supplyNote || "",
           set_name: eq.setName || null,
           is_set_header: eq.isHeader,
           is_component: !!eq.setName && !eq.isHeader,
@@ -1497,7 +1499,7 @@ function supaInsertAuthorizedScheduleItems_(cfg, tid, rows, addedScheduleIds) {
     // UI 소유 상태/불변 기준선은 복사하지 않는다. 재시도도 이미 존재하는 행을 덮지 않는다.
     inserts.push({ schedule_id: id, trade_id: tid, sort: row.sort, name: row.name, qty: row.qty,
       set_name: row.set_name || null, is_set_header: !!row.is_set_header,
-      is_component: !!row.is_component, category: row.category || null, checkout_state: 'pending' });
+      is_component: !!row.is_component, category: row.category || null, supply_note: row.supply_note || '', checkout_state: 'pending' });
   }
   var token = supaToken_(cfg);
   if (!token) return false;

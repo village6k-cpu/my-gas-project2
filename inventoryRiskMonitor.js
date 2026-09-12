@@ -55,7 +55,7 @@ function readInventoryRiskSnapshot_() {
   var schedules=schedule.rows.filter(function(r){return schedule.value(r,'스케줄ID') || schedule.value(r,'장비명');}).map(function(r){
     var tradeId=schedule.value(r,'거래ID'), c=contractById[tradeId] || {};
     return {id:schedule.value(r,'스케줄ID'),tradeId:tradeId,customer:c.name || '',tradeStatus:c.status || '',
-      setName:schedule.value(r,'세트명'),name:schedule.value(r,'장비명'),quantity:schedule.value(r,'수량'),
+      note:schedule.value(r,'비고'),setName:schedule.value(r,'세트명'),name:schedule.value(r,'장비명'),quantity:schedule.value(r,'수량'),
       start:inventoryRiskDateTime_(schedule.value(r,'반출일'),schedule.value(r,'반출시간')),
       end:inventoryRiskDateTime_(schedule.value(r,'반납일'),schedule.value(r,'반납시간')),status:schedule.value(r,'상태')};
   });
@@ -95,7 +95,7 @@ function readInventoryRiskSnapshot_() {
 
 function getInventoryRiskReport(force) {
   var props=PropertiesService.getScriptProperties(),cache=CacheService.getScriptCache();
-  var cacheKey='inventoryRisk_report_'+(props.getProperty(INVENTORY_RISK_PREFIX_+'dirty') || 'initial');
+  var cacheKey='inventoryRisk_report_v2_'+(props.getProperty(INVENTORY_RISK_PREFIX_+'dirty') || 'initial');
   var cached=force===true?null:inventoryRiskCacheRead_(cache,cacheKey);
   if(cached)return cached;
   var snapshot=readInventoryRiskSnapshot_();
@@ -129,7 +129,7 @@ function inventoryRiskCacheWrite_(cache,key,value,ttl) {
 }
 
 function inventoryRiskLabel_(kind) {
-  return {shortage:'재고 부족',capacity_tight:'여유 재고 10% 이하',turnaround:'반납·반출 간격 부족',unknown_equipment:'장비명 확인 필요',ambiguous_equipment:'장비명 중복 연결',unknown_stock:'보유·정비 수량 확인',
+  return {invalid_supply_allocation:'외부 조달·상위 대체 기록 확인',shortage:'재고 부족',capacity_tight:'여유 재고 10% 이하',turnaround:'반납·반출 간격 부족',unknown_equipment:'장비명 확인 필요',ambiguous_equipment:'장비명 중복 연결',unknown_stock:'보유·정비 수량 확인',
     invalid_quantity:'예약 수량 확인',invalid_schedule:'예약 날짜·시간 확인',overdue_return:'반납 처리 확인 필요',set_component_missing:'세트 구성품 확인',
     invalid_set_component:'세트 구성 수량 확인',maintenance_unquantified:'정비 수량 미기록',source_unavailable:'점검 데이터 연결 확인'}[kind] || '재고 위험';
 }

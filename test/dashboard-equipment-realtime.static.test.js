@@ -101,8 +101,8 @@ assert.match(
 );
 assert.match(
   availabilityRowsBody[0],
-  /readDashboardScheduleRows_\(sheet,\s*rowsToRead,\s*10\)/,
-  'availability checks should read full schedule columns only for matched equipment rows'
+  /readDashboardScheduleRows_\(sheet,\s*rowsToRead,\s*11\)/,
+  'availability checks must include column K supply allocations only for matched equipment rows'
 );
 
 assert.match(
@@ -119,7 +119,7 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardAvailabilityScheduleMap_\(sheet,\s*lastRow\)[\s\S]*getDashboardCacheJson_\(cache,\s*cacheKey\)[\s\S]*sheet\.getRange\(2,\s*1,\s*lastRow - 1,\s*10\)\.getValues\(\)[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*map,\s*300\)/,
+  /function getDashboardAvailabilityScheduleMap_\(sheet,\s*lastRow\)[\s\S]*getDashboardCacheJson_\(cache,\s*cacheKey\)[\s\S]*sheet\.getRange\(2,\s*1,\s*lastRow - 1,\s*11\)\.getValues\(\)[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*map,\s*300\)/,
   'dashboard availability schedule map must be cached so add-equipment checks avoid live schedule scans'
 );
 
