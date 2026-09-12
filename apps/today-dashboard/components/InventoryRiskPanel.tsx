@@ -9,7 +9,7 @@ export type InventoryRiskViewData = {
   inventoryCoverage?: { start?: string; end?: string; allFuture?: boolean; complete?: boolean; schedules?: number };
   inventoryGeneratedAt?: string;
   inventoryTurnaroundMinutes?: number;
-  inventoryMonitor?: { enabled?: boolean; lastScanAt?: string; error?: string | null };
+  inventoryMonitor?: { enabled?: boolean; lastScanAt?: string; notificationHour?: number; error?: string | null };
 };
 
 function when(value?: string) {
@@ -40,7 +40,7 @@ export function InventoryRiskPanel({ data }: { data: InventoryRiskViewData }) {
         {(stale || !data.inventoryCoverage?.allFuture) && <p className="text-[12px] font-bold text-attention-fg">⚠️ 최신 점검 결과 확인 필요 — 안전 여부를 확정할 수 없습니다.</p>}
         {!monitor?.enabled ? <p className="text-[12px] font-bold text-warn-fg">🔔 자동 경보 연결 확인 필요</p>
           : (monitor.error || monitorLate) ? <p className="text-[12px] font-bold text-attention-fg">🔔 자동 경보 지연·전송 상태 확인 필요</p>
-          : <p className="text-[11.5px] text-ink-mute">🔔 업무지시 채널 자동 경보 · 1분 간격 점검</p>}
+          : <p className="text-[11.5px] text-ink-mute">🔔 업무지시 채널 · 매일 {String(monitor.notificationHour ?? 9).padStart(2, "0")}:00 알림 · 1분 간격 점검</p>}
         {alerts.length > 0 && (
           <div className="flex flex-wrap gap-1.5 pt-1" role="group" aria-label="위험 종류">
             {[["all", `전체 ${alerts.length}`], ["conflict", `부족 ${conflicts}`], ["names", `이름 확인 ${alerts.filter(isNameRisk).length}`]].map(([value, label]) => (

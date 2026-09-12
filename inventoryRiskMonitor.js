@@ -149,9 +149,15 @@ function inventoryRiskAttachOperations_(result, report) {
   result.summary.inventoryConflicts=report.conflictCount;result.summary.inventoryTight=report.riskCount;
   var p=PropertiesService.getScriptProperties(),lastScan=JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lastScan') || 'null');
   result.inventoryMonitor={enabled:p.getProperty(INVENTORY_RISK_PREFIX_+'enabled')==='true',lastScanAt:lastScan?.at || null,
+    notificationFrequency:'daily',notificationHour:inventoryRiskNotificationHour_(),notificationTimeZone:'Asia/Seoul',
     error:p.getProperty(INVENTORY_RISK_PREFIX_+'lastError') || p.getProperty(INVENTORY_RISK_PREFIX_+'lastScanError') || null};
   delete result.inventoryHorizonDays;
   return result;
+}
+
+function inventoryRiskNotificationHour_() {
+  var value=PropertiesService.getScriptProperties().getProperty(INVENTORY_RISK_PREFIX_+'notificationHour'),hour=Number(value);
+  return value!==null && Number.isInteger(hour) && hour>=0 && hour<=23?hour:9;
 }
 
 function inventoryRiskDigest_(value) {
@@ -179,7 +185,7 @@ function inventoryRiskSlackText_(report, plan, detailUrl) {
   function when(s){return s?Utilities.formatDate(new Date(s),'Asia/Seoul','M/d HH:mm'):'일정 확인 필요';}
   if(report.sourceUnavailable)return '⚠️ *재고 점검 연결 확인 필요*\n전체 점검을 완료하지 못했습니다. 기존 위험은 유지합니다.\n<'+detailUrl+'|재고 점검 상태 보기>';
   if(!report.alerts.length)return (plan.resolved?'✅ 재고 위험 해소 · 이전 '+plan.resolved+'건':'✅ 재고 충돌·위험 없음')+'\n오늘부터 전체 향후 일정 점검 완료';
-  var lines=['🚨 *재고 경보* · 🔴 부족 '+report.conflictCount+'건 · ⚠️ 위험 '+report.riskCount+'건'];
+  var lines=[(plan.daily?'☀️ *아침 재고 점검*':'🚨 *재고 경보*')+' · 🔴 부족 '+report.conflictCount+'건 · ⚠️ 위험 '+report.riskCount+'건'];
   plan.changed.slice(0,5).forEach(function(a){
     var label=a.kind==='shortage'?a.shortage+'개 부족':inventoryRiskLabel_(a.kind);
     lines.push((a.kind==='shortage'?'🔴':'⚠️')+' *'+clean(a.equipment)+'* — '+label);
@@ -188,7 +194,7 @@ function inventoryRiskSlackText_(report, plan, detailUrl) {
     if(people.length)lines.push('　'+people.join(' · '));
     if(a.candidates?.length)lines.push('　이름 후보: '+a.candidates.slice(0,2).map(clean).join(' / '));
   });
-  if(plan.changed.length>5)lines.push('외 변경 '+(plan.changed.length-5)+'건');
+  if(plan.changed.length>5)lines.push((plan.daily?'외 ':'외 변경 ')+(plan.changed.length-5)+'건');
   lines.push('<'+detailUrl+'|전체 위험·예약 보기>');
   return lines.join('\n');
 }
