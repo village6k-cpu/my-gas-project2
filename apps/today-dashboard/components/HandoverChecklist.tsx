@@ -209,6 +209,8 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         )}
       </div>
 
+      {e.supplyNote && <div className="mb-2 ml-9 whitespace-pre-line rounded-md bg-brand-50 px-2 py-1 text-[12px] font-semibold text-brand-700">📦 {e.supplyNote}</div>}
+
       {!open && memos.length > 0 && (
         <div className="-mt-1 mb-2 ml-9 space-y-1">
           {memos.map((m) => (

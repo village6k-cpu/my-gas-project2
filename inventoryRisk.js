@@ -140,6 +140,15 @@ function buildInventoryRiskReport_(snapshot, options) {
   });
   coverageEnd=Math.max(coverageEnd,now+bufferMs+1);
   function allocate(row) {
+    var policyItem=identity.resolve(row.name).item;
+    if(typeof inventorySupplyExcluded_==='function' && inventorySupplyExcluded_(row.name,policyItem?.category))return;
+    if(row.note && /^\[(외부조달|상위대체)\]/m.test(row.note) && typeof inventorySupplyPhysicalRows_==='function') {
+      try {
+        var physical=inventorySupplyPhysicalRows_({equipment:row.name,qty:row.quantity,startDT:new Date(row.startMs),endDT:new Date(row.endMs),note:row.note});
+        physical.forEach(function(p,i){allocate(Object.assign({},row,{key:row.key+'|supply-'+i,name:p.equipment,quantity:p.qty,note:''}));});
+      } catch(error){risk('invalid_supply_allocation',row,{message:String(error.message || error)});allocate(Object.assign({},row,{note:''}));}
+      return;
+    }
     // A missing return checkbox is not proof of continuing possession. Keep it
     // visible as uncertainty without extending a past reservation into November.
     if(row.overdue && row.endMs<=from) {risk('overdue_return',row);return;}
@@ -178,7 +187,7 @@ function buildInventoryRiskReport_(snapshot, options) {
     var group=groups[key];
     if(!group.headers.length || !group.components.length || group.headers[0].endMs<from) return;
     group.set.components.forEach(function(c) {
-      if(c.tracked===false) return;
+      if(c.tracked===false || (typeof inventorySupplyExcluded_==='function' && inventorySupplyExcluded_(c.name,identity.resolve(c.name).item?.category))) return;
       var expected=identity.resolve(c.name).item;
       if(!expected) return;
       var present=group.components.some(function(r){return identity.resolve(r.name).item?.id===expected.id;});
@@ -215,6 +224,7 @@ function buildInventoryRiskReport_(snapshot, options) {
   alerts.sort(function(a,b){return (a.severity==='conflict'?0:1)-(b.severity==='conflict'?0:1) || String(a.start || '').localeCompare(String(b.start || '')) || a.key.localeCompare(b.key);});
   return {schema:'inventory-risk-report/v1',success:true,generatedAt:new Date(now).toISOString(),
     coverage:{start:new Date(from).toISOString(),end:new Date(coverageEnd).toISOString(),allFuture:true,complete:complete,schedules:relevant.length,skipped:skipped},
+    inventoryPolicy:typeof getInventorySupplyPolicy==='function'?getInventorySupplyPolicy():null,
     turnaroundMinutes:bufferMinutes,conflictCount:alerts.filter(function(a){return a.kind==='shortage';}).length,
     riskCount:alerts.filter(function(a){return a.kind!=='shortage';}).length,alerts:alerts};
 }

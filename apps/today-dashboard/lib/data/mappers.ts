@@ -74,6 +74,7 @@ export function itemFromRow(r: any): EquipmentItem {
     actualName: r.actual_name ?? undefined,
     actualTakenQty: r.actual_taken_qty ?? undefined,
     actualSource: r.actual_source ?? undefined,
+    supplyNote: r.supply_note ?? undefined,
     setName: r.set_name ?? undefined,
     isSetHeader: r.is_set_header || undefined,
     // 과거 동기화 데이터는 C/D 구조는 맞아도 is_component=false로 저장된 행이 있다.

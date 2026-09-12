@@ -33,7 +33,7 @@ already understood action; it does not replace business judgment.
 
 ## Source of truth
 
-Choose the narrowest authoritative live source for the requested fact:
+Choose the narrowest authoritative live source; apply [supply rules](references/inventory-supply-policy.md) for inventory or existing reservations:
 
 1. Current reservation, schedule, price, payment, inventory, and customer state
    comes from the matching Sheet/GAS/API read route and its readback.

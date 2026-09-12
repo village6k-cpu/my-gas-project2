@@ -140,6 +140,8 @@ function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: E
         </div>
       )}
 
+      {e.supplyNote && <div className="mb-2 ml-9 whitespace-pre-line rounded-md bg-brand-50 px-2 py-1 text-[12px] font-semibold text-brand-700">📦 {e.supplyNote}</div>}
+
       {open && (
         <div className="space-y-2 bg-paper/70 py-2.5">
           <div className="rounded-lg bg-line/20 px-2.5 py-1.5 text-[12px] text-ink-mute">
