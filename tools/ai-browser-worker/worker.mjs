@@ -694,7 +694,7 @@ export function buildHermesPrompt(job, options = {}) {
     ? `\nREAD-ONLY VILLAGE-AI RAG TOOL:\n${options.ragContext.enabled ? 'enabled' : 'disabled'}; ${ragInvocation}; output: {text,confidence,ownerReview,knowledgeSource,usedSources,topSimilarity,logId,error}.\nUse as long-term reference memory after Kakao; put visible Kakao context in the question string itself. RAG must not replace current Kakao screen evidence or Sheets/GAS, and never covers inventory, booking, mutations, or duplicates. CURRENT_CONFIRMED_POLICY wins over older RAG conflicts. Uncovered policy FAQ: high/retrieved RAG may support auto_send; low/no_match/error ignore; ownerReview=true review. RAG 답변을 그대로 복붙하지 말고 현재 Kakao 대화와 합성한다.\n`
     : '';
   const promptPolicyConfig = loadCurrentConfirmedPolicyConfig();
-  const currentConfirmedPolicyText = options.ragContext && promptPolicyConfig
+  const currentConfirmedPolicyText = promptPolicyConfig
     ? `\nCURRENT_CONFIRMED_POLICY: ${promptPolicyConfig.prompt.current_confirmed_policy}\n`
     : '';
   const policyCalcRuleLine = text(promptPolicyConfig?.prompt?.calc_rule_line).trim()

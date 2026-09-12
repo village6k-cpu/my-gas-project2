@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID as defaultRandomUUID } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const { CorrectionStageError, runRegisteredTradeCorrection } = require('../../scripts/windows/village-registered-trade-correction.js');
@@ -271,7 +271,7 @@ export async function executeVillageRegisteredReservationChange(request = {}, op
   const operationFence = options.operationFence || dependencies.operationFence;
   const operationId = text(operationFence?.operation_id);
   if (!operationId) throw new Error('operation fence operation_id is required');
-  const uuid = dependencies.randomUUID || crypto.randomUUID;
+  const uuid = dependencies.randomUUID || defaultRandomUUID;
   const now = dependencies.now || (() => new Date());
   const receiptId = text(uuid());
   if (!receiptId) throw new Error('receipt_id generation failed');

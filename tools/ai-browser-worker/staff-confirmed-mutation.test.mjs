@@ -7,6 +7,16 @@ import {
   validateStaffConfirmedMutation
 } from './staff-confirmed-mutation.mjs';
 
+test('native receipt generation works without a mocked UUID provider', async () => {
+  const receipt = await executeVillageRegisteredReservationChange({
+    job: {job_id:'native-uuid-test',room_key:'test:local',room_revision:1}, roomRevision:1,
+    mutation: {confirmed:false}
+  }, {operationFence:{operation_id:'native-uuid-test'}});
+  assert.equal(receipt.status,'failed');
+  assert.equal(receipt.error.code,'invalid_mutation');
+  assert.match(receipt.receipt_id,/^[0-9a-f-]{36}$/);
+});
+
 const MUTATION = {
   confirmed: true,
   kind: 'equipment_replace',
