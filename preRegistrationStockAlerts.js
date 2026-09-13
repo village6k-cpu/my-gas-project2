@@ -96,9 +96,13 @@ function preRegistrationStockReceipt_(pending) {
 function preRegistrationStockDeliver_(evaluation) {
   var p=PropertiesService.getScriptProperties(),key=PREREG_STOCK_PREFIX_+'state_'+evaluation.requestId;
   var state=JSON.parse(p.getProperty(key) || '{}'),reconciled=false,posting=false;
-  var fingerprint=preRegistrationStockHash_({customer:evaluation.customer,start:evaluation.start,end:evaluation.end,
+  var signature={customer:evaluation.customer,start:evaluation.start,end:evaluation.end,
     shortages:evaluation.shortages.map(function(s){return [s.equipment,s.start,s.end,s.requested,s.available];}).sort(),
-    uncertain:preRegistrationStockNotifiableUncertainty_(evaluation).map(function(a){return [a.kind,a.equipment,a.component || ''];}).sort()});
+    uncertain:preRegistrationStockNotifiableUncertainty_(evaluation).map(function(a){return [a.kind,a.equipment,a.component || ''];}).sort()};
+  var fingerprint=preRegistrationStockHash_(signature),legacyFingerprint=null;
+  if(evaluation.shortages.length || signature.uncertain.some(function(a){return a[0]!=='source_unavailable';}))
+    legacyFingerprint=preRegistrationStockHash_(Object.assign({},signature,{uncertain:signature.uncertain.concat([
+      ['source_unavailable','실재고·별칭 연결 확인 필요','']]).sort()}));
   var actionable=evaluation.shortages.length+evaluation.uncertain.length>0;
   function save(){p.setProperty(key,JSON.stringify(state));}
   try {
@@ -114,7 +118,12 @@ function preRegistrationStockDeliver_(evaluation) {
       } else if(state.pending.hash!==fingerprint || !actionable) {state.pending=null;save();}
     }
     if(!actionable) {state.lastHash='';state.end=evaluation.end;state.pending=null;save();return {status:'clear',requestId:evaluation.requestId};}
-    if(state.lastHash===fingerprint)return {status:reconciled?'sent':'already_sent',requestId:evaluation.requestId,receipt:state.lastReceipt};
+    if(state.lastHash===fingerprint || legacyFingerprint && state.lastReceipt && state.lastHash===legacyFingerprint) {
+      // Any pending receipt reaching here has complete absence evidence and no
+      // active relay/uncertain attempt. The verified equivalent notice owns it.
+      if(state.lastHash!==fingerprint || state.pending){state.lastHash=fingerprint;state.pending=null;state.error=null;save();}
+      return {status:reconciled?'sent':'already_sent',requestId:evaluation.requestId,receipt:state.lastReceipt};
+    }
     if(!state.pending)state.pending={id:Utilities.getUuid(),hash:fingerprint,desiredHash:fingerprint,actionable:true,channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
       createdAt:Date.now(),text:preRegistrationStockText_(evaluation)};
     state.end=evaluation.end;state.pending.attemptedAt=Date.now();delete state.pending.transportRejected;save();
