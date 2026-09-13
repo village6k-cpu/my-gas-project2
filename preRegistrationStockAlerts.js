@@ -119,7 +119,9 @@ function preRegistrationStockDeliver_(evaluation) {
     }
     if(!actionable) {state.lastHash='';state.end=evaluation.end;state.pending=null;save();return {status:'clear',requestId:evaluation.requestId};}
     if(state.lastHash===fingerprint || legacyFingerprint && state.lastReceipt && state.lastHash===legacyFingerprint) {
-      if(state.lastHash!==fingerprint){state.lastHash=fingerprint;save();}
+      // Any pending receipt reaching here has complete absence evidence and no
+      // active relay/uncertain attempt. The verified equivalent notice owns it.
+      if(state.lastHash!==fingerprint || state.pending){state.lastHash=fingerprint;state.pending=null;state.error=null;save();}
       return {status:reconciled?'sent':'already_sent',requestId:evaluation.requestId,receipt:state.lastReceipt};
     }
     if(!state.pending)state.pending={id:Utilities.getUuid(),hash:fingerprint,desiredHash:fingerprint,actionable:true,channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),

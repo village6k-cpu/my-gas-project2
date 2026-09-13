@@ -371,3 +371,15 @@ test('legacy verified source-outage fingerprints migrate without resending the s
    assert.notEqual(JSON.parse(props.getProperty('preRegStock_v1_state_'+evaluation.requestId)).lastHash,oldHash);
  }
 });
+
+test('legacy receipt migration clears an absent equivalent pending notice before a relay can claim it',()=>{
+ const {c,props}=env(),evaluation=c.preRegistrationStockEvaluate_(request(),snapshot());
+ const signature={customer:evaluation.customer,start:evaluation.start,end:evaluation.end,
+   shortages:evaluation.shortages.map(s=>[s.equipment,s.start,s.end,s.requested,s.available]).sort(),uncertain:[]};
+ const hash=c.preRegistrationStockHash_(signature),oldHash=c.preRegistrationStockHash_({...signature,uncertain:[['source_unavailable','실재고·별칭 연결 확인 필요','']]});
+ const now=c.Date.now(),key='preRegStock_v1_state_'+evaluation.requestId;
+ props.setProperty(key,JSON.stringify({lastHash:oldHash,lastReceipt:{id:'verified',ts:'123.456',channel:'C0B769B394K'},pending:{id:'unsent',hash,channel:'C0B769B394K',text:c.preRegistrationStockText_(evaluation),createdAt:now-120000,attemptedAt:now-60001}}));
+ let posts=0;c.inventoryRiskSlack_=method=>{if(method==='chat.postMessage')posts++;return {messages:[]};};
+ assert.equal(c.preRegistrationStockDeliver_(evaluation).status,'already_sent');assert.equal(posts,0);
+ assert.equal(JSON.parse(props.getProperty(key)).pending,null);
+});
