@@ -76,7 +76,7 @@ function preRegistrationStockReceipt_(pending) {
     if(cursor)args.cursor=cursor;
     var page=inventoryRiskSlack_('conversations.history',args);
     var message=(page.messages || []).find(function(m){return m.metadata?.event_type==='preregistration_stock_alert' &&
-      m.metadata?.event_payload?.id===pending.id && m.text===pending.text && (!pending.ts || pending.ts===m.ts);});
+      m.metadata?.event_payload?.id===pending.id && stockAlertSlackText_(m.text)===stockAlertSlackText_(pending.text) && (!pending.ts || pending.ts===m.ts);});
     if(message)return {found:true,ts:message.ts};
     cursor=page.response_metadata?.next_cursor || '';
     if(!cursor && !page.has_more)return {found:false,complete:true};

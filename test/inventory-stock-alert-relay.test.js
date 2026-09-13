@@ -17,6 +17,12 @@ test('a prior accepted post is found instead of posted a second time',async()=>{
  const e=env();e.messages.push({ts:'100.1',text:e.p.text,metadata:{event_type:'preregistration_stock_alert',event_payload:{id:e.p.id}}});
  assert.equal((await relayOnce(e)).status,'sent');assert.ok(!e.calls.includes('chat.postMessage'));
 });
+
+test('a real Slack emoji-normalized receipt is acknowledged without a duplicate post',async()=>{
+ const e=env({text:'🚨 재고 부족\n🗓️ 일정\n🔴 장비\n❓ 별칭\n👉 확인'});
+ e.messages.push({ts:'100.1',text:':rotating_light: 재고 부족\n:spiral_calendar_pad: 일정\n:red_circle: 장비\n:question: 별칭\n:point_right: 확인',metadata:{event_type:'preregistration_stock_alert',event_payload:{id:e.p.id}}});
+ assert.equal((await relayOnce(e)).status,'sent');assert.ok(!e.calls.includes('chat.postMessage'));
+});
 test('changed intent is discarded only after complete absence evidence; no obsolete alert is sent',async()=>{
  const e=env({desiredHash:'changed'});assert.equal((await relayOnce(e)).status,'obsolete');assert.equal(e.acks[0].obsolete,true);assert.ok(!e.calls.includes('chat.postMessage'));
 });
