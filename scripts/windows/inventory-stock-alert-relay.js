@@ -48,6 +48,17 @@ async function relayOnce({gas,slack,channel,now=Date.now}) {
   return gas('acknowledgePreRegistrationStockAlertRelay',[{...ack,delivered:true,channel,ts:receipt.ts}]);
 }
 
+async function relayWithBusyRetry(clients,wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))) {
+  // The GAS heartbeat and Windows task both run each minute. Retrying inside
+  // this run prevents their fixed phases from colliding indefinitely.
+  const delays=[5000,15000];
+  for(let attempt=0;;attempt++) {
+    const result=await relayOnce(clients);
+    if(result.status!=='busy' || attempt===delays.length)return result;
+    await wait(delays[attempt]);
+  }
+}
+
 function parseArgs(args) {
   const result={mode:'once',stateDir:path.resolve(__dirname,'../../../runtime/inventory-stock-alerts')};
   for(let i=0;i<args.length;i++) {
@@ -111,11 +122,11 @@ async function main() {
       fs.writeFileSync(configPath,JSON.stringify({channel},null,2));
       save({status:'configured',channel,error:null});return;
     }
-    result=await relayOnce({...clients,channel});
+    result=await relayWithBusyRetry({...clients,channel});
     if(result.receipt)state.lastReceipt=result.receipt;
     save({status:result.status,requestId:result.requestId || null,error:null});
   }catch(error){save({status:'error',error:/^relay_[a-z_]+$/.test(error.message)?error.message:'relay_operation_failed'});process.exitCode=1;}
 }
 
-module.exports={findReceipt,relayOnce,parseArgs,createClients};
+module.exports={findReceipt,relayOnce,relayWithBusyRetry,parseArgs,createClients};
 if(require.main===module)main().catch(()=>{console.error('relay_start_failed');process.exitCode=1;});
