@@ -170,7 +170,10 @@ function flushInventoryRiskAlerts(event) {
   }finally{inventoryRiskRelease_(owner);}
 }
 
-function inventoryRiskHeartbeat(){return flushInventoryRiskAlerts();}
+function inventoryRiskHeartbeat(){
+  if(typeof flushPreRegistrationStockAlerts==='function')flushPreRegistrationStockAlerts();
+  return flushInventoryRiskAlerts();
+}
 
 function requestInventoryRiskScan_() {
   // Called from booking locks too: no nested locks or network work here.

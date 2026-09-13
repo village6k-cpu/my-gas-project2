@@ -12272,6 +12272,7 @@ function insertAndCheckRequest(req) {
     return _insertAndCheckRequest(req);
   } finally {
     insertLock.releaseLock();
+    if(typeof flushPreRegistrationStockAlerts==='function')flushPreRegistrationStockAlerts();
   }
 }
 
@@ -13445,6 +13446,7 @@ function processByReqID(sheet, triggerRowOrReqID) {
   return _processByReqID(sheet, triggerRow);
   } finally {
     lock.releaseLock();
+    if(typeof flushPreRegistrationStockAlerts==='function')flushPreRegistrationStockAlerts();
   }
 }
 
@@ -13761,6 +13763,10 @@ function _processByReqID(sheet, triggerRow) {
       }
     }
   }
+
+  // 전개·서식까지 저장한 완성된 요청만 검사 대상으로 게시한다.
+  SpreadsheetApp.flush();
+  if(typeof queuePreRegistrationStockCheck_==='function')queuePreRegistrationStockCheck_(triggerReqID);
 
   // ※ 가용확인 알림톡은 여기서 자동발송하지 않음
   // → H열 "발송" 선택 시 sendAvailAlimtalk()에서 별도 발송 (결재 후)
@@ -16289,6 +16295,15 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     }
   }
   const directRegisterApproved = requestHasDirectRegisterApproval_(allData, reqID);
+  // A real shortage must reach the owner before schedule/contract writes, including
+  // explicit staff-approved registrations. This does not replace their approval.
+  if(typeof checkPreRegistrationStockBeforeRegister_==='function') {
+    var stockNotice=checkPreRegistrationStockBeforeRegister_(reqID);
+    if(stockNotice.ready===false) {
+      markRequestRegisterFailed_(sheet,allData,reqID,'재고 경보 전달 확인 대기 — 확인요청은 보존되며 알림은 자동 재시도합니다');
+      return;
+    }
+  }
   var blockingRegisterIssue = getBlockingRegisterIssue_(allData, reqID, directRegisterApproved);
   if (blockingRegisterIssue) {
     markRequestRegisterFailed_(sheet, allData, reqID, blockingRegisterIssue);
