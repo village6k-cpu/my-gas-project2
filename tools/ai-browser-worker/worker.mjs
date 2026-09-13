@@ -7077,7 +7077,8 @@ export function isUsableKakaoConversationEvidence(evidence = {}) {
     .map((value) => text(value).replace(/\s+/g, ' ').trim())
     .filter(Boolean)
     .some((value) => {
-      if (KAKAO_CONVERSATION_CHROME_ONLY_LINES.has(value) || isKakaoUiPlaceholderLine(value)) return false;
+      if (KAKAO_CONVERSATION_CHROME_ONLY_LINES.has(value) || isKakaoUiPlaceholderLine(value)
+        || value.startsWith('카카오 고객 메모(')) return false;
       if (hints.some((hint) => value === hint)) return false;
       return true;
     });
@@ -7327,6 +7328,15 @@ export function buildKakaoConversationTextExpression() {
       order: index + 1,
       text: row.text
     }));
+    // The room's memo tooltip is populated even while collapsed, so body.innerText
+    // omits contact details stored there. Preserve it as bounded reference data,
+    // separately from customer/staff messages and their authorization evidence.
+    for (const button of deepQueryAll('button.btn_memo')) {
+      if (!visible(button) || isChatListRow(button)) continue;
+      const memo = normalize(button.querySelector?.('.txt_tooltip')?.textContent || '')
+        .replace(/\s+/g, ' ').slice(0, 1000);
+      if (memo) pushText(`카카오 고객 메모(직원 참고 정보, 대화 메시지 아님): ${memo}`);
+    }
     return { title: document.title, href: location.href, text: parts.join('\n'), messages };
   }.toString()})()`;
 }
