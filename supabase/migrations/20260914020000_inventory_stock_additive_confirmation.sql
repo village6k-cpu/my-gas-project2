@@ -11,8 +11,8 @@ begin
  -- An owner-confirmed NEW asset does not mutate a frozen snapshot item. Keep
  -- pending audit creations separate, and reserve their selected IDs below.
  if exists(select 1 from village.inventory_audit_decisions d join village.inventory_audit_sessions a on a.id=d.session_id
-   where a.status='draft' and d.resolution='create_equipment' and
-   lower(regexp_replace(d.new_equipment_payload->>'name','[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g')))
+   where a.status not in ('approved','cancelled') and d.resolution='create_equipment' and
+   (lower(regexp_replace(d.new_equipment_payload->>'name','[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g')) or exists(select 1 from jsonb_array_elements_text(coalesce(d.new_equipment_payload->'aliases','[]'::jsonb)) alias where lower(regexp_replace(alias,'[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g')))))
  then raise exception 'equipment_pending_in_audit'; end if;
  select * into v_prior from village.inventory_stock_confirmations where source_key=p_source_key for update;
  if found then
@@ -34,7 +34,7 @@ begin
   union all
   select coalesce(nullif(btrim(d.resolved_equipment_id),''),nullif(btrim(d.new_equipment_payload->>'equipment_id'),''))
   from village.inventory_audit_decisions d join village.inventory_audit_sessions a on a.id=d.session_id
-  where a.status='draft' and d.resolution='create_equipment'
+  where a.status not in ('approved','cancelled') and d.resolution='create_equipment'
  ) reserved where equipment_id ~ ('^'||v_prefix||'-[0-9]+
  v_id:=v_prefix||'-'||lpad(v_count::text,greatest(3,length(v_count::text)),'0');
  insert into village.equipment_ledger(equipment_id,name,major,category,stock_total,stock_maint,price,state,note,verify_status,last_verified_at,last_verified_by,source)
