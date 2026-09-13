@@ -58,7 +58,8 @@ fi
 
 echo ""
 echo "▶ 통합 검증..."
-for f in test/*.static.test.js; do
+npm ci --prefix apps/today-dashboard --ignore-scripts
+for f in test/*.test.js; do
   node "$f"
 done
 node --check checkAvailability.js

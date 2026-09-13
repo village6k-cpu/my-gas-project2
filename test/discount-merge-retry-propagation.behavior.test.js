@@ -39,8 +39,23 @@ test('빈 카카오+빈 고객DB는 M열에 일반을 물질화하지 않는다 
   assert.equal(ctx._resolveConfirmRequestDiscountOrBlank_(undefined, undefined), '');
   assert.equal(ctx._resolveConfirmRequestDiscountOrBlank_('학생', ''), '학생');
   assert.equal(ctx._resolveConfirmRequestDiscountOrBlank_('', '단골'), '단골');
-  // 확인요청 삽입은 공란 보존 리졸버를 사용해야 한다
-  assert.match(backend, /var resolvedDiscount = _resolveConfirmRequestDiscountOrBlank_\(/);
+  // Execute the insertion decision so a new branch does not break a formatting
+  // assertion while an accidental default to '일반' still fails the test.
+  const assignment = backend.match(/var resolvedDiscount\s*=\s*[\s\S]*?;/);
+  assert.ok(assignment, '확인요청 할인 결정식이 있어야 한다');
+  for (const scenario of [
+    { chat: '', db: '', bootstrap: false, fenced: false, expected: '' },
+    { chat: '', db: '단골', bootstrap: false, fenced: false, expected: '단골' },
+    { chat: '학생', db: '단골', bootstrap: false, fenced: false, expected: '학생' },
+    { chat: '', db: '단골', bootstrap: true, fenced: false, expected: '' },
+    { chat: '', db: '단골', bootstrap: false, fenced: true, expected: '' },
+    { chat: '학생', db: '단골', bootstrap: true, fenced: false, expected: '학생' }
+  ]) {
+    Object.assign(ctx, { req: { 할인유형: scenario.chat }, dbDiscount: scenario.db,
+      confirmedRegistrationBootstrap: scenario.bootstrap, customerPendingFence: scenario.fenced });
+    vm.runInContext(assignment[0], ctx);
+    assert.equal(ctx.resolvedDiscount, scenario.expected, JSON.stringify(scenario));
+  }
 });
 
 test('고객DB 강한 할인(단골/제휴/학생)을 확인요청의 일반이 조용히 덮어쓰지 않는다', () => {

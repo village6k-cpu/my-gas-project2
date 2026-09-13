@@ -11,6 +11,24 @@ DEPLOY_ID="AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0Mmx
 DESC="${1:-deploy $(git rev-parse --short HEAD)}"
 SKIP_GUARD="${SKIP_DRIFT_GUARD:-0}"
 
+# A queued workflow must never overwrite a newer main deployment. Check again
+# after the remote read because main can advance while tests or clasp are busy.
+require_current_main() {
+  [[ "${GITHUB_ACTIONS:-}" != "true" ]] && return 0
+  if [[ "${GITHUB_REF:-}" != "refs/heads/main" ]]; then
+    echo "::error::GAS CI 배포는 main에서만 실행할 수 있습니다."
+    exit 1
+  fi
+  local head latest
+  head="$(git rev-parse HEAD)"
+  latest="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+  if [[ "$head" != "$latest" ]]; then
+    echo "::notice::더 최신 main 커밋이 있어 이전 실행의 GAS 배포를 건너뜁니다."
+    exit 0
+  fi
+}
+require_current_main
+
 # 1. GAS 원격 드리프트 확인 — GAS 편집기/다른 맥에서만 작업된 변경이 있으면 덮어쓰지 않고 중단
 TMP_GAS="$(mktemp -d /tmp/gas-ci-remote.XXXXXX)"
 trap 'rm -rf "$TMP_GAS"' EXIT
@@ -60,6 +78,7 @@ tar -czf "gas-backup/gas-remote-before-push-$TS.tar.gz" -C "$TMP_GAS" .
 echo "▶ GAS 백업: gas-backup/gas-remote-before-push-$TS.tar.gz"
 
 # 3. push + deploy (기존 웹앱 URL 유지)
+require_current_main
 echo "▶ clasp push..."
 PUSH_OUT="$(clasp push -f 2>&1)"
 echo "$PUSH_OUT"

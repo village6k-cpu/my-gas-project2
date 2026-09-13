@@ -25,7 +25,7 @@ function parse(result) {
   return JSON.parse(result.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1));
 }
 
-test('kakaoworker Gateway task plan is profile-scoped, clean-lineage, and disabled by default', () => {
+test('kakaoworker Gateway task plan is profile-scoped, clean-lineage, and disabled by default', { skip: process.platform !== 'win32' }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'kakao-gateway-task-'));
   const hermesHome = path.join(temp, 'hermes');
   const python = path.join(hermesHome, 'hermes-agent', 'venv', 'Scripts', 'python.exe');
@@ -69,7 +69,7 @@ test('kakaoworker launcher requires an exact plugin receipt and never uses the i
   assert.match(source, /gateway['"],?\s*['"]run/i);
 });
 
-test('Gateway bridge token setup is plan-first, profile-scoped, atomic, and idempotent', () => {
+test('Gateway bridge token setup is plan-first, profile-scoped, atomic, and idempotent', { skip: process.platform !== 'win32' }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'kakao-gateway-token-'));
   const profileRoot = path.join(temp, 'profiles', 'kakaoworker');
   const envFile = path.join(profileRoot, '.env.windows-production');
@@ -100,7 +100,7 @@ test('Gateway bridge token setup is plan-first, profile-scoped, atomic, and idem
   assert.match(escaped.stderr, /escapes kakaoworker profile/i);
 });
 
-test('no-send health requires Gateway transport, fresh consumer, and every send/write gate off', () => {
+test('no-send health requires Gateway transport, fresh consumer, and every send/write gate off', { skip: process.platform !== 'win32' }, () => {
   const modulePath = path.join(scripts, 'KakaoLiveNoSend.Common.psm1');
   const result = parse(run(`
     Import-Module ${psLiteral(modulePath)} -Force
