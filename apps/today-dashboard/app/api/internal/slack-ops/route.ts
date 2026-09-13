@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { applySlackOpsPlan, lookupSlackOpsEvent, markSlackOpsEvent, scanSlackOpsEvents } from "@/lib/server/slackOps";
 import { lookupSlackEquipment, recordSlackEquipment, syncSlackEquipmentNotes } from '@/lib/server/slackEquipment';
 
-import {scanStockQuestions,confirmStockQuestion,retryConfirmedStockMirrors} from '@/lib/server/slackStock';
+import {getStockReports,scanStockQuestions,confirmStockQuestion,retryConfirmedStockMirrors} from '@/lib/server/slackStock';
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -34,7 +34,8 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json() as Record<string, unknown>;
     const mode = String(body.mode || "");
-    if (mode === 'stock_scan') return NextResponse.json(await scanStockQuestions());
+    if (mode === 'stock_reports') return NextResponse.json(await getStockReports(body.reportId));
+    if (mode === 'stock_scan') return NextResponse.json(await scanStockQuestions(body.threads));
     if (mode === 'stock_sync' && body.execute === true) return NextResponse.json({ok:true,mirrors:await retryConfirmedStockMirrors()});
     if (mode === 'stock_confirm') return NextResponse.json(await confirmStockQuestion(body,body.execute === true));
     if (mode === 'equipment_lookup') return NextResponse.json(await lookupSlackEquipment(body.event, body.query));
