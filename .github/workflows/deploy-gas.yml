@@ -12,15 +12,8 @@ name: Deploy GAS
 on:
   push:
     branches: [main]
-    paths:
-      - "*.js"
-      - "*.html"
-      - "appsscript.json"
-      - "scripts/ci-deploy-gas.sh"
-      - "scripts/integrate.sh"
-      - "scripts/windows/**"
-      - "test/**"
-      - ".github/workflows/deploy-gas.yml"
+    # Every newer main commit owns a replacement run, including docs-only commits.
+    # Otherwise a superseded GAS run could skip with no successor to deploy it.
   workflow_dispatch:
     inputs:
       skip_drift_guard:
@@ -65,6 +58,12 @@ jobs:
         run: npm ci --prefix apps/today-dashboard --ignore-scripts
       - name: 전체 회귀 검사
         shell: bash
+        env:
+          # Node and PowerShell must share one path spelling; the Windows default
+          # TEMP can contain an 8.3 alias (RUNNER~1) that FileInfo expands differently.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: |
           mkdir -p test-results
           fails=0
