@@ -390,7 +390,7 @@ if ($GatewayMaintenance.IsPresent) {
         $verified.runtime = Get-KakaoWatcherRuntime
         $gatewayRuntime = Get-KakaoworkerGatewayRuntime
         $gatewayHealthy = $null -ne $verified.bridge -and (Test-KakaoGatewayWatchdogHealth -Health $verified.bridge `
-            -RuntimeProbe $verified.runtime -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence) -and
+            -RuntimeProbe $verified.runtime -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence -RequireIdleQueue $true) -and
             $verified.bridge.gateway.unnotified_application_failures -eq 0
     } while (-not $gatewayHealthy -and [DateTime]::UtcNow -lt $deadline)
     if (-not $gatewayHealthy) { throw 'Gateway maintenance direct readback failed.' }

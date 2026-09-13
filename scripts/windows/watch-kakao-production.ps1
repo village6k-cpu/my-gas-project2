@@ -35,6 +35,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Report-WatchdogIncident {
+    param([switch]$Healthy, [string]$Reason = 'runtime_validation_failed')
+    if ($WhatIfPreference) { return }
+    $notifier = Join-Path $PSScriptRoot 'kakao-runtime-incident.js'
+    $incidentArgs = if ($Healthy.IsPresent) { @('--healthy') } else { @('--failure', $Reason) }
+    & $NodePath $notifier @incidentArgs | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning 'Kakao runtime incident notification is awaiting delivery.' }
+}
+
+$incidentReason = 'runtime_validation_failed'
+try {
 Import-Module (Join-Path $PSScriptRoot 'KakaoStaging.Common.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'KakaoLive.Common.psm1') -Force
 
@@ -133,9 +144,35 @@ function Test-KakaoworkerGatewayHealthy {
     catch { return $false }
 }
 
+function Get-WatchdogGatewayRuntime {
+    $gatewayPidPath = Join-Path $env:LOCALAPPDATA 'hermes\profiles\kakaoworker\gateway.pid'
+    $gatewayProcessId = [int](([IO.File]::ReadAllText($gatewayPidPath, [Text.Encoding]::UTF8) | ConvertFrom-Json).pid)
+    return [pscustomobject]@{
+        profile = 'kakaoworker'
+        pid = $gatewayProcessId
+        pluginPath = [string]$pluginReceipt.targetPluginPath
+        manifestSha256 = [string]$pluginReceipt.manifestSha256
+        pluginReceiptVerified = Test-KakaoPluginInstallReceipt -Receipt $pluginReceipt
+    }
+}
+
+function Confirm-WatchdogRecovery {
+    $confirmedProbe = Get-KakaoDirectProbe
+    $confirmedHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:8787/health' -TimeoutSec 5
+    if (-not (Test-KakaoLiveHealth -Health $confirmedHealth -RuntimeProbe $confirmedProbe)) {
+        throw 'Kakao recovery did not restore verified capture.'
+    }
+    if ($ConfirmKakaoGatewayCutover.IsPresent -and -not (Test-KakaoGatewayWatchdogHealth -Health $confirmedHealth `
+        -RuntimeProbe $confirmedProbe -GatewayRuntime (Get-WatchdogGatewayRuntime) -SmokeEvidence $smokeEvidence)) {
+        throw 'Kakao recovery did not restore verified Gateway processing.'
+    }
+    Report-WatchdogIncident -Healthy
+}
+
 $pluginReceipt = $null
 $smokeEvidence = $null
 if ($ConfirmKakaoGatewayCutover.IsPresent) {
+    $incidentReason = 'plugin_validation_failed'
     if ([string]::IsNullOrWhiteSpace($BenchmarkReportPath)) { throw 'Gateway watchdog requires BenchmarkReportPath.' }
     $resolvedBenchmarkReportPath = (Resolve-Path -LiteralPath $BenchmarkReportPath -ErrorAction Stop).Path
     $benchmarkReport = [IO.File]::ReadAllText($resolvedBenchmarkReportPath, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
@@ -151,6 +188,7 @@ if ($ConfirmKakaoGatewayCutover.IsPresent) {
         throw 'Gateway watchdog refuses installed plugin hash drift.'
     }
     if (-not (Test-KakaoworkerGatewayHealthy)) {
+        $incidentReason = 'gateway_unavailable'
         if (-not $PSCmdlet.ShouldProcess('Hermes_Gateway_Kakaoworker_Native', 'Heal only the kakaoworker Gateway')) { return }
         $gatewayRestart = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'restart-hermes-gateway.ps1')).Path
         & $gatewayRestart -Target kakaoworker -HealOnly | Out-Null
@@ -170,8 +208,10 @@ if ($IncludeGateway.IsPresent) {
 # 빈 배열이 $null로 언롤되는 PowerShell 특성 방어: 파이프로 걸러 항상 배열화한다.
 $unhealthy = @(Get-UnhealthyComponents -Names $componentNames | Where-Object { $_ })
 if ($unhealthy.Count -eq 0) {
+    $incidentReason = 'capture_unavailable'
     $runtimeProbe = Get-KakaoDirectProbe
     if ($ConfirmKakaoGatewayCutover.IsPresent) {
+        $incidentReason = 'gateway_unavailable'
         $gatewayHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:8787/health' -TimeoutSec 5
         $pidPath = Join-Path $env:LOCALAPPDATA 'hermes\profiles\kakaoworker\gateway.pid'
         $gatewayPid = if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
@@ -190,14 +230,16 @@ if ($unhealthy.Count -eq 0) {
             throw 'Gateway watchdog direct plugin/consumer/queue/safety readback failed; refusing broad recovery.'
         }
         if (Test-KakaoGatewayWatchdogHealth -Health $gatewayHealth -RuntimeProbe $runtimeProbe `
-            -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence) { return }
+            -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence) { Report-WatchdogIncident -Healthy; return }
     }
-    elseif (Test-KakaoLiveRuntimeProbe -Probe $runtimeProbe) { return }
+    elseif (Test-KakaoLiveRuntimeProbe -Probe $runtimeProbe) { Report-WatchdogIncident -Healthy; return }
     if (-not $PSCmdlet.ShouldProcess('Windows Kakao production authentication/watcher', 'Recover only the failed live layer')) {
         return
     }
     Write-WatchdogLog ("runtime probe requires recovery: {0}" -f (Get-KakaoLiveRuntimeState -Probe $runtimeProbe))
+    $incidentReason = 'recovery_incomplete'
     Invoke-KakaoLiveEvaluator
+    Confirm-WatchdogRecovery
     Write-WatchdogLog 'live authentication/watcher evaluation completed'
     return
 }
@@ -207,6 +249,7 @@ if (-not $PSCmdlet.ShouldProcess('Windows Kakao production runtime', 'Restart de
 }
 
 Write-WatchdogLog ("unhealthy components detected: {0}" -f ($unhealthy -join ', '))
+$incidentReason = 'recovery_incomplete'
 
 try {
     & $stopScriptPath -Confirm:$false | Out-Null
@@ -235,9 +278,16 @@ try {
     & $startScriptPath @startParameters | Out-Null
     Write-WatchdogLog 'write-enabled production start completed'
     Invoke-KakaoLiveEvaluator
+    Confirm-WatchdogRecovery
     Write-WatchdogLog 'post-start authentication/watcher evaluation completed'
 }
 catch {
     Write-WatchdogLog ("write-enabled production start failed: {0}" -f $_.Exception.Message)
     throw
+}
+} catch {
+    $watchdogFailure = $_
+    try { Report-WatchdogIncident -Reason $incidentReason }
+    catch { Write-Warning 'Kakao runtime incident notification is awaiting delivery.' }
+    throw $watchdogFailure
 }

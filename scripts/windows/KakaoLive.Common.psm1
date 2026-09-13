@@ -346,7 +346,8 @@ function Test-KakaoGatewayHealthContract {
         [Parameter(Mandatory = $true)][psobject]$RuntimeProbe,
         [Parameter(Mandatory = $true)][psobject]$GatewayRuntime,
         [Parameter(Mandatory = $true)][psobject]$SmokeEvidence,
-        [Parameter(Mandatory = $true)][bool]$RequireCleanHistory
+        [Parameter(Mandatory = $true)][bool]$RequireCleanHistory,
+        [bool]$RequireIdleQueue = $true
     )
 
     $gateway = $Health.gateway
@@ -365,8 +366,9 @@ function Test-KakaoGatewayHealthContract {
         $config.killSwitchPolicyEnforced -eq $true -and
         $null -ne $gateway -and $gateway.gatewayReady -eq $true -and
         $null -ne $gateway.consumer -and $gateway.consumer.fresh -eq $true -and
-        $null -ne $queue -and $queue.ready -eq 0 -and
-        $queue.claimed -eq 0 -and $queue.retry -eq 0 -and
+        $null -ne $queue -and (-not $RequireIdleQueue -or (
+            $queue.ready -eq 0 -and $queue.claimed -eq 0 -and $queue.retry -eq 0
+        )) -and
         (-not $RequireCleanHistory -or (
             $queue.failed -eq 0 -and $gateway.unnotified_application_failures -eq 0
         )) -and
@@ -401,13 +403,14 @@ function Test-KakaoGatewayWatchdogHealth {
         [Parameter(Mandatory = $true)][psobject]$Health,
         [Parameter(Mandatory = $true)][psobject]$RuntimeProbe,
         [Parameter(Mandatory = $true)][psobject]$GatewayRuntime,
-        [Parameter(Mandatory = $true)][psobject]$SmokeEvidence
+        [Parameter(Mandatory = $true)][psobject]$SmokeEvidence,
+        [bool]$RequireIdleQueue = $false
     )
 
     return [bool](
         (Test-KakaoLiveBridgeContract -Health $Health -RequireInvariantHealth $false) -and
         (Test-KakaoGatewayHealthContract -Health $Health -RuntimeProbe $RuntimeProbe `
-            -GatewayRuntime $GatewayRuntime -SmokeEvidence $SmokeEvidence -RequireCleanHistory $false)
+            -GatewayRuntime $GatewayRuntime -SmokeEvidence $SmokeEvidence -RequireCleanHistory $false -RequireIdleQueue $RequireIdleQueue)
     )
 }
 
