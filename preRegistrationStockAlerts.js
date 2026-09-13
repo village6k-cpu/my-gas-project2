@@ -3,7 +3,12 @@ var PREREG_STOCK_PREFIX_='preRegStock_v1_';
 
 function preRegistrationStockEvaluate_(request,snapshot) {
   var candidateId='pending:'+request.id,demands=[],identity;
-  var proposed=request.rows.map(function(row){return Object.assign({},row,{tradeId:candidateId,customer:request.customer,status:row.status==='제외'?'제외':'대기'});});
+  // A delivered/registered request can later be changed directly in the schedule.
+  // Reconcile pending notices against that current trade, not the old request copy.
+  var currentRows=request.registered && request.tradeId?
+    (snapshot.schedules || []).filter(function(row){return row.tradeId===request.tradeId;}):request.rows;
+  var proposed=currentRows.map(function(row){return Object.assign({},row,{tradeId:candidateId,customer:request.customer,
+    status:request.registered?row.status:(row.status==='제외'?'제외':'대기')});});
   var existing=(snapshot.schedules || []).filter(function(row){return !request.tradeId || row.tradeId!==request.tradeId;});
   var report=buildInventoryRiskReport_(Object.assign({},snapshot,{schedules:existing.concat(proposed)}),{
     turnaroundMinutes:0,onDemands:function(rows,index){demands=rows;identity=index;}
@@ -38,7 +43,7 @@ function preRegistrationStockEvaluate_(request,snapshot) {
     });
   });
   return {requestId:request.id,customer:request.customer,tradeId:request.tradeId || '',registered:!!request.registered,
-    start:proposed[0]?.start || '',end:proposed.reduce(function(end,r){return r.end>end?r.end:end;},''),shortages:shortages,uncertain:uncertain};
+    start:proposed[0]?.start || request.rows[0]?.start || '',end:proposed.reduce(function(end,r){return r.end>end?r.end:end;},'') || request.rows[0]?.end || '',shortages:shortages,uncertain:uncertain};
 }
 
 function preRegistrationStockText_(result) {
