@@ -7039,7 +7039,7 @@ export function normalizeKakaoConversationMessages(messages = [], { maxItems = 8
   return normalized;
 }
 
-function extractKakaoConversationEvidenceFromText(bodyText = '', { title = '', hints = [], messages = [], maxItems = 80, source = 'live_kakao_dom_after_navigation' } = {}) {
+function extractKakaoConversationEvidenceFromText(bodyText = '', { title = '', hints = [], messages = [], roomMemo = '', maxItems = 80, source = 'live_kakao_dom_after_navigation' } = {}) {
   const values = String(bodyText || '')
     .split(/\n+/)
     .map((value) => value.replace(/\s+/g, ' ').trim())
@@ -7055,6 +7055,7 @@ function extractKakaoConversationEvidenceFromText(bodyText = '', { title = '', h
     hints,
     visible_static_text_tail: tail,
     messages: normalizeKakaoConversationMessages(messages, { maxItems }),
+    ...(roomMemo ? { room_memo: String(roomMemo).normalize('NFKC').trim().slice(0, 1000) } : {}),
     note: 'Live DOM text captured after deterministic DevTools navigation. It is browser evidence for the AI to inspect, not a deterministic business classification.'
   };
 }
@@ -7102,6 +7103,7 @@ async function readUsableKakaoConversationEvidence(target, {
       title: target.title || dom?.title || '',
       hints,
       messages: dom?.messages,
+      roomMemo: dom?.room_memo,
       source
     });
     if (isUsableKakaoConversationEvidence(evidence)) return { ready: true, dom, evidence, attempts: attempt };
@@ -7331,13 +7333,17 @@ export function buildKakaoConversationTextExpression() {
     // The room's memo tooltip is populated even while collapsed, so body.innerText
     // omits contact details stored there. Preserve it as bounded reference data,
     // separately from customer/staff messages and their authorization evidence.
+    const roomMemos = new Set();
     for (const button of deepQueryAll('button.btn_memo')) {
       if (!visible(button) || isChatListRow(button)) continue;
       const memo = normalize(button.querySelector?.('.txt_tooltip')?.textContent || '')
         .replace(/\s+/g, ' ').slice(0, 1000);
-      if (memo) pushText(`카카오 고객 메모(직원 참고 정보, 대화 메시지 아님): ${memo}`);
+      if (memo) roomMemos.add(memo);
     }
-    return { title: document.title, href: location.href, text: parts.join('\n'), messages };
+    const roomMemo = [...roomMemos].join('\n').slice(0, 1000);
+    if (roomMemo) pushText(`카카오 고객 메모(직원 참고 정보, 대화 메시지 아님): ${roomMemo}`);
+    return { title: document.title, href: location.href, text: parts.join('\n'), messages,
+      ...(roomMemo ? { room_memo: roomMemo } : {}) };
   }.toString()})()`;
 }
 
@@ -9335,6 +9341,7 @@ export function createImmutableKakaoRoomSnapshot({ job = {}, navigationContext =
       hints: Array.isArray(evidence.hints) ? evidence.hints.map((value) => text(value).trim()).filter(Boolean).slice(0, 20) : [],
       visible_static_text_tail: text(evidence.visible_static_text_tail).slice(-20_000),
       messages: normalizeKakaoConversationMessages(evidence.messages, { maxItems: 80 }),
+      ...(text(evidence.room_memo).trim() ? { room_memo: text(evidence.room_memo).normalize('NFKC').trim().slice(0, 1000) } : {}),
       note: text(evidence.note).trim().slice(0, 500)
     }
   };
@@ -9346,7 +9353,8 @@ export function createImmutableKakaoRoomSnapshot({ job = {}, navigationContext =
     title: navigation.conversation_evidence.title,
     hintMatched: navigation.conversation_evidence.hint_matched,
     visibleText: navigation.conversation_evidence.visible_static_text_tail,
-    messages: navigation.conversation_evidence.messages
+    messages: navigation.conversation_evidence.messages,
+    ...(navigation.conversation_evidence.room_memo ? { roomMemo: navigation.conversation_evidence.room_memo } : {})
   };
   const snapshot = {
     schema: 'kakao-room-snapshot/v1',
@@ -9554,6 +9562,7 @@ function buildBoundedGatewayRaw({ job = {}, snapshot, lookupEvidence, ragContext
             ? snapshot.navigation.conversation_evidence.hints.map((value) => boundedGatewayText(value, 160)).slice(0, 20)
             : [],
           visible_static_text_tail: boundedGatewayText(snapshot.navigation?.conversation_evidence?.visible_static_text_tail, 16_000),
+          ...(snapshot.navigation?.conversation_evidence?.room_memo ? { room_memo: snapshot.navigation.conversation_evidence.room_memo } : {}),
           messages: Array.isArray(snapshot.navigation?.conversation_evidence?.messages)
             ? snapshot.navigation.conversation_evidence.messages.slice(-80).map((message) => ({
                 message_id: boundedGatewayText(message?.message_id, 160),

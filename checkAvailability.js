@@ -11883,6 +11883,15 @@ function _assertInquirySourceEvidence_(evidence) {
       evidence.customer_message_ids.some(function(id) { return typeof id !== "string" || !id.trim(); })) {
     throw new Error("고객 문의 변경의 대화 revision/hash/message 근거가 필요합니다.");
   }
+  _confirmRequestRoomMemoEvidence_(evidence.room_memo);
+}
+
+function _confirmRequestRoomMemoEvidence_(value) {
+  if (value === undefined) return "";
+  if (typeof value !== "string" || !value.trim() || value.length > 1000) {
+    throw new Error("고객 메모 근거는 같은 대화방에서 확인한 1000자 이내 원문이어야 합니다.");
+  }
+  return value.normalize("NFKC").trim();
 }
 
 function _normalizeCustomerRequestedPendingBaselinePeriod_(period) {
@@ -11946,11 +11955,12 @@ function _assertPendingCustomerIdentityUpdate_(group, update, req, evidence) {
   var phone = _confirmRequestPhoneKey_(update.phone);
   var currentPhone = _confirmRequestPhoneKey_(group.phone);
   var source = String(evidence && evidence.customer_request || "").normalize("NFKC");
+  var contactSource = source + "\n" + _confirmRequestRoomMemoEvidence_(evidence && evidence.room_memo);
   if (update.expected_name.trim() !== group.name || _confirmRequestPhoneKey_(update.expected_phone) !== currentPhone ||
       !update.name.trim() || update.name.trim().length > 120 || phone.length < 8 || phone.length > 15 ||
       !/^[\d\s()+.\-]+$/.test(update.phone) || update.name.trim() !== String(req.예약자명 || "").trim() ||
       phone !== _confirmRequestPhoneKey_(req.연락처) || (currentPhone && currentPhone !== phone) ||
-      source.indexOf(update.name.trim()) < 0 || source.replace(/[\s()+.\-]/g, "").indexOf(phone) < 0) {
+      source.indexOf(update.name.trim()) < 0 || contactSource.replace(/[\s()+.\-]/g, "").indexOf(phone) < 0) {
     throw new Error("고객 정보 보완의 baseline 또는 대화 근거가 일치하지 않습니다.");
   }
 }
@@ -15443,12 +15453,13 @@ function _normalizeConfirmedReservationCommit_(input) {
   }
   var evidenceAllowed = {
     customer_request: true, staff_confirmation: true, conversation_revision: true,
-    conversation_evidence_hash: true, customer_message_ids: true, staff_message_ids: true
+    conversation_evidence_hash: true, customer_message_ids: true, staff_message_ids: true, room_memo: true
   };
   Object.keys(evidence).forEach(function(key) {
     if (!evidenceAllowed[key]) throw new Error("unsupported source_evidence field: " + key);
   });
   var customerRequest = String(evidence.customer_request || "").trim();
+  var roomMemo = _confirmRequestRoomMemoEvidence_(evidence.room_memo);
   var staffConfirmation = String(evidence.staff_confirmation || "").trim();
   var conversationRevision = Number(evidence.conversation_revision);
   var conversationEvidenceHash = String(evidence.conversation_evidence_hash || "").trim();
@@ -15552,6 +15563,7 @@ function _normalizeConfirmedReservationCommit_(input) {
     ...(identityUpdate ? {customer_identity_update: identityUpdate} : {}),
     source_evidence: {
       customer_request: customerRequest,
+      ...(roomMemo ? {room_memo: roomMemo} : {}),
       staff_confirmation: staffConfirmation,
       conversation_revision: conversationRevision,
       conversation_evidence_hash: conversationEvidenceHash,

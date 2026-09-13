@@ -2,7 +2,15 @@
 
 // Mechanical validation only. The native model determines that the final form
 // belongs to this exact pending inquiry; GAS compares the old identity under lock.
-function normalizePendingCustomerIdentity(value, sourceText) {
+function normalizeRoomMemoEvidence(value) {
+  if (value === undefined) return '';
+  if (typeof value !== 'string' || !value.trim() || value.length > 1000) {
+    throw new Error('source_evidence.room_memo must be the bounded exact room memo');
+  }
+  return value.normalize('NFKC').trim();
+}
+
+function normalizePendingCustomerIdentity(value, sourceText, roomMemo) {
   if (value === undefined || value === null) return null;
   const required=['expected_name','expected_phone','name','phone'];
   if (typeof value !== 'object' || Array.isArray(value) ||
@@ -12,10 +20,11 @@ function normalizePendingCustomerIdentity(value, sourceText) {
   const phone=result.phone.replace(/\D/g,'');
   const oldPhone=result.expected_phone.replace(/\D/g,'');
   const source=String(sourceText||'').normalize('NFKC');
+  const contactSource=source+'\n'+normalizeRoomMemoEvidence(roomMemo);
   if (!result.name || result.name.length>120 || !result.expected_name ||
       !/^[\d\s()+.\-]+$/.test(result.phone) || phone.length<8 || phone.length>15 ||
       (oldPhone && oldPhone!==phone) || !source.includes(result.name) ||
-      !source.replace(/[\s()+.\-]/g,'').includes(phone)) throw new Error('customer_identity_update contradicts existing contact or selected customer evidence');
+      !contactSource.replace(/[\s()+.\-]/g,'').includes(phone)) throw new Error('customer_identity_update contradicts existing contact or selected customer evidence');
   if (value.discount_type !== undefined) {
     if (!['일반','학생','개인사업자/프리랜서','단골','제휴'].includes(value.discount_type)) throw new Error('customer_identity_update.discount_type is invalid');
     result.discount_type=value.discount_type;
@@ -38,4 +47,4 @@ function normalizePendingBaselinePeriod(value) {
   return result;
 }
 
-module.exports={normalizePendingCustomerIdentity,normalizePendingBaselinePeriod};
+module.exports={normalizePendingCustomerIdentity,normalizePendingBaselinePeriod,normalizeRoomMemoEvidence};
