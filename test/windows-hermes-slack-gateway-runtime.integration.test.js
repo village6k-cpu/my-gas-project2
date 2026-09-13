@@ -3,11 +3,12 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const hermesHome = process.env.VILLAGE_LIVE_HERMES_HOME;
+const runLiveChecks = process.platform === 'win32' && Boolean(hermesHome);
 
 test('Windows Heybilli gateway uses the runtime that can load Slack Socket Mode', {
-  skip: process.platform !== 'win32'
+  skip: !runLiveChecks
 }, () => {
-  const hermesHome = path.join(process.env.LOCALAPPDATA || '', 'hermes');
   const agentHome = path.join(hermesHome, 'hermes-agent');
   const python = path.join(agentHome, 'venv', 'Scripts', 'python.exe');
   const incompletePython = path.join(agentHome, '.venv', 'Scripts', 'python.exe');

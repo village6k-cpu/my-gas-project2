@@ -27,7 +27,7 @@ function ownedChromeArguments() {
   return JSON.parse(output.trim());
 }
 
-test('owned minimized Chrome keeps DOM watcher timers running in the background', () => {
+test('owned minimized Chrome keeps DOM watcher timers running in the background', { skip: process.platform !== 'win32' }, () => {
   const args = ownedChromeArguments();
 
   assert.ok(args.includes('--disable-background-timer-throttling'));

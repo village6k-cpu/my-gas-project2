@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
@@ -23,7 +24,7 @@ function readHarness() {
   return fs.readFileSync(harnessPath, 'utf8');
 }
 
-function runHarness(profileHome, extraArgs = []) {
+function runHarness(profileHome, extraArgs = [], env = {}) {
   return spawnSync(
     'powershell.exe',
     [
@@ -36,7 +37,7 @@ function runHarness(profileHome, extraArgs = []) {
       profileHome,
       ...extraArgs
     ],
-    { encoding: 'utf8' }
+    { encoding: 'utf8', env: { ...process.env, ...env } }
   );
 }
 
@@ -142,8 +143,15 @@ test('WhatIf resolves only a new isolated child and refuses live paths', { skip:
   }
 });
 
-test('WhatIf can preview a full kakaoworker-shaped isolated lifecycle', { skip: process.platform !== 'win32' }, () => {
-  const profilesRoot = path.join(process.env.LOCALAPPDATA, 'hermes', 'profiles');
+test('WhatIf can preview a full kakaoworker-shaped isolated lifecycle', { skip: process.platform !== 'win32' }, (t) => {
+  const tempBase = path.resolve(os.tmpdir());
+  const localAppData = fs.mkdtempSync(path.join(tempBase, 'lifecycle-host-fixture-'));
+  t.after(() => {
+    assert.equal(path.dirname(path.resolve(localAppData)), tempBase);
+    fs.rmSync(localAppData, { recursive: true, force: true });
+  });
+  const profilesRoot = path.join(localAppData, 'hermes', 'profiles');
+  fs.mkdirSync(path.join(profilesRoot, 'kakaoworker', 'skills'), { recursive: true });
   const candidate = path.join(
     profilesRoot,
     `native-lifecycle-worker-${process.pid}-${Date.now()}`
@@ -155,7 +163,7 @@ test('WhatIf can preview a full kakaoworker-shaped isolated lifecycle', { skip: 
     '-WorkerRepo',
     root,
     '-WhatIf'
-  ]);
+  ], { LOCALAPPDATA: localAppData });
   assert.equal(preview.status, 0, preview.stderr || preview.stdout);
   assert.match(preview.stdout, /profileShape=kakaoworker/i);
   assert.match(preview.stdout.replaceAll('\\', '/'), /workerProfileHome=.*profiles\/kakaoworker/i);

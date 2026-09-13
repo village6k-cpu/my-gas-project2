@@ -1,0 +1,2 @@
+# Offline YAML configuration fixtures; no Hermes installation is required.
+ruamel.yaml==0.19.1

@@ -169,15 +169,8 @@ test('benchmark runner is cold, comparable, observable, and fail-closed', () => 
   assert.doesNotMatch(source, /chat\.postMessage|hooks\.slack\.com|sheetAPI[^\r\n]*write|doPost\s*\(/i);
 });
 
-test('analyzer accepts semantic Village Brain source wording', { skip: process.platform !== 'win32' }, () => {
-  const python = path.join(
-    process.env.LOCALAPPDATA,
-    'hermes',
-    'hermes-agent',
-    'venv',
-    'Scripts',
-    'python.exe'
-  );
+test('analyzer accepts semantic Village Brain source wording', () => {
+  const python = process.platform === 'win32' ? 'python.exe' : 'python3';
   const modulePath = analyzerPath.replaceAll('\\', '/');
   const program = [
     'import importlib.util',

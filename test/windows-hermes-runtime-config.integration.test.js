@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const hermesHome = process.env.VILLAGE_LIVE_HERMES_HOME;
+const runLiveChecks = process.platform === 'win32' && Boolean(hermesHome);
 
 // 모델/프로바이더 기대값은 하드코딩하지 않고 단일 계약 파일에서 읽는다.
 // 모델을 바꿀 때 계약 파일 하나만 수정하면 런타임 구성과 이 테스트가 함께 따라온다.
@@ -24,11 +26,10 @@ function topLevelSection(source, name) {
 }
 
 test('active Windows Hermes keeps the Mac model budget and Slack display contract', {
-  skip: process.platform !== 'win32'
+  skip: !runLiveChecks
 }, () => {
   const configPath = path.join(
-    process.env.LOCALAPPDATA || '',
-    'hermes',
+    hermesHome,
     'config.yaml'
   );
   assert.equal(fs.existsSync(configPath), true, 'active Hermes config must exist');
@@ -52,9 +53,9 @@ test('active Windows Hermes keeps the Mac model budget and Slack display contrac
 });
 
 test('Windows gateway is pinned to the clean Village Hermes runtime and enabled on AX2', {
-  skip: process.platform !== 'win32'
+  skip: !runLiveChecks
 }, () => {
-  const home = path.join(process.env.LOCALAPPDATA || '', 'hermes');
+  const home = hermesHome;
   const cmd = fs.readFileSync(path.join(home, 'gateway-service', 'Hermes_Gateway.cmd'), 'utf8');
   const vbs = fs.readFileSync(path.join(home, 'gateway-service', 'Hermes_Gateway.vbs'), 'utf8');
   const runtime = String.raw`C:\Village\hermes-agent-worktrees\village-hermes-clean-runtime`;

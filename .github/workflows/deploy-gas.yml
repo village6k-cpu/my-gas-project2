@@ -1,9 +1,9 @@
-# main에 GAS 파일이 머지되면 자동으로 clasp push + deploy.
+# Linux와 Windows 회귀 검사가 모두 통과한 main만 GAS에 배포한다.
 # endwork.sh의 안전장치(드리프트 가드·백업)를 그대로 따른다 — scripts/ci-deploy-gas.sh 참고.
 #
 # 1회 설정 (필수): GitHub 레포 Settings → Secrets and variables → Actions 에
 #   CLASPRC_JSON = 맥의 ~/.clasprc.json 파일 내용 전체
-# 를 등록해야 동작한다. 미등록 시 워크플로는 안내만 남기고 스킵된다.
+# 를 등록해야 동작한다. 미등록 시 배포 작업은 명확한 오류로 중단된다.
 # (clasp 버전이 맥과 다르면 인증 포맷이 안 맞을 수 있음 — 맥에서 `clasp --version` 확인 후
 #  아래 CLASP_VERSION 을 같은 버전으로 맞출 것)
 
@@ -12,12 +12,8 @@ name: Deploy GAS
 on:
   push:
     branches: [main]
-    paths:
-      - "*.js"
-      - "*.html"
-      - "appsscript.json"
-      - "scripts/ci-deploy-gas.sh"
-      - ".github/workflows/deploy-gas.yml"
+    # Every newer main commit owns a replacement run, including docs-only commits.
+    # Otherwise a superseded GAS run could skip with no successor to deploy it.
   workflow_dispatch:
     inputs:
       skip_drift_guard:
@@ -26,55 +22,105 @@ on:
         default: false
 
 concurrency:
-  group: deploy-gas
+  group: deploy-gas-${{ github.ref }}
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   CLASP_VERSION: "3.3.0"
 
 jobs:
+  test:
+    name: 회귀 검사 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/today-dashboard/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: test/requirements.txt
+      - name: Python 테스트 의존성 설치
+        run: python -m pip install --requirement test/requirements.txt
+      - name: 테스트 의존성 설치
+        run: npm ci --prefix apps/today-dashboard --ignore-scripts
+      - name: 전체 회귀 검사
+        shell: bash
+        env:
+          # Node and PowerShell must share one path spelling; the Windows default
+          # TEMP can contain an 8.3 alias (RUNNER~1) that FileInfo expands differently.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          mkdir -p test-results
+          fails=0
+          for f in test/*.test.js; do
+            log="test-results/$(basename "$f").log"
+            if node "$f" >"$log" 2>&1; then
+              echo "PASS: $f"
+            else
+              fails=1
+              echo "::group::FAIL: $f"
+              cat "$log"
+              echo "::endgroup::"
+            fi
+          done
+          exit "$fails"
+      - name: 검사 로그 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gas-test-logs-${{ matrix.os }}
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # 드리프트 가드가 히스토리 blob 존재 여부로 판별
 
       - name: 시크릿 확인
-        id: secrets
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
         run: |
-          if [ -z "${{ secrets.CLASPRC_JSON }}" ]; then
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::CLASPRC_JSON 시크릿 미등록 — GAS 자동 배포 스킵. 맥의 ~/.clasprc.json 내용을 레포 Secrets에 등록하세요."
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
+          if [ -z "$CLASPRC_JSON" ]; then
+            echo "::error::CLASPRC_JSON 시크릿 미등록 — GAS 자동 배포 인증을 설정해야 합니다."
+            exit 1
           fi
 
       - name: Node 설정
-        if: steps.secrets.outputs.configured == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "24"
 
       - name: clasp 설치·인증
-        if: steps.secrets.outputs.configured == 'true'
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
         run: |
           npm i -g @google/clasp@${{ env.CLASP_VERSION }}
-          printf '%s' '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
-
-      - name: 대시보드 테스트 의존성 설치
-        if: steps.secrets.outputs.configured == 'true'
-        run: npm ci --prefix apps/today-dashboard --ignore-scripts
-
-      - name: 정적 테스트
-        if: steps.secrets.outputs.configured == 'true'
-        run: |
-          fails=0
-          for f in test/*.test.js; do node "$f" >/dev/null 2>&1 || { fails=1; echo "FAIL: $f"; }; done
-          [ "$fails" -eq 0 ]
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > ~/.clasprc.json
 
       - name: GAS 배포 (드리프트 가드 + 백업 포함)
-        if: steps.secrets.outputs.configured == 'true'
         env:
           SKIP_DRIFT_GUARD: ${{ inputs.skip_drift_guard == true && '1' || '0' }}
         run: |
@@ -82,7 +128,7 @@ jobs:
           scripts/ci-deploy-gas.sh "CI deploy ${{ github.sha }}"
 
       - name: 배포 전 GAS 백업 아티팩트 업로드
-        if: always() && steps.secrets.outputs.configured == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gas-backup-${{ github.run_number }}
