@@ -1,46 +1,43 @@
-> **[정책 우선 고지 2026-08-12]** 이 문서의 인프라 자가 재시작/복구 지시(맥 방언 원문)는 2026-08-11 사장님 정책으로 대체됨 — **치유는 워치독 소유, 업무 턴 중 자가수리 금지** (SKILL.md 'Infrastructure incident guard'가 우선). 원문은 참고용으로 보존.
+# Kakao room reads that preserve live collection
 
-# Village Kakao profile-safe room navigation
+The authenticated `/chats` list in the owned Kakao automation Chrome is the
+watcher's input surface. A customer `/chats/<room-id>` page cannot replace it.
+Navigating the only list tab into a room stops collection for every customer,
+even while the bridge and AI worker processes remain healthy.
 
-Use this when a task requires opening a Kakao customer room and reading/sending/attaching in the browser.
+## Read a customer conversation
 
-## Rule
+1. Verify the configured Kakao DevTools endpoint and owned Chrome profile.
+   On the Windows production runtime this is port 9223 with the
+   `%LOCALAPPDATA%\Village\chrome-kakao` profile. Read the current tab inventory.
+2. Preserve the list tab's ID and URL. Never use the first generic Kakao tab as
+   a `Page.navigate` target, and never close or navigate a `/chats` list tab for
+   customer work.
+3. Prefer the existing `captureKakaoRoomSnapshot` helper in
+   `tools/ai-browser-worker/worker.mjs`, which manages a customer-room read.
+   When direct CDP is needed, reuse an exact matching customer-room tab or
+   create a separate one with `PUT /json/new?<encoded-room-url>`.
+4. Verify the room URL and customer title after loading. Read the whole relevant
+   conversation, including later staff approvals, changes, and cancellations.
+5. Close only a temporary room tab created by this operation, after verifying
+   its current ID and URL still belong to the operation. Leave the list tab
+   and other clients' tabs intact.
+6. Confirm the original list is still present. For a collection-health check,
+   use `inject-watcher-cdp.py --port 9223 --probe-only` from the active runtime;
+   require authenticated list access and `watcherReady=true`.
 
-Never rely on a generic `Google Chrome` capture for Kakao customer work. The user expects all Village Kakao/browser automation to target `🤖 자동화 크롬` (normal Chrome Profile 3), never `💁🏻 직원용 크롬`.
+If the list is already missing or authentication is unavailable, preserve the
+remaining tabs and report the exact runtime fault to the existing recovery
+path. Do not repeatedly restart Chrome or infer successful collection from a
+process, port, or bridge `/health` response alone.
 
-## Verification before any input
+## Installation receipts and recovery
 
-1. Run or use an equivalent profile-aware status check:
-   - `python3 tools/kakao-dom-bridge/automation-login-recover.py --status-only --json`
-2. Require all of:
-   - `summary.profileName` includes `🤖 자동화 크롬`
-   - `summary.chosen.pid` and `summary.chosen.windowId` are present
-   - `chatOk: true` and `watcherVisible: true` when doing normal Kakao operations
-3. Bind CUA calls to that exact `pid`/`window_id`.
-4. Re-check the AX title/header after navigation; it should include the intended customer name/room title.
+Plugin deployment must update every reviewed file's `sha256` **and `bytes`**,
+then the canonical manifest hash, and pass `Test-KakaoPluginInstallReceipt`.
+The startup launcher and scheduled watchdog must both accept the installed
+receipt. A running gateway alone does not prove that automatic recovery works.
 
-If the captured title/profile marker is staff Chrome or missing, stop and retarget before clicking or typing. Do not “quickly search” in the wrong profile.
-
-## Navigation pattern for room evidence
-
-- Use watcher/events data only to discover a likely room URL or customer hint.
-- Prefer DevTools/page JavaScript navigation inside the verified automation window, e.g. setting `location.href` to the specific `https://business.kakao.com/_.../chats/...` URL, rather than address-bar typing.
-- After navigation, wait for the title/header to change and verify `hintMatched`/room header before reading chat text.
-- If the page remains on the previous customer after attempted navigation, discard that evidence and retry with a safer navigation path. Do not reuse the previous room’s text under the new customer name.
-
-## Failure posture
-
-If the exact room body cannot be verified:
-
-- Report `본문 미확인` / `target conversation not verified`.
-- Do not write `확인요청`, send Kakao messages, or claim the customer context was checked.
-- If the user is already frustrated, do not narrate a long debugging story; acknowledge the profile/verification guard and give the next concrete action/result.
-
-## Regression guard idea
-
-Worker/window-picking tests should include both profiles:
-
-- staff popup/list window title: `... (💁🏻 직원용 크롬)` → must be excluded
-- automation popup/list window title: `... (🤖 자동화 크롬)` → must be preferred
-
-Tests should also reject `opened_target_chat` unless the extracted live conversation evidence matches the intended customer hint.
+This guidance changes browser and deployment handling only. Interpret booking
+intent from the full conversation and retain the current registration, price,
+inventory, and customer-send rules.

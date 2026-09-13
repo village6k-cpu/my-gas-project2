@@ -45,8 +45,7 @@ Choose the narrowest authoritative live source; apply [supply rules](references/
    customer-specific value.
 5. The Mac mirror and backups are historical recovery inputs, not runtime truth.
 
-Windows paths and command boundaries live in
-[Windows runtime and sources](references/windows-runtime-and-sources.md).
+See [Windows runtime and sources](references/windows-runtime-and-sources.md). For Kakao reads, preserve the watcher-owned chat-list tab and use separate customer tabs: [Kakao room navigation](references/village-kakao-profile-safe-room-navigation.md).
 
 ## Interpret before execution
 
