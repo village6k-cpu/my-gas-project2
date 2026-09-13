@@ -10739,6 +10739,10 @@ function handleScheduleEdit(e) {
       sheet.getRange(row, 15).setValue('보류');
       sheet.getRange(row, 15).setBackground('#FFEB9C');
     }
+    if ((val === "거절" || val === "보류") && typeof cancelPreRegistrationStockResume_ === 'function') {
+      SpreadsheetApp.flush();
+      cancelPreRegistrationStockResume_(String(sheet.getRange(row, 1).getValue() || '').trim());
+    }
   }
 
   // 시트 직접 편집도 확인요청 목록/카드 상태를 바꾼다 — API 경로처럼 60초 목록 캐시를
@@ -17685,6 +17689,7 @@ function holdByReqID(sheet, allData, reqID) {
     sheet.getRange(row, 14).clearContent();       // N열: 등록 드롭다운 초기화
     sheet.getRange(row, 15).setBackground("#FFEB9C");  // 노란색
   }
+  if (typeof cancelPreRegistrationStockResume_ === 'function') {SpreadsheetApp.flush();cancelPreRegistrationStockResume_(reqID);}
 }
 
 /**
@@ -17698,6 +17703,7 @@ function rejectByReqID(sheet, allData, reqID) {
     sheet.getRange(row, 14).clearContent();       // N열: 등록 드롭다운 초기화
     sheet.getRange(row, 15).setBackground("#FFC7CE");  // 빨간색
   }
+  if (typeof cancelPreRegistrationStockResume_ === 'function') {SpreadsheetApp.flush();cancelPreRegistrationStockResume_(reqID);}
 }
 
 // jsonResponse()는 sheetAPI.js에 통합 정의됨

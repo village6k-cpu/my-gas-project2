@@ -202,3 +202,128 @@ test('entry points queue checks and the registration hook precedes schedule writ
  assert.ok(hook>0);assert.ok(hook<register.indexOf('schedSheet.getRange('));
  const delivery=fs.readFileSync(path.join(__dirname,'../inventoryRiskDelivery.js'),'utf8');assert.match(delivery,/function inventoryRiskHeartbeat\(\)[\s\S]*?flushPreRegistrationStockAlerts/);
 });
+
+test('Google quota exhaustion keeps a durable notice that an authenticated relay can acknowledge with a matching lease',()=>{
+ const {c,props}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
+ c.inventoryRiskSlack_=()=>{throw Error('하루에 urlfetch 서비스를 너무 많이 호출했습니다.');};
+ c.queuePreRegistrationStockCheck_('RQ-260912-013');
+ const claim=c.claimPreRegistrationStockAlertRelay();assert.equal(claim.status,'claimed');assert.equal(claim.pending.transportRejected,true);
+ const ack={requestId:claim.requestId,id:claim.pending.id,relayToken:claim.pending.relayToken,channel:'C0B769B394K',ts:'123.456',delivered:true};
+ assert.equal(c.acknowledgePreRegistrationStockAlertRelay({...ack,relayToken:'wrong'}).status,'conflict');
+ assert.equal(c.acknowledgePreRegistrationStockAlertRelay(ack).status,'sent');
+ const result=c.flushPreRegistrationStockAlerts();assert.equal(result.results[0].status,'already_sent');
+ assert.equal(c.getPreRegistrationStockAlertStatus().pending,0);
+});
+
+test('relay lease prevents a competing GAS send and obsolete release cannot discard a still-current notice',()=>{
+ const {c,props}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();let calls=0;
+ c.inventoryRiskSlack_=()=>{calls++;throw Error('quota');};c.queuePreRegistrationStockCheck_('RQ-260912-013');
+ const claim=c.claimPreRegistrationStockAlertRelay(),before=calls;
+ const evaluation=c.preRegistrationStockEvaluate_(request(),snapshot());
+ assert.equal(c.preRegistrationStockDeliver_(evaluation).status,'pending');assert.equal(calls,before);
+ const ack={requestId:claim.requestId,id:claim.pending.id,relayToken:claim.pending.relayToken,obsolete:true};
+ assert.equal(c.acknowledgePreRegistrationStockAlertRelay(ack).status,'conflict');
+ evaluation.shortages=[];evaluation.uncertain=[];c.preRegistrationStockDeliver_(evaluation);
+ assert.equal(c.acknowledgePreRegistrationStockAlertRelay(ack).status,'obsolete');
+});
+
+test('a deleted, ended or skipped request invalidates a pending relay notice without losing its receipt identity',()=>{
+ const {c,props}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
+ c.inventoryRiskSlack_=()=>{throw Error('quota');};c.queuePreRegistrationStockCheck_('RQ-260912-013');c.flushPreRegistrationStockAlerts();
+ c.preRegistrationStockRequest_=()=>null;
+ const claim=c.claimPreRegistrationStockAlertRelay();assert.equal(claim.status,'claimed');assert.equal(claim.pending.actionable,false);
+ assert.equal(c.acknowledgePreRegistrationStockAlertRelay({requestId:claim.requestId,id:claim.pending.id,relayToken:claim.pending.relayToken,obsolete:true}).status,'obsolete');
+});
+
+test('relay cannot claim stale intent when the exact request is locked or its evaluation fails',()=>{
+ const {c,props,inputLock}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
+ c.inventoryRiskSlack_=()=>{throw Error('quota');};c.queuePreRegistrationStockCheck_('RQ-260912-013');c.flushPreRegistrationStockAlerts();
+ inputLock.tryLock=()=>false;
+ assert.notEqual(c.claimPreRegistrationStockAlertRelay().status,'claimed');
+ inputLock.tryLock=()=>true;c.readInventoryRiskSnapshot_=()=>{throw Error('snapshot unavailable');};
+ assert.notEqual(c.claimPreRegistrationStockAlertRelay().status,'claimed');
+});
+
+test('relay refreshes its exact candidate beyond the batch limit and rejects a newer unverified generation',()=>{
+ const {c,props}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
+ c.inventoryRiskSlack_=()=>{throw Error('quota');};const id='RQ-260912-013';
+ c.queuePreRegistrationStockCheck_(id);c.flushPreRegistrationStockAlerts();
+ for(let i=1;i<=4;i++)props.setProperty('preRegStock_v1_dirty_RQ-260901-00'+i,'1:'+i);
+ const readIds=[];c.preRegistrationStockRequest_=key=>{readIds.push(key);return key===id?request():null;};
+ const flush=c.preRegistrationStockFlush_;
+ c.preRegistrationStockFlush_=(...args)=>{const result=flush(...args);c.queuePreRegistrationStockCheck_(id);return result;};
+ assert.notEqual(c.claimPreRegistrationStockAlertRelay().status,'claimed');
+ c.preRegistrationStockFlush_=flush;
+ const claim=c.claimPreRegistrationStockAlertRelay();assert.equal(claim.status,'claimed');assert.equal(claim.requestId,id);
+ assert.ok(readIds.includes(id));
+});
+
+test('relay acknowledgement cannot race a GAS state save and erase its verified receipt',()=>{
+ const {c,props}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
+ c.inventoryRiskSlack_=()=>{throw Error('quota');};c.queuePreRegistrationStockCheck_('RQ-260912-013');
+ const claim=c.claimPreRegistrationStockAlertRelay();
+ const ack={requestId:claim.requestId,id:claim.pending.id,relayToken:claim.pending.relayToken,channel:claim.pending.channel,ts:'123.456',delivered:true};
+ const set=props.setProperty;let concurrent;
+ props.setProperty=(key,value)=>{if(key==='preRegStock_v1_state_'+claim.requestId && !concurrent)concurrent=c.acknowledgePreRegistrationStockAlertRelay(ack);set(key,value);};
+ c.flushPreRegistrationStockAlerts();assert.equal(concurrent.status,'busy');
+ props.setProperty=set;assert.equal(c.acknowledgePreRegistrationStockAlertRelay(ack).status,'sent');
+ const state=JSON.parse(props.getProperty('preRegStock_v1_state_'+claim.requestId));assert.equal(state.pending,null);assert.equal(state.lastReceipt.ts,'123.456');
+});
+
+test('quota errors while reconciling history do not declare an uncertain POST rejected',()=>{
+ const {c,props}=env();const evaluation=c.preRegistrationStockEvaluate_(request(),snapshot());
+ c.inventoryRiskSlack_=method=>{throw Error(method==='chat.postMessage'?'unknown outcome':'하루에 urlfetch 서비스를 너무 많이 호출했습니다.');};
+ assert.equal(c.preRegistrationStockDeliver_(evaluation).status,'pending');
+ assert.equal(c.preRegistrationStockDeliver_(evaluation).status,'pending');
+ const pending=JSON.parse(props.getProperty('preRegStock_v1_state_RQ-260912-013')).pending;
+ assert.notEqual(pending.transportRejected,true);
+});
+
+test('a new POST clears the previous quota rejection before any uncertain outcome',()=>{
+ const {c,props,advance}=env();const evaluation=c.preRegistrationStockEvaluate_(request(),snapshot());
+ c.inventoryRiskSlack_=()=>{throw Error('하루에 urlfetch 서비스를 너무 많이 호출했습니다.');};c.preRegistrationStockDeliver_(evaluation);
+ advance(60001);c.inventoryRiskSlack_=method=>{if(method==='chat.postMessage')throw Error('unknown outcome');return {messages:[]};};
+ c.preRegistrationStockDeliver_(evaluation);
+ const pending=JSON.parse(props.getProperty('preRegStock_v1_state_RQ-260912-013')).pending;
+ assert.notEqual(pending.transportRejected,true);
+});
+
+test('a later owner hold cancels a registration-resume notice and preserves its delivery receipt identity',()=>{
+ const {c,props}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ const id='RQ-260912-013';props.setProperty('preRegStock_v1_registering_'+id,'true');
+ c.preRegistrationStockRequest_=(_,registered,resume)=>resume?request():null;c.readInventoryRiskSnapshot_=()=>snapshot();
+ c.inventoryRiskSlack_=()=>{throw Error('quota');};c.queuePreRegistrationStockCheck_(id);c.flushPreRegistrationStockAlerts();
+ c.cancelPreRegistrationStockResume_(id);
+ const claim=c.claimPreRegistrationStockAlertRelay();assert.equal(claim.status,'claimed');assert.equal(claim.pending.actionable,false);
+ assert.equal(props.getProperty('preRegStock_v1_registering_'+id),null);
+});
+
+test('a change during relay history lookup is rejected at the final send decision boundary',async()=>{
+ const {relayOnce}=require('../scripts/windows/inventory-stock-alert-relay');
+ const {c,props}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
+ c.inventoryRiskSlack_=()=>{throw Error('하루에 urlfetch 서비스를 너무 많이 호출했습니다.');};c.queuePreRegistrationStockCheck_('RQ-260912-013');
+ let posts=0;
+ const result=await relayOnce({channel:'C0B769B394K',gas:async(name,args=[])=>plain(c[name](...args)),slack:async(name)=>{
+   if(name==='chat.postMessage'){posts++;return {ts:'123.456'};}
+   c.preRegistrationStockRequest_=()=>null;c.flushPreRegistrationStockAlerts();return {messages:[]};
+ }});
+ assert.equal(result.status,'stale');assert.equal(posts,0);
+});
+
+test('relay send authorization rejects a new request generation and records only an authorized attempt',()=>{
+ const {c,props,advance}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
+ c.inventoryRiskSlack_=()=>{throw Error('하루에 urlfetch 서비스를 너무 많이 호출했습니다.');};const id='RQ-260912-013';c.queuePreRegistrationStockCheck_(id);
+ const claim=c.claimPreRegistrationStockAlertRelay(),ack={requestId:id,id:claim.pending.id,relayToken:claim.pending.relayToken};
+ advance(1000);assert.equal(c.authorizePreRegistrationStockAlertRelay(ack).status,'authorized');
+ const saved=JSON.parse(props.getProperty('preRegStock_v1_state_'+id)).pending;
+ assert.equal(saved.attemptedAt,claim.pending.attemptedAt+1000);assert.notEqual(saved.transportRejected,true);
+ c.queuePreRegistrationStockCheck_(id);assert.equal(c.authorizePreRegistrationStockAlertRelay(ack).status,'stale');
+});
