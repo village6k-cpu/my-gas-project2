@@ -39,7 +39,7 @@ function Report-WatchdogIncident {
     param([switch]$Healthy, [string]$Reason = 'runtime_validation_failed')
     if ($WhatIfPreference) { return }
     $notifier = Join-Path $PSScriptRoot 'kakao-runtime-incident.js'
-    $incidentArgs = if ($Healthy.IsPresent) { @('--healthy') } else { @('--failure', $Reason) }
+    $incidentArgs = @(if ($Healthy.IsPresent) { '--healthy' } else { '--failure'; $Reason })
     & $NodePath $notifier @incidentArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Warning 'Kakao runtime incident notification is awaiting delivery.' }
 }
