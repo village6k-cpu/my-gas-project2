@@ -100,7 +100,7 @@ function buildInventoryRiskReport_(snapshot, options) {
   var bufferMinutes=options.turnaroundMinutes === undefined ? 60 : Number(options.turnaroundMinutes);
   if(!Number.isFinite(bufferMinutes) || bufferMinutes<0 || bufferMinutes>1440) throw new Error('반납 여유시간 오류');
   var bufferMs=bufferMinutes*60000, alerts=[], equipment=snapshot.equipment || [];
-  var identity=inventoryRiskIdentity_(equipment), sets={}, groups={}, expanded={}, demands=[], complete=true;
+  var identity=inventoryRiskIdentity_(equipment), sets={}, groups={}, expanded={}, omitted={}, demands=[], complete=true;
   var relevant=[], coverageEnd=now, skipped=0;
   function risk(kind,row,extra) {
     complete=false;
@@ -113,7 +113,11 @@ function buildInventoryRiskReport_(snapshot, options) {
   // Remember explicit expansion even when every component was returned/excluded.
   (snapshot.schedules || []).forEach(function(row){
     var setKey=inventoryRiskNameKey_(row.setName);
-    if(sets[setKey] && inventoryRiskNameKey_(row.name)!==setKey)expanded[groupKey(row,setKey)]=true;
+    if(sets[setKey] && inventoryRiskNameKey_(row.name)!==setKey) {
+      var key=groupKey(row,setKey);expanded[key]=true;
+      if(['제외','반납완료'].indexOf(String(row.status || ''))>=0 || row.returned===true)
+        (omitted[key] || (omitted[key]=[])).push(row.name);
+    }
   });
   (snapshot.schedules || []).forEach(function(raw,index) {
     var row=Object.assign({},raw), status=String(row.status || ''), tradeStatus=String(row.tradeStatus || '');
@@ -190,11 +194,15 @@ function buildInventoryRiskReport_(snapshot, options) {
       if(c.tracked===false || (typeof inventorySupplyExcluded_==='function' && inventorySupplyExcluded_(c.name,identity.resolve(c.name).item?.category))) return;
       var expected=identity.resolve(c.name).item;
       if(!expected) return;
-      var present=group.components.some(function(r){return identity.resolve(r.name).item?.id===expected.id;});
+      var present=group.components.some(function(r){return identity.resolve(r.name).item?.id===expected.id;}) ||
+        (omitted[key] || []).some(function(name){return identity.resolve(name).item?.id===expected.id;});
       if(!present) risk('set_component_missing',group.headers[0],{component:c.name});
     });
   });
   var pools={};
+  // Internal consumers reuse the same expanded, aliased, physically allocated rows.
+  // JSON API callers cannot supply this callback.
+  if(typeof options.onDemands==='function')options.onDemands(demands,identity);
   demands.forEach(function(row){if(!pools[row.equipmentId])pools[row.equipmentId]=[];pools[row.equipmentId].push(row);});
   Object.keys(pools).forEach(function(id) {
     var item=identity.byId[id], stock=inventoryRiskNumber_(item.stock), maint=inventoryRiskNumber_(item.maintenance);

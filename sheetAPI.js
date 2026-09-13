@@ -1609,6 +1609,10 @@ function runFunction(funcName, params) {
     "getInventoryRiskReport",
     "getInventoryRiskMonitorStatus",
     "setupInventoryRiskMonitor",
+    "setupPreRegistrationStockAlerts",
+    "getPreRegistrationStockAlertStatus",
+    "checkPreRegistrationStockAlert",
+    "flushPreRegistrationStockAlerts",
     "flushInventoryRiskAlerts",
     "listAllTriggers",
     "setupInstallableTrigger",
@@ -1878,11 +1882,13 @@ function runFunction(funcName, params) {
       var rsResult = repairTradeContractStatus.apply(null, rsArgs);
       return { success: true, function: funcName, result: rsResult, executionTime: (new Date() - startTime) + "ms" };
     }
-    if (["getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts"].indexOf(funcName)>=0) {
+    if (["getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts", "setupPreRegistrationStockAlerts", "getPreRegistrationStockAlertStatus", "checkPreRegistrationStockAlert", "flushPreRegistrationStockAlerts"].indexOf(funcName)>=0) {
       var inventoryArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
       if(!Array.isArray(inventoryArgs))inventoryArgs=[inventoryArgs];
       var inventoryFunctions={getInventorySupplyPolicy:getInventorySupplyPolicy,setScheduleSupplyAllocation:setScheduleSupplyAllocation,getInventoryRiskReport:getInventoryRiskReport,getInventoryRiskMonitorStatus:getInventoryRiskMonitorStatus,
-        setupInventoryRiskMonitor:setupInventoryRiskMonitor,flushInventoryRiskAlerts:flushInventoryRiskAlerts};
+        setupInventoryRiskMonitor:setupInventoryRiskMonitor,flushInventoryRiskAlerts:flushInventoryRiskAlerts,
+        setupPreRegistrationStockAlerts:setupPreRegistrationStockAlerts,getPreRegistrationStockAlertStatus:getPreRegistrationStockAlertStatus,
+        checkPreRegistrationStockAlert:checkPreRegistrationStockAlert,flushPreRegistrationStockAlerts:flushPreRegistrationStockAlerts};
       return {success:true,function:funcName,result:inventoryFunctions[funcName].apply(null,inventoryArgs),executionTime:(new Date()-startTime)+'ms'};
     }
     var globalFuncs = {
