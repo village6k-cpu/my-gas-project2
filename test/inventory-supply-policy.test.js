@@ -48,8 +48,8 @@ test('risk report uses the same exclusions and external/upgrade allocations',()=
 });
 test('exclusions do not swallow cameras, battery grips, power stations or recorders',()=>{
  const c=env();assert.equal(typeof c.inventorySupplyExcluded_,'function');
- for(const name of ['소니 A7S3 바디세트','배터리그립','에코플로우 델타2','줌 F6 레코더','소니 FX3 (배터리 포함)'])assert.equal(c.inventorySupplyExcluded_(name),false,name);
- for(const name of ['V마운트 배터리','970 배터리 (전체)','NP-FZ100','소니 CF-A 160','SD 128GB'])assert.equal(c.inventorySupplyExcluded_(name),true,name);
+ for(const name of ['소니 A7S3 바디세트','배터리그립','에코플로우 델타2','줌 F6 레코더','소니 FX3 (배터리 포함)','소니 XQD 리더기'])assert.equal(c.inventorySupplyExcluded_(name),false,name);
+ for(const name of ['V마운트 배터리','970 배터리 (전체)','NP-FZ100','소니 CF-A 160','SD 128GB','소니 XQD 128','소니 XQD 256'])assert.equal(c.inventorySupplyExcluded_(name),true,name);
 });
 test('bad supplier notes affect the matching supply family, never every unrelated reservation',()=>{
  const c=env();const data=c.inventorySupplyAvailabilityRows_(row(lo,2,{note:'[상위대체] 깨진 배정 기록'}));

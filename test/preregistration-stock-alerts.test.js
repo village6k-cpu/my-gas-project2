@@ -56,6 +56,12 @@ test('unknown tracked models raise uncertainty and never silently become availab
  assert.equal(result.shortages.length,0);assert.ok(result.uncertain.some(a=>a.kind==='unknown_equipment'));
 });
 
+test('memory cards missing from the catalog still follow the memory exclusion policy',()=>{
+ const {c}=env();const r=request({rows:[{id:'card',name:'소니 XQD 128',quantity:2,...period}]});
+ const result=c.preRegistrationStockEvaluate_(r,snapshot({sets:[],equipment:[],schedules:[]}));
+ assert.equal(result.shortages.length,0);assert.equal(result.uncertain.length,0);
+});
+
 test('unknown inventory count is not falsely reported as zero stock',()=>{
  const {c}=env();const result=c.preRegistrationStockEvaluate_(request(),snapshot({equipment:[equipment({stock:''})]}));
  assert.equal(result.shortages.length,0);assert.ok(result.uncertain.some(a=>a.kind==='unknown_stock'));
