@@ -322,7 +322,8 @@ test('relay send authorization rejects a new request generation and records only
  c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
  c.inventoryRiskSlack_=()=>{throw Error('하루에 urlfetch 서비스를 너무 많이 호출했습니다.');};const id='RQ-260912-013';c.queuePreRegistrationStockCheck_(id);
  const claim=c.claimPreRegistrationStockAlertRelay(),ack={requestId:id,id:claim.pending.id,relayToken:claim.pending.relayToken};
- advance(1000);assert.equal(c.authorizePreRegistrationStockAlertRelay(ack).status,'authorized');
+ advance(1000);const authorization=c.authorizePreRegistrationStockAlertRelay(ack);assert.equal(authorization.status,'authorized');
+ assert.ok(authorization.validUntil>claim.pending.relayUntil);
  const saved=JSON.parse(props.getProperty('preRegStock_v1_state_'+id)).pending;
  assert.equal(saved.attemptedAt,claim.pending.attemptedAt+1000);assert.notEqual(saved.transportRejected,true);
  c.queuePreRegistrationStockCheck_(id);assert.equal(c.authorizePreRegistrationStockAlertRelay(ack).status,'stale');

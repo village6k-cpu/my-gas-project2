@@ -36,6 +36,8 @@ async function relayOnce({gas,slack,channel,now=Date.now}) {
       return {status:'pending',requestId:claim.requestId};
     const authorization=await gas('authorizePreRegistrationStockAlertRelay',[ack]);
     if(authorization.status!=='authorized')return {status:authorization.status,requestId:claim.requestId};
+    if(!Number.isFinite(authorization.validUntil) || now()+20000>=authorization.validUntil)
+      return {status:'authorization_expired',requestId:claim.requestId};
     const posted=await slack('chat.postMessage',{channel,text:pending.text,unfurl_links:false,unfurl_media:false,
       client_msg_id:pending.id,metadata:{event_type:'preregistration_stock_alert',event_payload:{id:pending.id,request_id:claim.requestId}}});
     if(!posted.ts || posted.channel && posted.channel!==channel)throw new Error('relay_post_receipt_missing');

@@ -339,9 +339,9 @@ function authorizePreRegistrationStockAlertRelay(args) {
       pending.desiredHash!==pending.hash || pending.actionable===false)return {status:'stale'};
     // This is the send decision boundary. It follows the relay's history lookup,
     // fences request writers, and records the attempt before the external POST.
-    pending.attemptedAt=Date.now();delete pending.transportRejected;
+    pending.attemptedAt=Date.now();pending.relayUntil=Date.now()+180000;delete pending.transportRejected;
     p.setProperty(key,JSON.stringify(state));
-    return {status:'authorized',requestId:args.requestId};
+    return {status:'authorized',requestId:args.requestId,validUntil:pending.relayUntil};
   }finally{if(inputHeld)inputLock.releaseLock();lock.releaseLock();}
 }
 

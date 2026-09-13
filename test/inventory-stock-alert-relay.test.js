@@ -5,7 +5,7 @@ const channel='C0B769B394K';
 const pending=()=>({id:'message-id',relayToken:'lease',channel,text:'재고 부족',hash:'same',desiredHash:'same',actionable:true,createdAt:100000,attemptedAt:100000,transportRejected:true});
 function env(over={}) {
  const p={...pending(),...over},messages=[],calls=[],acks=[];
- const gas=async (name,args)=>{if(name==='claimPreRegistrationStockAlertRelay')return {status:'claimed',requestId:'RQ-260904-014',pending:p};if(name==='authorizePreRegistrationStockAlertRelay')return {status:'authorized'};acks.push(args[0]);return {status:args[0].delivered?'sent':'obsolete'};};
+ const gas=async (name,args)=>{if(name==='claimPreRegistrationStockAlertRelay')return {status:'claimed',requestId:'RQ-260904-014',pending:p};if(name==='authorizePreRegistrationStockAlertRelay')return {status:'authorized',validUntil:500000};acks.push(args[0]);return {status:args[0].delivered?'sent':'obsolete'};};
  const slack=async (name,args)=>{calls.push(name);if(name==='conversations.history')return {ok:true,messages};messages.push({...args,ts:'123.456'});return {ok:true,channel,ts:'123.456'};};
  return {p,messages,calls,acks,gas,slack,channel,now:()=>200000};
 }
@@ -33,6 +33,11 @@ test('a failed acknowledgement does not justify replaying an already visible mes
 });
 test('relay rejects a different channel before any Slack operation',async()=>{
  const e=env({channel:'COTHER1234'});await assert.rejects(relayOnce(e),/channel_mismatch/);assert.equal(e.calls.length,0);
+});
+
+test('an authorization delayed beyond its usable lease never starts a POST',async()=>{
+ const e=env(),original=e.gas;e.gas=async(name,args)=>name==='authorizePreRegistrationStockAlertRelay'?{status:'authorized',validUntil:210000}:original(name,args);
+ assert.equal((await relayOnce(e)).status,'authorization_expired');assert.ok(!e.calls.includes('chat.postMessage'));
 });
 test('Slack rate limits persist a retry boundary, and GAS failures do not leak credentials',async()=>{
  let retry=0;const clients=createClients({config:{VILLAGE2_API_URL:'https://script.google.com/macros/s/test/exec',VILLAGE2_API_KEY:'private-test-value'},slackToken:'private-slack-value',onBackoff:t=>retry=t,
