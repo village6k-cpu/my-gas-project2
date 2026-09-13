@@ -15,7 +15,8 @@ function preRegistrationStockEvaluate_(request,snapshot) {
   });
   var uncertain=report.alerts.filter(function(a){return a.kind!=='shortage' && a.kind!=='capacity_tight' && a.kind!=='overdue_return' &&
     a.bookings.some(function(b){return b.tradeId===candidateId;});});
-  if((snapshot.sourceIssues || []).length)uncertain.push({kind:'source_unavailable',equipment:'실재고·별칭 연결 확인 필요'});
+  if((snapshot.sourceIssues || []).length && (uncertain.length || demands.some(function(d){return d.tradeId===candidateId;})))
+    uncertain.push({kind:'source_unavailable',equipment:'실재고·별칭 연결 확인 필요'});
   var equipment={},periods={},shortages=[];
   (snapshot.equipment || []).forEach(function(e){equipment[e.name]={total:Number(e.stock),maintenance:Number(e.maintenance),category:e.category};});
   demands.filter(function(d){return d.tradeId===candidateId;}).forEach(function(d){
@@ -46,6 +47,13 @@ function preRegistrationStockEvaluate_(request,snapshot) {
     start:proposed[0]?.start || request.rows[0]?.start || '',end:proposed.reduce(function(end,r){return r.end>end?r.end:end;},'') || request.rows[0]?.end || '',shortages:shortages,uncertain:uncertain};
 }
 
+function preRegistrationStockNotifiableUncertainty_(result) {
+  var businessIssues=result.uncertain.filter(function(a){return a.kind!=='source_unavailable';});
+  // A temporary supplemental read failure does not create a second warning for
+  // the same proven shortage. Keep it in evaluation diagnostics and gate checks.
+  return result.shortages.length || businessIssues.length?businessIssues:result.uncertain;
+}
+
 function preRegistrationStockText_(result) {
   function clean(value){return String(value || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/[\r\n]/g,' ');}
   function when(value){return Utilities.formatDate(new Date(value),'Asia/Seoul','M/d HH:mm');}
@@ -56,7 +64,7 @@ function preRegistrationStockText_(result) {
     var names=Array.from(new Set(s.bookings.map(function(b){return clean(b.customer || b.tradeId);}))).slice(0,3);
     if(names.length)lines.push('　겹치는 예약: '+names.join(' · '));
   });
-  result.uncertain.slice(0,3).forEach(function(a){lines.push('❓ '+clean(a.component || a.equipment)+' — 재고 연결 확인 필요');});
+  preRegistrationStockNotifiableUncertainty_(result).slice(0,3).forEach(function(a){lines.push('❓ '+clean(a.component || a.equipment)+' — 재고 연결 확인 필요');});
   if(result.shortages.length>4)lines.push('외 부족 '+(result.shortages.length-4)+'건');
   lines.push(result.registered?'👉 등록된 예약입니다. 공급 가능 여부를 즉시 확인해 주세요.':'👉 등록 전에 대체 장비·외부 조달 여부를 확인해 주세요.');
   lines.push('<https://today-dashboard-ten.vercel.app/schedule|예약 보기> · '+clean(result.requestId));
@@ -90,7 +98,7 @@ function preRegistrationStockDeliver_(evaluation) {
   var state=JSON.parse(p.getProperty(key) || '{}'),reconciled=false,posting=false;
   var fingerprint=preRegistrationStockHash_({customer:evaluation.customer,start:evaluation.start,end:evaluation.end,
     shortages:evaluation.shortages.map(function(s){return [s.equipment,s.start,s.end,s.requested,s.available];}).sort(),
-    uncertain:evaluation.uncertain.map(function(a){return [a.kind,a.equipment,a.component || ''];}).sort()});
+    uncertain:preRegistrationStockNotifiableUncertainty_(evaluation).map(function(a){return [a.kind,a.equipment,a.component || ''];}).sort()});
   var actionable=evaluation.shortages.length+evaluation.uncertain.length>0;
   function save(){p.setProperty(key,JSON.stringify(state));}
   try {
