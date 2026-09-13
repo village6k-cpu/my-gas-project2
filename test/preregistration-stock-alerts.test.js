@@ -25,6 +25,98 @@ const booking=(over={})=>({id:'old-1',tradeId:'260907-009',customer:'박나림',
 const snapshot=(over={})=>({equipment:[equipment()],sets:[{name:'R6 세트',components:[{name:'캐논 100-500 렌즈',quantity:1,tracked:true},{name:'메모리 / 배터리',quantity:1,tracked:false}]}],schedules:[booking()],sourceIssues:[],...over});
 const plain=x=>JSON.parse(JSON.stringify(x));
 
+function captureNotices(c) {
+ const messages=[];
+ c.inventoryRiskSlack_=(method,p)=>{
+  if(method==='chat.postMessage') {
+   const message={...p,ts:'1800000000.'+String(messages.length+1).padStart(6,'0')};
+   messages.push(message);return {ok:true,channel:p.channel,ts:message.ts};
+  }
+  return {ok:true,messages};
+ };
+ return messages;
+}
+const uncertainEvaluation=(names)=>({requestId:'RQ-260913-004',customer:'예약자',...period,shortages:[],
+ uncertain:names.map(equipment=>({kind:'unknown_equipment',equipment}))});
+
+test('resolving a fourth hidden issue does not resend the same three visible warnings',()=>{
+ const {c}=env(),messages=captureNotices(c);
+ const before=uncertainEvaluation(['삼각대','스크림 구성','그립 구성','미선택 소프트박스']);
+ assert.equal(c.preRegistrationStockDeliver_(before).status,'sent');
+ const after=uncertainEvaluation(['삼각대','스크림 구성','그립 구성']);
+ assert.equal(c.preRegistrationStockDeliver_(after).status,'already_sent');
+ assert.equal(messages.length,1);
+});
+
+test('a new issue is shown in the follow-up instead of repeating the old first three',()=>{
+ const {c}=env(),messages=captureNotices(c);
+ c.preRegistrationStockDeliver_(uncertainEvaluation(['삼각대','스크림 구성','그립 구성']));
+ assert.equal(c.preRegistrationStockDeliver_(uncertainEvaluation(['삼각대','스크림 구성','그립 구성','새 조명'])).status,'sent');
+ assert.match(messages[1].text,/새 조명/);assert.doesNotMatch(messages[1].text,/❓ 삼각대/);
+ assert.equal(c.preRegistrationStockDeliver_(uncertainEvaluation(['삼각대','스크림 구성','그립 구성','새 조명'])).status,'already_sent');
+});
+
+test('an exact authorized RQ replacement retains notification history across multiple replacements',()=>{
+ const {c}=env(),messages=captureNotices(c),evaluation=uncertainEvaluation(['삼각대']);
+ c.preRegistrationStockDeliver_(evaluation);
+ assert.equal(typeof c.linkPreRegistrationStockReplacement_,'function');
+ c.linkPreRegistrationStockReplacement_('RQ-260913-004','RQ-260913-005');
+ c.linkPreRegistrationStockReplacement_('RQ-260913-005','RQ-260913-006');
+ assert.equal(c.preRegistrationStockDeliver_({...evaluation,requestId:'RQ-260913-006'}).status,'already_sent');
+ assert.equal(messages.length,1);
+ assert.equal(c.preRegistrationStockDeliver_({...evaluation,requestId:'RQ-260913-007'}).status,'sent');
+ assert.equal(messages.length,2,'an independent booking must not share deduplication by customer/date alone');
+});
+
+test('replacement cannot post again while its predecessor delivery is uncertain',()=>{
+ const {c,advance}=env(),evaluation=uncertainEvaluation(['삼각대']);let posts=0,posted,online=false;
+ c.inventoryRiskSlack_=(method,p)=>{
+  if(method==='chat.postMessage'){posts++;posted=p;throw Error('connection lost after delivery');}
+  if(!online)throw Error('history unavailable');
+  return {messages:[{...posted,ts:'1800000000.111111'}]};
+ };
+ assert.equal(c.preRegistrationStockDeliver_(evaluation).status,'pending');
+ assert.equal(typeof c.linkPreRegistrationStockReplacement_,'function');
+ c.linkPreRegistrationStockReplacement_(evaluation.requestId,'RQ-260913-005');advance(60001);
+ assert.equal(c.preRegistrationStockDeliver_({...evaluation,requestId:'RQ-260913-005'}).status,'pending');
+ online=true;
+ assert.equal(c.preRegistrationStockDeliver_({...evaluation,requestId:'RQ-260913-005'}).status,'already_sent');
+ assert.equal(posts,1);
+});
+
+test('a reduced shortage stays quiet but a worsening shortage and a recurrence are reported',()=>{
+ const {c}=env(),messages=captureNotices(c);
+ const base=c.preRegistrationStockEvaluate_(request({rows:[{...request().rows[0],quantity:3}]}),snapshot());
+ c.preRegistrationStockDeliver_(base);
+ const improved=plain(base);Object.assign(improved.shortages[0],{requested:2,shortage:2});
+ assert.equal(c.preRegistrationStockDeliver_(improved).status,'already_sent');
+ const worse=plain(base);Object.assign(worse.shortages[0],{requested:4,shortage:4});
+ assert.equal(c.preRegistrationStockDeliver_(worse).status,'sent');
+ c.preRegistrationStockDeliver_({...base,shortages:[],uncertain:[]});
+ assert.equal(c.preRegistrationStockDeliver_(base).status,'sent');assert.equal(messages.length,3);
+});
+
+test('replacement history is linked only after successful exact cutover',()=>{
+ const source=fs.readFileSync(path.join(__dirname,'../checkAvailability.js'),'utf8');
+ const start=source.indexOf('var expectedReplacedRows = cutoverFence.group.rows.length;');
+ const block=source.slice(start,source.indexOf('if (staffConfirmedPendingFence)',start));
+ assert.ok(block.indexOf('linkPreRegistrationStockReplacement_')>block.indexOf('replacedRows !== expectedReplacedRows'));
+ assert.match(block,/linkPreRegistrationStockReplacement_\(cutoverFence\.group\.reqID, reqID\)/);
+});
+
+test('existing verified receipts learn their risk baseline without another Slack post',()=>{
+ const {c,props}=env(),messages=captureNotices(c),evaluation=uncertainEvaluation(['삼각대','소프트박스']);
+ c.preRegistrationStockDeliver_(evaluation);
+ const key='preRegStock_v1_state_'+evaluation.requestId,state=JSON.parse(props.getProperty(key));
+ delete state.lastSignature;props.setProperty(key,JSON.stringify(state));
+ assert.equal(c.preRegistrationStockDeliver_(evaluation).status,'already_sent');
+ assert.equal(c.preRegistrationStockDeliver_(uncertainEvaluation(['삼각대'])).status,'already_sent');
+ assert.equal(messages.length,1);
+ const status=plain(c.getPreRegistrationStockAlertStatus({requestId:evaluation.requestId}));
+ assert.equal(status.policyVersion,2);assert.equal(status.request.lastRiskCounts.uncertain,1);
+ assert.equal(status.request.lastReceipt.ts,messages[0].ts);
+});
+
 test('set component alias finds the real lens shortage before any booking write',()=>{
  const {c}=env();const s=snapshot(),r=request(),before=JSON.stringify([s,r]);
  const result=plain(c.preRegistrationStockEvaluate_(r,s));

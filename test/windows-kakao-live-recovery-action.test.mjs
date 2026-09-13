@@ -167,6 +167,14 @@ test('watchdog keeps a ready matching runtime alive while Work Orchestrator debt
   assert.equal(gatewayWatchdogHealth({ invariantHealthy: false }), true);
 });
 
+test('routine watchdog permits healthy work in progress so capture recovery remains reachable', () => {
+  for (const queue of [{ready:1},{claimed:1},{retry:1}]) {
+    assert.equal(gatewayWatchdogHealth(queue),true);
+  }
+  assert.equal(gatewayWatchdogHealth({claimed:1,fresh:false}),false);
+  assert.equal(gatewayWatchdogHealth({claimed:1,receiptVerified:false}),false);
+});
+
 test('startup maintenance tolerates terminal history while preserving active runtime safeguards', () => {
   assert.equal(gatewayWatchdogHealth({ startupMaintenance: true, failed: 15 }), true);
   for (const blocked of [{ ready: 1 }, { claimed: 1 }, { retry: 1 }, { fresh: false },
@@ -279,13 +287,13 @@ test('Gateway cutover health fails closed on queue, consumer, or plugin receipt 
   assert.equal(gatewayCutoverHealth({ receiptVerified: false }), false);
 });
 
-test('Gateway watchdog ignores terminal history but still requires an idle safe live path', () => {
+test('Gateway watchdog ignores terminal history while retaining a safe live processing path', () => {
   assert.equal(gatewayWatchdogHealth(), true);
   assert.equal(gatewayWatchdogHealth({ failed: 3, unnotified: 1 }), true);
   assert.equal(gatewayWatchdogHealth({ targetMode: 'v2', healthMode: 'legacy' }), false);
-  assert.equal(gatewayWatchdogHealth({ ready: 1 }), false);
-  assert.equal(gatewayWatchdogHealth({ claimed: 1 }), false);
-  assert.equal(gatewayWatchdogHealth({ retry: 1 }), false);
+  assert.equal(gatewayWatchdogHealth({ ready: 1 }), true);
+  assert.equal(gatewayWatchdogHealth({ claimed: 1 }), true);
+  assert.equal(gatewayWatchdogHealth({ retry: 1 }), true);
   assert.equal(gatewayWatchdogHealth({ fresh: false }), false);
   assert.equal(gatewayWatchdogHealth({ receiptVerified: false }), false);
 });

@@ -12674,6 +12674,8 @@ function _insertAndCheckRequest(req) {
     SpreadsheetApp.flush();
     response.replacedReqIDs = replacedReqIDs;
     response.replacedRows = replacedRows;
+    if (typeof linkPreRegistrationStockReplacement_ === 'function')
+      linkPreRegistrationStockReplacement_(cutoverFence.group.reqID, reqID);
   }
   if (staffConfirmedPendingFence) {
     response.staff_confirmed_pending_mutation = {

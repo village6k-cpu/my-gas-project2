@@ -54,21 +54,81 @@ function preRegistrationStockNotifiableUncertainty_(result) {
   return result.shortages.length || businessIssues.length?businessIssues:result.uncertain;
 }
 
-function preRegistrationStockText_(result) {
+function preRegistrationStockSameScope_(a,b) {
+  return !!a && !!b && a.customer===b.customer && a.start===b.start && a.end===b.end;
+}
+
+function preRegistrationStockCoversShortage_(prior,current) {
+  return (prior || []).some(function(s){return s[0]===current[0] && s[1]===current[1] && s[2]===current[2] &&
+    s[3]>=current[3] && s[4]<=current[4];});
+}
+
+function preRegistrationStockCovers_(prior,current) {
+  return preRegistrationStockSameScope_(prior,current) &&
+    current.shortages.every(function(s){return preRegistrationStockCoversShortage_(prior.shortages,s);}) &&
+    current.uncertain.every(function(a){return prior.uncertain.some(function(b){return JSON.stringify(a)===JSON.stringify(b);});});
+}
+
+function preRegistrationStockText_(result,previous) {
+  var shortages=result.shortages,uncertain=preRegistrationStockNotifiableUncertainty_(result);
+  if(preRegistrationStockSameScope_(previous,result)) {
+    shortages=shortages.filter(function(s){return !preRegistrationStockCoversShortage_(previous.shortages,[s.equipment,s.start,s.end,s.requested,s.available]);});
+    uncertain=uncertain.filter(function(a){return !previous.uncertain.some(function(b){return JSON.stringify(b)===JSON.stringify([a.kind,a.equipment,a.component || '']);});});
+  }
   function clean(value){return String(value || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/[\r\n]/g,' ');}
   function when(value){return Utilities.formatDate(new Date(value),'Asia/Seoul','M/d HH:mm');}
   var lines=[(result.shortages.length?'🚨 *재고 부족*':'⚠️ *재고 확인 필요*')+' · '+clean(result.customer),
     '🗓️ '+when(result.start)+' ~ '+when(result.end)];
-  result.shortages.slice(0,4).forEach(function(s){
+  shortages.slice(0,4).forEach(function(s){
     lines.push('🔴 '+clean(s.equipment)+' — 필요 '+s.requested+' / 가용 '+s.available+' · *'+s.shortage+'대 부족*');
     var names=Array.from(new Set(s.bookings.map(function(b){return clean(b.customer || b.tradeId);}))).slice(0,3);
     if(names.length)lines.push('　겹치는 예약: '+names.join(' · '));
   });
-  preRegistrationStockNotifiableUncertainty_(result).slice(0,3).forEach(function(a){lines.push('❓ '+clean(a.component || a.equipment)+' — 재고 연결 확인 필요');});
-  if(result.shortages.length>4)lines.push('외 부족 '+(result.shortages.length-4)+'건');
+  uncertain.slice(0,3).forEach(function(a){lines.push('❓ '+clean(a.component || a.equipment)+' — 재고 연결 확인 필요');});
+  if(shortages.length>4)lines.push('외 부족 '+(shortages.length-4)+'건');
+  if(uncertain.length>3)lines.push('외 재고 확인 '+(uncertain.length-3)+'건');
   lines.push(result.registered?'👉 등록된 예약입니다. 공급 가능 여부를 즉시 확인해 주세요.':'👉 등록 전에 대체 장비·외부 조달 여부를 확인해 주세요.');
   lines.push('<https://today-dashboard-ten.vercel.app/schedule|예약 보기> · '+clean(result.requestId));
   return lines.join('\n').slice(0,2200);
+}
+
+// Called only by the exact, validated RQ cutover while its writer owns UserLock.
+// Never infer booking identity from a customer's name or a matching rental date.
+function linkPreRegistrationStockReplacement_(previousId,requestId) {
+  if(!/^RQ-\d{6}-\d{3}$/.test(previousId) || !/^RQ-\d{6}-\d{3}$/.test(requestId) || previousId===requestId)
+    throw new Error('재고 알림 예약 교체 연결 확인 필요');
+  PropertiesService.getScriptProperties().setProperty(PREREG_STOCK_PREFIX_+'predecessor_'+requestId,previousId);
+}
+
+function preRegistrationStockInherit_(requestId,state) {
+  var p=PropertiesService.getScriptProperties(),seen={},id=requestId;
+  for(var i=0;i<32;i++) {
+    id=p.getProperty(PREREG_STOCK_PREFIX_+'predecessor_'+id);
+    if(!id)return {pending:false};
+    if(seen[id])return {pending:true};seen[id]=true;
+    var key=PREREG_STOCK_PREFIX_+'state_'+id,prior=JSON.parse(p.getProperty(key) || '{}');
+    if(prior.pending) {
+      // An earlier POST may still be in flight. Reconcile its original identity;
+      // never transfer it to another request or let the replacement replay it.
+      if(prior.pending.relayUntil>Date.now())return {pending:true};
+      var receipt=preRegistrationStockReceipt_(prior.pending);
+      if(receipt.found) {
+        if(!(prior.lastReceipt && prior.pending.coveredByHash===prior.lastHash)) {
+          prior.lastHash=prior.pending.hash;prior.lastSignature=prior.pending.signature;
+          prior.lastReceipt={id:prior.pending.id,channel:prior.pending.channel,ts:receipt.ts,at:new Date().toISOString()};
+        }
+        prior.pending=null;prior.error=null;p.setProperty(key,JSON.stringify(prior));
+      } else if(!receipt.complete || prior.pending.ts || Date.now()-prior.pending.attemptedAt<60000) return {pending:true};
+      else {prior.pending=null;p.setProperty(key,JSON.stringify(prior));}
+    }
+    if(prior.lastReceipt && prior.lastHash) {
+      state.lastHash=prior.lastHash;state.lastSignature=prior.lastSignature;state.lastReceipt=prior.lastReceipt;
+      return {pending:false};
+    }
+    // A verified clear state ends the old incident. Do not resurrect earlier debt.
+    if(prior.lastHash==='')return {pending:false};
+  }
+  return {pending:true};
 }
 
 function preRegistrationStockHash_(value) {
@@ -99,14 +159,22 @@ function preRegistrationStockDeliver_(evaluation) {
   var signature={customer:evaluation.customer,start:evaluation.start,end:evaluation.end,
     shortages:evaluation.shortages.map(function(s){return [s.equipment,s.start,s.end,s.requested,s.available];}).sort(),
     uncertain:preRegistrationStockNotifiableUncertainty_(evaluation).map(function(a){return [a.kind,a.equipment,a.component || ''];}).sort()};
+  if(!state.lastReceipt && !state.pending && state.lastHash!=='') {
+    try {
+      if(preRegistrationStockInherit_(evaluation.requestId,state).pending)return {status:'pending',requestId:evaluation.requestId};
+      if(state.lastReceipt){state.end=evaluation.end;p.setProperty(key,JSON.stringify(state));}
+    }
+    catch(error){return {status:'pending',requestId:evaluation.requestId,error:'이전 예약의 재고 알림 전달 확인 대기'};}
+  }
   var fingerprint=preRegistrationStockHash_(signature),legacyFingerprint=null;
   if(evaluation.shortages.length || signature.uncertain.some(function(a){return a[0]!=='source_unavailable';}))
     legacyFingerprint=preRegistrationStockHash_(Object.assign({},signature,{uncertain:signature.uncertain.concat([
       ['source_unavailable','실재고·별칭 연결 확인 필요','']]).sort()}));
   var actionable=evaluation.shortages.length+evaluation.uncertain.length>0;
-  var alreadyNotified=!!state.lastReceipt && (state.lastHash===fingerprint || legacyFingerprint && state.lastHash===legacyFingerprint);
-  var migrated=alreadyNotified && state.lastHash!==fingerprint;
-  if(alreadyNotified)state.lastHash=fingerprint;
+  var alreadyNotified=!!state.lastReceipt && (state.lastHash===fingerprint || legacyFingerprint && state.lastHash===legacyFingerprint ||
+    !!state.lastHash && preRegistrationStockCovers_(state.lastSignature,signature));
+  var migrated=alreadyNotified && (state.lastHash!==fingerprint || !state.lastSignature);
+  if(alreadyNotified){state.lastHash=fingerprint;state.lastSignature=signature;}
   function save(){p.setProperty(key,JSON.stringify(state));}
   function waiting(){return alreadyNotified?{status:'already_sent',requestId:evaluation.requestId,receipt:state.lastReceipt,needsReconciliation:!!state.pending}:
     {status:'pending',requestId:evaluation.requestId};}
@@ -120,21 +188,21 @@ function preRegistrationStockDeliver_(evaluation) {
       if(state.pending.relayUntil>Date.now())return waiting();
       var prior=preRegistrationStockReceipt_(state.pending);
       if(prior.found) {
-        if(!alreadyNotified){state.lastHash=state.pending.hash;state.lastReceipt={id:state.pending.id,ts:prior.ts,channel:state.pending.channel,at:new Date().toISOString()};}
+        if(!alreadyNotified){state.lastHash=state.pending.hash;state.lastSignature=state.pending.signature;state.lastReceipt={id:state.pending.id,ts:prior.ts,channel:state.pending.channel,at:new Date().toISOString()};}
         state.pending=null;state.error=null;reconciled=true;save();
       } else if(!prior.complete || state.pending.ts || Date.now()-state.pending.attemptedAt<60000) {
         return waiting();
       } else if(alreadyNotified || state.pending.hash!==fingerprint || !actionable) {state.pending=null;save();}
     }
-    if(!actionable) {state.lastHash='';state.end=evaluation.end;state.pending=null;save();return {status:'clear',requestId:evaluation.requestId};}
+    if(!actionable) {state.lastHash='';state.lastSignature=null;state.end=evaluation.end;state.pending=null;save();return {status:'clear',requestId:evaluation.requestId};}
     if(state.lastHash===fingerprint || legacyFingerprint && state.lastReceipt && state.lastHash===legacyFingerprint) {
       // Any pending receipt reaching here has complete absence evidence and no
       // active relay/uncertain attempt. The verified equivalent notice owns it.
       if(state.lastHash!==fingerprint || state.pending){state.lastHash=fingerprint;state.pending=null;state.error=null;save();}
       return {status:reconciled?'sent':'already_sent',requestId:evaluation.requestId,receipt:state.lastReceipt};
     }
-    if(!state.pending)state.pending={id:Utilities.getUuid(),hash:fingerprint,desiredHash:fingerprint,actionable:true,channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
-      createdAt:Date.now(),text:preRegistrationStockText_(evaluation)};
+    if(!state.pending)state.pending={id:Utilities.getUuid(),hash:fingerprint,signature:signature,desiredHash:fingerprint,actionable:true,channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
+      createdAt:Date.now(),text:preRegistrationStockText_(evaluation,state.lastSignature)};
     state.end=evaluation.end;state.pending.attemptedAt=Date.now();delete state.pending.transportRejected;save();
     posting=true;
     var response=inventoryRiskSlack_('chat.postMessage',{channel:state.pending.channel,text:state.pending.text,
@@ -145,7 +213,7 @@ function preRegistrationStockDeliver_(evaluation) {
     state.pending.ts=response.ts;save();
     var receipt=preRegistrationStockReceipt_(state.pending);
     if(!receipt.found)return {status:'pending',requestId:evaluation.requestId};
-    state.lastHash=state.pending.hash;state.lastReceipt={id:state.pending.id,ts:receipt.ts,channel:state.pending.channel,at:new Date().toISOString()};
+    state.lastHash=state.pending.hash;state.lastSignature=state.pending.signature;state.lastReceipt={id:state.pending.id,ts:receipt.ts,channel:state.pending.channel,at:new Date().toISOString()};
     state.pending=null;state.error=null;save();
     return {status:'sent',requestId:evaluation.requestId,receipt:state.lastReceipt};
   }catch(error){
@@ -179,11 +247,13 @@ function preRegistrationStockPrune_(scriptLockHeld) {
   try {
     if(!inputLock.hasLock()) {if(!inputLock.tryLock(100))return;ownsInputLock=true;}
     var p=PropertiesService.getScriptProperties(),all=p.getProperties(),prefix=PREREG_STOCK_PREFIX_+'dirty_',cutoff=Date.now()-7*86400000;
+    var inherited=Object.keys(all).filter(function(k){return k.indexOf(PREREG_STOCK_PREFIX_+'predecessor_')===0;}).map(function(k){return all[k];});
     Object.keys(all).filter(function(k){return k.indexOf(prefix)===0;}).forEach(function(k){
       var id=k.slice(prefix.length),state=JSON.parse(all[PREREG_STOCK_PREFIX_+'state_'+id] || '{}');
+      if(inherited.indexOf(id)>=0)return;
       if(all[k]!==all[PREREG_STOCK_PREFIX_+'checked_'+id] || state.pending)return;
       if(state.end?!(Date.parse(state.end)<cutoff):!(parseInt(all[k],10)<cutoff))return;
-      ['state_','dirty_','checked_','registered_','registering_'].forEach(function(part){p.deleteProperty(PREREG_STOCK_PREFIX_+part+id);});
+      ['state_','dirty_','checked_','registered_','registering_','predecessor_'].forEach(function(part){p.deleteProperty(PREREG_STOCK_PREFIX_+part+id);});
     });
   }finally{if(ownsInputLock)inputLock.releaseLock();if(!scriptLockHeld)lock.releaseLock();}
 }
@@ -299,13 +369,22 @@ function checkPreRegistrationStockAlert(options) {
   return request?preRegistrationStockEvaluate_(request,readInventoryRiskSnapshot_()):{status:'skipped',requestId:id};
 }
 
-function getPreRegistrationStockAlertStatus() {
+function getPreRegistrationStockAlertStatus(options) {
   var p=PropertiesService.getScriptProperties(),all=p.getProperties(),lease=JSON.parse(all[PREREG_STOCK_PREFIX_+'lease'] || '{}');
-  return {enabled:p.getProperty(PREREG_STOCK_PREFIX_+'enabled')==='true',channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
+  var result={policyVersion:2,enabled:p.getProperty(PREREG_STOCK_PREFIX_+'enabled')==='true',channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
     externalRelay:p.getProperty(PREREG_STOCK_PREFIX_+'externalRelay')==='true',
     processingUntil:lease.until>Date.now()?new Date(lease.until).toISOString():null,
     pending:preRegistrationStockPendingKeys_(all).length,
     lastResult:JSON.parse(p.getProperty(PREREG_STOCK_PREFIX_+'lastResult') || 'null'),lastError:p.getProperty(PREREG_STOCK_PREFIX_+'lastError')};
+  if(options && options.requestId) {
+    var id=String(options.requestId);
+    if(!/^RQ-\d{6}-\d{3}$/.test(id))throw new Error('재고 알림 요청ID 확인 필요');
+    var state=JSON.parse(all[PREREG_STOCK_PREFIX_+'state_'+id] || '{}');
+    result.request={requestId:id,predecessor:all[PREREG_STOCK_PREFIX_+'predecessor_'+id] || null,
+      pending:!!state.pending,lastReceipt:state.lastReceipt || null,lastHash:state.lastHash || null,
+      lastRiskCounts:state.lastSignature?{shortages:state.lastSignature.shortages.length,uncertain:state.lastSignature.uncertain.length}:null};
+  }
+  return result;
 }
 
 function setupPreRegistrationStockAlerts(options) {
@@ -386,7 +465,7 @@ function acknowledgePreRegistrationStockAlertRelay(args) {
       // Reconciling an older posted attempt must not replace the verified notice
       // that already covers the current request and retire its deduplication key.
       var covered=!!state.lastReceipt && !!pending.coveredByHash && pending.coveredByHash===state.lastHash;
-      if(!covered){state.lastHash=pending.hash;state.lastReceipt={id:pending.id,channel:pending.channel,ts:args.ts,at:new Date().toISOString(),transport:'windows_relay'};}
+      if(!covered){state.lastHash=pending.hash;state.lastSignature=pending.signature;state.lastReceipt={id:pending.id,channel:pending.channel,ts:args.ts,at:new Date().toISOString(),transport:'windows_relay'};}
       state.pending=null;state.error=null;result={status:covered?'already_sent':'sent',requestId:args.requestId,receipt:state.lastReceipt};
     } else if(args.obsolete===true) {
       if(pending.desiredHash===pending.hash && pending.actionable!==false)return {status:'conflict'};
