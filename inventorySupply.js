@@ -9,7 +9,7 @@ function inventorySupplyExcluded_(name, category) {
   var n=String(name || '').normalize('NFKC').trim();
   if (/^(메모리|메모리카드|배터리)$/.test(String(category || '').trim())) return true;
   // Match standalone consumables, never a camera/set merely mentioning a battery.
-  return /^(?:(?:소니|샌디스크|삼성|렉사)\s*)?(?:CF-?A\s*\d+|CFexpress\s*(?:Type\s*)?[AB]?\s*\d+|XQD\s*\d+|(?:micro\s*)?SD(?:XC|HC)?\s*\d+|메모리(?:카드)?(?:\s*\d+)?)(?:\s*(?:GB|TB|기가))?$/i.test(n) ||
+  return /^(?:(?:소니|샌디스크|삼성|렉사)\s*)?(?:CF-?A|CFexpress\s*(?:Type\s*)?[AB]?|XQD|(?:micro\s*|마이크로\s*)?SD(?:XC|HC)?|메모리)(?:\s*(?:카드|card))?(?:\s*\d+(?:\.\d+)?\s*(?:GB|TB|기가)?)?$/i.test(n) ||
     /^(?:NP-FZ100|NP-F970|NP-F750|LP-E6(?:N|NH)?|BP-U\d+|(?:V|v|브이)\s*마운트\s*배터리|\d+\s*배터리|배터리)(?:\s*\(전체\))?$/i.test(n);
 }
 

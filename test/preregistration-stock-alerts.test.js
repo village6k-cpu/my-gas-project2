@@ -337,3 +337,24 @@ test('Slack emoji aliases still verify the same receipt but changed wording does
  c.inventoryRiskSlack_=()=>({messages:[{ts:'123.456',text:c.stockAlertSlackText_(posted.text)+' changed',metadata:posted.metadata}]});
  assert.equal(c.preRegistrationStockReceipt_(pending).found,false);
 });
+
+test('off-catalog SD card names stay excluded even during a supplemental source outage',()=>{
+ const {c}=env();
+ for(const name of ['sd카드 256','SD 카드 256GB','microSD card 128GB','마이크로 SD 카드','XQD 카드 128','CF-A 160']) {
+   const r=request({rows:[{id:'card',name,quantity:6,...period}]});
+   const result=c.preRegistrationStockEvaluate_(r,snapshot({sets:[],equipment:[],schedules:[],sourceIssues:['temporary outage']}));
+   assert.equal(result.shortages.length,0,name);assert.equal(result.uncertain.length,0,name);
+ }
+ for(const name of ['SD카드 리더기','소니 CF-A 리더기','FX3 세트 SD 카드 256'])assert.equal(c.inventorySupplyExcluded_(name),false,name);
+});
+
+test('flapping supplemental reads do not resend the same proven shortage',()=>{
+ const {c}=env();let posts=0,posted;
+ c.inventoryRiskSlack_=(name,p)=>{if(name==='chat.postMessage'){posts++;posted=p;return {ts:'123.456'};}return {messages:[{ts:'123.456',text:posted.text,metadata:posted.metadata}]};};
+ const good=c.preRegistrationStockEvaluate_(request(),snapshot());
+ const unavailable=c.preRegistrationStockEvaluate_(request(),snapshot({sourceIssues:['temporary outage']}));
+ assert.equal(c.preRegistrationStockDeliver_(good).status,'sent');
+ assert.equal(c.preRegistrationStockDeliver_(unavailable).status,'already_sent');
+ assert.equal(c.preRegistrationStockDeliver_(good).status,'already_sent');assert.equal(posts,1);
+ assert.ok(!c.preRegistrationStockText_(unavailable).includes('실재고·별칭'));
+});
