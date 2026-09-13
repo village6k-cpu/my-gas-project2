@@ -8,12 +8,15 @@ begin
  v_name:=p_item->>'name'; v_total:=(p_item->>'stock_total')::integer; v_maint:=(p_item->>'stock_maint')::integer;
  if coalesce(length(v_name),0) not between 1 and 200 or v_total is null or v_total<0 or v_total>9999 or v_maint is null or v_maint<0 or v_maint>v_total then raise exception 'invalid_stock_count'; end if;
  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('village.inventory_audit.full_shop',0));
- -- An owner-confirmed NEW asset does not mutate a frozen snapshot item. Keep
- -- pending audit creations separate, and reserve their selected IDs below.
- if exists(select 1 from village.inventory_audit_decisions d join village.inventory_audit_sessions a on a.id=d.session_id
-   where a.status not in ('approved','cancelled') and d.resolution='create_equipment' and
-   (lower(regexp_replace(d.new_equipment_payload->>'name','[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g')) or exists(select 1 from jsonb_array_elements_text(coalesce(d.new_equipment_payload->'aliases','[]'::jsonb)) alias where lower(regexp_replace(alias,'[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g')))))
- then raise exception 'equipment_pending_in_audit'; end if;
+ -- Owner-confirmed additions never change snapshot items or pending audit creations.
+ if exists(
+  select 1 from village.inventory_audit_decisions d join village.inventory_audit_sessions a on a.id=d.session_id
+  where a.status not in ('approved','cancelled') and d.resolution='create_equipment' and (
+   lower(regexp_replace(d.new_equipment_payload->>'name','[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g'))
+   or exists(select 1 from jsonb_array_elements_text(coalesce(d.new_equipment_payload->'aliases','[]'::jsonb)) alias
+    where lower(regexp_replace(alias,'[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g')))
+  )
+ ) then raise exception 'equipment_pending_in_audit'; end if;
  select * into v_prior from village.inventory_stock_confirmations where source_key=p_source_key for update;
  if found then
    if v_prior.evidence is distinct from p_evidence then raise exception 'stock_confirmation_evidence_changed'; end if;
@@ -35,18 +38,7 @@ begin
   select coalesce(nullif(btrim(d.resolved_equipment_id),''),nullif(btrim(d.new_equipment_payload->>'equipment_id'),''))
   from village.inventory_audit_decisions d join village.inventory_audit_sessions a on a.id=d.session_id
   where a.status not in ('approved','cancelled') and d.resolution='create_equipment'
- ) reserved where equipment_id ~ ('^'||v_prefix||'-[0-9]+
- v_id:=v_prefix||'-'||lpad(v_count::text,greatest(3,length(v_count::text)),'0');
- insert into village.equipment_ledger(equipment_id,name,major,category,stock_total,stock_maint,price,state,note,verify_status,last_verified_at,last_verified_by,source)
- values(v_id,v_name,p_item->>'major',p_item->>'category',v_total,v_maint,(p_item->>'price')::integer,case when v_maint>0 then '정비중' else '정상' end,'','verified',now(),p_evidence->>'ownerId','owner-stock-confirmation');
- insert into village.equipment_events(equipment_id,type,payload,actor) values(v_id,'owner_stock_confirmed',jsonb_build_object('sourceKey',p_source_key,'item',p_item,'evidence',p_evidence),'inventory-stock-intake');
- insert into village.inventory_stock_confirmations(source_key,equipment_id,evidence) values(p_source_key,v_id,p_evidence);
- return jsonb_build_object('ok',true,'duplicate',false,'equipmentId',v_id);
-end;
-$$;
-revoke all on function village.confirm_missing_inventory_stock(text,jsonb,jsonb) from public,anon,authenticated;
-grant execute on function village.confirm_missing_inventory_stock(text,jsonb,jsonb) to service_role;
-);
+ ) reserved where equipment_id ~ ('^'||v_prefix||'-[0-9]+$');
  v_id:=v_prefix||'-'||lpad(v_count::text,greatest(3,length(v_count::text)),'0');
  insert into village.equipment_ledger(equipment_id,name,major,category,stock_total,stock_maint,price,state,note,verify_status,last_verified_at,last_verified_by,source)
  values(v_id,v_name,p_item->>'major',p_item->>'category',v_total,v_maint,(p_item->>'price')::integer,case when v_maint>0 then '정비중' else '정상' end,'','verified',now(),p_evidence->>'ownerId','owner-stock-confirmation');
