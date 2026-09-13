@@ -8,20 +8,20 @@ begin
  v_name:=p_item->>'name'; v_total:=(p_item->>'stock_total')::integer; v_maint:=(p_item->>'stock_maint')::integer;
  if coalesce(length(v_name),0) not between 1 and 200 or v_total is null or v_total<0 or v_total>9999 or v_maint is null or v_maint<0 or v_maint>v_total then raise exception 'invalid_stock_count'; end if;
  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('village.inventory_audit.full_shop',0));
- -- Owner-confirmed additions never change snapshot items or pending audit creations.
- if exists(
-  select 1 from village.inventory_audit_decisions d join village.inventory_audit_sessions a on a.id=d.session_id
-  where a.status not in ('approved','cancelled') and d.resolution='create_equipment' and (
-   lower(regexp_replace(d.new_equipment_payload->>'name','[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g'))
-   or exists(select 1 from jsonb_array_elements_text(coalesce(d.new_equipment_payload->'aliases','[]'::jsonb)) alias
-    where lower(regexp_replace(alias,'[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g')))
-  )
- ) then raise exception 'equipment_pending_in_audit'; end if;
  select * into v_prior from village.inventory_stock_confirmations where source_key=p_source_key for update;
  if found then
    if v_prior.evidence is distinct from p_evidence then raise exception 'stock_confirmation_evidence_changed'; end if;
    return jsonb_build_object('ok',true,'duplicate',true,'equipmentId',v_prior.equipment_id);
  end if;
+ -- Owner-confirmed additions never change snapshot items or pending audit creations.
+ if exists(
+  select 1 from village.inventory_audit_decisions d join village.inventory_audit_sessions a on a.id=d.session_id
+  where a.status not in ('approved','cancelled') and d.resolution='create_equipment' and (
+   lower(regexp_replace(d.new_equipment_payload->>'name','[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g'))
+   or exists(select 1 from jsonb_array_elements_text(case when jsonb_typeof(d.new_equipment_payload->'aliases')='array' then d.new_equipment_payload->'aliases' else '[]'::jsonb end) alias
+    where lower(regexp_replace(alias,'[^0-9A-Za-z가-힣]','','g'))=lower(regexp_replace(v_name,'[^0-9A-Za-z가-힣]','','g')))
+  )
+ ) then raise exception 'equipment_pending_in_audit'; end if;
  -- Existing UI writes share the audit advisory lock through RLS. Avoid a table
  -- lock upgrade here: UI DML already holds RowExclusive before entering RLS.
  select count(*),min(equipment_id) into v_count,v_id from village.equipment_ledger e
