@@ -25,15 +25,17 @@ test('room memo omitted by innerText reaches the immutable AI evidence without b
   const dom = capture();
   assert.match(dom.text, /카카오 고객 메모/);
   assert.match(dom.text, /010-1234-5678/);
+  assert.equal(dom.room_memo, '010-1234-5678');
   assert.equal(dom.messages.length, 0);
   const snapshot = createImmutableKakaoRoomSnapshot({
     job: { jobId: 'memo-fixture', roomKey: 'chat:12345', roomRevision: 1 },
     navigationContext: { status: 'opened_target_chat', conversation_evidence: {
-      title: dom.title, hint_matched: true, visible_static_text_tail: dom.text, messages: dom.messages,
+      title: dom.title, hint_matched: true, visible_static_text_tail: dom.text, messages: dom.messages, room_memo: dom.room_memo,
     } },
   });
   assert.match(snapshot.navigation.conversation_evidence.visible_static_text_tail, /010-1234-5678/);
   assert.equal(snapshot.navigation.conversation_evidence.messages.length, 0);
+  assert.equal(snapshot.navigation.conversation_evidence.room_memo, '010-1234-5678');
 });
 
 test('hidden controls and chat-list rows cannot supply another room contact', () => {

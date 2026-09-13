@@ -1,7 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
-const { normalizePendingCustomerIdentity, normalizePendingBaselinePeriod } = require('./pending-customer-identity.js');
+const { normalizePendingCustomerIdentity, normalizePendingBaselinePeriod, normalizeRoomMemoEvidence } = require('./pending-customer-identity.js');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 const { validateVillageRentalTimeSource } = require('./village-time-contract.js');
 
@@ -342,7 +342,7 @@ const CONFIRMED_REGISTRATION_FIELDS = new Set([
 ]);
 const CONFIRMED_REGISTRATION_EVIDENCE_FIELDS = new Set([
   'customer_request', 'staff_confirmation', 'conversation_revision',
-  'conversation_evidence_hash', 'customer_message_ids', 'staff_message_ids', 'post_confirmation_review'
+  'conversation_evidence_hash', 'customer_message_ids', 'staff_message_ids', 'post_confirmation_review', 'room_memo'
 ]);
 const CONFIRMED_REGISTRATION_PERIOD_FIELDS = new Set([
   'start_date', 'start_time', 'end_date', 'end_time'
@@ -535,7 +535,8 @@ function normalizeConfirmedReservationCommit(value) {
   // The bridge validates continuation coverage against its immutable snapshot and
   // keeps that review in the receipt. GAS receives only its six evidence fields below.
   const desiredAfter = normalizeConfirmedRegistrationPlan(value.desired_after, 'desired_after');
-  const identityUpdate = normalizePendingCustomerIdentity(value.customer_identity_update, value.source_evidence.customer_request);
+  const roomMemo = normalizeRoomMemoEvidence(value.source_evidence.room_memo);
+  const identityUpdate = normalizePendingCustomerIdentity(value.customer_identity_update, value.source_evidence.customer_request, value.source_evidence.room_memo);
   if (identityUpdate && requestId === null) throw new Error('customer_identity_update requires an existing pending RQ');
   const expectedSetComponents = normalizeConfirmedRegistrationSetComponents(
     value.expected_set_components, 'expected_set_components'
@@ -565,6 +566,7 @@ function normalizeConfirmedReservationCommit(value) {
     ...(identityUpdate ? { customer_identity_update: identityUpdate } : {}),
     ...(requestId === null ? { pending_request_candidate: pendingRequestCandidate } : {}),
     source_evidence: {
+      ...(roomMemo ? { room_memo: roomMemo } : {}),
       customer_request: requiredText(value.source_evidence.customer_request, 'source_evidence.customer_request', 2_000),
       staff_confirmation: requiredText(value.source_evidence.staff_confirmation, 'source_evidence.staff_confirmation', 2_000),
       conversation_revision: revision,

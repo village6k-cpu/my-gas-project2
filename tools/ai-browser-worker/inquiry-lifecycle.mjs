@@ -15,6 +15,7 @@ export const INQUIRY_LIFECYCLE_PROMPT = `INQUIRY LIFECYCLE — read context, rec
 - For registered_change_inquiry, first compare requested items/quantities to the live registered schedule. Already-applied additions/substitutions are already_applied with no write. A genuinely unapplied change may have one inquiry record and later use the staff-confirmed registered route. Never duplicate the whole existing booking, replay a previously applied delta, or reset already_registered to escape a validation error. Independent_rental is only an explicitly separate rental with source evidence in inquiry_source_evidence; matching customer/dates alone neither grants nor denies that interpretation.
 - Multiple periods: plan them ALL before the first tool call. One village_confirmation_request call may carry decision.confirmation_requests=[full child decision per distinct period] (2 to 8). Keep the outer should_write_to_sheet=true, safety_checks and sheet_row_candidate equal to the first child's compatible transport fields. Every child has its own complete plan, period and catalog evidence. This is one durable operation; never verify/write period one and then call again for period two. Inspect every child result/request_id; partial_success is incomplete, preserve completed IDs and never replay. For a single period omit confirmation_requests.
 - A correlated successful receipt remains authoritative even if a later attempted call conflicts. Do not say '입력 실패' when the first receipt proves creation. Use read-only lookup for further verification; the mutating confirmation tool is not a general read tool. Do not call it to pre-verify an operation or to reset a consumed lease.
+- For missing contacts in a pending RQ, copy the exact captured room_memo to source_evidence.room_memo with customer_identity_update. Keep customer_request and message IDs unchanged; a memo is reference data, not a customer/staff message.
 - DOM read dividers ('여기까지 읽었습니다'), attachment placeholders and timestamps are UI metadata, never customer or staff message text. Preserve exact message IDs and text. A role of unknown is missing extractor metadata: determine the speaker from the full conversation and supplied layout, then cite the exact customer IDs; it does not automatically block a pending revision. Known opposing sender roles must not be contradicted. A later acknowledgement must not erase pending business work, but does not create another inquiry. No duplicate customer reply after a staff answer.
 `;
 
@@ -41,6 +42,12 @@ function baselinePeriodValid(period) {
 export function validateCustomerInquiryEvidence(evidence, { roomRevision, roomSnapshot } = {}) {
   const errors = [];
   if (!record(evidence)) return ['customer inquiry source_evidence is required'];
+  try {
+    const memo = identityHelpers.normalizeRoomMemoEvidence(evidence.room_memo);
+    if (memo && roomSnapshot !== undefined && memo !== roomSnapshot?.navigation?.conversation_evidence?.room_memo) {
+      errors.push('source_evidence.room_memo must match the immutable same-room memo');
+    }
+  } catch (error) { errors.push(error.message); }
   const ids = evidence.customer_message_ids;
   if (!text(evidence.customer_request) || evidence.customer_request.length > 2000) errors.push('customer_request is required and bounded');
   if (!Number.isSafeInteger(evidence.conversation_revision) || evidence.conversation_revision < 1
@@ -53,7 +60,8 @@ export function validateCustomerInquiryEvidence(evidence, { roomRevision, roomSn
   const hash = createHash('sha256').update(JSON.stringify(canonical({
     roomKey: String(roomSnapshot?.roomKey ?? '').trim(), roomRevision: Number(roomSnapshot?.roomRevision || 0),
     title: String(conversation.title ?? '').trim(), hintMatched: conversation.hint_matched === true,
-    visibleText: String(conversation.visible_static_text_tail ?? ''), messages: conversation.messages
+    visibleText: String(conversation.visible_static_text_tail ?? ''), messages: conversation.messages,
+    ...(conversation.room_memo ? { roomMemo: conversation.room_memo } : {})
   }))).digest('hex');
   if (roomSnapshot?.schema !== 'kakao-room-snapshot/v1' || roomSnapshot.roomRevision !== evidence.conversation_revision
     || roomSnapshot.evidenceHash !== evidence.conversation_evidence_hash || hash !== evidence.conversation_evidence_hash) errors.push('customer inquiry evidence must bind the immutable room snapshot');
@@ -75,7 +83,7 @@ export function validatePendingInquiryRevision(decision, options = {}) {
   if (!record(revision)) return ['customer_requested_pending_revision must be an object'];
   const errors = validateCustomerInquiryEvidence(revision.source_evidence, options);
   try {
-    const identity = identityHelpers.normalizePendingCustomerIdentity(revision.customer_identity_update, revision.source_evidence?.customer_request);
+    const identity = identityHelpers.normalizePendingCustomerIdentity(revision.customer_identity_update, revision.source_evidence?.customer_request, revision.source_evidence?.room_memo);
     if (identity && (text(identity.name) !== text(decision.sheet_row_candidate?.customer_name) ||
         identity.phone.replace(/\D/g, '') !== String(decision.sheet_row_candidate?.phone || '').replace(/\D/g, ''))) {
       errors.push('customer_identity_update must match the final sheet customer');

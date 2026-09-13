@@ -2,7 +2,7 @@ import { createHash, randomUUID as defaultRandomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { normalizePendingCustomerIdentity, normalizePendingBaselinePeriod } = require('../../scripts/windows/pending-customer-identity.js');
+const { normalizePendingCustomerIdentity, normalizePendingBaselinePeriod, normalizeRoomMemoEvidence } = require('../../scripts/windows/pending-customer-identity.js');
 const { commitConfirmedReservation: defaultCommitConfirmedReservation } = require('../../scripts/windows/village-confirm-request.js');
 
 const REGISTRATION_FIELDS = new Set([
@@ -12,7 +12,7 @@ const REGISTRATION_FIELDS = new Set([
 ]);
 const EVIDENCE_FIELDS = new Set([
   'customer_request', 'staff_confirmation', 'conversation_revision',
-  'conversation_evidence_hash', 'customer_message_ids', 'staff_message_ids', 'post_confirmation_review'
+  'conversation_evidence_hash', 'customer_message_ids', 'staff_message_ids', 'post_confirmation_review', 'room_memo'
 ]);
 const PERIOD_FIELDS = new Set(['start_date', 'start_time', 'end_date', 'end_time']);
 const PLAN_FIELDS = new Set(['name', 'quantity']);
@@ -72,7 +72,8 @@ function snapshotEvidenceHash(snapshot) {
     title: normalizedText(conversation.title),
     hintMatched: conversation.hint_matched === true,
     visibleText: String(conversation.visible_static_text_tail ?? ''),
-    messages: conversation.messages
+    messages: conversation.messages,
+    ...(conversation.room_memo ? { roomMemo: conversation.room_memo } : {})
   }))).digest('hex');
 }
 
@@ -82,6 +83,12 @@ export function validateStaffConfirmedRegistrationEvidence(evidence, {
 } = {}) {
   const errors = objectErrors(evidence, EVIDENCE_FIELDS, 'source_evidence');
   if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return errors;
+  try {
+    const memo = normalizeRoomMemoEvidence(evidence.room_memo);
+    if (memo && roomSnapshot !== undefined && memo !== roomSnapshot?.navigation?.conversation_evidence?.room_memo) {
+      errors.push('source_evidence.room_memo must match the immutable same-room memo');
+    }
+  } catch (error) { errors.push(error.message); }
 
   const customerRequest = normalizedConversationText(evidence.customer_request);
   const staffConfirmation = normalizedConversationText(evidence.staff_confirmation);
@@ -345,7 +352,7 @@ export function validateStaffConfirmedRegistration(value, { roomRevision, roomSn
   errors.push(...setComponentSelectionErrors(value.set_component_selections));
   try { normalizePendingBaselinePeriod(value.expected_period); } catch (error) { errors.push(error.message); }
   try {
-    const update = normalizePendingCustomerIdentity(value.customer_identity_update, value.source_evidence?.customer_request);
+    const update = normalizePendingCustomerIdentity(value.customer_identity_update, value.source_evidence?.customer_request, value.source_evidence?.room_memo);
     if (update && value.request_id === null) errors.push('customer_identity_update requires an existing pending RQ');
   } catch (error) { errors.push(error.message); }
   errors.push(...planErrors(value.desired_after, 'desired_after'));
