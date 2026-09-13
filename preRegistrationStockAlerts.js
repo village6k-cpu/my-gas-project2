@@ -104,18 +104,26 @@ function preRegistrationStockDeliver_(evaluation) {
     legacyFingerprint=preRegistrationStockHash_(Object.assign({},signature,{uncertain:signature.uncertain.concat([
       ['source_unavailable','실재고·별칭 연결 확인 필요','']]).sort()}));
   var actionable=evaluation.shortages.length+evaluation.uncertain.length>0;
+  var alreadyNotified=!!state.lastReceipt && (state.lastHash===fingerprint || legacyFingerprint && state.lastHash===legacyFingerprint);
+  var migrated=alreadyNotified && state.lastHash!==fingerprint;
+  if(alreadyNotified)state.lastHash=fingerprint;
   function save(){p.setProperty(key,JSON.stringify(state));}
+  function waiting(){return alreadyNotified?{status:'already_sent',requestId:evaluation.requestId,receipt:state.lastReceipt,needsReconciliation:!!state.pending}:
+    {status:'pending',requestId:evaluation.requestId};}
   try {
+    if(migrated)save();
     if(state.pending) {
-      state.pending.desiredHash=fingerprint;state.pending.actionable=actionable;save();
-      if(state.pending.relayUntil>Date.now())return {status:'pending',requestId:evaluation.requestId};
+      // An equivalent verified warning already satisfies registration. Retain an
+      // uncertain old attempt for reconciliation, but never authorize another POST.
+      state.pending.desiredHash=alreadyNotified?'':fingerprint;state.pending.actionable=actionable && !alreadyNotified;save();
+      if(state.pending.relayUntil>Date.now())return waiting();
       var prior=preRegistrationStockReceipt_(state.pending);
       if(prior.found) {
-        state.lastHash=state.pending.hash;state.lastReceipt={id:state.pending.id,ts:prior.ts,channel:state.pending.channel,at:new Date().toISOString()};
+        if(!alreadyNotified){state.lastHash=state.pending.hash;state.lastReceipt={id:state.pending.id,ts:prior.ts,channel:state.pending.channel,at:new Date().toISOString()};}
         state.pending=null;state.error=null;reconciled=true;save();
       } else if(!prior.complete || state.pending.ts || Date.now()-state.pending.attemptedAt<60000) {
-        return {status:'pending',requestId:evaluation.requestId};
-      } else if(state.pending.hash!==fingerprint || !actionable) {state.pending=null;save();}
+        return waiting();
+      } else if(alreadyNotified || state.pending.hash!==fingerprint || !actionable) {state.pending=null;save();}
     }
     if(!actionable) {state.lastHash='';state.end=evaluation.end;state.pending=null;save();return {status:'clear',requestId:evaluation.requestId};}
     if(state.lastHash===fingerprint || legacyFingerprint && state.lastReceipt && state.lastHash===legacyFingerprint) {
@@ -142,7 +150,7 @@ function preRegistrationStockDeliver_(evaluation) {
   }catch(error){
     state.error='Slack 재고 알림 전달 확인 대기';
     if(posting && state.pending && /urlfetch/i.test(String(error.message)) && /too many|너무 많이|quota|한도/i.test(String(error.message)))state.pending.transportRejected=true;
-    save();return {status:'pending',requestId:evaluation.requestId,error:state.error};
+    save();return Object.assign(waiting(),{error:state.error});
   }
 }
 
@@ -249,7 +257,7 @@ function preRegistrationStockFlush_(requestId,scriptLockHeld,includeRegistered,p
       var evaluation=preparedEvaluation && preparedEvaluation.requestId===id?preparedEvaluation:preRegistrationStockEvaluate_(request,snapshot);
       var result=preRegistrationStockDeliver_(evaluation);
       result.intentVerified=true;result.verifiedGeneration=marker;results.push(result);
-      if(result.status!=='pending' && marker)p.setProperty(PREREG_STOCK_PREFIX_+'checked_'+id,marker);
+      if(result.status!=='pending' && !result.needsReconciliation && marker)p.setProperty(PREREG_STOCK_PREFIX_+'checked_'+id,marker);
       p.setProperty(PREREG_STOCK_PREFIX_+'lastResult',JSON.stringify(Object.assign({at:new Date().toISOString()},result)));
     });
     // Bound ScriptProperties use, retaining every future/pending receipt and
