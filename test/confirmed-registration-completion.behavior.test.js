@@ -52,3 +52,25 @@ test('a replacement set selection survives every normalizer without pretending i
   const gas=ctx._normalizeConfirmedReservationCommit_(normalized);
   assert.equal(gas.set_component_selections[0].selected_item,'소니 CF-A 160');
 });
+
+test('registration completion recognizes a Korean mobile stored as a sheet number without accepting another contact',async()=>{
+  const {executeVillageConfirmedReservationCommit}=await import('../tools/ai-browser-worker/staff-confirmed-registration.mjs');
+  for(const [phone,expected] of [['010-0000-0002','ok'],['1000000002','ok'],['1000000003','partial_success'],['','partial_success']]) {
+    const input=registration();let writes=0;
+    const period=input.desired_period;
+    const result={schema:'village-confirmed-reservation-commit-result/v1',success:true,status:'ok',
+      request_id:input.request_id,effective_request_id:'RQ-260908-002',trade_id:'260908-001',
+      replaced_request_ids:[input.request_id],final_plan:input.desired_after,final_period:period,final_set_components:[],
+      customerNotificationAttempted:false,customerNotificationSent:false,
+      authoritative:{request:{reqID:'RQ-260908-002',tradeIds:['260908-001'],
+        topLevelEquipItems:input.desired_after,setComponentItems:[],name:input.customer_identity_update.name,
+        phone,discount:input.customer_identity_update.discount_type,
+        startDate:period.start_date,startTime:period.start_time,endDate:period.end_date,endTime:period.end_time},
+        registered_trade:{schedule:{rows:[]}}}};
+    const receipt=await executeVillageConfirmedReservationCommit({job:{job_id:'numeric-contact',room_key:'contact-room',room_revision:8},
+      roomRevision:8,registration:input,dependencies:{operationFence:{operation_id:'numeric-contact-once'},
+        commitConfirmedReservation:async()=>{writes++;return result;}}});
+    assert.equal(receipt.status,expected,`sheet contact ${phone}`);
+    assert.equal(writes,1,'readback must never replay the registration');
+  }
+});

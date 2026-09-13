@@ -432,7 +432,10 @@ function canonicalAuthoritativePlan(values) {
 }
 
 function phoneKey(value) {
-  return normalizedText(value).replace(/\D/g, '');
+  const digits = normalizedText(value).replace(/\D/g, '');
+  // A numeric Sheets cell drops the trunk zero of an 010 mobile number.
+  // Restore only that unambiguous local form when comparing persisted contacts.
+  return /^10\d{8}$/.test(digits) ? `0${digits}` : digits;
 }
 
 function exactAuthoritativeRequestReadback(result, registration) {
