@@ -11,16 +11,19 @@ async function gas(action:string,body:Obj={},timeoutMs=30000) {
 }
 async function context(){const data=await gas('run',{func:'getInventoryStockQuestions',args:[]});if(!data.result?.reports)throw Error('재고 보고 조회 실패');return data.result;}
 function ownerIds(){const ids=(process.env.SLACK_INVENTORY_OWNER_IDS || '').split(',').map(s=>s.trim()).filter(Boolean);if(!ids.length || ids.some(s=>!/^U[A-Z0-9]+$/.test(s)))throw Error('재고 확인 소유자 설정 필요');return ids;}
-async function thread(report:Obj){
- const token=process.env.SLACK_BOT_TOKEN;if(!token)throw Error('Slack 연결 설정 필요');
- const messages:Obj[]=[];let cursor='';
- do {const url=new URL('https://slack.com/api/conversations.replies');for(const [k,v] of Object.entries({channel:report.channel,ts:report.ts,limit:'100',include_all_metadata:'true',cursor}))url.searchParams.set(k,v as string);
- const response=await fetch(url,{headers:{authorization:'Bearer '+token},signal:AbortSignal.timeout(20000)});const data=await response.json();
- if(!response.ok||!data.ok)throw Error('Slack 재고 답변 조회 실패');messages.push(...(data.messages || []));cursor=data.response_metadata?.next_cursor || '';
- if(data.has_more&&!cursor)throw Error('Slack 답변 일부 누락');if(cursor && messages.length>=500)throw Error('Slack 스레드 전체 조회 범위 초과');
- }while(cursor);
+// The authenticated local collector owns Slack credentials and fetches the complete
+// thread again immediately before apply, just as the existing SlackOps collector.
+async function thread(report:Obj,evidence:Obj){
+ if(evidence?.reportId!==report.id || evidence.channel!==report.channel || evidence.ts!==report.ts || evidence.complete!==true || !Array.isArray(evidence.messages) || !evidence.messages.length || evidence.messages.length>500)throw Error('최신 Slack 원문 수집 결과가 필요합니다');
+ const messages=evidence.messages;
+ if(messages.some((m:Obj,i:number)=>!/^\d+\.\d+$/.test(m.ts || '') || (i>0 && Number(m.ts)<=Number(messages[i-1].ts))))throw Error('Slack 원문 순서 확인 필요');
  const root=messages[0];if(!root?.bot_id || root.ts!==report.ts || !['preregistration_stock_alert','inventory_risk_alert'].includes(root.metadata?.event_type) || root.metadata?.event_payload?.id!==report.id)throw Error('검증된 재고 보고 스레드가 아닙니다');
  return messages;
+}
+export async function getStockReports(reportId?:unknown){
+ const c=await context();if(reportId!==undefined && (typeof reportId!=='string'||!c.reports.some((r:Obj)=>r.id===reportId)))throw Error('현재 미해결 재고 보고가 아닙니다');
+ const reports=reportId?c.reports.filter((r:Obj)=>r.id===reportId):stockQuestionBatch(c.reports);
+ return {ok:true,reports,deferred:reportId?0:Math.max(0,c.reports.length-reports.length)};
 }
 async function mirrorOne(equipmentId:string) {
  const db=getInventoryAuditServiceClient();const {data:row,error}=await db.from('equipment_ledger').select('*').eq('equipment_id',equipmentId).single();if(error || !row)throw Error('생성한 재고 원장 조회 실패');
@@ -45,17 +48,19 @@ export async function retryConfirmedStockMirrors(){
  for(const id of [...new Set((data || []).map(r=>r.equipment_id))]){await db.from('inventory_stock_confirmations').update({last_attempted_at:new Date().toISOString()}).eq('equipment_id',id).is('synced_at',null);try{results.push(await mirrorOne(id));}catch(e){const message=e instanceof Error?e.message:'재고 반영 재시도 필요';await db.from('inventory_stock_confirmations').update({last_error:message}).eq('equipment_id',id).is('synced_at',null);results.push({equipmentId:id,pending:true,message});}}
  return results;
 }
-export async function scanStockQuestions(){
+export async function scanStockQuestions(evidence:unknown){
  const c=await context(),owners=ownerIds(),questions:Obj[]=[],errors:Obj[]=[];
- const batch=stockQuestionBatch(c.reports);
- await Promise.all(batch.map(async (report:Obj)=>{try{const messages=await thread(report);const replies=messages.filter(m=>!m.bot_id && owners.includes(m.user) && m.ts!==report.ts);
+ if(!Array.isArray(evidence)||evidence.length>8||new Set(evidence.map(e=>e?.reportId)).size!==evidence.length)throw Error('인증된 로컬 수집기의 Slack 원문이 필요합니다');
+ const batch=c.reports.filter((r:Obj)=>evidence.some(e=>e?.reportId===r.id));
+ if(batch.length!==evidence.length)throw Error('재고 보고가 바뀌었습니다. 다시 조회해 주세요');
+ await Promise.all(batch.map(async (report:Obj)=>{try{const messages=await thread(report,evidence.find(e=>e.reportId===report.id));const replies=messages.filter(m=>!m.bot_id && owners.includes(m.user) && m.ts!==report.ts);
  if(replies.length)questions.push({report,sourceHash:stockThreadHash(messages),messages,ownerReplies:replies,catalog:c.sets.filter((s:Obj)=>report.names.includes(s.name)),equipment:c.equipment});
  }catch(e){errors.push({reportId:report.id,error:e instanceof Error?e.message:'재고 답변 조회 실패'});}}));
  return {ok:true,questions,errors,deferred:Math.max(0,c.reports.length-batch.length)};
 }
 export async function confirmStockQuestion(input:unknown,execute:boolean){
  const raw=(input || {}) as Obj,c=await context(),report=c.reports.find((r:Obj)=>r.id===raw.reportId);if(!report)throw Error('현재 미해결 재고 보고가 아닙니다');
- const messages=await thread(report),plan=validateStockConfirmation(raw.confirmation,{report,messages,ownerIds:ownerIds(),catalog:c.sets,equipment:c.equipment});
+ const messages=await thread(report,raw.threadEvidence),plan=validateStockConfirmation(raw.confirmation,{report,messages,ownerIds:ownerIds(),catalog:c.sets,equipment:c.equipment});
  const set=c.sets.find((s:Obj)=>s.name===plan.catalogName),price=Number(String(set?.price || '').replace(/,/g,''));
  const item={name:plan.catalogName,major:plan.major,category:plan.category,stock_total:plan.stockTotal,stock_maint:plan.stockMaintenance,price:Number.isInteger(price)&&price>=0?price:null};
  const evidence={ownerId:plan.ownerId,channel:report.channel,threadTs:report.ts,reportId:report.id,sourceMessageTs:plan.sourceMessageTs,sourceHash:plan.sourceHash,quote:plan.quote};

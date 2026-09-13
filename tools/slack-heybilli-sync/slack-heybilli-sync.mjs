@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
+import {scanStockWithLocalCollector,confirmStockWithLocalCollector} from './stock-collector.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -48,6 +49,7 @@ function loadConfig() {
   return {
     token: process.env.SLACK_BOT_TOKEN || '',
     apiToken: process.env.SLACK_HEYBILLI_API_TOKEN || process.env.SLACK_BOT_TOKEN || '',
+    inventoryApiToken: process.env.SLACK_HEYBILLI_API_TOKEN || '',
     channelId: channelIds[0], channelIds, channelStartTs,
     apiUrl: process.env.SLACK_HEYBILLI_API_URL || DEFAULT_API_URL,
     lookbackHours: Math.max(24, Number(process.env.SLACK_HEYBILLI_LOOKBACK_HOURS || 72)),
@@ -58,27 +60,33 @@ function loadConfig() {
   };
 }
 
-async function slackApi(config, method, params = {}) {
+async function slackApi(config, method, params = {}, options = {}) {
   if (!config.token) throw new Error('SLACK_BOT_TOKEN이 없습니다');
   const url = new URL(`https://slack.com/api/${method}`);
   for (const [key, value] of Object.entries(params)) if (value != null && value !== '') url.searchParams.set(key, String(value));
-  const response = await fetch(url, { headers: { authorization: `Bearer ${config.token}` }, signal: AbortSignal.timeout(30_000) });
+  const response = await fetch(url, { headers: { authorization: `Bearer ${config.token}` }, signal: options.signal ? AbortSignal.any([options.signal,AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) });
   const data = await response.json();
   if (!response.ok || !data.ok) throw new Error(`Slack ${method} 실패: ${data.error || response.status}`);
   return data;
 }
 
-async function syncApi(config, body) {
+async function syncApi(config, body, options = {}) {
   if (!config.apiToken) throw new Error('SLACK_HEYBILLI_API_TOKEN이 없습니다');
   const response = await fetch(config.apiUrl, {
     method: 'POST',
     headers: { authorization: `Bearer ${config.apiToken}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(60_000),
+    signal: options.signal ? AbortSignal.any([options.signal,AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.ok === false) throw new Error(`헤이빌리 동기화 API 실패 (${response.status}): ${data.error || '응답 오류'}`);
   return data;
+}
+
+async function stockSyncApi(config,body,options={}){
+ const token=config.inventoryApiToken;
+ if(!token || token===config.token || /^xox[a-z]-/.test(token))throw Error('재고 수집에는 Slack 토큰과 별개인 내부 API 인증이 필요합니다');
+ return syncApi({...config,apiToken:token},body,options);
 }
 
 export function messageText(message) {
@@ -602,11 +610,11 @@ async function scanCommand(config, args) {
     catch { process.stderr.write('slack-heybilli-sync: 장비마스터 비고 반영 실패, 다음 실행에서 재시도합니다\n'); }
   }
   try {
-    const stock=await syncApi(config,{mode:'stock_scan'});
+    const stock=await scanStockWithLocalCollector((body,options)=>stockSyncApi(config,body,options),(method,args,options)=>slackApi(config,method,args,options));
     result.stockQuestions=stock.questions || [];result.stockMirrors=stock.mirrors || [];result.stockErrors=stock.errors || [];
     if(result.stockErrors.length)process.stderr.write('slack-heybilli-sync: 일부 재고 답변 조회를 다음 실행에서 재시도합니다\n');
   }catch(error){process.stderr.write('slack-heybilli-sync: 재고 답변 처리 경로 확인 필요: '+String(error.message || error).slice(0,250)+'\n');}
-  if(config.writeEnabled){try{result.stockMirrors=(await syncApi(config,{mode:'stock_sync',execute:true})).mirrors;}catch{process.stderr.write('slack-heybilli-sync: 확정 재고의 시트 반영은 다음 실행에서 재시도합니다\n');}}
+  if(config.writeEnabled){try{result.stockMirrors=(await stockSyncApi(config,{mode:'stock_sync',execute:true})).mirrors;}catch{process.stderr.write('slack-heybilli-sync: 확정 재고의 시트 반영은 다음 실행에서 재시도합니다\n');}}
   let succeeded = 0;
   for (const channelId of config.channelIds) {
     try {
@@ -758,10 +766,10 @@ async function main() {
   }
   else if(command === 'confirm-stock'){
     const body=await readStdinJson();if(args.has('--write') && !config.writeEnabled)throw Error('DRY-RUN에서는 재고를 등록할 수 없습니다');
-    result=await syncApi(config,{...body,mode:'stock_confirm',execute:args.has('--write') && config.writeEnabled});
-    if(args.has('--write') && result.equipmentId){const sync=await syncApi(config,{mode:'stock_sync',execute:true});result.mirror=sync.mirrors?.find(row=>row.equipmentId===result.equipmentId) || result.mirror;}
+    result=await confirmStockWithLocalCollector(body,args.has('--write') && config.writeEnabled,payload=>stockSyncApi(config,payload),(method,params)=>slackApi(config,method,params));
+    if(args.has('--write') && result.equipmentId){const sync=await stockSyncApi(config,{mode:'stock_sync',execute:true});result.mirror=sync.mirrors?.find(row=>row.equipmentId===result.equipmentId) || result.mirror;}
   }
-  else if(command === 'scan-stock')result=await syncApi(config,{mode:'stock_scan',execute:args.has('--write') && config.writeEnabled});
+  else if(command === 'scan-stock')result=await scanStockWithLocalCollector((body,options)=>stockSyncApi(config,body,options),(method,params,options)=>slackApi(config,method,params,options));
   else if (command === 'scan') result = await scanCommand(config, args);
   else if (command === 'apply') result = await applyCommand(config, args);
   else if (command === 'ask') result = await markCommand(config, 'needs_context');

@@ -196,3 +196,5 @@ AI가 전체 스레드와 카탈로그를 읽고 어떤 장비의 실재고인�
 - 이미 장비가 있으면 생성 API가 덮어쓰지 않는다. 기존 재고 정정이 필요하면 원래 장비의 승인된 수정 경로를 사용한다.
 - mirror.verified=true일 때만 원장과 장비마스터에 반영됐다고 보고한다. mirror.pending이면 다음 scan이 대상 장비 투영만 재시도한다.
 - 답변 완료 후 같은 장비는 기존 재고를 재사용한다. 같은 질문·신규 장비를 반복 생성하지 않는다.
+
+Slack thread collection stays in the existing local Hermes runtime. The cloud receives the authenticated collector's complete transcript, validates the durable report receipt, owner quote and current source hash, and writes through its existing internal API secret. confirm-stock always fetches the thread again; model-supplied transcript fields are ignored. A separate SLACK_HEYBILLI_API_TOKEN is required for stock operations; Slack credentials are never used as cloud API authentication.
