@@ -14,7 +14,10 @@ function preRegistrationStockEvaluate_(request,snapshot) {
     turnaroundMinutes:0,onDemands:function(rows,index){demands=rows;identity=index;}
   });
   var uncertain=report.alerts.filter(function(a){return a.kind!=='shortage' && a.kind!=='capacity_tight' && a.kind!=='overdue_return' &&
-    a.bookings.some(function(b){return b.tradeId===candidateId;});});
+    a.bookings.some(function(b){return b.tradeId===candidateId;});}).map(function(a){
+      var bookings=a.bookings.filter(function(b){return b.tradeId===candidateId;});
+      return Object.assign({},a,{bookings:bookings,start:bookings[0].start,end:bookings.reduce(function(end,b){return b.end>end?b.end:end;},'')});
+    });
   if((snapshot.sourceIssues || []).length && (uncertain.length || demands.some(function(d){return d.tradeId===candidateId;})))
     uncertain.push({kind:'source_unavailable',equipment:'실재고·별칭 연결 확인 필요'});
   var equipment={},periods={},shortages=[];
@@ -84,10 +87,15 @@ function preRegistrationStockText_(result,previous) {
     var names=Array.from(new Set(s.bookings.map(function(b){return clean(b.customer || b.tradeId);}))).slice(0,3);
     if(names.length)lines.push('　겹치는 예약: '+names.join(' · '));
   });
-  uncertain.slice(0,3).forEach(function(a){lines.push('❓ '+clean(a.component || a.equipment)+' — 재고 연결 확인 필요');});
+  uncertain.slice(0,3).forEach(function(a){
+    var label={model_selection:'구체 모델 선택',catalog_stock_missing:'카탈로그 등록됨 · 실제 재고 기록 확인',unknown_stock:'보유·정비 수량 확인',source_unavailable:'재고 원장 조회 재시도',invalid_schedule:'예약 날짜·시간 확인',invalid_quantity:'요청 수량 확인',set_component_missing:'세트 구성 확인'}[a.kind] || 'AI 장비 연결 검토';
+    lines.push('❓ '+clean(a.component || a.equipment)+' — '+label);
+    if(a.kind==='catalog_stock_missing')lines.push('　대표님, 실제 보유수량이 몇 개인가요? 이 스레드에 답해주시면 재고 원장과 장비마스터에 등록하겠습니다. 수리 중 장비가 있으면 함께 알려주세요.');
+    if(a.kind==='model_selection' && a.candidates?.length)lines.push('　후보: '+a.candidates.slice(0,4).map(clean).join(' / '));
+  });
   if(shortages.length>4)lines.push('외 부족 '+(shortages.length-4)+'건');
   if(uncertain.length>3)lines.push('외 재고 확인 '+(uncertain.length-3)+'건');
-  lines.push(result.registered?'👉 등록된 예약입니다. 공급 가능 여부를 즉시 확인해 주세요.':'👉 등록 전에 대체 장비·외부 조달 여부를 확인해 주세요.');
+  lines.push(result.shortages.length?(result.registered?'👉 등록된 예약입니다. 공급 가능 여부를 즉시 확인해 주세요.':'👉 등록 전에 대체 장비·외부 조달 여부를 확인해 주세요.'):'👉 원문·세트 구성·실재고를 대조해 연결하고, 고객의 선택이 필요한 모델만 확인합니다.');
   lines.push('<https://today-dashboard-ten.vercel.app/schedule|예약 보기> · '+clean(result.requestId));
   return lines.join('\n').slice(0,2200);
 }
@@ -175,7 +183,7 @@ function preRegistrationStockDeliver_(evaluation) {
     !!state.lastHash && preRegistrationStockCovers_(state.lastSignature,signature));
   var migrated=alreadyNotified && (state.lastHash!==fingerprint || !state.lastSignature);
   if(alreadyNotified){state.lastHash=fingerprint;state.lastSignature=signature;}
-  function save(){p.setProperty(key,JSON.stringify(state));}
+  function save(){p.setProperty(key,JSON.stringify(state));if(typeof rememberInventoryStockQuestion_==='function')rememberInventoryStockQuestion_(state.lastReceipt,state.lastSignature);}
   function waiting(){return alreadyNotified?{status:'already_sent',requestId:evaluation.requestId,receipt:state.lastReceipt,needsReconciliation:!!state.pending}:
     {status:'pending',requestId:evaluation.requestId};}
   try {
@@ -466,6 +474,7 @@ function acknowledgePreRegistrationStockAlertRelay(args) {
       // that already covers the current request and retire its deduplication key.
       var covered=!!state.lastReceipt && !!pending.coveredByHash && pending.coveredByHash===state.lastHash;
       if(!covered){state.lastHash=pending.hash;state.lastSignature=pending.signature;state.lastReceipt={id:pending.id,channel:pending.channel,ts:args.ts,at:new Date().toISOString(),transport:'windows_relay'};}
+      if(typeof rememberInventoryStockQuestion_==='function')rememberInventoryStockQuestion_(state.lastReceipt,state.lastSignature);
       state.pending=null;state.error=null;result={status:covered?'already_sent':'sent',requestId:args.requestId,receipt:state.lastReceipt};
     } else if(args.obsolete===true) {
       if(pending.desiredHash===pending.hash && pending.actionable!==false)return {status:'conflict'};

@@ -22,7 +22,7 @@ Session-derived notes for natural-language Kakao/staff reservation text. Always 
 ## Known warnings to surface
 
 - `안전고리` may appear as `❓ 미등록 장비` because it is not in 장비마스터/세트마스터. Still enter it if the user explicitly requested it; report the warning.
-- 600C set expansion may show `소프트박스` as `⚠️ 모델 선택 필요`. Surface this as a manual follow-up item.
+- For a generic set component, read the concrete catalog and period availability, select with context, or ask one specific customer question. Do not stop at a generic manual follow-up warning.
 - Set components like `헤드 / 발라스터 / 클램프 / 라인*2` or `마이크*2 / 마이크 송신기` may show 미등록. Report if operationally relevant, but do not confuse them with the user’s top-level requested items.
 
 ## Verification pattern
@@ -33,3 +33,8 @@ After insert, read `확인요청` by the created `reqID` and check:
 2. all top-level intended items are present or intentionally noted as excluded
 3. warnings are understood and summarized
 4. no 알림톡/등록 was triggered unless explicitly requested
+
+
+## Owner-approved inventory judgment
+
+Before registration read the complete policy at `C:/Village/runtimes/my-gas-project2-production/tools/ai-browser-worker/inventory-judgment.md`. For catalog-only stock, use the Slack stock confirmation flow; the owner reply must persist into both the inventory ledger and equipment master. Do not substitute repeated warning reports for resolving aliases, model choices and included packing components.

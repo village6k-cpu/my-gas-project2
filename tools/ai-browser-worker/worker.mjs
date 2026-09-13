@@ -46,6 +46,7 @@ export { validateWorkOrchestratorV2CutoverConfig } from '../work-orchestrator-v2
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const INVENTORY_JUDGMENT = fs.readFileSync(new URL('./inventory-judgment.md', import.meta.url), 'utf8');
 
 const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec';
 // 공개 키 폴백 금지 — 키가 구성되지 않은 경로는 조용히 공개 키로 강등되는 대신
@@ -724,6 +725,9 @@ export function buildHermesPrompt(job, options = {}) {
 - Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use village_registered_reservation_change before FINAL_JSON and verify its authoritative result. Authority comes from the current registered trade, exact schedule rows/period and staff approval. A prior intake RQ may have been finalized or removed; its absence does not block a registered change. For equipment changes, include request_id only when a live pending inquiry for this exact change exists, with the same single ID in existing_confirm_request_ids; otherwise omit request_id and use existing_confirm_request_ids=[]. date_time_change carries neither. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
 - Read the full same-room conversation. Native Hermes—not code or keywords—semantically decides whether a Village staff reply clearly and unconditionally authorizes the exact customer request; wording is open-ended.
 - Before choosing pending registration, compare the customer and period with active registered trades. An existing RQ can represent additions to that trade; in that case use village_registered_reservation_change with the exact missing delta and matching RQ, not a second pending registration. Only an independent rental should become a separate trade.
+${INVENTORY_JUDGMENT}
+
+- Before registration, use village_read(kind=request,query=exact RQ). For a new inquiry, use catalog query="*" for identity, then village_read(kind=quote,quote.source=catalog) with the proposed period and full items before deciding availability. The request/quote inventory_context includes full physical inventory, set manifests, source issues and period-specific modelChoices. Interpret these yourself: do not stop at a raw name mismatch, do not treat an included cable/packing manifest as an independent unavailable rental, and do not call a catalog-only stock record a matching failure or a shortage. Resolve real model choices from the full conversation and shop defaults, compare available choices, and put every choice in set_component_selections. If a material customer preference remains, prepare one specific customer question naming the viable choices through the existing reply authorization policy; keep the inquiry pending instead of a vague inventory owner task. Never invent a stock count, conflate different filter types, or drop a tracked demand. Data/transport failures remain evidence gaps.
 - For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit once before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
 - After a successful village_confirmed_reservation_commit receipt, FINAL_JSON may omit staff_confirmed_registration instead of copying the full input and set components again. The host retains the sealed authorization and exact readback. Report remaining questions with their reply_decision, price_quote and grounding context; do not re-read or re-register a verified successful operation just to restate it in FINAL_JSON.
 - Fast/coalesced turn: if this same snapshot contains the inquiry and clear staff authorization but no RQ exists, call village_confirmed_reservation_commit once with request_id=null. pending_request_candidate contains exactly customer_name, phone, discount_type, memo and extra_request. Put set_component_selections at registration top level, never inside pending_request_candidate. This atomic operation creates/reuses and verifies the RQ, applies exact choices and registers it. Never invent an RQ ID or split intake and registration into two calls.
@@ -3057,6 +3061,15 @@ function requireReadText(value, limit = 120, allowEmpty = false) {
 
 // Only fixed read operations are exposed to native Hermes. Credentials and API
 // selection stay in the bridge; the model chooses the business query/quote plan.
+async function fetchNativeInventoryContext(config, options = {}) {
+  try {
+    const data=await fetchReadOnlyJson(buildGasReadUrl(config.gasApiUrl || DEFAULT_GAS_API_URL,config.sheetApiKey || DEFAULT_SHEET_API_KEY,
+      {action:'run',func:'getInventoryResolutionContext',args:JSON.stringify([options])}),{fetchImpl:config.fetchImpl || fetch,timeoutMs:30000});
+    if(data?.success!==true || data.result?.mode!=='read_only' || !Array.isArray(data.result.equipment) || !Array.isArray(data.result.sets))throw new Error('invalid_inventory_context');
+    return data.result;
+  } catch {return {mode:'read_only',status:'unavailable',reason:'inventory_context_read_failed'};}
+}
+
 export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
   if (request.kind === 'knowledge') {
     requireReadKeys(request, ['kind', 'question']);
@@ -3068,7 +3081,7 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
   if (request.kind === 'quote') {
     requireReadKeys(request, ['kind', 'quote']);
     const quote = request.quote;
-    let calculation;
+    let calculation, inventory_context;
     if (quote?.source === 'trade' || quote?.source === 'request') {
       requireReadKeys(quote, ['source', 'id']);
       const pattern = quote.source === 'trade' ? /^\d{6}-\d{3}$/ : /^RQ-\d{6}-\d{3}$/;
@@ -3101,6 +3114,8 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
       if (new Set(quote.items.map(item => item.name)).size !== quote.items.length) throw new Error('duplicate_quote_item');
       const customer = await lookupCustomerDbDiscountForRequest({customerName:quote.customer_name,phone:quote.phone}, config);
       if (customer.ambiguous) throw new Error('ambiguous_customer');
+      inventory_context=await fetchNativeInventoryContext(config,{plan:{items:quote.items,
+        start:quote.start_date+'T'+quote.start_time+':00+09:00',end:quote.end_date+'T'+quote.end_time+':00+09:00'}});
       const discount = customer.discountType || quote.discount_type;
       const days = calcRentalDaysForQuote(quote.start_date,quote.start_time,quote.end_date,quote.end_time);
       const pricedItems = [], unresolvedItems = [];
@@ -3122,7 +3137,7 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
     const unresolved = (calculation?.unresolvedItems || []).map(item => item.name + ' x' + item.qty);
     const complete = Boolean(calculation && !calculation.error && calculation.payment
       && !unresolved.length && calculation.payment.finalVatIncluded > 0);
-    return {complete,reason:complete ? 'authoritative_price_verified' : 'authoritative_price_incomplete',
+    return {complete,...(inventory_context?{inventory_context}:{}),reason:complete ? 'authoritative_price_verified' : 'authoritative_price_incomplete',
       calculations:calculation ? [calculation] : [],unresolved,
       totalVatIncluded:complete ? calculation.payment.finalVatIncluded : null};
   }
@@ -3135,9 +3150,11 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
   requireReadKeys(request,['kind','query']);
   requireReadText(request.query);
   if (request.kind === 'catalog' && request.query === '*') {
-    const catalog = await fetchEquipmentCatalogSnapshot(config, { fetchImpl: config.fetchImpl });
+    const [catalog,inventory_context] = await Promise.all([
+      fetchEquipmentCatalogSnapshot(config, { fetchImpl: config.fetchImpl }),fetchNativeInventoryContext(config)
+    ]);
     if (catalog.status !== 'ok') throw new Error(catalog.error || 'catalog_read_failed');
-    return catalog;
+    return {...catalog,inventory_context};
   }
   const lookups = {
     catalog:[['세트마스터','A'],['장비마스터','B']],
@@ -3149,6 +3166,7 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
   if (!targets) throw new Error('invalid_read_kind');
   if (request.kind === 'request' && !/^RQ-\d{6}-\d{3}$/.test(request.query)
     || request.kind === 'trade' && !/^\d{6}-\d{3}$/.test(request.query)) throw new Error('invalid_read_id');
+  const inventoryContextPromise=request.kind==='request'?fetchNativeInventoryContext(config,{requestId:request.query}):null;
   const sources = await Promise.all(targets.map(async ([sheet,col]) => {
     let {rows,headers} = await fetchGasSearch(config,sheet,col,request.query,{withHeaders:true});
     if (request.kind === 'catalog') {
@@ -3163,7 +3181,7 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
       ? rows.filter(row => text(row?.data?.[col.charCodeAt(0)-65]).trim() === request.query) : rows;
     return {sheet,headers,rows:matched.slice(0,100),truncated:matched.length>100};
   }));
-  return {sources};
+  return inventoryContextPromise?{sources,inventory_context:await inventoryContextPromise}:{sources};
 }
 
 export async function buildAuthoritativePriceVerification(config = {}, decision = {}) {

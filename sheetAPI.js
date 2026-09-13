@@ -1604,6 +1604,9 @@ function runFunction(funcName, params) {
     "repairTradeBillingCompanyDropdown",
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
+    "setInventoryIncludedComponents",
+    "getInventoryStockQuestions",
+    "getInventoryResolutionContext",
     "getInventorySupplyPolicy",
     "setScheduleSupplyAllocation",
     "getInventoryRiskReport",
@@ -1885,10 +1888,10 @@ function runFunction(funcName, params) {
       var rsResult = repairTradeContractStatus.apply(null, rsArgs);
       return { success: true, function: funcName, result: rsResult, executionTime: (new Date() - startTime) + "ms" };
     }
-    if (["getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts", "setupPreRegistrationStockAlerts", "getPreRegistrationStockAlertStatus", "checkPreRegistrationStockAlert", "flushPreRegistrationStockAlerts", "claimPreRegistrationStockAlertRelay", "authorizePreRegistrationStockAlertRelay", "acknowledgePreRegistrationStockAlertRelay"].indexOf(funcName)>=0) {
+    if (["setInventoryIncludedComponents", "getInventoryStockQuestions", "getInventoryResolutionContext", "getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts", "setupPreRegistrationStockAlerts", "getPreRegistrationStockAlertStatus", "checkPreRegistrationStockAlert", "flushPreRegistrationStockAlerts", "claimPreRegistrationStockAlertRelay", "authorizePreRegistrationStockAlertRelay", "acknowledgePreRegistrationStockAlertRelay"].indexOf(funcName)>=0) {
       var inventoryArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
       if(!Array.isArray(inventoryArgs))inventoryArgs=[inventoryArgs];
-      var inventoryFunctions={getInventorySupplyPolicy:getInventorySupplyPolicy,setScheduleSupplyAllocation:setScheduleSupplyAllocation,getInventoryRiskReport:getInventoryRiskReport,getInventoryRiskMonitorStatus:getInventoryRiskMonitorStatus,
+      var inventoryFunctions={setInventoryIncludedComponents:setInventoryIncludedComponents,getInventoryStockQuestions:getInventoryStockQuestions,getInventoryResolutionContext:getInventoryResolutionContext,getInventorySupplyPolicy:getInventorySupplyPolicy,setScheduleSupplyAllocation:setScheduleSupplyAllocation,getInventoryRiskReport:getInventoryRiskReport,getInventoryRiskMonitorStatus:getInventoryRiskMonitorStatus,
         setupInventoryRiskMonitor:setupInventoryRiskMonitor,flushInventoryRiskAlerts:flushInventoryRiskAlerts,
         setupPreRegistrationStockAlerts:setupPreRegistrationStockAlerts,getPreRegistrationStockAlertStatus:getPreRegistrationStockAlertStatus,
         claimPreRegistrationStockAlertRelay:claimPreRegistrationStockAlertRelay,authorizePreRegistrationStockAlertRelay:authorizePreRegistrationStockAlertRelay,acknowledgePreRegistrationStockAlertRelay:acknowledgePreRegistrationStockAlertRelay,
@@ -2349,6 +2352,14 @@ function syncEquipmentMaster(rows, newRows) {
     if (id && !rowById[id]) rowById[id] = i + 2;
   }
   var updated = 0, appended = 0, skipped = [];
+  // New owner-confirmed stock must not race another asset with the same name.
+  for(var appendGuardIndex=0;appendGuardIndex<(newRows || []).length;appendGuardIndex++) {
+    var appendGuard=newRows[appendGuardIndex];
+    if(!appendGuard.expectedNameAbsent || rowById[String(appendGuard.id || '').trim()])continue;
+    var nameKey=function(v){return String(v || '').normalize('NFKC').toLowerCase().replace(/[^0-9a-z가-힣]/g,'');};
+    var existingNames=last>1?sheet.getRange(2,4,last-1,1).getValues():[];
+    if(existingNames.some(function(r){return nameKey(r[0])===nameKey(appendGuard.name);}))return {success:false,error:'같은 이름의 장비가 이미 있습니다',updated:0,appended:0};
+  }
   // Slack notes use a read precondition so an intervening sheet edit is retried.
   // Check the whole batch before any write. Existing full-ledger callers remain compatible.
   for (var guardIndex = 0; guardIndex < (rows || []).length; guardIndex++) {

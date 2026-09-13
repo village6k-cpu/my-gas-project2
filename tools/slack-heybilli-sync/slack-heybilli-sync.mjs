@@ -535,8 +535,8 @@ async function enrichPendingRecords(config, records, pending, visionBudget) {
   };
 }
 
-function hermesPrompt(result, config) {
-  if (!result.pending?.length) return '';
+export function hermesPrompt(result, config) {
+  if (!result.pending?.length && !result.stockQuestions?.length) return '';
   return [
     'Slack #단톡방·#업무지시 → 헤이빌리 기존 거래 직접 정정 작업입니다.',
     '각 이벤트의 channel_id를 모든 lookup/apply/ask/ignore JSON의 channelId에 그대로 넣으세요. 다른 채널의 메시지나 스레드를 같은 사건으로 합치지 마세요.',
@@ -553,6 +553,8 @@ function hermesPrompt(result, config) {
     'candidate 목록은 초기 검색 힌트일 뿐 전부가 아닙니다. 후보 없음/이름 추출 오류/동일 날짜 복수 거래이면 직원 원문의 이름·장비·시간으로 lookup을 수행하세요. lookup은 읽기 전용이며 query를 바꿔 최대 3회 조사할 수 있습니다.',
     'lookup 결과가 notesOnly이면 actions는 [] 또는 item_memo만 허용합니다. selectedTradeId가 있어도 이미 같은 내용이면 ignore하세요. 모호한 고객 약칭을 임의의 정식 이름으로 바꾸지 마세요.',
     '재고·분실·파손·고장·수리·발견 보고는 거래 정정과 별개로 먼저 lookup-equipment → record-equipment로 장비마스터 비고에 기록하세요. 거래번호 없이도 처리하며 원문 불확실성을 유지합니다. 거래 반영 공지가 이미 있어도 장비 기록 누락 여부는 별도로 판단합니다. 일반 문의·사진·위치 공유만 있으면 ignore하세요.',
+    'stockQuestions는 재고 보고에 대한 대표님 답변입니다. 거래 연결과 별개로 먼저 처리하세요. 전체 스레드를 이해하여 catalog의 정확명, stockTotal, stockMaintenance, 기존 equipment 분류를 참고한 category/major를 정합니다. 답변이 실재고를 말하고 수리 언급이 없으면 신규 등록 기본값 정비 0을 쓰고 보고합니다. 명시적인 수리·미확인 내용은 그대로 반영하거나 한 가지 필요한 사실만 남기세요. 숫자 정규식이나 이름 일치 실패로 해석을 포기하지 마세요.',
+    'node tools/slack-heybilli-sync/slack-heybilli-sync.mjs confirm-stock [--write] 에 {reportId,confirmation:{catalogName,stockTotal,stockMaintenance,category,major,sourceMessageTs,quote,sourceHash}} JSON을 stdin으로 전달하세요. quote는 ownerReplies의 해당 메시지 전체, sourceHash는 조회 결과를 그대로 복사합니다. dryRun 후 실행하고 mirror.verified=true까지 확인합니다. mirror.pending이면 생성 재실행 대신 다음 scan의 투영 재시도를 확인합니다.',
     '각 이벤트의 전체 스레드에서 최신 직원 답변을 우선해 사실을 추출하고, 후보 거래·품목과 대조하세요.',
     'bot_thread_replies는 헤이빌리(봇)가 이미 이 스레드에 남긴 답글입니다. 이미 반영/적용 완료를 공지했거나 후보 카드가 요구 상태와 일치해 정정할 차이가 없으면 apply하지 말고 ignore로 종료하세요. 같은 사실의 재적용·재공지는 금지입니다.',
     '명시되지 않은 결제 상태나 분실을 추측하지 마세요. 미반납은 lost가 아닙니다.',
@@ -599,6 +601,12 @@ async function scanCommand(config, args) {
     try { result.equipmentMirror = await syncApi(config, {mode:'equipment_sync',execute:true}); }
     catch { process.stderr.write('slack-heybilli-sync: 장비마스터 비고 반영 실패, 다음 실행에서 재시도합니다\n'); }
   }
+  try {
+    const stock=await syncApi(config,{mode:'stock_scan'});
+    result.stockQuestions=stock.questions || [];result.stockMirrors=stock.mirrors || [];result.stockErrors=stock.errors || [];
+    if(result.stockErrors.length)process.stderr.write('slack-heybilli-sync: 일부 재고 답변 조회를 다음 실행에서 재시도합니다\n');
+  }catch(error){process.stderr.write('slack-heybilli-sync: 재고 답변 처리 경로 확인 필요: '+String(error.message || error).slice(0,250)+'\n');}
+  if(config.writeEnabled){try{result.stockMirrors=(await syncApi(config,{mode:'stock_sync',execute:true})).mirrors;}catch{process.stderr.write('slack-heybilli-sync: 확정 재고의 시트 반영은 다음 실행에서 재시도합니다\n');}}
   let succeeded = 0;
   for (const channelId of config.channelIds) {
     try {
@@ -748,6 +756,12 @@ async function main() {
       event:{...body.event,channelId:scoped.channelId},query:body.query,reports:body.reports,
       execute:command === 'record-equipment' && args.has('--write') && config.writeEnabled,finish:body.finish === true});
   }
+  else if(command === 'confirm-stock'){
+    const body=await readStdinJson();if(args.has('--write') && !config.writeEnabled)throw Error('DRY-RUN에서는 재고를 등록할 수 없습니다');
+    result=await syncApi(config,{...body,mode:'stock_confirm',execute:args.has('--write') && config.writeEnabled});
+    if(args.has('--write') && result.equipmentId){const sync=await syncApi(config,{mode:'stock_sync',execute:true});result.mirror=sync.mirrors?.find(row=>row.equipmentId===result.equipmentId) || result.mirror;}
+  }
+  else if(command === 'scan-stock')result=await syncApi(config,{mode:'stock_scan',execute:args.has('--write') && config.writeEnabled});
   else if (command === 'scan') result = await scanCommand(config, args);
   else if (command === 'apply') result = await applyCommand(config, args);
   else if (command === 'ask') result = await markCommand(config, 'needs_context');

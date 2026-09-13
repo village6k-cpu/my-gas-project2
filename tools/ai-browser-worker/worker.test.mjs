@@ -6443,7 +6443,8 @@ test('native full catalog lookup exposes alternative spelling after a partial qu
     }},{kind:'catalog',query:'*'});
   assert.equal(result.status,'ok');
   assert.deepEqual(result.exact_names,['마스 400S']);
-  assert.deepEqual(calls,['read']);
+  assert.deepEqual(calls,['read','run']);
+  assert.equal(result.inventory_context.status,'unavailable');
 });
 
 test('buildReadOnlyLookupContext reads kill switch from GAS header-only read responses', async () => {
