@@ -401,3 +401,31 @@ test('Google quota cannot authorize a duplicate legacy notice when the equivalen
  const result=await relayOnce({channel:'C0B769B394K',gas:async(name,args=[])=>plain(c[name](...args)),slack:async name=>{if(name==='chat.postMessage')posts++;return {messages:[]};}});
  assert.equal(result.status,'obsolete');assert.equal(posts,0);assert.equal(JSON.parse(props.getProperty(key)).pending,null);
 });
+
+test('relay reconciliation of an older delivered shortage preserves the current verified warning',async()=>{
+ const {relayOnce}=require('../scripts/windows/inventory-stock-alert-relay');
+ for(const legacy of [false,true]) {
+   const {c,props}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+   c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
+   const evaluation=c.preRegistrationStockEvaluate_(request(),snapshot());
+   const older=c.preRegistrationStockEvaluate_(request({rows:[{...request().rows[0],quantity:2}]}),snapshot());
+   const signature=e=>({customer:e.customer,start:e.start,end:e.end,
+     shortages:e.shortages.map(s=>[s.equipment,s.start,s.end,s.requested,s.available]).sort(),uncertain:[]});
+   const hash=c.preRegistrationStockHash_(signature(evaluation));
+   const lastHash=legacy?c.preRegistrationStockHash_({...signature(evaluation),uncertain:[['source_unavailable','실재고·별칭 연결 확인 필요','']]}):hash;
+   const receipt={id:'current-verified',ts:'123.456',channel:'C0B769B394K'};
+   const now=c.Date.now(),key='preRegStock_v1_state_'+evaluation.requestId;
+   const pending={id:'older-delivered',hash:c.preRegistrationStockHash_(signature(older)),channel:receipt.channel,
+     text:c.preRegistrationStockText_(older),createdAt:now-120000,attemptedAt:now-60001};
+   props.setProperty(key,JSON.stringify({lastHash,lastReceipt:receipt,pending}));
+   let posts=0;c.inventoryRiskSlack_=name=>{if(name==='chat.postMessage')posts++;throw Error('하루에 urlfetch 서비스를 너무 많이 호출했습니다.');};
+   c.queuePreRegistrationStockCheck_(evaluation.requestId);
+   const result=await relayOnce({channel:receipt.channel,gas:async(name,args=[])=>plain(c[name](...args)),slack:async name=>{
+     if(name==='chat.postMessage')posts++;
+     return {messages:[{ts:'122.456',text:pending.text,metadata:{event_type:'preregistration_stock_alert',event_payload:{id:pending.id}}}]};
+   }});
+   const saved=JSON.parse(props.getProperty(key));
+   assert.equal(result.status,'already_sent');assert.equal(saved.lastHash,hash);assert.deepEqual(saved.lastReceipt,receipt);assert.equal(saved.pending,null);
+   assert.equal(c.flushPreRegistrationStockAlerts().results[0].status,'already_sent');assert.equal(posts,0);
+ }
+});
