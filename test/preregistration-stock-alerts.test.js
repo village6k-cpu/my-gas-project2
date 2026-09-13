@@ -383,3 +383,21 @@ test('legacy receipt migration clears an absent equivalent pending notice before
  assert.equal(c.preRegistrationStockDeliver_(evaluation).status,'already_sent');assert.equal(posts,0);
  assert.equal(JSON.parse(props.getProperty(key)).pending,null);
 });
+
+test('Google quota cannot authorize a duplicate legacy notice when the equivalent warning was already verified',async()=>{
+ const {relayOnce}=require('../scripts/windows/inventory-stock-alert-relay');
+ const {c,props}=env();props.setProperty('preRegStock_v1_externalRelay','true');
+ c.preRegistrationStockRequest_=()=>request();c.readInventoryRiskSnapshot_=()=>snapshot();
+ const evaluation=c.preRegistrationStockEvaluate_(request(),snapshot());
+ const signature={customer:evaluation.customer,start:evaluation.start,end:evaluation.end,
+   shortages:evaluation.shortages.map(s=>[s.equipment,s.start,s.end,s.requested,s.available]).sort(),uncertain:[]};
+ const hash=c.preRegistrationStockHash_(signature),oldHash=c.preRegistrationStockHash_({...signature,uncertain:[['source_unavailable','실재고·별칭 연결 확인 필요','']]});
+ const now=c.Date.now(),key='preRegStock_v1_state_'+evaluation.requestId;
+ props.setProperty(key,JSON.stringify({lastHash:oldHash,lastReceipt:{id:'verified',ts:'123.456',channel:'C0B769B394K'},pending:{id:'unsent',hash,channel:'C0B769B394K',text:c.preRegistrationStockText_(evaluation),createdAt:now-120000,attemptedAt:now-60001}}));
+ c.inventoryRiskSlack_=()=>{throw Error('하루에 urlfetch 서비스를 너무 많이 호출했습니다.');};c.queuePreRegistrationStockCheck_(evaluation.requestId);
+ const first=c.flushPreRegistrationStockAlerts().results[0];assert.equal(first.status,'already_sent');assert.equal(first.needsReconciliation,true);
+ assert.equal(c.getPreRegistrationStockAlertStatus().pending,1);
+ let posts=0;
+ const result=await relayOnce({channel:'C0B769B394K',gas:async(name,args=[])=>plain(c[name](...args)),slack:async name=>{if(name==='chat.postMessage')posts++;return {messages:[]};}});
+ assert.equal(result.status,'obsolete');assert.equal(posts,0);assert.equal(JSON.parse(props.getProperty(key)).pending,null);
+});
