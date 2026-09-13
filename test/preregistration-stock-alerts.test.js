@@ -111,10 +111,24 @@ test('held/rejected rows are checked when registration explicitly resumes them',
 test('registered incident delivery retries through the heartbeat without losing its scope',()=>{
  const {c}=env();let posted,offline=true,sends=0;
  c.preRegistrationStockRequest_=(_,includeRegistered)=>includeRegistered?request({registered:true,tradeId:'260913-001'}):null;
- c.readInventoryRiskSnapshot_=()=>snapshot();
+ c.readInventoryRiskSnapshot_=()=>snapshot({schedules:[booking(),booking({id:'own',tradeId:'260913-001'})]});
  c.inventoryRiskSlack_=(method,p)=>{if(method==='chat.postMessage'){sends++;posted=p;throw Error('uncertain POST');}if(offline)throw Error('offline');return {ok:true,messages:[{ts:'110.1',text:posted.text,metadata:posted.metadata}]};};
  assert.equal(c.checkPreRegistrationStockAlert({requestId:'RQ-260912-013',notify:true,includeRegistered:true}).results[0].status,'pending');
  offline=false;assert.equal(c.flushPreRegistrationStockAlerts().results[0].status,'sent');assert.equal(sends,1);
+});
+
+test('registered notice retries use the changed schedule instead of the obsolete request copy',()=>{
+ const {c}=env(),r=request({registered:true,tradeId:'260913-001'});
+ const substitute=equipment({id:'replacement',name:'캐논 100-400mm II',aliases:[],stock:1});
+ const own=booking({id:'own',tradeId:'260913-001',name:substitute.name,...period});
+ const s=snapshot({equipment:[equipment(),substitute],schedules:[booking(),own]});
+ let result=c.preRegistrationStockEvaluate_(r,s);
+ assert.equal(result.shortages.length,0);assert.equal(result.uncertain.length,0);
+ own.name=equipment().name;own.end='2026-09-13T18:00:00+09:00';
+ result=c.preRegistrationStockEvaluate_(r,s);assert.equal(result.shortages.length,1);assert.equal(result.end,own.end);
+ own.status='반납완료';
+ result=c.preRegistrationStockEvaluate_(r,s);assert.equal(result.shortages.length,0);
+ s.schedules=[booking()];result=c.preRegistrationStockEvaluate_(r,s);assert.equal(result.shortages.length,0);
 });
 
 test('excluded set components remain structurally present without shortage or missing-component alerts',()=>{
