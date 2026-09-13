@@ -14537,10 +14537,15 @@ function _isCompositeSetAccessoryManifest_(name) {
 }
 
 function _isSetAccessoryManifestRow_(sheet, row, equipmentName) {
-  if (!_isCompositeSetAccessoryManifest_(equipmentName)) return false;
   try {
     var qTag = String(sheet.getRange(row, 17).getValue() || "").trim();
-    return qTag.indexOf("[세트]") === 0;
+    if(qTag.indexOf("[세트]")!==0)return false;
+    if(_isCompositeSetAccessoryManifest_(equipmentName))return true;
+    var setName=qTag.slice(4).trim(),setSheet=SpreadsheetApp.getActiveSpreadsheet().getSheetByName('세트마스터');
+    return getSetMasterRows_(setSheet).some(function(r){
+      return String(r[0] || '').trim()===setName && String(r[1] || '').trim()===String(equipmentName).trim() &&
+        typeof inventoryRiskComponentIncluded_==='function' && inventoryRiskComponentIncluded_(r[3]);
+    });
   } catch (e) {
     return false;
   }

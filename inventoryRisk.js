@@ -108,7 +108,18 @@ function buildInventoryRiskReport_(snapshot, options) {
       bookings:[inventoryRiskBooking_(row)],sourceNames:[row.name || '']};
     Object.keys(extra || {}).forEach(function(key){issue[key]=extra[key];}); alerts.push(issue);
   }
-  (snapshot.sets || []).forEach(function(set){sets[inventoryRiskNameKey_(set.name)]=set;});
+  (snapshot.sets || []).forEach(function(set){
+    var key=inventoryRiskNameKey_(set.name), existing=sets[key];
+    if(!existing) {sets[key]=Object.assign({},set,{components:(set.components || []).slice()});return;}
+    var incoming=set.components || [];
+    if(!incoming.length)return;
+    if(!existing.components.length){existing.components=incoming.slice();return;}
+    function signature(components){return components.map(function(c){
+      var resolved=identity.resolve(c.name).item;
+      return JSON.stringify([resolved?'id:'+resolved.id:'name:'+inventoryRiskNameKey_(c.name),inventoryRiskNumber_(c.quantity),c.tracked!==false]);
+    }).sort().join('|');}
+    if(signature(existing.components)!==signature(incoming))existing.definitionConflict=true;
+  });
   function groupKey(row,setKey) {return [row.tradeId,setKey,row.start,row.end].join('|');}
   // Remember explicit expansion even when every component was returned/excluded.
   (snapshot.schedules || []).forEach(function(row){
@@ -158,8 +169,9 @@ function buildInventoryRiskReport_(snapshot, options) {
     if(row.overdue && row.endMs<=from) {risk('overdue_return',row);return;}
     var match=identity.resolve(row.name);
     if(!match.item) {
-      risk(match.candidates.length?'ambiguous_equipment':'unknown_equipment',row,
-        {candidates:match.candidates.length?match.candidates:inventoryRiskCandidates_(row.name,equipment)});
+      var category=equipment.filter(function(e){return inventoryRiskNameKey_(e.category)===inventoryRiskNameKey_(row.name);});
+      var kind=match.candidates.length?'ambiguous_equipment':category.length?'model_selection':sets[inventoryRiskNameKey_(row.name)]?'catalog_stock_missing':'unknown_equipment';
+      risk(kind,row,{setName:row.setName || '',candidates:match.candidates.length?match.candidates:category.length?category.map(function(e){return e.name;}):inventoryRiskCandidates_(row.name,equipment)});
       return;
     }
     var item=match.item;
@@ -169,6 +181,10 @@ function buildInventoryRiskReport_(snapshot, options) {
   relevant.forEach(function(row) {
     var group=row.setGroup?groups[row.setGroup]:null;
     if(row.setHeader) {
+      if(group.set.definitionConflict){risk("conflicting_set_definition",row);if(!expanded[row.setGroup])return;}
+      // A stocked kit with only packing components occupies the kit itself.
+      // An equivalent catalog spelling must not erase that manifest or its stock.
+      if(group.set.components.every(function(c){return c.tracked===false;}) && identity.resolve(row.name).item) {allocate(row);return;}
       if(expanded[row.setGroup]) return;
       group.set.components.forEach(function(component,index) {
         if(component.tracked===false) return;
@@ -218,7 +234,7 @@ function buildInventoryRiskReport_(snapshot, options) {
   var grouped={},compact=[];
   alerts.forEach(function(alert){
     var key=alert.kind==='overdue_return'?'return|'+alert.bookings[0].tradeId
-      : alert.kind==='unknown_equipment' || alert.kind==='ambiguous_equipment' ? alert.kind+'|'+inventoryRiskNameKey_(alert.equipment):'';
+      : ['unknown_equipment','ambiguous_equipment','model_selection','catalog_stock_missing'].indexOf(alert.kind)>=0 ? alert.kind+'|'+inventoryRiskNameKey_(alert.equipment):'';
     if(!key){compact.push(alert);return;}
     if(grouped[key]){grouped[key].bookings=grouped[key].bookings.concat(alert.bookings);grouped[key].sourceNames=Array.from(new Set(grouped[key].sourceNames.concat(alert.sourceNames)));return;}
     if(alert.kind==='overdue_return'){alert.equipment=(alert.bookings[0].customer || alert.bookings[0].tradeId)+' · 반납 기록';alert.equipmentId=null;}

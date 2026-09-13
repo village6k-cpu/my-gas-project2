@@ -122,3 +122,25 @@ test('catalog lookup follows the actual equipment-name header after sheet column
   assert.equal(found.sources.find(s=>s.sheet==='장비마스터').rows.length,1);
   assert.ok(columns.some(([sheet,col])=>sheet==='장비마스터'&&col==='D'));
 });
+
+
+test('request read supplies the AI with stock reasons and set choices before it spends the registration operation',async()=>{
+ const c=config();let readContext=false;
+ c.fetchImpl=async(url)=>{const u=new URL(url);if(u.searchParams.get('action')==='run'){
+  assert.equal(u.searchParams.get('func'),'getInventoryResolutionContext');assert.deepEqual(JSON.parse(u.searchParams.get('args')),[{requestId:'RQ-261001-001'}]);readContext=true;
+  return {ok:true,text:async()=>JSON.stringify({success:true,result:{mode:'read_only',decidedBy:'native_ai',equipment:[{name:'모델 A'}],sets:[],evaluation:{uncertain:[{kind:'model_selection',candidates:['모델 A','모델 B']}]}}})};}
+  return {ok:true,text:async()=>JSON.stringify({headers:['요청ID'],results:[{data:['RQ-261001-001']}]})};};
+ const result=await worker.executeVillageReadOnlyLookup(c,{kind:'request',query:'RQ-261001-001'});
+ assert.equal(readContext,true);assert.equal(result.inventory_context.evaluation.uncertain[0].kind,'model_selection');
+});
+
+
+test('prospective quote exposes exact period inventory evidence independently of price completeness',async()=>{
+ const c=config(),base=c.fetchImpl;
+ c.fetchImpl=async(url,options)=>{const u=new URL(url);if(u.searchParams.get('action')!=='run')return base(url,options);
+  assert.equal(u.searchParams.get('func'),'getInventoryResolutionContext');
+  assert.deepEqual(JSON.parse(u.searchParams.get('args')),[{plan:{items:quote.items,start:'2026-09-09T08:00:00+09:00',end:'2026-09-10T08:00:00+09:00'}}]);
+  return {ok:true,text:async()=>JSON.stringify({success:true,result:{mode:'read_only',equipment:[],sets:[],evaluation:{shortages:[],uncertain:[]}}})};};
+ const result=await worker.executeVillageReadOnlyLookup(c,{kind:'quote',quote});
+ assert.equal(result.complete,true);assert.deepEqual(result.inventory_context.evaluation.shortages,[]);
+});

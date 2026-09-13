@@ -33,6 +33,24 @@ function inventoryRiskDbRows_(cfg,token,table,query) {
   throw new Error('재고 점검 조회 범위 초과');
 }
 
+function inventoryRiskComponentIncluded_(note) {
+  return /(?:^|\n)\[재고:동봉품\](?:\r?$|\s)/m.test(String(note || ''));
+}
+
+function inventoryRiskEnrichLedger_(equipment,ledger) {
+  var byId={};equipment.forEach(function(item){byId[item.id]=item;});
+  ledger.forEach(function(row){
+    var item=byId[row.equipment_id];if(!item)return;
+    item.aliases=[row.name].concat(row.aliases || []);
+    // Supplemental counts only fill an absent cell for the same verified asset.
+    // Never replace explicit zero, maintenance state, or a differing master count.
+    if(item.maintenance==='' && row.verify_status==='verified' && item.name===row.name &&
+      item.status===row.state && Number(item.stock)===row.stock_total && Number.isInteger(row.stock_maint) && row.stock_maint>=0 && row.stock_maint<=row.stock_total) {
+      item.maintenance=row.stock_maint;item.maintenanceSource='verified_equipment_ledger';
+    }
+  });
+}
+
 function readInventoryRiskSnapshot_() {
   var ss=SpreadsheetApp.getActiveSpreadsheet();
   var eq=inventoryRiskSheetRows_(ss,'장비마스터',['장비ID','장비명','총보유수량','정비중수량','상태']);
@@ -48,9 +66,10 @@ function readInventoryRiskSnapshot_() {
   set.rows.forEach(function(r){
     var name=set.value(r,'세트명'),component=set.value(r,'구성장비명');
     if(!name) return;
-    if(!setsByName[name])setsByName[name]={name:name,components:[]};
+    if(!setsByName[name])setsByName[name]={name:name,price:set.value(r,'단가'),components:[]};
     if(component)setsByName[name].components.push({name:component,quantity:set.value(r,'수량'),
-      tracked:String(set.value(r,'가용체크(Y/N)') || set.value(r,'가용체크') || '').toUpperCase()!=='N' && !_isCompositeSetAccessoryManifest_(component)});
+      note:set.value(r,'비고') || '',alternatives:set.value(r,'대체가능장비') || '',
+      tracked:String(set.value(r,'가용체크(Y/N)') || set.value(r,'가용체크') || '').toUpperCase()!=='N' && !inventoryRiskComponentIncluded_(set.value(r,'비고')) && !_isCompositeSetAccessoryManifest_(component)});
   });
   var schedules=schedule.rows.filter(function(r){return schedule.value(r,'스케줄ID') || schedule.value(r,'장비명');}).map(function(r){
     var tradeId=schedule.value(r,'거래ID'), c=contractById[tradeId] || {};
@@ -63,10 +82,10 @@ function readInventoryRiskSnapshot_() {
   try {
     var cfg=SUPA_CFG_(),token=supaToken_(cfg);
     if(!token) throw new Error('보조 데이터 인증 확인 필요');
-    var aliasCache=CacheService.getScriptCache(),aliasText=aliasCache.get('inventory_risk_ledger_aliases_v1');
-    var aliases=aliasText?JSON.parse(aliasText):inventoryRiskDbRows_(cfg,token,'equipment_ledger','select=equipment_id,name,aliases&order=equipment_id');
-    if(!aliasText)try{aliasCache.put('inventory_risk_ledger_aliases_v1',JSON.stringify(aliases),60);}catch(cacheError){}
-    aliases.forEach(function(row){var item=equipmentById[row.equipment_id];if(item)item.aliases=[row.name].concat(row.aliases || []);});
+    var aliasCache=CacheService.getScriptCache(),aliasText=aliasCache.get('inventory_risk_ledger_aliases_v2');
+    var aliases=aliasText?JSON.parse(aliasText):inventoryRiskDbRows_(cfg,token,'equipment_ledger','select=equipment_id,name,aliases,stock_total,stock_maint,state,verify_status&order=equipment_id');
+    if(!aliasText)try{aliasCache.put('inventory_risk_ledger_aliases_v2',JSON.stringify(aliases),60);}catch(cacheError){}
+    inventoryRiskEnrichLedger_(equipment,aliases);
     var today=Utilities.formatDate(new Date(),'Asia/Seoul','yyyy-MM-dd')+'T00:00:00+09:00';
     var trades=inventoryRiskDbRows_(cfg,token,'trades','select=trade_id,setup_done,return_done&order=trade_id&or='+encodeURIComponent('(return_at.gte.'+today+',and(setup_done.eq.true,return_done.eq.false))'));
     var tradesById={},itemsById={};
@@ -95,7 +114,7 @@ function readInventoryRiskSnapshot_() {
 
 function getInventoryRiskReport(force) {
   var props=PropertiesService.getScriptProperties(),cache=CacheService.getScriptCache();
-  var cacheKey='inventoryRisk_report_v2_'+(props.getProperty(INVENTORY_RISK_PREFIX_+'dirty') || 'initial');
+  var cacheKey='inventoryRisk_report_v3_'+(props.getProperty(INVENTORY_RISK_PREFIX_+'dirty') || 'initial');
   var cached=force===true?null:inventoryRiskCacheRead_(cache,cacheKey);
   if(cached)return cached;
   var snapshot=readInventoryRiskSnapshot_();
@@ -131,7 +150,7 @@ function inventoryRiskCacheWrite_(cache,key,value,ttl) {
 function inventoryRiskLabel_(kind) {
   return {invalid_supply_allocation:'외부 조달·상위 대체 기록 확인',shortage:'재고 부족',capacity_tight:'여유 재고 10% 이하',turnaround:'반납·반출 간격 부족',unknown_equipment:'장비명 확인 필요',ambiguous_equipment:'장비명 중복 연결',unknown_stock:'보유·정비 수량 확인',
     invalid_quantity:'예약 수량 확인',invalid_schedule:'예약 날짜·시간 확인',overdue_return:'반납 처리 확인 필요',set_component_missing:'세트 구성품 확인',
-    invalid_set_component:'세트 구성 수량 확인',maintenance_unquantified:'정비 수량 미기록',source_unavailable:'점검 데이터 연결 확인'}[kind] || '재고 위험';
+    catalog_stock_missing:'실보유수량 확인 후 장비마스터 등록',model_selection:'구체 모델 선택',conflicting_set_definition:'중복 세트 구성 대조',invalid_set_component:'세트 구성 수량 확인',maintenance_unquantified:'정비 수량 미기록',source_unavailable:'점검 데이터 연결 확인'}[kind] || '재고 위험';
 }
 
 function inventoryRiskOperationsAlerts_(report) {
@@ -192,9 +211,64 @@ function inventoryRiskSlackText_(report, plan, detailUrl) {
     lines.push('　'+when(a.start)+(a.stock!==undefined?' · 가용 '+a.stock+' / 필요 '+a.booked:''));
     var people=Array.from(new Set((a.bookings || []).map(function(b){return clean(b.customer || b.tradeId);}))).slice(0,4);
     if(people.length)lines.push('　'+people.join(' · '));
+    if(a.kind==='catalog_stock_missing')lines.push('　대표님, 실제 몇 개 보유 중인가요? 수리 중 수량이 있으면 함께 이 스레드에 답해주세요. 답변을 재고 원장·장비마스터에 반영합니다.');
     if(a.candidates?.length)lines.push('　이름 후보: '+a.candidates.slice(0,2).map(clean).join(' / '));
   });
   if(plan.changed.length>5)lines.push((plan.daily?'외 ':'외 변경 ')+(plan.changed.length-5)+'건');
   lines.push('<'+detailUrl+'|전체 위험·예약 보기>');
   return lines.join('\n');
+}
+
+
+/** Ephemeral period assessment; no RQ or schedule is written. */
+function inventoryResolutionPreview_(plan,snapshot) {
+  if(!plan || Object.keys(plan).some(function(k){return ['items','start','end'].indexOf(k)<0;}) ||
+    !Array.isArray(plan.items) || !plan.items.length || plan.items.length>40)throw new Error('재고 판단 계획 형식 오류');
+  ['start','end'].forEach(function(k){
+    var value=plan[k],time=Date.parse(value);
+    if(typeof value!=='string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\+09:00$/.test(value) || !Number.isFinite(time) ||
+      new Date(time+9*3600000).toISOString().slice(0,19)!==value.slice(0,19))throw new Error('재고 판단 기간 오류');
+  });
+  if(Date.parse(plan.end)<=Date.parse(plan.start))throw new Error('재고 판단 기간 오류');
+  var seen={},rows=[];
+  function add(name,quantity,setName){rows.push({id:'preview-'+rows.length,name:name,quantity:quantity,setName:setName,start:plan.start,end:plan.end,status:'대기'});}
+  plan.items.forEach(function(item){
+    if(!item || Object.keys(item).some(function(k){return k!=='name' && k!=='quantity';}) || typeof item.name!=='string' || !item.name.trim() || item.name.length>200 ||
+      inventoryRiskNumber_(item.quantity)!==item.quantity || item.quantity<1 || item.quantity>999 || seen[item.name])throw new Error('재고 판단 장비 오류');
+    seen[item.name]=true;var set=snapshot.sets.find(function(s){return s.name===item.name;});
+    add(item.name,item.quantity,set?item.name:'');
+    (set?.components || []).forEach(function(c){
+      var qty=inventoryRiskNumber_(c.quantity);add(c.name,qty===null?null:qty*item.quantity,item.name);
+    });
+  });
+  return {id:'preview',preview:true,customer:'',rows:rows};
+}
+
+/** Read-only evidence for native AI; the model owns identity and model selection. */
+function getInventoryResolutionContext(options) {
+  options=options || {};
+  if(Object.keys(options).some(function(k){return k!=='requestId' && k!=='plan';}) ||
+    (options.requestId && options.plan) || (options.requestId && !/^RQ-\d{6}-\d{3}$/.test(options.requestId)))throw new Error('재고 판단 조회 형식 오류');
+  var snapshot=readInventoryRiskSnapshot_();
+  var result={schema:'inventory-resolution-context/v1',mode:'read_only',decidedBy:'native_ai',
+    equipment:snapshot.equipment,sets:snapshot.sets,sourceIssues:snapshot.sourceIssues || [],
+    guidance:'이 자료는 판단 근거다. 코드 후보는 추천일 뿐이다. AI가 원문, 전체 카탈로그, 세트 구성과 용도를 비교해 선택한다. 구성품과 별도 대여품을 구분하고, 의미 있는 선택만 고객에게 묻는다. 판매 카탈로그에 있지만 재고 기록이 없는 경우는 매칭 실패나 품절로 단정하지 않는다.'};
+  if(options.requestId || options.plan) {
+    var request=options.plan?inventoryResolutionPreview_(options.plan,snapshot):preRegistrationStockRequest_(options.requestId,true,true);
+    result.request=request;result.evaluation=request?preRegistrationStockEvaluate_(request,snapshot):null;
+    result.modelChoices=[];
+    if(request && !request.registered)request.rows.forEach(function(row){
+      var candidates=snapshot.equipment.filter(function(item){return inventoryRiskNameKey_(item.category)===inventoryRiskNameKey_(row.name);});
+      if(!candidates.length)return;
+      result.modelChoices.push({rowId:row.id,setName:row.setName,name:row.name,quantity:row.quantity,truncated:candidates.length>8,
+        candidates:candidates.slice(0,8).map(function(item){
+          var planned=Object.assign({},request,{rows:request.rows.map(function(r){return r.id===row.id?Object.assign({},r,{name:item.name}):r;})});
+          var check=preRegistrationStockEvaluate_(planned,snapshot);
+          return {id:item.id,name:item.name,stock:item.stock,maintenance:item.maintenance,status:item.status,
+            shortages:check.shortages.filter(function(a){return a.equipment===item.name;}),
+            uncertainty:check.uncertain.filter(function(a){return a.equipment===item.name;})};
+        })});
+    });
+  }
+  return result;
 }
