@@ -61,6 +61,22 @@ test('watchdog catches validation failures and verifies capture after recovery b
  assert.match(src,/Invoke-KakaoLiveEvaluator\s*\r?\n\s*Confirm-WatchdogRecovery/);
 });
 
+test('PowerShell passes the healthy incident flag as one argument, not individual characters', {skip:process.platform!=='win32'},()=>{
+ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'village-watchdog-failure-'));
+ try {
+  const source=fs.readFileSync(path.join(__dirname,'../scripts/windows/watch-kakao-production.ps1'),'utf8');
+  const fn=source.slice(source.indexOf('function Report-WatchdogIncident'),source.indexOf("$incidentReason = 'runtime_validation_failed'"));
+  const marker=path.join(temp,'notifier-call.json');
+  fs.writeFileSync(path.join(temp,'kakao-runtime-incident.js'),`require('node:fs').writeFileSync(${JSON.stringify(marker)},JSON.stringify(process.argv.slice(2)));`);
+  fs.writeFileSync(path.join(temp,'probe.ps1'),"$NodePath='"+process.execPath.replaceAll("'","''")+"'\n"+fn+'\nReport-WatchdogIncident -Healthy\n');
+  const r=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(temp,'probe.ps1')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0);assert.deepEqual(JSON.parse(fs.readFileSync(marker,'utf8')),['--healthy']);
+ } finally {
+  assert.equal(path.dirname(path.resolve(temp)),path.resolve(os.tmpdir()));
+  assert.ok(path.basename(temp).startsWith('village-watchdog-failure-'));fs.rmSync(temp,{recursive:true,force:true});
+ }
+});
+
 test('the real watchdog invokes its independent notifier when plugin validation aborts before capture', {skip:process.platform!=='win32'},()=>{
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'village-watchdog-failure-'));
  try {
