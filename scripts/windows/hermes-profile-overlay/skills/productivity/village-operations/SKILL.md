@@ -48,6 +48,10 @@ Choose the narrowest authoritative live source; apply [supply rules](references/
 Windows paths and command boundaries live in
 [Windows runtime and sources](references/windows-runtime-and-sources.md).
 
+For Kakao browser reads, preserve the watcher-owned chat-list tab and open
+customer conversations in separate tabs. Follow
+[Kakao room navigation](references/village-kakao-profile-safe-room-navigation.md).
+
 ## Interpret before execution
 
 - Read the whole request and preserve source dates/times, quantities, option
