@@ -115,7 +115,8 @@ function preRegistrationStockDeliver_(evaluation) {
     if(state.pending) {
       // An equivalent verified warning already satisfies registration. Retain an
       // uncertain old attempt for reconciliation, but never authorize another POST.
-      state.pending.desiredHash=alreadyNotified?'':fingerprint;state.pending.actionable=actionable && !alreadyNotified;save();
+      state.pending.desiredHash=alreadyNotified?'':fingerprint;state.pending.actionable=actionable && !alreadyNotified;
+      state.pending.coveredByHash=alreadyNotified?fingerprint:null;save();
       if(state.pending.relayUntil>Date.now())return waiting();
       var prior=preRegistrationStockReceipt_(state.pending);
       if(prior.found) {
@@ -382,8 +383,11 @@ function acknowledgePreRegistrationStockAlertRelay(args) {
     var result={status:'pending',requestId:args.requestId};
     if(args.delivered===true) {
       if(args.channel!==pending.channel || !/^\d+\.\d+$/.test(args.ts || ''))throw new Error('재고 경보 Slack 영수증 확인 필요');
-      state.lastHash=pending.hash;state.lastReceipt={id:pending.id,channel:pending.channel,ts:args.ts,at:new Date().toISOString(),transport:'windows_relay'};
-      state.pending=null;state.error=null;result={status:'sent',requestId:args.requestId,receipt:state.lastReceipt};
+      // Reconciling an older posted attempt must not replace the verified notice
+      // that already covers the current request and retire its deduplication key.
+      var covered=!!state.lastReceipt && !!pending.coveredByHash && pending.coveredByHash===state.lastHash;
+      if(!covered){state.lastHash=pending.hash;state.lastReceipt={id:pending.id,channel:pending.channel,ts:args.ts,at:new Date().toISOString(),transport:'windows_relay'};}
+      state.pending=null;state.error=null;result={status:covered?'already_sent':'sent',requestId:args.requestId,receipt:state.lastReceipt};
     } else if(args.obsolete===true) {
       if(pending.desiredHash===pending.hash && pending.actionable!==false)return {status:'conflict'};
       state.pending=null;result.status='obsolete';
