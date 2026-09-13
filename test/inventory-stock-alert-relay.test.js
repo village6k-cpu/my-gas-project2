@@ -1,6 +1,6 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {relayOnce,createClients}=require('../scripts/windows/inventory-stock-alert-relay');
+const {relayOnce,relayWithBusyRetry,createClients}=require('../scripts/windows/inventory-stock-alert-relay');
 const channel='C0B769B394K';
 const pending=()=>({id:'message-id',relayToken:'lease',channel,text:'재고 부족',hash:'same',desiredHash:'same',actionable:true,createdAt:100000,attemptedAt:100000,transportRejected:true});
 function env(over={}) {
@@ -15,6 +15,12 @@ test('quota rejection is relayed and acknowledged only after Slack history verif
 });
 test('a prior accepted post is found instead of posted a second time',async()=>{
  const e=env();e.messages.push({ts:'100.1',text:e.p.text,metadata:{event_type:'preregistration_stock_alert',event_payload:{id:e.p.id}}});
+ assert.equal((await relayOnce(e)).status,'sent');assert.ok(!e.calls.includes('chat.postMessage'));
+});
+
+test('a real Slack emoji-normalized receipt is acknowledged without a duplicate post',async()=>{
+ const e=env({text:'🚨 재고 부족\n🗓️ 일정\n🔴 장비\n❓ 별칭\n👉 확인'});
+ e.messages.push({ts:'100.1',text:':rotating_light: 재고 부족\n:spiral_calendar_pad: 일정\n:red_circle: 장비\n:question: 별칭\n:point_right: 확인',metadata:{event_type:'preregistration_stock_alert',event_payload:{id:e.p.id}}});
  assert.equal((await relayOnce(e)).status,'sent');assert.ok(!e.calls.includes('chat.postMessage'));
 });
 test('changed intent is discarded only after complete absence evidence; no obsolete alert is sent',async()=>{
@@ -38,6 +44,15 @@ test('relay rejects a different channel before any Slack operation',async()=>{
 test('an authorization delayed beyond its usable lease never starts a POST',async()=>{
  const e=env(),original=e.gas;e.gas=async(name,args)=>name==='authorizePreRegistrationStockAlertRelay'?{status:'authorized',validUntil:210000}:original(name,args);
  assert.equal((await relayOnce(e)).status,'authorization_expired');assert.ok(!e.calls.includes('chat.postMessage'));
+});
+
+test('overlapping minute jobs retry within the same run instead of colliding at every fixed interval',async()=>{
+ const e=env(),original=e.gas,waits=[];let claims=0;
+ e.gas=async(name,args)=>name==='claimPreRegistrationStockAlertRelay' && ++claims<3?{status:'busy'}:original(name,args);
+ assert.equal((await relayWithBusyRetry(e,async ms=>waits.push(ms))).status,'sent');
+ assert.deepEqual(waits,[5000,15000]);assert.equal(e.calls.filter(x=>x==='chat.postMessage').length,1);
+ const busy=env();busy.gas=async()=>({status:'busy'});const bounded=[];
+ assert.equal((await relayWithBusyRetry(busy,async ms=>bounded.push(ms))).status,'busy');assert.equal(bounded.length,2);
 });
 test('Slack rate limits persist a retry boundary, and GAS failures do not leak credentials',async()=>{
  let retry=0;const clients=createClients({config:{VILLAGE2_API_URL:'https://script.google.com/macros/s/test/exec',VILLAGE2_API_KEY:'private-test-value'},slackToken:'private-slack-value',onBackoff:t=>retry=t,

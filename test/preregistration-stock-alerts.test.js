@@ -14,7 +14,7 @@ function env() {
   const inputLock={hasLock:()=>inputHeld,waitLock:()=>{inputHeld=true;},tryLock:()=>{inputHeld=true;return true;},releaseLock:()=>{inputHeld=false;}};
   const ctx = {Date:Clock,PropertiesService:{getScriptProperties:()=>props},LockService:{getScriptLock:()=>lock,getUserLock:()=>inputLock},Utilities:{getUuid:()=>crypto.randomUUID(),DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,s)=>[...crypto.createHash('sha256').update(s).digest()],formatDate:d=>new Date(+d+9*3600000).toISOString().slice(5,16).replace('T',' ')}};
   vm.createContext(ctx);
-  for(const name of ['inventorySupply.js','inventoryRisk.js','preRegistrationStockAlerts.js']) { const p=path.join(__dirname,'..',name); if(fs.existsSync(p))vm.runInContext(fs.readFileSync(p,'utf8'),ctx); }
+  for(const name of ['inventorySupply.js','inventoryRisk.js','stockAlertReceipt.js','preRegistrationStockAlerts.js']) { const p=path.join(__dirname,'..',name); if(fs.existsSync(p))vm.runInContext(fs.readFileSync(p,'utf8'),ctx); }
   props.setProperty('preRegStock_v1_enabled','true');props.setProperty('preRegStock_v1_channel','C0B769B394K');
   return {c:ctx,props,values,lock,inputLock,advance:ms=>now+=ms};
 }
@@ -327,4 +327,13 @@ test('relay send authorization rejects a new request generation and records only
  const saved=JSON.parse(props.getProperty('preRegStock_v1_state_'+id)).pending;
  assert.equal(saved.attemptedAt,claim.pending.attemptedAt+1000);assert.notEqual(saved.transportRejected,true);
  c.queuePreRegistrationStockCheck_(id);assert.equal(c.authorizePreRegistrationStockAlertRelay(ack).status,'stale');
+});
+
+test('Slack emoji aliases still verify the same receipt but changed wording does not',()=>{
+ const {c}=env();const evaluation=c.preRegistrationStockEvaluate_(request(),snapshot());let posted;
+ c.inventoryRiskSlack_=(name,p)=>{if(name==='chat.postMessage'){posted=p;return {ts:'123.456'};}return {messages:[{ts:'123.456',text:c.stockAlertSlackText_(posted.text),metadata:posted.metadata}]};};
+ assert.equal(c.preRegistrationStockDeliver_(evaluation).status,'sent');
+ const pending={id:posted.metadata.event_payload.id,channel:posted.channel,text:posted.text,ts:'123.456'};
+ c.inventoryRiskSlack_=()=>({messages:[{ts:'123.456',text:c.stockAlertSlackText_(posted.text)+' changed',metadata:posted.metadata}]});
+ assert.equal(c.preRegistrationStockReceipt_(pending).found,false);
 });

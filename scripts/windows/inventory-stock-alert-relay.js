@@ -4,6 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {parseEnv, DEFAULT_ENV_FILE} = require('./village-live-read');
+const {stockAlertSlackText_} = require('../../stockAlertReceipt');
 
 async function findReceipt(slack, pending) {
   const args = {channel:pending.channel,oldest:pending.ts || String((pending.createdAt-60000)/1000),inclusive:true,limit:100,include_all_metadata:true};
@@ -11,7 +12,7 @@ async function findReceipt(slack, pending) {
   for(let page=0;page<3;page++) {
     const result=await slack('conversations.history',args);
     const found=(result.messages || []).find(m=>m.metadata?.event_type==='preregistration_stock_alert' &&
-      m.metadata?.event_payload?.id===pending.id && m.text===pending.text && (!pending.ts || pending.ts===m.ts));
+      m.metadata?.event_payload?.id===pending.id && stockAlertSlackText_(m.text)===stockAlertSlackText_(pending.text) && (!pending.ts || pending.ts===m.ts));
     if(found)return {found:true,ts:found.ts};
     const cursor=result.response_metadata?.next_cursor;
     if(!cursor && !result.has_more)return {found:false,complete:true};
@@ -47,8 +48,19 @@ async function relayOnce({gas,slack,channel,now=Date.now}) {
   return gas('acknowledgePreRegistrationStockAlertRelay',[{...ack,delivered:true,channel,ts:receipt.ts}]);
 }
 
+async function relayWithBusyRetry(clients,wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))) {
+  // The GAS heartbeat and Windows task both run each minute. Retrying inside
+  // this run prevents their fixed phases from colliding indefinitely.
+  const delays=[5000,15000];
+  for(let attempt=0;;attempt++) {
+    const result=await relayOnce(clients);
+    if(result.status!=='busy' || attempt===delays.length)return result;
+    await wait(delays[attempt]);
+  }
+}
+
 function parseArgs(args) {
-  const result={mode:'once',stateDir:path.join(process.env.LOCALAPPDATA || 'C:/Village','VillageInventoryAlerts')};
+  const result={mode:'once',stateDir:path.resolve(__dirname,'../../../runtime/inventory-stock-alerts')};
   for(let i=0;i<args.length;i++) {
     if(args[i]==='--setup')result.mode='setup';
     else if(args[i]==='--once')result.mode='once';
@@ -110,11 +122,11 @@ async function main() {
       fs.writeFileSync(configPath,JSON.stringify({channel},null,2));
       save({status:'configured',channel,error:null});return;
     }
-    result=await relayOnce({...clients,channel});
+    result=await relayWithBusyRetry({...clients,channel});
     if(result.receipt)state.lastReceipt=result.receipt;
     save({status:result.status,requestId:result.requestId || null,error:null});
   }catch(error){save({status:'error',error:/^relay_[a-z_]+$/.test(error.message)?error.message:'relay_operation_failed'});process.exitCode=1;}
 }
 
-module.exports={findReceipt,relayOnce,parseArgs,createClients};
+module.exports={findReceipt,relayOnce,relayWithBusyRetry,parseArgs,createClients};
 if(require.main===module)main().catch(()=>{console.error('relay_start_failed');process.exitCode=1;});

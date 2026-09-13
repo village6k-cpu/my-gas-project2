@@ -1,11 +1,12 @@
 param(
   [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
-  [string]$StateDir = (Join-Path $env:LOCALAPPDATA 'VillageInventoryAlerts')
+  [string]$StateDir = ''
 )
 $ErrorActionPreference = 'Stop'
 $taskName = 'Village Inventory Stock Alert Relay'
 $ownerMarker = 'village-inventory-stock-relay-v1'
 $resolvedRepo = (Resolve-Path -LiteralPath $RepoRoot).Path
+if (-not $StateDir) { $StateDir = Join-Path (Split-Path -Parent $resolvedRepo) 'runtime\inventory-stock-alerts' }
 $runner = Join-Path $resolvedRepo 'scripts\windows\run-inventory-stock-alert-relay.ps1'
 $configPath = Join-Path $StateDir 'config.json'
 if (-not (Test-Path -LiteralPath $runner) -or -not (Test-Path -LiteralPath $configPath)) {

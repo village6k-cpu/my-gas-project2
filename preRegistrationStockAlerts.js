@@ -76,7 +76,7 @@ function preRegistrationStockReceipt_(pending) {
     if(cursor)args.cursor=cursor;
     var page=inventoryRiskSlack_('conversations.history',args);
     var message=(page.messages || []).find(function(m){return m.metadata?.event_type==='preregistration_stock_alert' &&
-      m.metadata?.event_payload?.id===pending.id && m.text===pending.text && (!pending.ts || pending.ts===m.ts);});
+      m.metadata?.event_payload?.id===pending.id && stockAlertSlackText_(m.text)===stockAlertSlackText_(pending.text) && (!pending.ts || pending.ts===m.ts);});
     if(message)return {found:true,ts:message.ts};
     cursor=page.response_metadata?.next_cursor || '';
     if(!cursor && !page.has_more)return {found:false,complete:true};
@@ -274,9 +274,10 @@ function checkPreRegistrationStockAlert(options) {
 }
 
 function getPreRegistrationStockAlertStatus() {
-  var p=PropertiesService.getScriptProperties(),all=p.getProperties();
+  var p=PropertiesService.getScriptProperties(),all=p.getProperties(),lease=JSON.parse(all[PREREG_STOCK_PREFIX_+'lease'] || '{}');
   return {enabled:p.getProperty(PREREG_STOCK_PREFIX_+'enabled')==='true',channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
     externalRelay:p.getProperty(PREREG_STOCK_PREFIX_+'externalRelay')==='true',
+    processingUntil:lease.until>Date.now()?new Date(lease.until).toISOString():null,
     pending:preRegistrationStockPendingKeys_(all).length,
     lastResult:JSON.parse(p.getProperty(PREREG_STOCK_PREFIX_+'lastResult') || 'null'),lastError:p.getProperty(PREREG_STOCK_PREFIX_+'lastError')};
 }
