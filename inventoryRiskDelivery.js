@@ -135,6 +135,14 @@ function flushInventoryRiskAlerts(event) {
   var started=Date.now();p.deleteProperty(INVENTORY_RISK_PREFIX_+'queuedAt');
   try {
     var state=inventoryRiskLoadState_();
+    var schedule=inventoryRiskNotificationSchedule_(state,Date.now());
+    // A daily digest must not scan Sheets/Supabase every minute all day.
+    // Only uncertain prior sends need a receipt lookup outside the send window.
+    if(!schedule.due) {
+      if(state.pending)inventoryRiskDeliver_(state,{allowSend:false});
+      schedule=inventoryRiskNotificationSchedule_(state,Date.now());
+      return {status:schedule.lastNotificationDate===schedule.date?'already_sent':'scheduled',nextNotificationAt:schedule.nextNotificationAt};
+    }
     var report;
     try{report=getInventoryRiskReport(true);}
     catch(error){
@@ -145,7 +153,7 @@ function flushInventoryRiskAlerts(event) {
     if(!report.sourceUnavailable)p.deleteProperty(INVENTORY_RISK_PREFIX_+'lastScanError');
     p.setProperty(INVENTORY_RISK_PREFIX_+'lastScan',JSON.stringify({at:report.generatedAt,elapsedMs:Date.now()-started,
       coverage:report.coverage,conflicts:report.conflictCount,risks:report.riskCount,sourceUnavailable:!!report.sourceUnavailable}));
-    var schedule=inventoryRiskNotificationSchedule_(state,Date.now());
+    schedule=inventoryRiskNotificationSchedule_(state,Date.now());
     if(state.pending && !inventoryRiskDeliver_(state,{allowSend:schedule.due,draft:schedule.due?inventoryRiskDailyDraft_(report,state):null})){
       return {status:schedule.due?'pending':'scheduled',nextNotificationAt:schedule.nextNotificationAt};
     }
@@ -180,6 +188,7 @@ function requestInventoryRiskScan_() {
   try{
     var p=PropertiesService.getScriptProperties();p.setProperty(INVENTORY_RISK_PREFIX_+'dirty',String(Date.now()));
     if(p.getProperty(INVENTORY_RISK_PREFIX_+'enabled')!=='true')return;
+    if(!inventoryRiskNotificationSchedule_(inventoryRiskLoadState_(),Date.now()).due)return;
     var queued=Number(p.getProperty(INVENTORY_RISK_PREFIX_+'queuedAt') || 0);
     if(Date.now()-queued<60000)return;
     p.setProperty(INVENTORY_RISK_PREFIX_+'queuedAt',String(Date.now()));

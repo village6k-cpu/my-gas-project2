@@ -87,7 +87,7 @@ function preRegistrationStockReceipt_(pending) {
 
 function preRegistrationStockDeliver_(evaluation) {
   var p=PropertiesService.getScriptProperties(),key=PREREG_STOCK_PREFIX_+'state_'+evaluation.requestId;
-  var state=JSON.parse(p.getProperty(key) || '{}'),reconciled=false;
+  var state=JSON.parse(p.getProperty(key) || '{}'),reconciled=false,posting=false;
   var fingerprint=preRegistrationStockHash_({customer:evaluation.customer,start:evaluation.start,end:evaluation.end,
     shortages:evaluation.shortages.map(function(s){return [s.equipment,s.start,s.end,s.requested,s.available];}).sort(),
     uncertain:evaluation.uncertain.map(function(a){return [a.kind,a.equipment,a.component || ''];}).sort()});
@@ -95,6 +95,8 @@ function preRegistrationStockDeliver_(evaluation) {
   function save(){p.setProperty(key,JSON.stringify(state));}
   try {
     if(state.pending) {
+      state.pending.desiredHash=fingerprint;state.pending.actionable=actionable;save();
+      if(state.pending.relayUntil>Date.now())return {status:'pending',requestId:evaluation.requestId};
       var prior=preRegistrationStockReceipt_(state.pending);
       if(prior.found) {
         state.lastHash=state.pending.hash;state.lastReceipt={id:state.pending.id,ts:prior.ts,channel:state.pending.channel,at:new Date().toISOString()};
@@ -105,12 +107,14 @@ function preRegistrationStockDeliver_(evaluation) {
     }
     if(!actionable) {state.lastHash='';state.end=evaluation.end;state.pending=null;save();return {status:'clear',requestId:evaluation.requestId};}
     if(state.lastHash===fingerprint)return {status:reconciled?'sent':'already_sent',requestId:evaluation.requestId,receipt:state.lastReceipt};
-    if(!state.pending)state.pending={id:Utilities.getUuid(),hash:fingerprint,channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
+    if(!state.pending)state.pending={id:Utilities.getUuid(),hash:fingerprint,desiredHash:fingerprint,actionable:true,channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
       createdAt:Date.now(),text:preRegistrationStockText_(evaluation)};
-    state.end=evaluation.end;state.pending.attemptedAt=Date.now();save();
+    state.end=evaluation.end;state.pending.attemptedAt=Date.now();delete state.pending.transportRejected;save();
+    posting=true;
     var response=inventoryRiskSlack_('chat.postMessage',{channel:state.pending.channel,text:state.pending.text,
       unfurl_links:false,unfurl_media:false,client_msg_id:state.pending.id,
       metadata:{event_type:'preregistration_stock_alert',event_payload:{id:state.pending.id,request_id:evaluation.requestId}}});
+    posting=false;
     if(!response.ts || response.channel && response.channel!==state.pending.channel)throw new Error('Slack 전달 결과 불일치');
     state.pending.ts=response.ts;save();
     var receipt=preRegistrationStockReceipt_(state.pending);
@@ -118,7 +122,11 @@ function preRegistrationStockDeliver_(evaluation) {
     state.lastHash=state.pending.hash;state.lastReceipt={id:state.pending.id,ts:receipt.ts,channel:state.pending.channel,at:new Date().toISOString()};
     state.pending=null;state.error=null;save();
     return {status:'sent',requestId:evaluation.requestId,receipt:state.lastReceipt};
-  }catch(error){state.error='Slack 재고 알림 전달 확인 대기';save();return {status:'pending',requestId:evaluation.requestId,error:state.error};}
+  }catch(error){
+    state.error='Slack 재고 알림 전달 확인 대기';
+    if(posting && state.pending && /urlfetch/i.test(String(error.message)) && /too many|너무 많이|quota|한도/i.test(String(error.message)))state.pending.transportRejected=true;
+    save();return {status:'pending',requestId:evaluation.requestId,error:state.error};
+  }
 }
 
 function queuePreRegistrationStockCheck_(requestId) {
@@ -132,6 +140,11 @@ function queuePreRegistrationStockCheck_(requestId) {
   if(!inputLock.hasLock() && !LockService.getScriptLock().hasLock()){inputLock.waitLock(30000);ownsInputLock=true;}
   try {p.setProperty(PREREG_STOCK_PREFIX_+'dirty_'+requestId,Date.now()+':'+Utilities.getUuid());}
   finally {if(ownsInputLock)inputLock.releaseLock();}
+}
+
+function cancelPreRegistrationStockResume_(requestId) {
+  PropertiesService.getScriptProperties().deleteProperty(PREREG_STOCK_PREFIX_+'registering_'+requestId);
+  queuePreRegistrationStockCheck_(requestId);
 }
 
 function preRegistrationStockPrune_(scriptLockHeld) {
@@ -208,10 +221,17 @@ function preRegistrationStockFlush_(requestId,scriptLockHeld,includeRegistered,p
         try {request=preRegistrationStockRequest_(id,allowRegistered,forRegistration);}
         finally {if(!inputLockHeld)inputLock.releaseLock();}
       }
-      if(!request){if(marker)p.setProperty(PREREG_STOCK_PREFIX_+'checked_'+id,marker);results.push({requestId:id,status:'skipped'});return;}
+      if(!request){
+        // A removed/ended/held request no longer authorizes the queued notice.
+        // Keep its receipt identity until the relay proves whether it was sent.
+        if(priorState.pending){priorState.pending.desiredHash='';priorState.pending.actionable=false;p.setProperty(PREREG_STOCK_PREFIX_+'state_'+id,JSON.stringify(priorState));}
+        if(marker)p.setProperty(PREREG_STOCK_PREFIX_+'checked_'+id,marker);
+        results.push({requestId:id,status:'skipped',intentVerified:true,verifiedGeneration:marker});return;
+      }
       if(!preparedEvaluation && !snapshot)snapshot=readInventoryRiskSnapshot_();
       var evaluation=preparedEvaluation && preparedEvaluation.requestId===id?preparedEvaluation:preRegistrationStockEvaluate_(request,snapshot);
-      var result=preRegistrationStockDeliver_(evaluation);results.push(result);
+      var result=preRegistrationStockDeliver_(evaluation);
+      result.intentVerified=true;result.verifiedGeneration=marker;results.push(result);
       if(result.status!=='pending' && marker)p.setProperty(PREREG_STOCK_PREFIX_+'checked_'+id,marker);
       p.setProperty(PREREG_STOCK_PREFIX_+'lastResult',JSON.stringify(Object.assign({at:new Date().toISOString()},result)));
     });
@@ -256,6 +276,7 @@ function checkPreRegistrationStockAlert(options) {
 function getPreRegistrationStockAlertStatus() {
   var p=PropertiesService.getScriptProperties(),all=p.getProperties();
   return {enabled:p.getProperty(PREREG_STOCK_PREFIX_+'enabled')==='true',channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
+    externalRelay:p.getProperty(PREREG_STOCK_PREFIX_+'externalRelay')==='true',
     pending:preRegistrationStockPendingKeys_(all).length,
     lastResult:JSON.parse(p.getProperty(PREREG_STOCK_PREFIX_+'lastResult') || 'null'),lastError:p.getProperty(PREREG_STOCK_PREFIX_+'lastError')};
 }
@@ -263,9 +284,85 @@ function getPreRegistrationStockAlertStatus() {
 function setupPreRegistrationStockAlerts(options) {
   options=options || {};var p=PropertiesService.getScriptProperties(),channel=options.channel || p.getProperty(PREREG_STOCK_PREFIX_+'channel');
   if(!/^[CG][A-Z0-9]{8,}$/.test(channel || ''))throw new Error('Slack 채널 ID 확인 필요');
-  inventoryRiskSlack_('conversations.history',{channel:channel,limit:1});
+  // The authenticated local relay verifies its own Slack connection before setup.
+  // This keeps activation possible when this Google account has no UrlFetch quota.
+  if(options.externalRelay!==true)inventoryRiskSlack_('conversations.history',{channel:channel,limit:1});
+  p.setProperty(PREREG_STOCK_PREFIX_+'externalRelay',options.externalRelay===true?'true':'false');
   p.setProperty(PREREG_STOCK_PREFIX_+'channel',channel);p.setProperty(PREREG_STOCK_PREFIX_+'enabled',options.enabled===false?'false':'true');
   if(!ScriptApp.getProjectTriggers().some(function(t){return t.getHandlerFunction()==='inventoryRiskHeartbeat';}))
     ScriptApp.newTrigger('inventoryRiskHeartbeat').timeBased().everyMinutes(1).create();
   return getPreRegistrationStockAlertStatus();
+}
+
+function claimPreRegistrationStockAlertRelay() {
+  var p=PropertiesService.getScriptProperties();
+  if(p.getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true' || p.getProperty(PREREG_STOCK_PREFIX_+'externalRelay')!=='true')return {status:'disabled'};
+  // Refresh the exact candidate, including pending receipts outside the normal
+  // four-request batch. A locked/failed read cannot authorize an old notice.
+  var all=p.getProperties(),statePrefix=PREREG_STOCK_PREFIX_+'state_';
+  var pendingIds=Object.keys(all).filter(function(k){
+    if(k.indexOf(statePrefix)!==0)return false;
+    var pending=JSON.parse(all[k]).pending;return pending && !(pending.relayUntil>Date.now());
+  }).sort(function(a,b){return JSON.parse(all[a]).pending.createdAt-JSON.parse(all[b]).pending.createdAt;})
+    .map(function(k){return k.slice(statePrefix.length);});
+  var id=pendingIds[0] || preRegistrationStockPendingKeys_(all).map(function(k){return k.slice((PREREG_STOCK_PREFIX_+'dirty_').length);})
+    .find(function(key){return !(JSON.parse(all[statePrefix+key] || '{}').pending?.relayUntil>Date.now());});
+  if(!id)return {status:'idle'};
+  var refresh=preRegistrationStockFlush_(id,false,false),verified=(refresh.results || []).find(function(r){return r.requestId===id && r.intentVerified;});
+  if(refresh.status!=='ok' || !verified)return {status:refresh.status==='busy'?'busy':'pending'};
+  var lock=LockService.getScriptLock(),inputLock=LockService.getUserLock(),inputHeld=false;
+  if(!lock.tryLock(1000))return {status:'busy'};
+  try {
+    var lease=JSON.parse(p.getProperty(PREREG_STOCK_PREFIX_+'lease') || '{}');if(lease.until>Date.now())return {status:'busy'};
+    if(!inputLock.tryLock(100))return {status:'busy'};inputHeld=true;
+    if(p.getProperty(PREREG_STOCK_PREFIX_+'dirty_'+id)!==verified.verifiedGeneration)return {status:'pending'};
+    var state=JSON.parse(p.getProperty(statePrefix+id) || '{}'),pending=state.pending;
+    if(!pending || pending.relayUntil>Date.now())return {status:'idle'};
+    pending.relayToken=Utilities.getUuid();pending.relayUntil=Date.now()+120000;pending.relayGeneration=verified.verifiedGeneration;
+    p.setProperty(statePrefix+id,JSON.stringify(state));
+    return {status:'claimed',requestId:id,pending:pending};
+  }finally{if(inputHeld)inputLock.releaseLock();lock.releaseLock();}
+}
+
+function authorizePreRegistrationStockAlertRelay(args) {
+  args=args || {};
+  if(!/^RQ-\d{6}-\d{3}$/.test(args.requestId || ''))throw new Error('재고 경보 요청ID 확인 필요');
+  var p=PropertiesService.getScriptProperties(),lock=LockService.getScriptLock(),inputLock=LockService.getUserLock(),inputHeld=false;
+  if(!lock.tryLock(1000))return {status:'busy'};
+  try {
+    if(p.getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true' || p.getProperty(PREREG_STOCK_PREFIX_+'externalRelay')!=='true')return {status:'disabled'};
+    if(JSON.parse(p.getProperty(PREREG_STOCK_PREFIX_+'lease') || '{}').until>Date.now())return {status:'busy'};
+    if(!inputLock.tryLock(100))return {status:'busy'};inputHeld=true;
+    var key=PREREG_STOCK_PREFIX_+'state_'+args.requestId,state=JSON.parse(p.getProperty(key) || '{}'),pending=state.pending;
+    if(!pending || pending.id!==args.id || pending.relayToken!==args.relayToken || pending.relayUntil<Date.now())return {status:'conflict'};
+    if(p.getProperty(PREREG_STOCK_PREFIX_+'dirty_'+args.requestId)!==pending.relayGeneration ||
+      pending.desiredHash!==pending.hash || pending.actionable===false)return {status:'stale'};
+    // This is the send decision boundary. It follows the relay's history lookup,
+    // fences request writers, and records the attempt before the external POST.
+    pending.attemptedAt=Date.now();pending.relayUntil=Date.now()+180000;delete pending.transportRejected;
+    p.setProperty(key,JSON.stringify(state));
+    return {status:'authorized',requestId:args.requestId,validUntil:pending.relayUntil};
+  }finally{if(inputHeld)inputLock.releaseLock();lock.releaseLock();}
+}
+
+function acknowledgePreRegistrationStockAlertRelay(args) {
+  args=args || {};
+  if(!/^RQ-\d{6}-\d{3}$/.test(args.requestId || ''))throw new Error('재고 경보 요청ID 확인 필요');
+  var p=PropertiesService.getScriptProperties(),lock=LockService.getScriptLock();if(!lock.tryLock(1000))return {status:'busy'};
+  try {
+    var lease=JSON.parse(p.getProperty(PREREG_STOCK_PREFIX_+'lease') || '{}');if(lease.until>Date.now())return {status:'busy'};
+    var key=PREREG_STOCK_PREFIX_+'state_'+args.requestId,state=JSON.parse(p.getProperty(key) || '{}'),pending=state.pending;
+    if(!pending || pending.id!==args.id || pending.relayToken!==args.relayToken || pending.relayUntil<Date.now())return {status:'conflict'};
+    var result={status:'pending',requestId:args.requestId};
+    if(args.delivered===true) {
+      if(args.channel!==pending.channel || !/^\d+\.\d+$/.test(args.ts || ''))throw new Error('재고 경보 Slack 영수증 확인 필요');
+      state.lastHash=pending.hash;state.lastReceipt={id:pending.id,channel:pending.channel,ts:args.ts,at:new Date().toISOString(),transport:'windows_relay'};
+      state.pending=null;state.error=null;result={status:'sent',requestId:args.requestId,receipt:state.lastReceipt};
+    } else if(args.obsolete===true) {
+      if(pending.desiredHash===pending.hash && pending.actionable!==false)return {status:'conflict'};
+      state.pending=null;result.status='obsolete';
+    } else {delete pending.relayToken;delete pending.relayUntil;}
+    p.setProperty(key,JSON.stringify(state));p.setProperty(PREREG_STOCK_PREFIX_+'lastResult',JSON.stringify(Object.assign({at:new Date().toISOString()},result)));
+    return result;
+  }finally{lock.releaseLock();}
 }

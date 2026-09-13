@@ -75,10 +75,10 @@ function deliveryEnv(){
  return {...e,posts,messages,scans:()=>scans,setAlerts:value=>{alerts=value;}};
 }
 
-test('quiet hours still scan; only the morning digest sends, including an unchanged risk next day',()=>{
+test('quiet hours use no full scans; morning alone scans and sends including an unchanged risk next day',()=>{
  const e=deliveryEnv(),c=e.ctx;
  e.setNow('2026-09-11T23:59:00Z');assert.equal(c.flushInventoryRiskAlerts().status,'scheduled');
- assert.equal(e.scans(),1);assert.equal(e.posts.length,0);
+ assert.equal(e.scans(),0);assert.equal(e.posts.length,0);
  e.setNow('2026-09-12T00:00:00Z');assert.equal(c.inventoryRiskHeartbeat().status,'sent');
  e.setAlerts([{...alert,booked:3,shortage:2}]);
  e.setNow('2026-09-12T00:01:00Z');assert.equal(c.flushInventoryRiskAlerts().status,'already_sent');
@@ -86,7 +86,14 @@ test('quiet hours still scan; only the morning digest sends, including an unchan
  e.setNow('2026-09-13T00:00:00Z');assert.equal(c.inventoryRiskHeartbeat().status,'sent');
  assert.equal(e.posts.length,2);assert.match(e.posts[1].text,/아침 재고 점검/);assert.match(e.posts[1].text,/2개 부족/);
  e.setNow('2026-09-14T00:00:00Z');c.inventoryRiskHeartbeat();assert.equal(e.posts.length,3);
- assert.match(e.posts[2].text,/FX3/);assert.equal(e.scans(),6);
+ assert.match(e.posts[2].text,/FX3/);assert.equal(e.scans(),3);
+});
+
+test('off-hours schedule changes invalidate cached reports without queuing full scans',()=>{
+ const e=deliveryEnv(),c=e.ctx;let created=0;
+ c.ScriptApp={newTrigger:()=>{created++;throw Error('unexpected scan trigger');}};
+ e.setNow('2026-09-12T10:00:00Z');c.requestInventoryRiskScan_();
+ assert.ok(e.props.getProperty('inventoryRisk_v1_dirty'));assert.equal(created,0);assert.equal(e.scans(),0);
 });
 
 test('today\'s legacy receipt counts toward the daily limit in Korea, including before 09:00',()=>{
