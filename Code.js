@@ -2078,9 +2078,22 @@ function clearCancelledTradeCleanupTriggersOutsideLock_(props) {
  */
 function scheduleCancelledTradeCleanupTriggerOutsideLock_(props, delayMs) {
   var safeDelay = Math.max(1000, Number(delayMs || 0));
-  var desiredAt = Date.now() + safeDelay;
+  var now = Date.now();
+  var desiredAt = now + safeDelay;
   var currentAt = Number(props.getProperty(CANCEL_CLEANUP_TRIGGER_PROP_) || 0);
-  if (currentAt > Date.now() && currentAt <= desiredAt + 1000) return;
+  // after()는 최소 지연이다. 매분 rescue가 아직 발화하지 않은 트리거를 교체하면
+  // 대기 취소가 영원히 실행되지 않는다. 예정 시각이 조금 지나도 실재하는 트리거는
+  // worker lease 기간까지 보존하고, 유실되거나 그 이상 멈췄을 때만 다시 만든다.
+  if (currentAt > 0 && currentAt <= desiredAt + 1000 && now - currentAt < CANCEL_CLEANUP_LEASE_MS_) {
+    try {
+      var scheduled = ScriptApp.getProjectTriggers().some(function(trigger) {
+        return trigger.getHandlerFunction() === CANCEL_CLEANUP_HANDLER_;
+      });
+      if (scheduled) return;
+    } catch (listErr) {
+      Logger.log('취소 정리 트리거 확인 실패: ' + (listErr && listErr.message ? listErr.message : String(listErr)));
+    }
+  }
   try {
     replaceOneShotTrigger_(CANCEL_CLEANUP_HANDLER_, safeDelay);
     props.setProperty(CANCEL_CLEANUP_TRIGGER_PROP_, String(desiredAt));
