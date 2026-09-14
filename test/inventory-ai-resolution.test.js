@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
-function env(){const c={Utilities:{formatDate:d=>d.toISOString()}};vm.createContext(c);for(const name of ['inventorySupply.js','inventoryRisk.js','inventoryRiskMonitor.js','preRegistrationStockAlerts.js','inventoryStockIntake.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'..',name),'utf8'),c);return c;}
+function env(){const c={Utilities:{formatDate:d=>d.toISOString()}};vm.createContext(c);for(const name of ['inventorySupply.js','inventoryRisk.js','inventoryRiskMonitor.js','inventorySemanticReview.js','preRegistrationStockAlerts.js','inventoryStockIntake.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'..',name),'utf8'),c);return c;}
 const period={start:'2026-10-01T09:00:00+09:00',end:'2026-10-02T09:00:00+09:00'};
 const item=(x={})=>({id:'EQ-1',name:'스크림 세트',stock:3,maintenance:0,status:'정상',aliases:[],...x});
 const row=(x={})=>({id:'s1',tradeId:'t1',name:'스크림세트',setName:'스크림세트',quantity:1,status:'대기',...period,...x});

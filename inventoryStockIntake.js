@@ -15,12 +15,13 @@ function getInventoryStockQuestions(options) {
   report.alerts.filter(function(a){return inventoryRiskNeedsIdentityReview_(a.kind);}).forEach(function(a){
     var key=inventoryRiskNameKey_(a.equipment),entry=byName[key] || (byName[key]={name:a.equipment,kinds:[],bookings:[],setNames:[]});
     entry.kinds=Array.from(new Set(entry.kinds.concat(a.kind)));entry.bookings=entry.bookings.concat(a.bookings || []);
-    if(a.setName)entry.setNames=Array.from(new Set(entry.setNames.concat(a.setName)));
+    entry.setNames=Array.from(new Set(entry.setNames.concat(a.setName || [],(a.bookings || []).map(function(b){return b.setName;}).filter(Boolean))));
   });
   var investigations=Object.keys(byName).sort().map(function(k){return byName[k];});
   investigations.forEach(function(a){if(!context.sets.some(function(s){return s.name===a.name;}))context.sets.push({name:a.name,price:null,components:[],source:'requested_equipment'});});
   function add(report){
     if(!report?.id || !report.channel || !report.ts)return;
+    var retired=props['inventoryStockRetired_'+report.id];if(retired){var marker=JSON.parse(retired);if(marker.channel===report.channel&&marker.ts===report.ts)return;}
     var names=(report.names || []).filter(function(name){
       return !context.equipment.some(function(e){return [e.name].concat(e.aliases || []).some(function(n){return inventoryRiskNameKey_(n)===inventoryRiskNameKey_(name);});});
     });
@@ -35,7 +36,7 @@ function getInventoryStockQuestions(options) {
   });
   Object.keys(reports).forEach(function(k){reports[k].names.forEach(function(name){if(!context.sets.some(function(s){return s.name===name;}))context.sets.push({name:name,price:null,components:[],source:'reported_equipment'});});});
   return {mode:'read_only',reports:Object.keys(reports).map(function(k){return reports[k];}),equipment:context.equipment,sets:context.sets,
-    investigations:investigations,sourceIssues:snapshot.sourceIssues,channel:props[PREREG_STOCK_PREFIX_+'channel'] || props[INVENTORY_RISK_PREFIX_+'channel']};
+    inventoryPolicy:typeof getInventorySupplyPolicy==='function'?getInventorySupplyPolicy():null,semanticScopes:snapshot.semanticScopes || [],investigations:investigations,sourceIssues:snapshot.sourceIssues,channel:props[PREREG_STOCK_PREFIX_+'channel'] || props[INVENTORY_RISK_PREFIX_+'channel']};
 }
 
 /** Preserve packing quantities, check flags and handwriting while recording an owner decision. */
@@ -70,4 +71,17 @@ function inventoryReviewPendingRows_(){
     quantity:value(r,'수량'),status:'대기',start:start,end:end});
   });
  });return result;
+}
+
+/** Retire only exact, externally verified deleted Slack receipts; preserve booking history. */
+function retireInventoryStockReports(input){
+ if(!input||Object.keys(input).some(function(k){return k!=='reports';})||!Array.isArray(input.reports)||input.reports.length>200)throw new Error('삭제한 재고 알림 영수증 필요');
+ var p=PropertiesService.getScriptProperties(),allowed=[p.getProperty(PREREG_STOCK_PREFIX_+'channel'),p.getProperty(INVENTORY_RISK_PREFIX_+'channel')];
+ input.reports.forEach(function(r){if(!r||Object.keys(r).some(function(k){return ['id','channel','ts'].indexOf(k)<0;})||typeof r.id!=='string'||!/^[a-zA-Z0-9-]{8,80}$/.test(r.id)||allowed.indexOf(r.channel)<0||!/^\d+\.\d+$/.test(r.ts))throw new Error('재고 알림 삭제 범위 오류');});
+ var lock=LockService.getScriptLock();if(!lock.tryLock(5000))throw new Error('재고 알림 정리 중');
+ try{input.reports.forEach(function(r){p.setProperty('inventoryStockRetired_'+r.id,JSON.stringify(r));});
+ var props=p.getProperties();Object.keys(props).filter(function(k){return k.indexOf(PREREG_STOCK_PREFIX_+'state_')===0;}).forEach(function(k){var s=JSON.parse(props[k]);
+  if(s.pending&&input.reports.some(function(r){return r.id===s.pending.id&&r.channel===s.pending.channel;})){s.pending=null;p.setProperty(k,JSON.stringify(s));}
+ });return {success:true,retired:input.reports.length};
+ }finally{lock.releaseLock();}
 }

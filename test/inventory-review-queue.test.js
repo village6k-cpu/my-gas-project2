@@ -20,3 +20,18 @@ test('durable identity mapping reuses physical stock without changing the source
  assert.ok(eq[0].aliases.includes(row.name));assert.equal(eq[0].stock,before.stock);assert.equal(eq[0].maintenance,before.maintenance);
  const r=c.buildInventoryRiskReport_({...snapshot(),equipment:eq},{now:'2099-09-14T00:00:00+09:00'});assert.equal(r.alerts.some(a=>a.kind==='unknown_equipment'),false);
 });
+test('packing rows are excluded before malformed dates can produce employee alerts',()=>{
+ const c=env(),s=snapshot();s.sets[0].components[0].tracked=false;s.schedules=[{...row,start:'',end:''}];
+ const r=c.buildInventoryRiskReport_(s);assert.equal(r.alerts.length,0);
+});
+test('data investigations and exact-capacity bookings stay off the stock shortage channel',()=>{
+ const c=env(),alerts=['invalid_schedule','capacity_tight','overdue_return','set_component_missing','unknown_equipment'].map(kind=>({kind,key:kind,equipment:'packing row',bookings:[],start:null}));
+ const r={alerts,conflictCount:0,riskCount:alerts.length};assert.equal(c.inventoryRiskSlackText_(r,{changed:alerts},'https://example.com'),null);
+ const shortage={kind:'shortage',key:'real',equipment:'OSEE',stock:1,booked:2,shortage:1,start:row.start,bookings:[row]};
+ const text=c.inventoryRiskSlackText_({...r,alerts:[...alerts,shortage],conflictCount:1},{changed:[...alerts,shortage]},'https://example.com');
+ assert.match(text,/OSEE/);assert.doesNotMatch(text,/packing row|예약 날짜|위험 5/);
+});
+
+test('pre-registration dates and packing metadata do not become a vague shortage message',()=>{
+ const c=env(),r={requestId:'RQ-990101-001',customer:'고객',start:row.start,end:row.end,shortages:[],uncertain:['invalid_schedule','invalid_quantity','set_component_missing'].map(kind=>({kind,equipment:'old packing data'}))};assert.equal(c.preRegistrationStockText_(r),null);
+});

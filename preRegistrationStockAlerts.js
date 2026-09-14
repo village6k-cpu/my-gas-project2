@@ -51,7 +51,7 @@ function preRegistrationStockEvaluate_(request,snapshot) {
 }
 
 function preRegistrationStockNotifiableUncertainty_(result) {
-  var visible=result.uncertain.filter(function(a){return !inventoryRiskNeedsIdentityReview_(a.kind);});
+  var visible=result.uncertain.filter(function(a){return !inventoryRiskNeedsIdentityReview_(a.kind) && ['invalid_schedule','invalid_quantity','set_component_missing'].indexOf(a.kind)<0;});
   var businessIssues=visible.filter(function(a){return a.kind!=='source_unavailable';});
   // A temporary supplemental read failure does not create a second warning for
   // the same proven shortage. Keep it in evaluation diagnostics and gate checks.

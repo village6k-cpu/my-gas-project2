@@ -54,7 +54,7 @@ function inventoryRiskCandidates_(name, equipment) {
 
 function inventoryRiskBooking_(row) {
   return {scheduleId:row.id, tradeId:row.tradeId, customer:row.customer || '', name:row.name,
-    quantity:row.quantity, start:row.start, end:row.end};
+    quantity:row.quantity, start:row.start, end:row.end, setName:row.setName || ''};
 }
 
 function inventoryRiskSweep_(rows, stock, from, until, bufferMs, kind) {
@@ -137,6 +137,8 @@ function buildInventoryRiskReport_(snapshot, options) {
   (snapshot.schedules || []).forEach(function(raw,index) {
     var row=Object.assign({},raw), status=String(row.status || ''), tradeStatus=String(row.tradeStatus || '');
     if(['취소','거절','반납완료','제외'].indexOf(status)>=0 || ['취소','거절','반납완료'].indexOf(tradeStatus)>=0 || row.returned===true) {skipped++;return;}
+    var sourceSet=sets[inventoryRiskNameKey_(row.setName)],sourceComponent=sourceSet?.components.find(function(c){return inventoryRiskNameKey_(c.name)===inventoryRiskNameKey_(row.name);});
+    if(sourceComponent?.tracked===false || typeof inventorySupplyExcluded_==='function'&&inventorySupplyExcluded_(row.name,identity.resolve(row.name).item?.category)) {skipped++;return;}
     row.quantity=inventoryRiskNumber_(row.quantity);
     if(row.quantity===0) {skipped++;return;}
     row.startMs=Date.parse(row.start || ''); row.endMs=Date.parse(row.end || '');
@@ -159,6 +161,7 @@ function buildInventoryRiskReport_(snapshot, options) {
   });
   coverageEnd=Math.max(coverageEnd,now+bufferMs+1);
   function allocate(row) {
+
     var policyItem=identity.resolve(row.name).item;
     if(typeof inventorySupplyExcluded_==='function' && inventorySupplyExcluded_(row.name,policyItem?.category))return;
     if(row.note && /^\[(외부조달|상위대체)\]/m.test(row.note) && typeof inventorySupplyPhysicalRows_==='function') {
@@ -168,6 +171,8 @@ function buildInventoryRiskReport_(snapshot, options) {
       } catch(error){risk('invalid_supply_allocation',row,{message:String(error.message || error)});allocate(Object.assign({},row,{note:''}));}
       return;
     }
+    var manifest=sets[inventoryRiskNameKey_(row.setName)],component=manifest?.components.find(function(c){return inventoryRiskNameKey_(c.name)===inventoryRiskNameKey_(row.name);});
+    if(!row.semanticApplied && component?.allocations){component.allocations.forEach(function(a,i){allocate(Object.assign({},row,{key:row.key+'|ai-'+i,name:a.equipmentName,quantity:row.quantity*a.quantity,semanticApplied:true}));});return;}
     // A missing return checkbox is not proof of continuing possession. Keep it
     // visible as uncertainty without extending a past reservation into November.
     if(row.overdue && row.endMs<=from) {risk('overdue_return',row);return;}
@@ -188,14 +193,23 @@ function buildInventoryRiskReport_(snapshot, options) {
       if(group.set.definitionConflict){risk("conflicting_set_definition",row);if(!expanded[row.setGroup])return;}
       // A stocked kit with only packing components occupies the kit itself.
       // An equivalent catalog spelling must not erase that manifest or its stock.
-      if(group.set.components.every(function(c){return c.tracked===false;}) && identity.resolve(row.name).item) {allocate(row);return;}
+      var headerItem=identity.resolve(row.name).item;
+      var physicalComponents=expanded[row.setGroup]?(snapshot.schedules || []).filter(function(r){return groupKey(r,inventoryRiskNameKey_(r.setName))===row.setGroup&&inventoryRiskNameKey_(r.name)!==inventoryRiskNameKey_(row.name);}):group.set.components;
+      var mainExpanded=headerItem && physicalComponents.some(function(r){
+        var definition=group.set.components.find(function(c){return inventoryRiskNameKey_(c.name)===inventoryRiskNameKey_(r.name);});
+        if(definition?.tracked===false)return false;
+        return identity.resolve(r.name).item?.id===headerItem.id || (definition?.allocations || []).some(function(a){return a.equipmentId===headerItem.id;});
+      });
+      // An explicit physical component owns its checkout/exclusion/external-supply
+      // state. The header is counted only when the main item is represented by it.
+      if(headerItem && !mainExpanded)allocate(row);
       if(expanded[row.setGroup]) return;
       group.set.components.forEach(function(component,index) {
-        if(component.tracked===false) return;
+        if(component.tracked===false || component.observedOnly) return;
         var q=inventoryRiskNumber_(component.quantity);
         if(q===null) {risk('invalid_set_component',row,{component:component.name});return;}
         if(!q) return;
-        allocate(Object.assign({},row,{key:row.key+'|component-'+index,name:component.name,quantity:row.quantity*q}));
+        allocate(Object.assign({},row,{key:row.key+'|component-'+index,name:component.name,quantity:row.quantity*q,setHeader:false}));
       });
       return;
     }
@@ -211,7 +225,7 @@ function buildInventoryRiskReport_(snapshot, options) {
     var group=groups[key];
     if(!group.headers.length || !group.components.length || group.headers[0].endMs<from) return;
     group.set.components.forEach(function(c) {
-      if(c.tracked===false || (typeof inventorySupplyExcluded_==='function' && inventorySupplyExcluded_(c.name,identity.resolve(c.name).item?.category))) return;
+      if(c.tracked===false || c.observedOnly || (typeof inventorySupplyExcluded_==='function' && inventorySupplyExcluded_(c.name,identity.resolve(c.name).item?.category))) return;
       var expected=identity.resolve(c.name).item;
       if(!expected) return;
       var present=group.components.some(function(r){return identity.resolve(r.name).item?.id===expected.id;}) ||

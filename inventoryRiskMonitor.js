@@ -61,7 +61,7 @@ function readInventoryRiskSnapshot_() {
   var schedule=inventoryRiskSheetRows_(ss,'스케줄상세',['스케줄ID','거래ID','세트명','장비명','수량','반출일','반출시간','반납일','반납시간','상태']);
   var contract=inventoryRiskSheetRows_(ss,'계약마스터',['거래ID','예약자명','계약상태']);
   var contractById={},equipmentById={},setsByName={};
-  contract.rows.forEach(function(r){contractById[contract.value(r,'거래ID')]={name:contract.value(r,'예약자명'),status:contract.value(r,'계약상태')};});
+  contract.rows.forEach(function(r){contractById[contract.value(r,'거래ID')]={name:contract.value(r,'예약자명'),status:contract.value(r,'계약상태'),start:inventoryRiskDateTime_(contract.value(r,'반출일'),contract.value(r,'반출시간')),end:inventoryRiskDateTime_(contract.value(r,'반납일'),contract.value(r,'반납시간'))};});
   var equipment=eq.rows.filter(function(r){return eq.value(r,'장비ID') && eq.value(r,'장비명');}).map(function(r){
     var item={id:eq.value(r,'장비ID'),name:eq.value(r,'장비명'),category:eq.value(r,'카테고리'),stock:eq.value(r,'총보유수량'),maintenance:eq.value(r,'정비중수량'),status:eq.value(r,'상태'),aliases:[]};
     equipmentById[item.id]=item; return item;
@@ -72,14 +72,14 @@ function readInventoryRiskSnapshot_() {
     if(!setsByName[name])setsByName[name]={name:name,price:set.value(r,'단가'),components:[]};
     if(component)setsByName[name].components.push({name:component,quantity:set.value(r,'수량'),
       note:set.value(r,'비고') || '',alternatives:set.value(r,'대체가능장비') || '',
-      tracked:String(set.value(r,'가용체크(Y/N)') || set.value(r,'가용체크') || '').toUpperCase()!=='N' && !inventoryRiskComponentIncluded_(set.value(r,'비고')) && !_isCompositeSetAccessoryManifest_(component)});
+      tracked:String(set.value(r,'가용체크(Y/N)') || set.value(r,'가용체크') || '').toUpperCase()!=='N' && !inventoryRiskComponentIncluded_(set.value(r,'비고'))});
   });
   var schedules=schedule.rows.filter(function(r){return schedule.value(r,'스케줄ID') || schedule.value(r,'장비명');}).map(function(r){
     var tradeId=schedule.value(r,'거래ID'), c=contractById[tradeId] || {};
     return {id:schedule.value(r,'스케줄ID'),tradeId:tradeId,customer:c.name || '',tradeStatus:c.status || '',
       note:schedule.value(r,'비고'),setName:schedule.value(r,'세트명'),name:schedule.value(r,'장비명'),quantity:schedule.value(r,'수량'),
-      start:inventoryRiskDateTime_(schedule.value(r,'반출일'),schedule.value(r,'반출시간')),
-      end:inventoryRiskDateTime_(schedule.value(r,'반납일'),schedule.value(r,'반납시간')),status:schedule.value(r,'상태')};
+      start:inventoryRiskDateTime_(schedule.value(r,'반출일'),schedule.value(r,'반출시간')) || c.start || '',
+      end:inventoryRiskDateTime_(schedule.value(r,'반납일'),schedule.value(r,'반납시간')) || c.end || '',status:schedule.value(r,'상태')};
   });
   var sourceIssues=[];
   try {
@@ -115,7 +115,9 @@ function readInventoryRiskSnapshot_() {
       else if(item.taken_qty!=null)row.quantity=item.taken_qty;
     });
   } catch(error) {sourceIssues.push(String(error.message || error));}
-  return {equipment:equipment,sets:Object.keys(setsByName).map(function(k){return setsByName[k];}),schedules:schedules,sourceIssues:sourceIssues};
+  var snapshot={equipment:equipment,sets:Object.keys(setsByName).map(function(k){return setsByName[k];}),schedules:schedules,sourceIssues:sourceIssues};
+  if(typeof inventoryApplySemanticReviews_==='function')inventoryApplySemanticReviews_(snapshot);
+  return snapshot;
 }
 
 function getInventoryRiskReport(force) {
@@ -190,10 +192,12 @@ function inventoryRiskDigest_(value) {
     .map(function(byte){return ('0'+(byte & 255).toString(16)).slice(-2);}).join('');
 }
 
+function inventoryRiskActionableAlert_(a){return ['shortage','turnaround','source_unavailable'].indexOf(a.kind)>=0;}
+
 function inventoryRiskNotificationPlan_(report, previous) {
   previous=previous || {};var entries={},changed=[];
   var today=new Date(Date.parse(report.generatedAt)+9*3600000).toISOString().slice(0,10);
-  report.alerts.filter(function(alert){return !report.sourceUnavailable || alert.kind==='source_unavailable';}).forEach(function(alert){
+  report.alerts.filter(function(alert){return inventoryRiskActionableAlert_(alert) && (!report.sourceUnavailable || alert.kind==='source_unavailable');}).forEach(function(alert){
     var key=inventoryRiskDigest_(alert.key), day=alert.start?new Date(Date.parse(alert.start)+9*3600000).toISOString().slice(0,10):'';
     var entry={fingerprint:inventoryRiskDigest_([alert.kind,alert.stock,alert.booked,alert.start,alert.candidates,alert.component,alert.bookings,day && day<=today?'today':'future']),
       shortage:alert.shortage || 0,severity:alert.severity};
@@ -206,9 +210,13 @@ function inventoryRiskNotificationPlan_(report, previous) {
 }
 
 function inventoryRiskSlackText_(report, plan, detailUrl) {
-  var deferred=report.alerts.some(function(a){return inventoryRiskNeedsIdentityReview_(a.kind);});
-  report=Object.assign({},report,{alerts:report.alerts.filter(function(a){return !inventoryRiskNeedsIdentityReview_(a.kind);})});
-  plan=Object.assign({},plan,{changed:plan.changed.filter(function(a){return !inventoryRiskNeedsIdentityReview_(a.kind);})});
+  // Only physical shortages and actual return/checkout collisions require this channel.
+  // Other findings remain available to the AI and operations view, never relabelled as shortages.
+  function actionable(a){return inventoryRiskActionableAlert_(a);}
+  var deferred=report.alerts.some(function(a){return !actionable(a);});
+  report=Object.assign({},report,{alerts:report.alerts.filter(function(a){return actionable(a);})});
+  plan=Object.assign({},plan,{changed:plan.changed.filter(function(a){return actionable(a);})});
+  report.conflictCount=report.alerts.filter(function(a){return a.kind==='shortage';}).length;
   report.riskCount=report.alerts.filter(function(a){return a.kind!=='shortage';}).length;
   if(deferred && !report.alerts.length)return null;
   function clean(s){return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/[\r\n]/g,' ');}
@@ -262,7 +270,7 @@ function getInventoryResolutionContext(options) {
     (options.requestId && options.plan) || (options.requestId && !/^RQ-\d{6}-\d{3}$/.test(options.requestId)))throw new Error('재고 판단 조회 형식 오류');
   var snapshot=readInventoryRiskSnapshot_();
   var result={schema:'inventory-resolution-context/v1',mode:'read_only',decidedBy:'native_ai',
-    equipment:snapshot.equipment,sets:snapshot.sets,sourceIssues:snapshot.sourceIssues || [],
+    equipment:snapshot.equipment,sets:snapshot.sets,semanticScopes:snapshot.semanticScopes || [],sourceIssues:snapshot.sourceIssues || [],
     guidance:'이 자료는 판단 근거다. 코드 후보는 추천일 뿐이다. AI가 원문, 전체 카탈로그, 세트 구성과 용도를 비교해 선택한다. 구성품과 별도 대여품을 구분하고, 의미 있는 선택만 고객에게 묻는다. 판매 카탈로그에 있지만 재고 기록이 없는 경우는 매칭 실패나 품절로 단정하지 않는다.'};
   if(options.requestId || options.plan) {
     var request=options.plan?inventoryResolutionPreview_(options.plan,snapshot):preRegistrationStockRequest_(options.requestId,true,true);
