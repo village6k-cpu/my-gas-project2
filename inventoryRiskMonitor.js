@@ -37,7 +37,7 @@ function inventoryRiskComponentIncluded_(note) {
   return /(?:^|\n)\[재고:동봉품\](?:\r?$|\s)/m.test(String(note || ''));
 }
 
-function inventoryRiskEnrichLedger_(equipment,ledger) {
+function inventoryRiskEnrichLedger_(equipment,ledger,resolutions) {
   var byId={};equipment.forEach(function(item){byId[item.id]=item;});
   ledger.forEach(function(row){
     var item=byId[row.equipment_id];if(!item)return;
@@ -48,6 +48,9 @@ function inventoryRiskEnrichLedger_(equipment,ledger) {
       item.status===row.state && Number(item.stock)===row.stock_total && Number.isInteger(row.stock_maint) && row.stock_maint>=0 && row.stock_maint<=row.stock_total) {
       item.maintenance=row.stock_maint;item.maintenanceSource='verified_equipment_ledger';
     }
+  });
+  (resolutions || []).forEach(function(link){var item=byId[link.equipment_id];
+    if(item && item.name===link.equipment_name)item.aliases=Array.from(new Set((item.aliases || []).concat(link.source_name)));
   });
 }
 
@@ -85,7 +88,10 @@ function readInventoryRiskSnapshot_() {
     var aliasCache=CacheService.getScriptCache(),aliasText=aliasCache.get('inventory_risk_ledger_aliases_v2');
     var aliases=aliasText?JSON.parse(aliasText):inventoryRiskDbRows_(cfg,token,'equipment_ledger','select=equipment_id,name,aliases,stock_total,stock_maint,state,verify_status&order=equipment_id');
     if(!aliasText)try{aliasCache.put('inventory_risk_ledger_aliases_v2',JSON.stringify(aliases),60);}catch(cacheError){}
-    inventoryRiskEnrichLedger_(equipment,aliases);
+    var linkText=aliasCache.get('inventory_identity_links_v1');
+    var links=linkText?JSON.parse(linkText):inventoryRiskDbRows_(cfg,token,'inventory_identity_aliases','select=source_name,equipment_id,equipment_name&order=source_name');
+    if(!linkText)try{aliasCache.put('inventory_identity_links_v1',JSON.stringify(links),30);}catch(cacheError){}
+    inventoryRiskEnrichLedger_(equipment,aliases,links);
     var today=Utilities.formatDate(new Date(),'Asia/Seoul','yyyy-MM-dd')+'T00:00:00+09:00';
     var trades=inventoryRiskDbRows_(cfg,token,'trades','select=trade_id,setup_done,return_done&order=trade_id&or='+encodeURIComponent('(return_at.gte.'+today+',and(setup_done.eq.true,return_done.eq.false))'));
     var tradesById={},itemsById={};
@@ -200,6 +206,11 @@ function inventoryRiskNotificationPlan_(report, previous) {
 }
 
 function inventoryRiskSlackText_(report, plan, detailUrl) {
+  var deferred=report.alerts.some(function(a){return inventoryRiskNeedsIdentityReview_(a.kind);});
+  report=Object.assign({},report,{alerts:report.alerts.filter(function(a){return !inventoryRiskNeedsIdentityReview_(a.kind);})});
+  plan=Object.assign({},plan,{changed:plan.changed.filter(function(a){return !inventoryRiskNeedsIdentityReview_(a.kind);})});
+  report.riskCount=report.alerts.filter(function(a){return a.kind!=='shortage';}).length;
+  if(deferred && !report.alerts.length)return null;
   function clean(s){return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/[\r\n]/g,' ');}
   function when(s){return s?Utilities.formatDate(new Date(s),'Asia/Seoul','M/d HH:mm'):'일정 확인 필요';}
   if(report.sourceUnavailable)return '⚠️ *재고 점검 연결 확인 필요*\n전체 점검을 완료하지 못했습니다. 기존 위험은 유지합니다.\n<'+detailUrl+'|재고 점검 상태 보기>';

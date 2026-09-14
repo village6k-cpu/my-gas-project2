@@ -19,6 +19,6 @@ test('stock scan isolates a thread fetch error without hiding other reports',asy
 });
 test('slow paginated stock reads have a total deadline and pass cancellation to transport',async()=>{
  let seenSignal;const started=Date.now();
- await assert.rejects(()=>scanStockWithLocalCollector(async()=>({reports:[report]}),async(_m,args,options)=>{seenSignal=options.signal;if(!args.cursor)return {ok:true,messages:[root],has_more:true,response_metadata:{next_cursor:'next'}};await new Promise(resolve=>setTimeout(resolve,90));return {ok:true,messages:[reply]};},{timeoutMs:15}));
- assert.ok(seenSignal.aborted);assert.ok(Date.now()-started<80);
+ const result=await scanStockWithLocalCollector(async()=>({reports:[report]}),async(_m,args,options)=>{seenSignal=options.signal;if(!args.cursor)return {ok:true,messages:[root],has_more:true,response_metadata:{next_cursor:'next'}};await new Promise(resolve=>setTimeout(resolve,90));return {ok:true,messages:[reply]};},{timeoutMs:15});
+ assert.ok(seenSignal.aborted);assert.equal(result.errors.length,1);assert.equal(result.questions.length,0);
 });

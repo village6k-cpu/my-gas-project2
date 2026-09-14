@@ -1,3 +1,7 @@
+/** Classification is a request for model judgment, never proof of absent stock. */
+function inventoryRiskNeedsIdentityReview_(kind) {
+ return ['unknown_equipment','ambiguous_equipment','catalog_stock_missing','model_selection'].indexOf(kind)>=0;
+}
 /** Read-only inventory risk arithmetic. Sales names/prices and bookings are never rewritten. */
 function inventoryRiskNameKey_(value) {
   return String(value == null ? '' : value).normalize('NFKC').toLowerCase().replace(/[^0-9a-z가-힣]/g, '');
