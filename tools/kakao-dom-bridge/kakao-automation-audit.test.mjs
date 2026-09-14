@@ -986,3 +986,9 @@ test('composite registered audit records equipment and both period endpoints in 
     { field: 'equipment', before: null, after: '강풍기 1개' }
   ]);
 });
+
+test('registered cancellation is recorded as a cancellation rather than a failed unknown operation',()=>{
+ const receipt=registeredReceipt(); receipt.mutation_kind='reservation_cancel';receipt.authorized_mutation.kind='reservation_cancel';receipt.authorized_mutation.expected_before=[{schedule_id:'260907-001-01',name:'카메라',quantity:1}];receipt.authorized_mutation.desired_after=[];
+ const events=buildKakaoAutomationAuditEvents({durableJob:baseJob({tool:'registered_reservation_change',operationId:REGISTERED_OPERATION,receipt})});
+ assert.equal(events.length,1);assert.equal(events[0].action_type,'update');assert.equal(events[0].summary,'등록예약 260907-001을 취소했습니다.');assert.equal(events[0].outcome,'success');
+});

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 
 const ALLOWED_INPUT_FIELDS = new Set([
-  'tradeId', 'operationId', 'sourceRequestId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate', 'staffApproval', 'priceChanges'
+  'cancel', 'tradeId', 'operationId', 'sourceRequestId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate', 'staffApproval', 'priceChanges'
 ]);
 const ALLOWED_DATE_FIELDS = new Set([
   'newStartDate', 'newEndDate', 'startTime', 'endTime', 'allowConflicts'
@@ -248,6 +248,7 @@ function normalizeCorrectionInput(input) {
   });
 
   const normalized = {
+    ...(input.cancel === undefined ? {} : { cancel: booleanValue(input.cancel, 'cancel', false) }),
     tradeId,
     operationId,
     sourceRequestId,
@@ -258,6 +259,9 @@ function normalizeCorrectionInput(input) {
     sendEstimate: booleanValue(input.sendEstimate, 'sendEstimate', false),
     staffApproval: normalizeStaffApproval(input.staffApproval)
   };
+  if (normalized.cancel && (!normalized.staffApproval || !normalized.expectedPeriod || !remove.length || add.length || normalized.dateChange || normalized.sourceRequestId || normalized.sendEstimate || input.priceChanges)) {
+    throw new Error('cancellation requires exact current rows, period and staff approval without other changes or sends');
+  }
   const priceChanges = normalizePriceChanges(input.priceChanges, tradeId);
   if (priceChanges.length) {
     if (!normalized.staffApproval || !normalized.expectedPeriod || normalized.dateChange || remove.length || add.length || normalized.sourceRequestId || normalized.sendEstimate) throw new Error('priceChanges requires staffApproval and expectedPeriod, and must be price-only without send');
@@ -416,6 +420,18 @@ async function runRegisteredTradeCorrection({
   if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
   const normalized = normalizeCorrectionInput(input);
   const appliedStages = [];
+  if (normalized.cancel) {
+    const payload = await postAction({config, fetchImpl, timeoutMs, stage:'updateContractStatus', appliedStages,
+      body:{action:'updateContractStatus',tid:normalized.tradeId,status:'취소',expectedCancellation:{operationId:normalized.operationId,expectedPeriod:normalized.expectedPeriod,expectedRows:normalized.remove,staffApproval:normalized.staffApproval}}});
+    const {exactRegisteredCancellationReadback}=await import('../../tools/ai-browser-worker/reservation-cancellation-readback.mjs');
+    const expected={trade_id:normalized.tradeId,expected_period:{start_date:normalized.expectedPeriod.startDate,start_time:normalized.expectedPeriod.startTime,end_date:normalized.expectedPeriod.endDate,end_time:normalized.expectedPeriod.endTime},expected_before:normalized.remove.map(r=>({schedule_id:r.scheduleId,name:r.expectedName,quantity:r.expectedQty}))};
+    if(payload.tradeId!==normalized.tradeId || payload.operationId!==normalized.operationId || payload.customerNotificationSent!==false
+      || JSON.stringify(payload.readback)!==JSON.stringify(payload.authoritativeReadback?.after)
+      || !exactRegisteredCancellationReadback(payload.authoritativeReadback,expected)) {
+      throw new CorrectionStageError('updateContractStatus','cancellation returned incomplete authoritative readback',{outcomeUnknown:true,appliedStages});
+    }
+    return {ok:true,verified:true,tradeId:normalized.tradeId,appliedStages,readback:payload.readback,authoritativeReadback:payload.authoritativeReadback,contractRegeneration:null,send:{attempted:false,accepted:false},requestFinalization:null};
+  }
   const hasCorrection = !!normalized.dateChange || normalized.remove.length > 0 || normalized.add.length > 0 || !!normalized.priceChanges;
   let correctionPayload = null;
   if (hasCorrection) {

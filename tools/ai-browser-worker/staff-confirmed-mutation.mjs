@@ -9,7 +9,7 @@ const TOP_LEVEL_FIELDS = new Set([
   'expected_period', 'expected_before', 'desired_after', 'date_change'
 ]);
 const KINDS = new Set([
-  'equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change'
+  'equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change', 'reservation_cancel'
 ]);
 const TRADE_ID = /^\d{6}-\d{3}$/;
 const REQUEST_ID = /^RQ-\d{6}-\d{3}$/;
@@ -142,7 +142,7 @@ function validateRegisteredKindShape(mutation, errors) {
   const shapeError = () => errors.push(`${mutation.kind} has an invalid affected-row delta shape`);
   if (mutation.kind === 'equipment_add') {
     if (before.length !== 0 || after.length === 0 || hasDateChange) shapeError();
-  } else if (mutation.kind === 'equipment_remove') {
+  } else if (['equipment_remove', 'reservation_cancel'].includes(mutation.kind)) {
     if (before.length === 0 || after.length !== 0 || hasDateChange) shapeError();
   } else if (mutation.kind === 'equipment_replace') {
     if (before.length === 0 || after.length === 0 || hasDateChange) shapeError();
@@ -199,7 +199,7 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
   const registered = scope === 'registered_trade';
   if (registered) {
     if (!TRADE_ID.test(text(mutation.trade_id))) errors.push('trade_id is invalid');
-    if (mutation.kind === 'date_time_change') {
+    if (['date_time_change', 'reservation_cancel'].includes(mutation.kind)) {
       if (Object.hasOwn(mutation, 'request_id')) errors.push('request_id is forbidden for registered date_time_change');
     } else if (Object.hasOwn(mutation, 'request_id') && !REQUEST_ID.test(text(mutation.request_id))) {
       errors.push('registered equipment mutation request_id must be exact when supplied');
@@ -211,6 +211,7 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
     }
   }
   if (scope === 'pending_request') {
+    if (mutation.kind === 'reservation_cancel') errors.push('reservation_cancel requires registered_trade');
     if (mutation.kind === 'equipment_and_date_change') errors.push('equipment_and_date_change requires registered_trade');
     if (!REQUEST_ID.test(text(mutation.request_id))) errors.push('request_id is invalid');
     if (Object.hasOwn(mutation, 'trade_id')) errors.push('trade_id is forbidden for pending_request');
@@ -241,6 +242,7 @@ export function buildRegisteredTradeCorrectionInput(mutation, operationId) {
   if (!normalizedOperationId) throw new Error('operationId is required');
   return {
     tradeId: mutation.trade_id,
+    ...(mutation.kind === 'reservation_cancel' ? { cancel: true } : {}),
     operationId: normalizedOperationId,
     // Derived here only after exact staff-confirmed mutation validation. The model
     // cannot provide a separate inventory bypass flag through its strict schema.

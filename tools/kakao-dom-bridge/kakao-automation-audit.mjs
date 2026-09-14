@@ -59,7 +59,8 @@ const REGISTERED_ACTION = Object.freeze({
   equipment_replace: 'replace',
   equipment_quantity_change: 'quantity_change',
   date_time_change: 'date_time_change',
-  equipment_and_date_change: 'update'
+  equipment_and_date_change: 'update',
+  reservation_cancel: 'update'
 });
 
 function invalidAuditEvent() {
@@ -554,7 +555,9 @@ function buildRegisteredEvent({ durableJob, operation, receipt, customerLabel, h
     customer_label: customerLabel,
     target_type: 'trade',
     target_id: tradeId,
-    summary: registeredSummary(actionType, tradeId, outcome),
+    summary: receipt.mutation_kind === 'reservation_cancel'
+      ? (outcome === 'success' ? `등록예약 ${tradeId}을 취소했습니다.` : `등록예약 ${tradeId} 취소가 완료되지 않았습니다 (${outcome}).`)
+      : registeredSummary(actionType, tradeId, outcome),
     change_items: changeItems,
     outbound_text: null,
     evidence: failureEvidence(receipt, {
