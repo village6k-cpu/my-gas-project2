@@ -2892,7 +2892,11 @@ function flushDashboardStructureProjectionQueue_() {
       if (ok && task.syncStructure) {
         var cfg = SUPA_CFG_();
         var built = buildSupabaseTrades_([tid]);
-        if (built.trades && built.trades.length && !supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
+        if (built.trades && built.trades.length) {
+          // 복구 큐도 매분 dirty worker와 동일하게 앱에서 입력한 메모를 보존한다.
+          supaDropOverwritingNotes_(cfg, built.trades);
+          if (!supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
+        }
         if (ok) {
           // 시트 추가 작업이 발급한 정확한 ID만 신규 생성한다. 기존 반출/반납 상태는
           // ignore-duplicates로 보존하고, 이후 전체 PATCH에서 행 존재까지 검증한다.
@@ -12980,6 +12984,22 @@ function _normalizeConfirmRequestEquipmentForUpdate_(items, targetRows, data, re
   });
 }
 
+// F열의 목록은 입력 보조이며 원문 수요의 승인/거절 기준이 아니다.
+// 기존 드롭다운 기준은 유지하고, 수정 대상 F셀의 거부만 경고로 바꾼다.
+// 가용성/정본 검토는 저장 후 기존 확인 경로에서 수행한다.
+function _allowConfirmRequestEquipmentDemand_(sheet, startRow, count) {
+  var range = sheet.getRange(startRow, 6, count, 1);
+  var hasRule = false;
+  var rules = range.getDataValidations().map(function(row) {
+    return row.map(function(rule) {
+      if (!rule) return null;
+      hasRule = true;
+      return rule.copy().setAllowInvalid(true).build();
+    });
+  });
+  if (hasRule) range.setDataValidations(rules);
+}
+
 function _updateConfirmRequestRowsInPlace_(sheet, targetRows, data, req, items) {
   if (!items || items.length === 0 || targetRows.length !== items.length) return null;
   for (var ci = 1; ci < targetRows.length; ci++) {
@@ -13053,6 +13073,7 @@ function _updateConfirmRequestRowsInPlace_(sheet, targetRows, data, req, items) 
   }
 
   if (scheduleChanged || metadataChanged || anyItemChanged) {
+    _allowConfirmRequestEquipmentDemand_(sheet, targetRows[0], items.length);
     sheet.getRange(targetRows[0], 2, items.length, 4).setNumberFormat("@");
     // 등록 워커가 소유하는 N/O/P는 절대 스냅샷으로 덮지 않는다. 편집 데이터 A:M과
     // 비고/추가요청 Q:R만 일괄 기록하고, O열은 제외 토글이 실제로 바뀐 행만 쓴다.
@@ -13139,7 +13160,7 @@ function _updateRequestUnderLock_(req) {
 
   var firstRow = targetRows[0];
 
-  // 장비 목록 변경이 있으면: 기존 행 삭제 후 재입력
+  // 장비 목록 변경: 수정본 저장/검증 후에만 기존 요청 행을 교체한다.
   if (req.장비 && req.장비.length > 0) {
     var items = _normalizeConfirmRequestEquipmentForUpdate_(req.장비, targetRows, data, req);
     _assertConfirmRequestEquipmentReductions_(req, items, targetRows, data);
@@ -13156,21 +13177,6 @@ function _updateRequestUnderLock_(req) {
         changedAvailabilityRows: inPlace.availabilityChanged
       };
     }
-
-    // 행 수가 달라진 경우에도 연속 요청 묶음은 한 번에 삭제한다. 30행을 deleteRow
-    // 30회 호출하면 시트 전체 행 이동도 30번 발생한다.
-    var contiguousTargetRows = true;
-    for (var d = 1; d < targetRows.length; d++) {
-      if (targetRows[d] !== targetRows[0] + d) { contiguousTargetRows = false; break; }
-    }
-    if (contiguousTargetRows) {
-      sheet.deleteRows(targetRows[0], targetRows.length);
-    } else {
-      for (var deleteIndex = targetRows.length - 1; deleteIndex >= 0; deleteIndex--) {
-        sheet.deleteRow(targetRows[deleteIndex]);
-      }
-    }
-    SpreadsheetApp.flush();
 
     // 기존 데이터에서 날짜/시간/예약자명/연락처 가져오기 (req에 없으면)
     var origFirst = data[targetRows[0] - 2];
@@ -13194,16 +13200,16 @@ function _updateRequestUnderLock_(req) {
     var 비고 = req.비고 !== undefined ? req.비고 : origFirst[16];
     var 추가요청 = req.추가요청 !== undefined ? req.추가요청 : origFirst[17];
 
-    // 삭제 후 삽입 시작 행 찾기 — items.length개의 "연속" 빈 행이 필요.
+    // 원본은 남겨 둔 채 items.length개의 연속 빈 행에 수정본을 먼저 저장한다.
     // (_insertAndCheckRequest와 동일한 이유: 중간 갭에 연속 삽입하면 아래 활성 요청을 덮어씀)
     var newLastRow = sheet.getLastRow();
     var need = items.length || 1;
     var startRow;
     if (newLastRow >= 2) {
-      var aCol = sheet.getRange(2, 1, newLastRow - 1, 1).getValues();
+      var emptyCandidates = sheet.getRange(2, 1, newLastRow - 1, 18).getValues();
       var runStart = -1, runLen = 0, foundStart = -1;
-      for (var r = 0; r < aCol.length; r++) {
-        var cellEmpty = (!aCol[r][0] || String(aCol[r][0]).trim() === "");
+      for (var r = 0; r < emptyCandidates.length; r++) {
+        var cellEmpty = emptyCandidates[r].every(function(value) { return value === "" || value === null; });
         if (cellEmpty) {
           if (runStart < 0) { runStart = r; runLen = 1; } else { runLen++; }
           if (runLen >= need) { foundStart = runStart; break; }
@@ -13238,14 +13244,71 @@ function _updateRequestUnderLock_(req) {
         j === 0 ? 추가요청 : ""
       ]);
     }
+    var replacementWriteAttempted = false;
+    var replacementCutoverAttempted = false;
+    try {
+    _allowConfirmRequestEquipmentDemand_(sheet, startRow, items.length);
     // 날짜/시간(B~E)은 텍스트로 고정하고 전체 요청을 한 번에 쓴다.
     sheet.getRange(startRow, 2, items.length, 4).setNumberFormat("@");
+    replacementWriteAttempted = true;
     sheet.getRange(startRow, 1, items.length, 18).setValues(replacementRows);
     sheet.getRange(startRow, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
     if (items.length > 1) {
       sheet.getRange(startRow + 1, 1, items.length - 1, 18).setFontWeight("normal").setBackground(null);
     }
     SpreadsheetApp.flush();
+
+    if (JSON.stringify(sheet.getRange(startRow, 1, items.length, 18).getValues()) !== JSON.stringify(replacementRows)) {
+      throw new Error('확인요청 수정본 저장 readback 불일치');
+    }
+    // 잠금 밖의 수동/등록 변경도 삭제 직전 전체 원본 행으로 재검증한다.
+    var currentData = sheet.getRange(2, 1, sheet.getLastRow() - 1, 18).getValues();
+    _assertConfirmRequestEditableRows_(targetRows, currentData);
+    targetRows.forEach(function(rowNum) {
+      if (JSON.stringify(currentData[rowNum - 2]) !== JSON.stringify(data[rowNum - 2])) {
+        throw new Error('확인요청 원본이 수정본 저장 중 변경되었습니다');
+      }
+    });
+    replacementCutoverAttempted = true;
+    // 행 수가 달라진 경우에도 연속 요청 묶음은 한 번에 삭제한다. 30행을 deleteRow
+    // 30회 호출하면 시트 전체 행 이동도 30번 발생한다.
+    var contiguousTargetRows = true;
+    for (var d = 1; d < targetRows.length; d++) {
+      if (targetRows[d] !== targetRows[0] + d) { contiguousTargetRows = false; break; }
+    }
+    if (contiguousTargetRows) {
+      sheet.deleteRows(targetRows[0], targetRows.length);
+    } else {
+      for (var deleteIndex = targetRows.length - 1; deleteIndex >= 0; deleteIndex--) {
+        sheet.deleteRow(targetRows[deleteIndex]);
+      }
+    }
+    SpreadsheetApp.flush();
+
+    startRow -= targetRows.filter(function(rowNum) { return rowNum < startRow; }).length;
+    } catch (replacementError) {
+      if (!replacementCutoverAttempted && replacementWriteAttempted) {
+        // setValues도 부분 적용될 수 있다. 원본은 그대로 두고, 이 호출이 예약한
+        // 빈 범위의 자기 요청 행만 치운다. 삭제 시도 후에는 유일한 수정본을 보존한다.
+        try {
+          var stagedIds = sheet.getRange(startRow, 1, items.length, 1).getValues();
+          if (!stagedIds.every(function(row) { return !row[0] || String(row[0]).trim() === req.reqID; })) {
+            throw new Error('수정본 정리 범위가 다른 요청으로 변경되었습니다');
+          }
+          sheet.getRange(startRow, 1, items.length, 18).clearContent();
+          SpreadsheetApp.flush();
+        } catch (cleanupError) {
+          replacementError.stagedCleanupError = cleanupError.message;
+          replacementError.outcomeUnknown = true;
+        }
+      }
+      if (replacementCutoverAttempted) {
+        replacementError.outcomeUnknown = true;
+        replacementError.effectiveRequestId = req.reqID;
+        replacementError.appliedStages = ['pending_request_update'];
+      }
+      throw replacementError;
+    }
 
     // skipCheck: 사장이 "이 장비는 재고 있는 거 안다"는 경우 가용확인을 건너뛴다.
     // 세트 전개·가용판정은 이후 '바로 등록' 시 registerByReqID가 한 번에 처리하므로 안전하다.

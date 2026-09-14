@@ -262,37 +262,80 @@ function Find-TopSection {
     param([string[]]$Lines, [string]$Name)
     $start = -1
     for ($i = 0; $i -lt $Lines.Count; $i++) {
-        if ($Lines[$i] -match ('^{0}:\s*$' -f [regex]::Escape($Name))) { $start = $i; break }
+        if ($Lines[$i] -match ('^{0}:[ \t]*(?:#.*)?$' -f [regex]::Escape($Name))) { $start = $i; break }
     }
     if ($start -lt 0) { return [pscustomobject]@{ start = -1; end = -1 } }
     $end = $Lines.Count
     for ($i = $start + 1; $i -lt $Lines.Count; $i++) {
-        if ($Lines[$i] -match '^\S[^:]*:\s*') { $end = $i; break }
+        if ($Lines[$i] -match '^[^ \t#][^:]*:\s*') { $end = $i; break }
     }
     return [pscustomobject]@{ start = $start; end = $end }
+}
+
+function Read-PluginEnabledName {
+    param([string]$Value)
+    # Plugin identifiers are scalars. Do not treat nested YAML or a continuation
+    # line as an enabled name; in particular, mixed list indentation can turn
+    # two apparent entries into one scalar in the actual YAML loader.
+    if ($Value -notmatch '^\s*(?:([A-Za-z0-9_.-]+)|''([A-Za-z0-9_.-]+)''|"([A-Za-z0-9_.-]+)")(?:\s+#.*)?\s*$') {
+        throw 'plugins.enabled must be a list of plugin identifiers.'
+    }
+    foreach ($index in 1..3) { if ($matches[$index]) { return [string]$matches[$index] } }
+}
+
+function Get-PluginEnabledList {
+    param([string[]]$Lines)
+    $section = Find-TopSection -Lines $Lines -Name 'plugins'
+    $result = [ordered]@{ index = -1; end = $section.end; values = @(); indent = '    '; inline = $false; inlineEnd = -1 }
+    if ($section.start -lt 0) {
+        if (@($Lines | Where-Object { $_ -match '^plugins:' }).Count -gt 0) {
+            throw 'plugins.enabled requires a plugins mapping block.'
+        }
+        return [pscustomobject]$result
+    }
+    $header = ''
+    for ($i = $section.start + 1; $i -lt $section.end; $i++) {
+        if ($Lines[$i] -match '^ {2}enabled:\s*(.*)$') {
+            if ($result.index -ge 0) { throw 'plugins.enabled must not have duplicate keys.' }
+            $result.index = $i
+            $header = $matches[1]
+        }
+    }
+    if ($result.index -lt 0) { return [pscustomobject]$result }
+    if ($header -match '^\[(.*)\]\s*(?:#.*)?$') {
+        $items = $matches[1]
+        $result.inline = $true
+        $result.inlineEnd = $Lines[$result.index].IndexOf(']')
+        if ($items.Trim()) {
+            foreach ($item in ($items -split ',')) { $result.values += Read-PluginEnabledName -Value $item }
+        }
+    }
+    elseif ($header -notmatch '^(?:#.*)?$') { throw 'plugins.enabled must be an inline or block list.' }
+
+    $itemIndent = ''
+    for ($i = $result.index + 1; $i -lt $section.end; $i++) {
+        $line = $Lines[$i]
+        if ($line -match '^\s*(?:#.*)?$') { continue }
+        if ($line -match '^ {2}[^ \t-][^:]*:') { $result.end = $i; break }
+        if ($result.inline -or $line -notmatch '^( {2,})-\s+(.+?)\s*$') {
+            throw 'plugins.enabled has an unsupported enabled list shape.'
+        }
+        $indent = $matches[1]
+        $value = $matches[2]
+        if ($itemIndent -and $indent -ne $itemIndent) { throw 'plugins.enabled has inconsistent list indentation.' }
+        $itemIndent = $indent
+        $result.indent = $indent
+        $result.values += Read-PluginEnabledName -Value $value
+    }
+    return [pscustomobject]$result
 }
 
 function Get-ConfigPlan {
     param([string]$Content)
     $normalized = ([string]$Content).Replace("`r`n", "`n").Replace("`r", "`n")
     $lines = [string[]]($normalized -split "`n")
-    $enabled = New-Object System.Collections.ArrayList
-    $plugins = Find-TopSection -Lines $lines -Name 'plugins'
-    if ($plugins.start -ge 0) {
-        for ($i = $plugins.start + 1; $i -lt $plugins.end; $i++) {
-            if ($lines[$i] -match '^\s{2}enabled:\s*\[(.*)\]\s*$') {
-                foreach ($value in @($matches[1] -split ',')) {
-                    $clean = $value.Trim().Trim("'", '"')
-                    if ($clean) { [void]$enabled.Add($clean) }
-                }
-            }
-            elseif ($lines[$i] -match '^\s{4}-\s*(.+?)\s*$') {
-                $clean = $matches[1].Trim().Trim("'", '"')
-                if ($clean) { [void]$enabled.Add($clean) }
-            }
-        }
-    }
-    if ($enabled -notcontains $pluginName) { [void]$enabled.Add($pluginName) }
+    $enabled = (Get-PluginEnabledList -Lines $lines).values
+    if ($enabled -notcontains $pluginName) { throw 'Merged plugins.enabled does not enable kakao_village.' }
 
     $platformMap = [ordered]@{}
     $platforms = Find-TopSection -Lines $lines -Name 'platforms'
@@ -337,33 +380,25 @@ function Merge-ProfileConfig {
     $normalized = ([string]$Content).Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd("`n")
     $lines = if ($normalized) { [string[]]($normalized -split "`n") } else { [string[]]@() }
 
+    $enabledList = Get-PluginEnabledList -Lines $lines
     $plugins = Find-TopSection -Lines $lines -Name 'plugins'
     if ($plugins.start -lt 0) {
         if ($lines.Count -gt 0) { $lines = Insert-StringLines -Lines $lines -Index $lines.Count -NewLines @('') }
         $lines = Insert-StringLines -Lines $lines -Index $lines.Count -NewLines @('plugins:', '  enabled:', "    - $pluginName")
     }
     else {
-        $enabledIndex = -1
-        for ($i = $plugins.start + 1; $i -lt $plugins.end; $i++) {
-            if ($lines[$i] -match '^\s{2}enabled:\s*(.*)$') { $enabledIndex = $i; break }
-        }
+        $enabledIndex = $enabledList.index
         if ($enabledIndex -lt 0) {
             $lines = Insert-StringLines -Lines $lines -Index ($plugins.start + 1) -NewLines @('  enabled:', "    - $pluginName")
         }
-        elseif ($lines[$enabledIndex] -match '^\s{2}enabled:\s*\[(.*)\]\s*$') {
-            $values = @($matches[1] -split ',' | ForEach-Object { $_.Trim().Trim("'", '"') } | Where-Object { $_ })
-            if ($values -notcontains $pluginName) { $values += $pluginName }
-            $lines[$enabledIndex] = '  enabled: [' + ($values -join ', ') + ']'
-        }
-        else {
-            $section = Find-TopSection -Lines $lines -Name 'plugins'
-            $exists = $false
-            $insert = $section.end
-            for ($i = $enabledIndex + 1; $i -lt $section.end; $i++) {
-                if ($lines[$i] -match '^\s{2}\S[^:]*:\s*') { $insert = $i; break }
-                if ($lines[$i] -match '^\s{4}-\s*(.+?)\s*$' -and $matches[1].Trim().Trim("'", '"') -eq $pluginName) { $exists = $true }
+        elseif ($enabledList.values -notcontains $pluginName) {
+            if ($enabledList.inline) {
+                $separator = if ($enabledList.values.Count) { ', ' } else { '' }
+                $lines[$enabledIndex] = $lines[$enabledIndex].Insert($enabledList.inlineEnd, "$separator$pluginName")
             }
-            if (-not $exists) { $lines = Insert-StringLines -Lines $lines -Index $insert -NewLines @("    - $pluginName") }
+            else {
+                $lines = Insert-StringLines -Lines $lines -Index $enabledList.end -NewLines @("$($enabledList.indent)- $pluginName")
+            }
         }
     }
 

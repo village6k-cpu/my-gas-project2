@@ -99,6 +99,7 @@ let batchWrites = 0;
 const sheet = {
   getRange(row, column, rowCount = 1, columnCount = 1) {
     return {
+      getDataValidations() { return Array.from({ length: rowCount }, () => [null]); },
       setNumberFormat() { return this; },
       setFontWeight() { return this; },
       setBackground() { return this; },
@@ -117,6 +118,7 @@ vm.runInNewContext([
   extractFunction(gas, "_confirmRequestDateKey_"),
   extractFunction(gas, "_confirmRequestTimeKey_"),
   extractFunction(gas, "_normalizeConfirmRequestEquipmentForUpdate_"),
+  extractFunction(gas, "_allowConfirmRequestEquipmentDemand_"),
   extractFunction(gas, "_updateConfirmRequestRowsInPlace_"),
 ].join("\n"), context);
 

@@ -241,7 +241,7 @@ test('validated mutation builder carries its evidence through both strict correc
     Utilities: { formatDate: date => new Date(date).toISOString().slice(0, 10) } };
   const start = source.indexOf('function normalizeRegisteredTradeCorrection_');
   const end = source.indexOf('\nfunction _registeredTradeSourceRequestPlan_', start);
-  vm.runInNewContext(source.slice(start, end), c);
+  vm.runInNewContext(functionSource('normalizeRegisteredTradePriceChanges_') + '\n' + source.slice(start, end), c);
   const { sendEstimate, ...args } = built;
   assert.deepEqual(plain(c.normalizeRegisteredTradeCorrection_(args).staffApproval), expectedApproval);
   assert.equal(validateStaffConfirmedMutation({ ...mutation, staffApproval: expectedApproval }).valid, false);

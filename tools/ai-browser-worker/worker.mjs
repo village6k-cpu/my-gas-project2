@@ -10725,12 +10725,60 @@ function forceRegisteredMutationOwnerReview(decision = {}, { job, receipt = null
 function registeredMutationInventoryFollowUps(decision = {}, receipt = {}) {
   const warnings = Array.isArray(receipt.authoritative_result?.inventoryWarnings)
     ? receipt.authoritative_result.inventoryWarnings : [];
-  if (!warnings.length) return [];
   const tradeId = text(receipt.trade_id).trim();
+  const taskKey = `registered-supply-review:${tradeId}`;
+  const followUps = Array.isArray(decision.follow_up_items) ? decision.follow_up_items : [];
+  const evidenceFor = item => Array.isArray(item?.evidence) ? item.evidence.filter(value => typeof value === 'string') : [];
+  const openReviews = followUps.filter(item => tradeId
+    && text(item?.route || item?.follow_up_route).trim() === 'inventory'
+    && text(item?.status).trim() === 'open' && text(item?.type).trim() !== 'completed_log'
+    && (item?.requiresHumanAction ?? item?.requires_human_action) === true
+    && text(item?.actionFamily || item?.action_family).trim() === 'inventory_check'
+    && text(item?.businessKey || item?.business_key).trim() === `trade:${tradeId}`
+    && text(item?.taskKey || item?.task_key).trim()
+    && (!text(item?.taskKey || item?.task_key).trim().startsWith('registered-supply-review:')
+      || text(item?.taskKey || item?.task_key).trim() === taskKey));
+  const completedReviews = followUps.filter(item => tradeId
+    && text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done'
+    && text(item?.route || item?.follow_up_route).trim() === 'inventory'
+    && text(item?.taskKey || item?.task_key).trim() === taskKey
+    && (item?.requiresHumanAction ?? item?.requires_human_action) === false
+    && text(item?.actionFamily || item?.action_family).trim() === 'none'
+    && ['', `trade:${tradeId}`].includes(text(item?.businessKey || item?.business_key).trim())
+    && text(item?.summary).trim() && !text(item?.blocking_reason || item?.blockingReason).trim());
+  const reviewedMissingMaster = warning => {
+    // Only this native warning shape is reviewable here. Shortages/model choices/unknown
+    // warning fields always retain reporting; equipment-name heuristics grant no exemption.
+    if (!warning || typeof warning !== 'object' || Array.isArray(warning)
+      || Object.keys(warning).some(key => !['stage', 'equipment', 'message'].includes(key))) return false;
+    const equipment = text(warning.equipment).trim(), message = text(warning.message).trim();
+    if (!equipment || message !== `${equipment} 미등록, 가용확인 제외`) return false;
+    return completedReviews.some(item => {
+      const evidence = evidenceFor(item), summary = text(item.summary).trim();
+      if (!evidence.includes(message)) return false;
+      return evidence.some(entry => {
+        const prefix = 'inventory_review_basis: ';
+        if (!entry.startsWith(prefix)) return false;
+        try {
+          const basis = JSON.parse(entry.slice(prefix.length));
+          if (!basis || typeof basis !== 'object' || Array.isArray(basis)
+            || basis.warning !== message || !['set_manifest', 'equipment_master'].includes(basis.source)) return false;
+          const fields = [basis.record, basis.finding, basis.resolution];
+          return fields.every(value => typeof value === 'string' && value.trim() && summary.includes(value.trim()))
+            && ![equipment, message].includes(basis.finding.trim())
+            && ![equipment, message, basis.finding.trim()].includes(basis.resolution.trim());
+        } catch { return false; }
+      });
+    });
+  };
   const customer = text(decision.customer?.name || decision.sheet_row_candidate?.customer_name || '고객');
-  const details = [...new Set(warnings.map(warning => text(warning?.message || warning?.equipment || warning).trim()).filter(Boolean))];
-  return [{
-    type: 'reservation_review', route: 'inventory', taskKey: `registered-supply-review:${tradeId}`,
+  const unreviewed = warnings.filter(warning => !reviewedMissingMaster(warning));
+  const warningDetail = warning => text(warning?.message || warning?.equipment || warning).trim();
+  const details = [...new Set(unreviewed.map(warningDetail).filter(Boolean))]
+    .filter(detail => !openReviews.some(item => evidenceFor(item).includes(detail)));
+  if (!details.length && !unreviewed.some(warning => !warningDetail(warning))) return openReviews;
+  const fallback = {
+    type: 'reservation_review', route: 'inventory', taskKey,
     priority: 'high', status: 'open', customer_name: customer,
     title: `${customer} 예약 반영 후 재고 확인`,
     summary: `승인된 요청은 거래 ${tradeId}에 반영했습니다. ${details.join(' / ')}`.slice(0, 2000),
@@ -10738,7 +10786,15 @@ function registeredMutationInventoryFollowUps(decision = {}, receipt = {}) {
     suggested_reply_draft: '', evidence: details,
     requiresHumanAction: true, actionFamily: 'inventory_check', businessKey: `trade:${tradeId}`,
     due_hint: 'now', alertLevel: 'none'
-  }];
+  };
+  const existingIndex = openReviews.findIndex(item => text(item.taskKey || item.task_key).trim() === taskKey);
+  if (existingIndex < 0) return openReviews.concat(fallback);
+  return openReviews.map((item, index) => index !== existingIndex ? item : {
+    ...item,
+    summary: [text(item.summary).trim(), fallback.summary].filter(Boolean).join('\n'),
+    recommended_action: [text(item.recommended_action || item.recommendedAction).trim(), fallback.recommended_action].filter(Boolean).join('\n'),
+    evidence: [...new Set([...evidenceFor(item), ...details])]
+  });
 }
 
 function forceRegisteredMutationSuccess(decision = {}, receipt) {

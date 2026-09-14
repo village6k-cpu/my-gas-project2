@@ -1458,8 +1458,8 @@ function scheduleContractRegenUnderLock_(거래ID) {
   props.setProperty('contractEditTS_' + 거래ID, String(now));
   try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
 
-  // 거래 변경이 있었으니 dashboard/timeline 캐시도 즉시 무효화 → 다음 fetch는 fresh
-  try { invalidateDashboardCache(); } catch (e) {}
+  // 미래 예약도 실제 반출/반납 날짜 캐시를 무효화해야 pending 표식이 보인다.
+  try { invalidateDashboardCacheForTrade_(거래ID); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 }
 
@@ -1893,7 +1893,7 @@ function regenPendingContracts() {
       }
       regenSucceeded = true;
       try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
-      try { invalidateDashboardCache(); } catch (e1) {}
+      try { invalidateDashboardCacheForTrade_(거래ID); } catch (e1) {}
       try { invalidateTimelineCache(); } catch (e2) {}
       // Supabase 전파(supaMarkTradeDirty_)는 여기서 하지 않는다 — 아래 finally에서
       // 큐 키가 실제로 지워진 뒤에 한다. 이유는 finally 주석 참고.
@@ -1930,7 +1930,10 @@ function regenPendingContracts() {
       // 존재 여부로 계산된다. 키 삭제 전에 dirty를 찍으면 매분 도는
       // flushDirtyToSupabase가 그 틈에 pending=true를 밀어넣고, 이후 dirty 마킹이
       // 다시는 없어 카드가 "계약서 갱신중"에 영구히 굳는다(6월 건까지 13개 관측).
+      // 완료 직전 읽기가 pending=true 캐시를 다시 만들 수 있으므로, 큐 삭제 뒤
+      // 거래의 미래 날짜까지 무효화하고 나서 dirty를 발급한다.
       if (finishResult && (finishResult.success || finishResult.permanentlyGone)) {
+        try { invalidateDashboardCacheForTrade_(거래ID); } catch (eCache) {}
         try { supaMarkTradeDirty_(거래ID); } catch (eMark) {}
       }
     }
