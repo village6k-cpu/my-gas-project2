@@ -3262,6 +3262,7 @@ function reclaimDashboardScriptProperties_(props, options) {
   var keys = Object.keys(all);
   // Projection payloads are durable accepted work, not reconstructible cache.
   // Keep their coordination records until the projection worker acknowledges them.
+  // 용량 정리에서도 미반영 추가/제외 ID와 반납 상태는 반드시 보존한다.
   var queuedTrades = {};
   keys.forEach(function(key) {
     if (!/^dashboardStructureQueue_/.test(key)) return;
