@@ -15,7 +15,7 @@ test('confirmed supply policy is present even when RAG is not needed', () => {
   const prompt=workerModule.buildHermesPrompt({job_id:'supply-policy-test',room_key:'test:local',room_revision:1});
   assert.match(prompt,/메모리·배터리는 재고 충돌에서 제외/);
   assert.match(prompt,/소니 GM 70-200mm→소니 GM 70-200mm II/);
-  assert.match(prompt,/등록 거래가 있으면 추가·변경은 그 거래에 반영/);
+  assert.match(prompt,/동일 고객·기간의 추가·변경은 기존 거래에 반영/);
 });
 import { loadWorkOrchestratorConfig } from '../work-orchestrator-v2/contracts.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
@@ -1168,7 +1168,7 @@ test('semantic pressure fixture keeps approval meaning in native Hermes while co
   );
   assert.match(prompt, /wording is open-ended/i);
   assert.match(prompt, /Native Hermes—not code or keywords—semantically decides/i);
-  assert.match(prompt, /conditional.*ambiguous-target.*customer-authored.*stale.*not authorization/is);
+  assert.match(prompt, /Only current, unambiguous staff approval authorizes registration/i);
 
   for (const scenario of cases) {
     const customerMessageId = `dom-${scenario.id}-customer`;

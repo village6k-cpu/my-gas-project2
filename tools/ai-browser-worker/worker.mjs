@@ -677,6 +677,15 @@ export function buildHermesPrompt(job, options = {}) {
         lookup_tool: options.lookupContext.lookup_tool
       }
     : null;
+  // Native turns omit legacy lookup commands, but still need the host policy
+  // observation. event.raw alone is not read by the model adapter.
+  const gatewayReplyPolicyText = options.gatewayConfirmationToolAvailable && options.lookupContext
+    ? '\nSERVER-OBSERVED REPLY POLICY:\n' + JSON.stringify({
+        observed_at: text(options.lookupContext.generated_at).trim() || null,
+        kill_switch_status: text(options.lookupContext.kill_switch?.status).trim() || 'not_checked',
+        read_failed: options.lookupContext.kill_switch?.error != null
+      }) + '\nUse this server observation for kill_switch_observed; do not call an already supplied observation unchecked. paused stops automatic replies; price_paused stops automatic price replies. not_checked or a failed read is not permission to send. An active switch does not establish the customer facts or bypass any reply authorization. Choose the appropriate reply mode from the conversation and evidence; the host still validates delivery policy before sending.\n'
+    : '';
   const lookupContextText = lookupPromptContext && !options.gatewayConfirmationToolAvailable
     ? `\nREAD-ONLY VILLAGE LIVE LOOKUP:\n${JSON.stringify(lookupPromptContext, null, 2)}\nAfter reading the Kakao evidence, the AI chooses all necessary queries and interprets every returned row. Send those queries together in one batch through the read-only wrapper; do not hand-compose raw GAS/curl/PowerShell requests or repeat a successful query. A failed batch item is an evidence gap, not permission to guess or mutate. write/insert/register/send APIs are 금지.\n`
     : '';
@@ -842,7 +851,7 @@ JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 ${currentConfirmedPolicyText}
   ${navigationContextText}${ownerCaseContextText.replace('bare 네', "단독 응답 '네'")}${terminalAckHintText}${recentBotSendsText}${correctionsText}
-${lookupContextText}${ragContextText}${brainContextText}
+${gatewayReplyPolicyText}${lookupContextText}${ragContextText}${brainContextText}
 ${sheetExecutionText}
 
 TASK:
