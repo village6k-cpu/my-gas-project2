@@ -3260,11 +3260,30 @@ function reclaimDashboardScriptProperties_(props, options) {
   var all;
   try { all = props.getProperties() || {}; } catch (readErr) { return { ok: false, error: String(readErr), deleted: 0 }; }
   var keys = Object.keys(all);
+  // Projection payloads are durable accepted work, not reconstructible cache.
+  // Keep their coordination records until the projection worker acknowledges them.
+  var queuedTrades = {};
+  keys.forEach(function(key) {
+    if (!/^dashboardStructureQueue_/.test(key)) return;
+    var match = key.match(/(\d{6}-\d{3})$/);
+    if (match) queuedTrades[match[1]] = true;
+  });
+  function preservePendingProjection(key) {
+    if (/^dashboardStructureQueue_/.test(key)) return true;
+    if (!/^dashboard(?:MutationLog|StructureMutation|ReturnProjectionLease)_/.test(key)) return false;
+    var match = key.match(/(\d{6}-\d{3})$/);
+    if (!match) return false;
+    if (queuedTrades[match[1]]) return true;
+    // A queue may arrive after the initial property snapshot.
+    try { return props.getProperty(DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + match[1]) != null; }
+    catch (readPendingError) { return true; }
+  }
   var toDelete = [];
   var keepPrefixes = {
     // 설정/인증 — 삭제 금지
   };
   keys.forEach(function(k) {
+    if (preservePendingProjection(k)) return;
     // 허용된 캐시 접두만 삭제. REG_ALIM_SENT/설정값은 절대 건드리지 않는다.
     var reclaimable =
       /^(itemCheck|itemCheckQty)_/.test(k) ||
@@ -3326,9 +3345,15 @@ function reclaimDashboardScriptProperties_(props, options) {
     return true;
   });
 
+  var deletedCount = 0;
   if (!dryRun) {
     toDelete.forEach(function(k) {
-      try { props.deleteProperty(k); } catch (delErr) {}
+      if (preservePendingProjection(k)) return;
+      try {
+        if (props.getProperty(k) !== all[k]) return;
+        props.deleteProperty(k);
+        deletedCount++;
+      } catch (delErr) {}
     });
   }
   var remaining = 0;
@@ -3337,7 +3362,7 @@ function reclaimDashboardScriptProperties_(props, options) {
     ok: true,
     dryRun: dryRun,
     cutoffYYMMDD: cutoffYYMMDD,
-    deleted: dryRun ? 0 : toDelete.length,
+    deleted: deletedCount,
     wouldDelete: toDelete.length,
     remaining: remaining,
     sample: toDelete.slice(0, 20)
