@@ -51,10 +51,11 @@ function preRegistrationStockEvaluate_(request,snapshot) {
 }
 
 function preRegistrationStockNotifiableUncertainty_(result) {
-  var businessIssues=result.uncertain.filter(function(a){return a.kind!=='source_unavailable';});
+  var visible=result.uncertain.filter(function(a){return !inventoryRiskNeedsIdentityReview_(a.kind);});
+  var businessIssues=visible.filter(function(a){return a.kind!=='source_unavailable';});
   // A temporary supplemental read failure does not create a second warning for
   // the same proven shortage. Keep it in evaluation diagnostics and gate checks.
-  return result.shortages.length || businessIssues.length?businessIssues:result.uncertain;
+  return result.shortages.length || businessIssues.length?businessIssues:visible;
 }
 
 function preRegistrationStockSameScope_(a,b) {
@@ -74,6 +75,7 @@ function preRegistrationStockCovers_(prior,current) {
 
 function preRegistrationStockText_(result,previous) {
   var shortages=result.shortages,uncertain=preRegistrationStockNotifiableUncertainty_(result);
+  if(!shortages.length && !uncertain.length)return null;
   if(preRegistrationStockSameScope_(previous,result)) {
     shortages=shortages.filter(function(s){return !preRegistrationStockCoversShortage_(previous.shortages,[s.equipment,s.start,s.end,s.requested,s.available]);});
     uncertain=uncertain.filter(function(a){return !previous.uncertain.some(function(b){return JSON.stringify(b)===JSON.stringify([a.kind,a.equipment,a.component || '']);});});
@@ -88,7 +90,7 @@ function preRegistrationStockText_(result,previous) {
     if(names.length)lines.push('　겹치는 예약: '+names.join(' · '));
   });
   uncertain.slice(0,3).forEach(function(a){
-    var label={model_selection:'구체 모델 선택',catalog_stock_missing:'카탈로그 등록됨 · 실제 재고 기록 확인',unknown_stock:'보유·정비 수량 확인',source_unavailable:'재고 원장 조회 재시도',invalid_schedule:'예약 날짜·시간 확인',invalid_quantity:'요청 수량 확인',set_component_missing:'세트 구성 확인'}[a.kind] || 'AI 장비 연결 검토';
+    var label={model_selection:'구체 모델 선택',catalog_stock_missing:'카탈로그 등록됨 · 실제 재고 기록 확인',unknown_stock:'보유·정비 수량 확인',source_unavailable:'재고 원장 조회 재시도',invalid_schedule:'예약 날짜·시간 확인',invalid_quantity:'요청 수량 확인',set_component_missing:'세트 구성 확인'}[a.kind] || '재고 기록 확인';
     lines.push('❓ '+clean(a.component || a.equipment)+' — '+label);
     if(a.kind==='catalog_stock_missing')lines.push('　대표님, 실제 보유수량이 몇 개인가요? 이 스레드에 답해주시면 재고 원장과 장비마스터에 등록하겠습니다. 수리 중 장비가 있으면 함께 알려주세요.');
     if(a.kind==='model_selection' && a.candidates?.length)lines.push('　후보: '+a.candidates.slice(0,4).map(clean).join(' / '));
@@ -178,7 +180,8 @@ function preRegistrationStockDeliver_(evaluation) {
   if(evaluation.shortages.length || signature.uncertain.some(function(a){return a[0]!=='source_unavailable';}))
     legacyFingerprint=preRegistrationStockHash_(Object.assign({},signature,{uncertain:signature.uncertain.concat([
       ['source_unavailable','실재고·별칭 연결 확인 필요','']]).sort()}));
-  var actionable=evaluation.shortages.length+evaluation.uncertain.length>0;
+  var reviewPending=evaluation.uncertain.some(function(a){return inventoryRiskNeedsIdentityReview_(a.kind);});
+  var actionable=evaluation.shortages.length+signature.uncertain.length>0;
   var alreadyNotified=!!state.lastReceipt && (state.lastHash===fingerprint || legacyFingerprint && state.lastHash===legacyFingerprint ||
     !!state.lastHash && preRegistrationStockCovers_(state.lastSignature,signature));
   var migrated=alreadyNotified && (state.lastHash!==fingerprint || !state.lastSignature);
@@ -202,7 +205,7 @@ function preRegistrationStockDeliver_(evaluation) {
         return waiting();
       } else if(alreadyNotified || state.pending.hash!==fingerprint || !actionable) {state.pending=null;save();}
     }
-    if(!actionable) {state.lastHash='';state.lastSignature=null;state.end=evaluation.end;state.pending=null;save();return {status:'clear',requestId:evaluation.requestId};}
+    if(!actionable) {state.lastHash='';state.lastSignature=null;state.end=evaluation.end;state.pending=null;save();return {status:reviewPending?'identity_review_queued':'clear',inventoryVerified:!reviewPending,requestId:evaluation.requestId};}
     if(state.lastHash===fingerprint || legacyFingerprint && state.lastReceipt && state.lastHash===legacyFingerprint) {
       // Any pending receipt reaching here has complete absence evidence and no
       // active relay/uncertain attempt. The verified equivalent notice owns it.
@@ -359,6 +362,10 @@ function checkPreRegistrationStockBeforeRegister_(requestId){
     if(!request)return {ready:true,status:'skipped'};
     var evaluation=preRegistrationStockEvaluate_(request,readInventoryRiskSnapshot_());
     if(!evaluation.shortages.length && !evaluation.uncertain.length)return {ready:true,status:'clear'};
+    // This gate owns delivery of proven shortages. Identity evidence remains in
+    // the durable request/schedule for native AI; it is never declared available.
+    if(!evaluation.shortages.length && !preRegistrationStockNotifiableUncertainty_(evaluation).length)
+      return {ready:true,status:'identity_review_queued',inventoryVerified:false};
     PropertiesService.getScriptProperties().setProperty(PREREG_STOCK_PREFIX_+'registering_'+requestId,'true');
     queuePreRegistrationStockCheck_(requestId);
     var result=preRegistrationStockFlush_(requestId,true,false,evaluation);

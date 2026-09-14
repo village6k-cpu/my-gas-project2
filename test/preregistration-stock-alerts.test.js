@@ -37,7 +37,7 @@ function captureNotices(c) {
  return messages;
 }
 const uncertainEvaluation=(names)=>({requestId:'RQ-260913-004',customer:'예약자',...period,shortages:[],
- uncertain:names.map(equipment=>({kind:'unknown_equipment',equipment}))});
+ uncertain:names.map(equipment=>({kind:'unknown_stock',equipment}))});
 
 test('resolving a fourth hidden issue does not resend the same three visible warnings',()=>{
  const {c}=env(),messages=captureNotices(c);
@@ -520,4 +520,10 @@ test('relay reconciliation of an older delivered shortage preserves the current 
    assert.equal(result.status,'already_sent');assert.equal(saved.lastHash,hash);assert.deepEqual(saved.lastReceipt,receipt);assert.equal(saved.pending,null);
    assert.equal(c.flushPreRegistrationStockAlerts().results[0].status,'already_sent');assert.equal(posts,0);
  }
+});
+
+test('identity-only registration keeps AI evidence without requiring a vague Slack warning',()=>{
+ const {c}=env();const r=request({rows:[{...request().rows[0],name:'브랜드 모니터',setName:''}]});c.preRegistrationStockRequest_=()=>r;c.readInventoryRiskSnapshot_=()=>snapshot({sets:[],schedules:[]});let sent=0;c.inventoryRiskSlack_=()=>{sent++;throw Error('no vague alert');};
+ const result=c.checkPreRegistrationStockBeforeRegister_(r.id);assert.equal(result.ready,true);assert.equal(result.inventoryVerified,false);assert.equal(result.status,'identity_review_queued');assert.equal(sent,0);
+ const evaluation=c.preRegistrationStockEvaluate_(r,c.readInventoryRiskSnapshot_());assert.equal(evaluation.uncertain[0].equipment,'브랜드 모니터');
 });

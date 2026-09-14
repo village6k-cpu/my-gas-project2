@@ -198,3 +198,13 @@ AI가 전체 스레드와 카탈로그를 읽고 어떤 장비의 실재고인�
 - 답변 완료 후 같은 장비는 기존 재고를 재사용한다. 같은 질문·신규 장비를 반복 생성하지 않는다.
 
 Slack thread collection stays in the existing local Hermes runtime. The cloud receives the authenticated collector's complete transcript, validates the durable report receipt, owner quote and current source hash, and writes through its existing internal API secret. confirm-stock always fetches the thread again; model-supplied transcript fields are ignored. A separate SLACK_HEYBILLI_API_TOKEN is required for stock operations; Slack credentials are never used as cloud API authentication.
+
+## 원문 장비를 AI가 먼저 대조하기
+
+stockInvestigations가 있으면 직원 댓글·거래 pending이 없어도 작업한다. stockCatalog 전체 장비, 분류, 별칭, 세트 구성, 원문 예약을 읽는다. 문자열 검색 후보가 비었다는 이유로 멈추지 않는다.
+
+- 동일한 실제 장비임을 확인하면 review-stock으로 link_existing을 저장한다. {sourceId,sourceHash,catalogHash,action:"link_existing",equipmentId,equipmentName,reason}를 stdin으로 전달하고 dry-run 후 LIVE에서 --write한다. 저장 뒤 verified=true와 effective=true를 확인한다. 실제 재고 수량은 변경하지 않는다.
+- 모델 선택과 동일 장비 식별을 구별한다. 일반적인 7인치 모니터·매트박스 명칭을 한 모델의 전역 별칭으로 만들지 않는다. 후보가 여럿이면 예약자·기간·실제 후보를 담은 구체적인 질문을 한다.
+- 전체 목록에도 장비가 없거나 실보유수량을 모르면 {sourceId,sourceHash,catalogHash,action:"ask_owner",reason,question}를 review-stock에 전달한다. 기존 장비를 조사한 근거와 필요한 총보유·정비수량을 묻는다. CLI가 로컬 Slack 인증으로 실제 전송과 영수증을 검증한다. 별도로 같은 질문을 보내지 않는다.
+- 질문 답변은 stockQuestions의 전체 원문으로 돌아온다. 실재고 수량 답변은 confirm-stock으로 장비마스터까지 입력한다. 모델 선택 답변은 재고 수량으로 해석하거나 신규 장비를 생성하지 않고 해당 예약의 모델 선택 업무로 처리한다.
+- sourceHash/catalogHash가 바뀌면 scan-stock을 다시 읽고 판단한다. 관련 없는 Slack 스레드의 지연·오류 때문에 이미 수집한 stockInvestigations를 무시하지 않는다.

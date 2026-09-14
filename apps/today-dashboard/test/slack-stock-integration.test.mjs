@@ -27,7 +27,8 @@ test.beforeEach(()=>{
  if(url.hostname==='slack.com')throw Error('Slack credentials must remain local');
  const table=url.pathname.split('/').at(-1);let result;
  if(table==='confirm_missing_inventory_stock'){rpcCalls++;ledger={equipment_id:'TRI-900',...body.p_item,state:'정상',note:'',updated_at:'2026-09-14T00:00:00Z'};receipts=[{equipment_id:ledger.equipment_id,synced_at:null,last_attempted_at:null}];result={ok:true,equipmentId:ledger.equipment_id};}
- else if(table==='equipment_ledger')result=ledger;
+ else if(table==='inventory_identity_reviews')result=[];
+ else if(table==='equipment_ledger')result=url.searchParams.has('equipment_id')?ledger:(ledger?[ledger]:[]);
  else if(table==='inventory_stock_confirmations'){
  if(method==='PATCH'){receipts.forEach(r=>Object.assign(r,body));result=null;}else result=receipts.filter(r=>!r.synced_at);
  }else throw Error('unexpected endpoint '+table);

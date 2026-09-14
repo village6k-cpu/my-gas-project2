@@ -36,7 +36,7 @@ test('request uncertainty retains only this booking and its period, with actiona
  const c=env();const name='NiSi True Color ND-Vario 가변 ND 필터';const req={id:'RQ-261001-001',customer:'테스트 고객',rows:[row({id:'r1',name,setName:''})]};
  const s={equipment:[],sets:[{name,components:[]}],schedules:[row({id:'old',tradeId:'other',name,setName:'',start:'2026-11-01T09:00:00+09:00',end:'2026-11-02T09:00:00+09:00'})]};
  const result=c.preRegistrationStockEvaluate_(req,s);assert.equal(result.uncertain[0].start,period.start);assert.equal(result.uncertain[0].bookings.length,1);
- const text=c.preRegistrationStockText_(result);assert.match(text,/카탈로그.*재고|재고.*수량/);assert.doesNotMatch(text,/대체 장비·외부 조달/);
+ assert.equal(c.preRegistrationStockText_(result),null);assert.equal(result.uncertain[0].kind,'catalog_stock_missing');
 });
 
 
@@ -103,6 +103,6 @@ test('original stock question names survive a narrower later reservation and rem
  c.rememberInventoryStockQuestion_(receipt,{uncertain:[['catalog_stock_missing','장비 A'],['catalog_stock_missing','장비 B']]});
  c.rememberInventoryStockQuestion_(receipt,{uncertain:[['catalog_stock_missing','장비 A']]});
  values.preRegStock_v1_state_rq=JSON.stringify({lastReceipt:receipt,lastSignature:{uncertain:[['catalog_stock_missing','장비 A']]}});
- c.getInventoryResolutionContext=()=>({sets:[{name:'장비 A'},{name:'장비 B'}],equipment:[]});
+ c.readInventoryRiskSnapshot_=()=>({sets:[{name:'장비 A'},{name:'장비 B'}],equipment:[],schedules:[],sourceIssues:[]});c.inventoryReviewPendingRows_=()=>[];
  assert.deepEqual(Array.from(c.getInventoryStockQuestions().reports[0].names),['장비 A','장비 B']);
 });

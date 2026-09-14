@@ -71,7 +71,10 @@ function inventoryRiskDeliver_(state, options) {
   if(!receipt?.found) {
     // Reconcile uncertain receipts at any time, but send/retry only in the daily window.
     if(options.allowSend!==true)return false;
-    if(options.draft){pending.text=options.draft.text;pending.entries=options.draft.entries;pending.stockSignature=options.draft.stockSignature;}
+    if(options.draft){
+      if(!options.draft.text){state.pending=null;inventoryRiskSaveState_(state);return true;}
+      pending.text=options.draft.text;pending.entries=options.draft.entries;pending.stockSignature=options.draft.stockSignature;
+    }
     pending.attemptedAt=Date.now();inventoryRiskSaveState_(state);
     var response=inventoryRiskSlack_('chat.postMessage',{channel:pending.channel,text:pending.text,unfurl_links:false,unfurl_media:false,
       client_msg_id:pending.id,metadata:{event_type:'inventory_risk_alert',event_payload:{id:pending.id}}});
@@ -155,6 +158,7 @@ function flushInventoryRiskAlerts(event) {
     p.setProperty(INVENTORY_RISK_PREFIX_+'lastScan',JSON.stringify({at:report.generatedAt,elapsedMs:Date.now()-started,
       coverage:report.coverage,conflicts:report.conflictCount,risks:report.riskCount,sourceUnavailable:!!report.sourceUnavailable}));
     schedule=inventoryRiskNotificationSchedule_(state,Date.now());
+    if(!state.pending && !inventoryRiskDailyDraft_(report,state).text)return {status:'identity_review_queued'};
     if(state.pending && !inventoryRiskDeliver_(state,{allowSend:schedule.due,draft:schedule.due?inventoryRiskDailyDraft_(report,state):null})){
       return {status:schedule.due?'pending':'scheduled',nextNotificationAt:schedule.nextNotificationAt};
     }
@@ -165,6 +169,7 @@ function flushInventoryRiskAlerts(event) {
         nextNotificationAt:schedule.nextNotificationAt,conflicts:report.conflictCount,risks:report.riskCount};
     }
     var draft=inventoryRiskDailyDraft_(report,state);
+    if(!draft.text)return {status:'identity_review_queued'};
     state.pending={id:Utilities.getUuid(),createdAt:Date.now(),channel:p.getProperty(INVENTORY_RISK_PREFIX_+'channel'),
       text:draft.text,entries:draft.entries,stockSignature:draft.stockSignature};
     inventoryRiskSaveState_(state);

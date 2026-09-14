@@ -2,6 +2,7 @@ import 'server-only';
 import {getInventoryAuditServiceClient} from './inventoryAuditDb';
 import {getInventoryAuditMirrorConfig} from './inventoryAuditMirrorCore.mjs';
 import {validateStockConfirmation,stockThreadHash,stockNameKey,stockGasRequest,stockQuestionBatch} from './slackStockCore.mjs';
+import {enrichInventoryReviewContext,applyInventoryReview,inventoryQuestionDelivery} from './inventoryReview';
 type Obj=Record<string,any>;
 async function gas(action:string,body:Obj={},timeoutMs=30000) {
  const {gasUrl,gasKey}=getInventoryAuditMirrorConfig();
@@ -9,7 +10,9 @@ async function gas(action:string,body:Obj={},timeoutMs=30000) {
  const response=await fetch(request.url,{...request.options,signal:AbortSignal.timeout(timeoutMs)});
  const data=await response.json();if(!response.ok || data.success===false || data.error)throw Error('재고 원장 연결 확인 필요');return data;
 }
-async function context(){const data=await gas('run',{func:'getInventoryStockQuestions',args:[]});if(!data.result?.reports)throw Error('재고 보고 조회 실패');return data.result;}
+async function context(){const data=await gas('run',{func:'getInventoryStockQuestions',args:[{refresh:true}]});if(!data.result?.reports)throw Error('재고 보고 조회 실패');return enrichInventoryReviewContext(data.result);}
+export async function processInventoryQuestionDelivery(body:Obj){return inventoryQuestionDelivery(body,context);}
+export async function reviewStock(input:unknown,execute:boolean){const result=await applyInventoryReview(await context(),input,execute);if(execute&&result.action==='link_existing'){const fresh=await context();result.effective=fresh.equipment.some((e:Obj)=>e.id===result.equipmentId&&(e.aliases||[]).includes(result.sourceName));if(!result.effective)throw Error('장비 연결 저장 완료; 실제 재고 계산 반영 확인 재시도 필요');}return result;}
 function ownerIds(){const ids=(process.env.SLACK_INVENTORY_OWNER_IDS || '').split(',').map(s=>s.trim()).filter(Boolean);if(!ids.length || ids.some(s=>!/^U[A-Z0-9]+$/.test(s)))throw Error('재고 확인 소유자 설정 필요');return ids;}
 // The authenticated local collector owns Slack credentials and fetches the complete
 // thread again immediately before apply, just as the existing SlackOps collector.
@@ -23,7 +26,7 @@ async function thread(report:Obj,evidence:Obj){
 export async function getStockReports(reportId?:unknown){
  const c=await context();if(reportId!==undefined && (typeof reportId!=='string'||!c.reports.some((r:Obj)=>r.id===reportId)))throw Error('현재 미해결 재고 보고가 아닙니다');
  const reports=reportId?c.reports.filter((r:Obj)=>r.id===reportId):stockQuestionBatch(c.reports);
- return {ok:true,reports,deferred:reportId?0:Math.max(0,c.reports.length-reports.length)};
+ return {ok:true,reports,deferred:reportId?0:Math.max(0,c.reports.length-reports.length),investigations:c.investigations,catalog:c.catalog,catalogHash:c.catalogHash,sourceIssues:c.sourceIssues||[]};
 }
 async function mirrorOne(equipmentId:string) {
  const db=getInventoryAuditServiceClient();const {data:row,error}=await db.from('equipment_ledger').select('*').eq('equipment_id',equipmentId).single();if(error || !row)throw Error('생성한 재고 원장 조회 실패');
@@ -61,8 +64,8 @@ export async function scanStockQuestions(evidence:unknown){
 export async function confirmStockQuestion(input:unknown,execute:boolean){
  const raw=(input || {}) as Obj,c=await context(),report=c.reports.find((r:Obj)=>r.id===raw.reportId);if(!report)throw Error('현재 미해결 재고 보고가 아닙니다');
  const messages=await thread(report,raw.threadEvidence),plan=validateStockConfirmation(raw.confirmation,{report,messages,ownerIds:ownerIds(),catalog:c.sets,equipment:c.equipment});
- const set=c.sets.find((s:Obj)=>s.name===plan.catalogName),price=Number(String(set?.price || '').replace(/,/g,''));
- const item={name:plan.catalogName,major:plan.major,category:plan.category,stock_total:plan.stockTotal,stock_maint:plan.stockMaintenance,price:Number.isInteger(price)&&price>=0?price:null};
+ const set=c.sets.find((s:Obj)=>s.name===plan.catalogName),price=set?.price==null||String(set.price).trim()===''?null:Number(String(set.price).replace(/,/g,''));
+ const item={name:plan.catalogName,major:plan.major,category:plan.category,stock_total:plan.stockTotal,stock_maint:plan.stockMaintenance,price:price!==null&&Number.isInteger(price)&&price>=0?price:null};
  const evidence={ownerId:plan.ownerId,channel:report.channel,threadTs:report.ts,reportId:report.id,sourceMessageTs:plan.sourceMessageTs,sourceHash:plan.sourceHash,quote:plan.quote};
  if(!execute)return {ok:true,dryRun:true,item,evidence,sourceKey:plan.sourceKey};
  const db=getInventoryAuditServiceClient();const {data,error}=await db.rpc('confirm_missing_inventory_stock',{p_source_key:plan.sourceKey,p_item:item,p_evidence:evidence});if(error)throw Error('재고 원장이 바뀌었거나 등록을 완료하지 못했습니다. 다시 조회해 주세요');

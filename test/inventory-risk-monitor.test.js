@@ -10,7 +10,7 @@ function env(){
  const lock={tryLock:()=>{if(held)return false;held=true;return true;},releaseLock:()=>{held=false;}};
  const ctx={Date:Clock,PropertiesService:{getScriptProperties:()=>props},CacheService:{getScriptCache:()=>({get:k=>cache[k]??null,put:(k,v)=>cache[k]=v,remove:k=>delete cache[k]})},LockService:{getScriptLock:()=>lock},Utilities:{DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(a,s)=>[...crypto.createHash('sha256').update(s).digest()],getUuid:()=>crypto.randomUUID(),formatDate:d=>d.toISOString().slice(0,10)}};
  vm.createContext(ctx);
- for(const file of ['../inventoryRiskMonitor.js','../inventoryRiskDelivery.js'])if(fs.existsSync(require.resolve(file)))vm.runInContext(fs.readFileSync(require.resolve(file),'utf8'),ctx);
+ for(const file of ['../inventoryRisk.js','../inventoryRiskMonitor.js','../inventoryRiskDelivery.js'])if(fs.existsSync(require.resolve(file)))vm.runInContext(fs.readFileSync(require.resolve(file),'utf8'),ctx);
  return {ctx,props,values,lock,setNow:value=>{now=Date.parse(value);}};
 }
 const alert={key:'shortage|CAM-1|s1',kind:'shortage',severity:'conflict',equipment:'FX3',stock:1,booked:2,shortage:1,start:'2026-09-15T01:00:00Z',end:'2026-09-15T09:00:00Z',bookings:[{scheduleId:'s1',tradeId:'t1',customer:'예약자',quantity:2,start:'2026-09-15T01:00:00Z',end:'2026-09-15T09:00:00Z'}]};
@@ -149,4 +149,10 @@ test('Slack read methods use query arguments and rate-limit retries honor Retry-
  assert.throws(()=>c.inventoryRiskSlack_('conversations.history',{channel:'C123'}));
  assert.throws(()=>c.inventoryRiskSlack_('conversations.history',{channel:'C123'}));
  assert.equal(calls,1);
+});
+
+test('an old unsent vague identity alert is retired without posting null or claiming inventory clear',()=>{
+ const e=deliveryEnv(),c=e.ctx;const unknown={...alert,kind:'unknown_equipment',severity:'risk'};
+ e.setAlerts([unknown]);c.inventoryRiskSaveState_({entries:{},pending:{id:'old',createdAt:c.Date.now()-120000,attemptedAt:c.Date.now()-120000,channel:'C123',text:'old vague alert'}});
+ const result=c.flushInventoryRiskAlerts();assert.equal(result.status,'identity_review_queued');assert.equal(e.posts.length,0);assert.equal(c.inventoryRiskLoadState_().pending,null);
 });
