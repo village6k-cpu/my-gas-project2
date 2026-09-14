@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 
 const ALLOWED_INPUT_FIELDS = new Set([
-  'tradeId', 'operationId', 'sourceRequestId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate', 'staffApproval'
+  'tradeId', 'operationId', 'sourceRequestId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate', 'staffApproval', 'priceChanges'
 ]);
 const ALLOWED_DATE_FIELDS = new Set([
   'newStartDate', 'newEndDate', 'startTime', 'endTime', 'allowConflicts'
@@ -150,6 +150,26 @@ function normalizeStaffApproval(value) {
   };
 }
 
+function normalizePriceChanges(value, tradeId) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.length || value.length > 10) throw new Error('priceChanges must contain 1 to 10 exact rows');
+  var seen = {};
+  return value.map(function(entry) {
+    var allowed = { scheduleId: true, expectedName: true, expectedQty: true, expectedUnitPrice: true, unitPrice: true };
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).some(function(key) { return !allowed[key]; })) throw new Error('invalid priceChanges fields');
+    var id = entry.scheduleId, name = entry.expectedName;
+    if (typeof id !== 'string' || !/^\d{6}-\d{3}-\d+$/.test(id) || id.indexOf(tradeId + '-') !== 0 || seen[id]) throw new Error('invalid or duplicate priceChanges scheduleId');
+    if (typeof name !== 'string' || !name.trim() || name.length > 160) throw new Error('priceChanges expectedName required');
+    if (!Number.isSafeInteger(entry.expectedQty) || entry.expectedQty < 1 || entry.expectedQty > 99) throw new Error('invalid priceChanges expectedQty');
+    ['expectedUnitPrice', 'unitPrice'].forEach(function(key) {
+      if (!Number.isSafeInteger(entry[key]) || entry[key] < 0) throw new Error('invalid priceChanges ' + key);
+    });
+    if (entry.expectedUnitPrice === entry.unitPrice) throw new Error('priceChanges must change the unit price');
+    seen[id] = true;
+    return { scheduleId: id, expectedName: name.trim(), expectedQty: entry.expectedQty, expectedUnitPrice: entry.expectedUnitPrice, unitPrice: entry.unitPrice };
+  });
+}
+
 function normalizeCorrectionInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('correction input must be a JSON object');
@@ -238,13 +258,18 @@ function normalizeCorrectionInput(input) {
     sendEstimate: booleanValue(input.sendEstimate, 'sendEstimate', false),
     staffApproval: normalizeStaffApproval(input.staffApproval)
   };
+  const priceChanges = normalizePriceChanges(input.priceChanges, tradeId);
+  if (priceChanges.length) {
+    if (!normalized.staffApproval || !normalized.expectedPeriod || normalized.dateChange || remove.length || add.length || normalized.sourceRequestId || normalized.sendEstimate) throw new Error('priceChanges requires staffApproval and expectedPeriod, and must be price-only without send');
+    normalized.priceChanges = priceChanges;
+  }
   if (normalized.staffApproval) {
     if (!normalized.expectedPeriod) throw new Error('staffApproval requires expectedPeriod');
     if (remove.some(entry => entry.expectedQty === undefined)) {
       throw new Error('staffApproval requires exact removal expectedQty');
     }
   }
-  if (!normalized.dateChange && remove.length === 0 && add.length === 0 && !normalized.sendEstimate) {
+  if (!normalized.dateChange && remove.length === 0 && add.length === 0 && !normalized.sendEstimate && !priceChanges.length) {
     throw new Error('At least one correction or send must be requested');
   }
   if (normalized.sourceRequestId && remove.length === 0 && add.length === 0) {
@@ -349,6 +374,39 @@ function sendSummary(payload) {
   };
 }
 
+function verifyPriceCorrectionReadback(normalized, payload) {
+  if (!normalized.priceChanges) return true;
+  const proof = payload.priceReadback;
+  if (!proof || JSON.stringify(proof) !== JSON.stringify(payload.authoritativeReadback?.priceChanges)
+      || !Number.isSafeInteger(proof.contractAmount) || proof.contractAmount < 0
+      || proof.contractAmount !== proof.ledgerAmount || proof.ledgerAmount !== payload.readback?.ledger?.amount
+      || proof.contractUrl !== payload.contractRegeneration?.url || proof.contractUrl !== payload.readback?.ledger?.contractLink
+      || !/^[a-f0-9]{64}$/.test(proof.beforeDigest || '') || !/^[a-f0-9]{64}$/.test(proof.afterDigest || '')) return false;
+  const beforeContract = payload.authoritativeReadback?.before?.contract;
+  const afterContract = payload.readback?.contract;
+  if (!beforeContract || !afterContract || JSON.stringify(beforeContract) !== JSON.stringify(afterContract)
+      || Object.keys(normalized.expectedPeriod).some(key => afterContract[key] !== normalized.expectedPeriod[key])
+      || JSON.stringify(payload.authoritativeReadback?.before?.schedule?.rows) !== JSON.stringify(proof.before)) return false;
+  const changes = normalized.priceChanges;
+  for (const key of ['before', 'after', 'contractItems']) {
+    if (!Array.isArray(proof[key]) || proof[key].length !== changes.length) return false;
+    const ids = new Set();
+    for (const change of changes) {
+      const rows = proof[key].filter(row => row.scheduleId === change.scheduleId);
+      const row = rows[0];
+      if (rows.length !== 1 || ids.has(row.scheduleId) || row.name !== change.expectedName || row.qty !== change.expectedQty || row.isComponent !== false
+          || row.unitPrice !== (key === 'before' ? change.expectedUnitPrice : change.unitPrice)) return false;
+      ids.add(row.scheduleId);
+    }
+  }
+  for (const change of changes) {
+    const rows = payload.readback?.schedule?.rows?.filter(row => row.scheduleId === change.scheduleId);
+    const row = rows?.[0];
+    if (rows?.length !== 1 || row.name !== change.expectedName || row.qty !== change.expectedQty || row.unitPrice !== change.unitPrice || row.isComponent !== false) return false;
+  }
+  return true;
+}
+
 async function runRegisteredTradeCorrection({
   config,
   input,
@@ -358,7 +416,7 @@ async function runRegisteredTradeCorrection({
   if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
   const normalized = normalizeCorrectionInput(input);
   const appliedStages = [];
-  const hasCorrection = !!normalized.dateChange || normalized.remove.length > 0 || normalized.add.length > 0;
+  const hasCorrection = !!normalized.dateChange || normalized.remove.length > 0 || normalized.add.length > 0 || !!normalized.priceChanges;
   let correctionPayload = null;
   if (hasCorrection) {
     const args = {
@@ -369,7 +427,8 @@ async function runRegisteredTradeCorrection({
       ...(normalized.expectedPeriod ? { expectedPeriod: normalized.expectedPeriod } : {}),
       ...(normalized.dateChange ? { dateChange: normalized.dateChange } : {}),
       ...(normalized.remove.length ? { remove: normalized.remove } : {}),
-      ...(normalized.add.length ? { add: normalized.add } : {})
+      ...(normalized.add.length ? { add: normalized.add } : {}),
+      ...(normalized.priceChanges ? { priceChanges: normalized.priceChanges } : {})
     };
     correctionPayload = await postAction({
       config,
@@ -415,6 +474,7 @@ async function runRegisteredTradeCorrection({
       || !validAuthoritativeReadback
       || !validRegeneration
       || !validRequestFinalization
+      || !verifyPriceCorrectionReadback(normalized, correctionPayload)
       || correctionPayload.customerNotificationSent !== false
     ) {
       throw new CorrectionStageError(
@@ -470,7 +530,8 @@ async function runRegisteredTradeCorrection({
     send,
     readback: correctionPayload?.readback || null,
     authoritativeReadback: correctionPayload?.authoritativeReadback || null,
-    requestFinalization: correctionPayload?.requestFinalization || null
+    requestFinalization: correctionPayload?.requestFinalization || null,
+    ...(normalized.priceChanges ? { priceReadback: correctionPayload.priceReadback } : {})
   };
 }
 

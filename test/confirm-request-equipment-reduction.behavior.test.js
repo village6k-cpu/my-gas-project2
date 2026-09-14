@@ -15,6 +15,7 @@ function fixture(rows, realWriter = false) {
   let writes = 0;
   const sheet = { getLastRow: () => rows.length + 1, getRange: (r, c, nr, nc) => {
     const range = { getValues: () => rows,
+      getDataValidations: () => Array.from({ length: nr || 1 }, () => [null]),
       setValues: (values) => { writes++; values.forEach((line, i) => line.forEach((v, j) => { rows[r - 2 + i][c - 1 + j] = v; })); return range; },
       setValue: (v) => { writes++; rows[r - 2][c - 1] = v; return range; },
       setNumberFormat: () => range, setFontWeight: () => range, setBackground: () => range };

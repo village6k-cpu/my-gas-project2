@@ -140,6 +140,62 @@ test('sync atomically installs only reviewed files, preserves config, and is ide
   assert.equal(second.manifestSha256, first.manifestSha256);
 });
 
+for (const itemIndent of ['  ', '    ']) {
+  for (const alreadyEnabled of [true, false]) {
+    test(`sync preserves ${itemIndent.length}-space enabled lists with existing=${alreadyEnabled}`, () => {
+      const fixture = makeFixture();
+      const configPath = path.join(fixture.profile, 'config.yaml');
+      const enabledLines = [
+        '  enabled: # preserve enabled comment',
+        `${itemIndent}- existing_plugin`,
+        ...(alreadyEnabled ? [`${itemIndent}- 'kakao_village' # keep this comment`] : []),
+      ];
+      const unrelated = ['  disabled:', '    - unrelated_plugin', '  options:', '    unchanged: true'];
+      writeFileSync(configPath, ['plugins: # installed plugins', ...enabledLines, ...unrelated, 'platforms:', '  slack:', '    enabled: true', ''].join('\n'));
+
+      const planned = runSync({ ...fixture, planOnly: true });
+      assert.deepEqual(planned.configPlan.pluginsEnabled, ['existing_plugin', 'kakao_village']);
+      assert.equal(planned.configPlan.pluginsEnabled.includes('unrelated_plugin'), false);
+      runSync(fixture);
+      const merged = readFileSync(configPath, 'utf8').replaceAll('\r\n', '\n');
+      const expectedLines = [...enabledLines, ...(!alreadyEnabled ? [`${itemIndent}- kakao_village`] : [])];
+      assert.ok(merged.includes(['plugins: # installed plugins', ...expectedLines, ...unrelated].join('\n')));
+      assert.equal((merged.match(/^\s*-\s*'?kakao_village'?/gm) || []).length, 1);
+      assert.equal(runSync(fixture).changed, false);
+    });
+  }
+}
+
+test('sync preserves inline enabled comments and does not read sibling lists as enabled', () => {
+  const fixture = makeFixture();
+  const configPath = path.join(fixture.profile, 'config.yaml');
+  writeFileSync(configPath, 'plugins:\n  enabled: [existing_plugin] # keep inline comment\n  disabled:\n    - kakao_village\n');
+  const result = runSync(fixture);
+  const merged = readFileSync(configPath, 'utf8');
+  assert.deepEqual(result.configPlan.pluginsEnabled, ['existing_plugin', 'kakao_village']);
+  assert.match(merged, /enabled: \[existing_plugin, kakao_village\] # keep inline comment/);
+  assert.match(merged, /disabled:\r?\n    - kakao_village/);
+  assert.equal(runSync(fixture).changed, false);
+});
+
+test('sync rejects malformed enabled data before changing the profile or installing files', () => {
+  for (const enabled of [
+    '  enabled:\n  - kakao_village\n    - kakao_village',
+    '  enabled: kakao_village',
+    '  enabled:\n    nested: kakao_village',
+    '  enabled: [existing_plugin]\n  enabled: [kakao_village]',
+  ]) {
+    const fixture = makeFixture();
+    const configPath = path.join(fixture.profile, 'config.yaml');
+    const original = `plugins:\n${enabled}\n`;
+    writeFileSync(configPath, original);
+    assert.match(runSync({ ...fixture, expectOk: false }), /plugins\.enabled|enabled list/i);
+    assert.equal(readFileSync(configPath, 'utf8'), original);
+    assert.equal(existsSync(path.join(fixture.profile, 'plugins', 'kakao_village')), false);
+    assert.equal(existsSync(path.join(fixture.profile, 'plugin-state', 'kakao_village.json')), false);
+  }
+});
+
 test('sync refuses dirty reviewed sources', () => {
   const fixture = makeFixture();
   writeFileSync(path.join(fixture.source, 'adapter.py'), 'VALUE = "dirty"\n');

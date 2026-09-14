@@ -909,7 +909,7 @@ function updateContractLink(거래ID, contractUrl, finalAmount, options) {
 
     try { if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]); } catch (cacheErr) {}
     try { if (typeof touchDashboardSearchCacheVersion_ !== 'undefined') touchDashboardSearchCacheVersion_(); } catch (searchErr) {}
-    try { if (typeof invalidateDashboardCache !== 'undefined') invalidateDashboardCache(); } catch (dashErr) {}
+    try { if (typeof invalidateDashboardCacheForTrade_ !== 'undefined') invalidateDashboardCacheForTrade_(거래ID); } catch (dashErr) {}
     try { if (typeof invalidateTimelineCache !== 'undefined') invalidateTimelineCache(); } catch (timeErr) {}
     try { if (typeof supaMarkTradeDirty_ !== 'undefined') supaMarkTradeDirty_(거래ID); } catch (markErr) {}
     Logger.log("개고생2.0 거래내역 C열 링크/I열 금액 입력 완료: " + 거래ID + " / " + finalAmount);
@@ -1144,19 +1144,19 @@ function clearDirectContractRegenPending_(거래ID) {
   try {
     PropertiesService.getScriptProperties().deleteProperty('contractEditTS_' + 거래ID);
   } catch (e) {}
-  // 새 계약서 링크(거래내역 C열)가 Supabase/앱으로 전파되도록 동기화 마킹
-  try {
-    if (typeof supaMarkTradeDirty_ !== 'undefined') supaMarkTradeDirty_(거래ID);
-  } catch (eMark) {}
   try {
     if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]);
   } catch (e1) {}
   try {
-    if (typeof invalidateDashboardCache !== 'undefined') invalidateDashboardCache();
+    if (typeof invalidateDashboardCacheForTrade_ !== 'undefined') invalidateDashboardCacheForTrade_(거래ID);
   } catch (e2) {}
   try {
     if (typeof invalidateTimelineCache !== 'undefined') invalidateTimelineCache();
   } catch (e3) {}
+  // 미래 날짜 캐시에 남은 빈 링크/금액을 다시 push하지 않도록 캐시 무효화 후 마킹.
+  try {
+    if (typeof supaMarkTradeDirty_ !== 'undefined') supaMarkTradeDirty_(거래ID);
+  } catch (eMark) {}
 }
 
 function getGeneratedContractSummary_(fileId) {
