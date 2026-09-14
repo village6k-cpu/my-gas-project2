@@ -1706,6 +1706,26 @@ function auditScriptProperties() {
   var config = keys.filter(function (k) { return !/^(itemCheck|setupDone|setupDoneAt|checkoutBaselineStarted)_/.test(k); });
   Logger.log('── 설정/기타(보존해야 함) ' + config.length + '개 ──');
   Logger.log('  ' + config.join('\n  '));
+  // 내부 운영 진단에는 취소 큐의 진행 상태만 반환한다. 설정값/토큰은 반환하지 않는다.
+  var cancellations = keys.filter(function(k) {
+    return k.indexOf('cancelCleanup_v1_') === 0;
+  }).map(function(k) {
+    var state = parseCancelledTradeCleanup_(all[k], k.substring('cancelCleanup_v1_'.length));
+    return {
+      tradeId: state.tradeId, status: state.status, attempts: state.attempts,
+      queuedAt: Number(state.queuedAt || 0), nextAt: state.nextAt,
+      leaseUntil: state.leaseUntil,
+      completed: { supabase: !!state.completed.supabase,
+        externalLedger: !!state.completed.externalLedger, drive: !!state.completed.drive },
+      lastError: String(state.lastError || '').replace(/https?:\/\/\S+/g, '[url]').slice(0, 1000)
+    };
+  });
+  return { propertyCount: keys.length, cancellations: cancellations,
+    cancellationTriggerAt: Number(all.cancelCleanupTriggerAt_v1 || 0),
+    cancellationDirty: cancellations.filter(function(s) {
+      return !!all[SUPA_DIRTY_PREFIX_ + s.tradeId];
+    }).map(function(s) { return s.tradeId; }) };
+
 }
 
 /**
