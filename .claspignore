@@ -3,6 +3,8 @@
 .worktrees/**
 
 # Agent/tool scratch files (GAS 업로드 금지)
+.tmp/**
+**/*.test.js
 .superpowers/**
 .gstack/**
 test/**
