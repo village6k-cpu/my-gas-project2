@@ -8,7 +8,7 @@ Native Hermes must interpret the full same-room conversation. Wording is open-en
 
 Reason over verified speaker roles, DOM order, the exact equipment, quantities, period and requested operation, plus any correction or superseding message. A clear, current and unconditional staff reply may itself authorize that exact mutation; a later customer acceptance can corroborate it but is not required.
 
-`네` or `가능합니다` **is authorization** when the full conversation makes it the staff's clear, current answer approving the exact pending request. The identical word in an unrelated, ambiguous, conditional, or superseded context does not approve that request. Code must never decide this from the token alone; native Hermes decides from meaning. Conditional or tentative replies, partial scope, an unresolved stock check, customer-authored wording, or stale staff evidence are not authorization. If meaning or scope is uncertain, do not mutate and route one no-send owner review.
+`네` or `가능합니다` **is authorization** when the full conversation makes it the staff's clear, current answer approving the exact pending request. The identical word in an unrelated, ambiguous, conditional, or superseded context does not approve that request. Code must never decide this from the token alone; native Hermes decides from meaning. Conditional or tentative replies, partial scope, a condition explicitly stated by staff that remains unresolved, customer-authored wording, or stale staff evidence are not authorization. If meaning or scope is uncertain, do not mutate and route one no-send owner review.
 
 ## Correct handling
 
@@ -36,3 +36,7 @@ Semantic regression scenarios must vary the language while preserving meaning, a
 - literal `가능합니다` followed by a condition or unresolved check: do not authorize;
 - literal `네` whose target is another question or whose speaker is the customer: do not authorize;
 - later staff correction or different room revision: do not authorize.
+
+## Current supply policy
+
+When staff unconditionally accepts the exact request, stock conflicts and missing catalog links do not block registration or changes. Preserve the approved demand and queue mandatory owner supply/master-data follow-up; external procurement remains an owner decision. An internal stock check warning is not a condition in the conversation. Do not wait for Slack delivery before writing the approved schedule. Keep identity, exact baseline, chronological evidence and duplicate-write protections.

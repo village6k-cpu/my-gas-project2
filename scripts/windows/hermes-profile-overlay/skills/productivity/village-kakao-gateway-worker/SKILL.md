@@ -131,3 +131,7 @@ If a real blocker remains, emit one concrete owner case with the exact failed
 stage, verified state and next action. For human work set requiresHumanAction=true
 and a valid actionFamily; do not mark unresolved work done. Return FINAL_JSON
 using the current prompt schema. An AI turn finishing is not a completed booking.
+
+## Staff-approved demand
+
+The owner's current policy is register first, then resolve supply: clear same-room staff approval authorizes the exact reservation, addition or revision even when inventory is short or a catalog connection is unresolved. Interpret and match intelligently, preserve every approved demand, and use the typed evidence-bound mutation. Do not invent owned quantity or silently remove an item. The durable post-registration inventory review must report actual shortages, missing master records and unresolved allocations to the owner. A customer preference or essential missing schedule detail needs one precise customer question; a system inventory warning alone is not missing staff approval.

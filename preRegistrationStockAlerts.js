@@ -238,16 +238,20 @@ function preRegistrationStockDeliver_(evaluation) {
   }
 }
 
-function queuePreRegistrationStockCheck_(requestId) {
+function queuePreRegistrationStockCheck_(requestId,options) {
+  options=options || {};
   var p=PropertiesService.getScriptProperties();
-  if(p.getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true' || !/^RQ-\d{6}-\d{3}$/.test(String(requestId)))return;
+  if((p.getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true' && !options.forceQueue) || !/^RQ-\d{6}-\d{3}$/.test(String(requestId)))return;
   // Writers own dirty; the consumer only writes checked. A newer generation can
   // never be erased by an older check completing between a comparison and delete.
   // Ordinary request writes already own UserLock; registration owns ScriptLock.
   // A direct API queue takes UserLock so retention can briefly fence both writers.
   var inputLock=LockService.getUserLock(),ownsInputLock=false;
   if(!inputLock.hasLock() && !LockService.getScriptLock().hasLock()){inputLock.waitLock(30000);ownsInputLock=true;}
-  try {p.setProperty(PREREG_STOCK_PREFIX_+'dirty_'+requestId,Date.now()+':'+Utilities.getUuid());}
+  try {
+    if(options.includeRegistered===true)p.setProperty(PREREG_STOCK_PREFIX_+'registered_'+requestId,'true');
+    p.setProperty(PREREG_STOCK_PREFIX_+'dirty_'+requestId,Date.now()+':'+Utilities.getUuid());
+  }
   finally {if(ownsInputLock)inputLock.releaseLock();}
 }
 

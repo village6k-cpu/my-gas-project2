@@ -723,18 +723,19 @@ export function buildHermesPrompt(job, options = {}) {
 - 최초 확인요청 입력에는 staff_confirmed_mutation이 필요 없다. 고객 장비 문의 자체만으로 village_confirmation_request를 호출하고, 직원의 이후 답변은 별도의 등록·변경 권한으로 의미 판단한다.
 - Clear, unconditional staff authorization of an exact pending RQ must use village_confirmed_reservation_commit. Use village_confirmation_request maintenance only for an explicit RQ edit that does not authorize registration.
 - Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use village_registered_reservation_change before FINAL_JSON and verify its authoritative result. Authority comes from the current registered trade, exact schedule rows/period and staff approval. A prior intake RQ may have been finalized or removed; its absence does not block a registered change. For equipment changes, include request_id only when a live pending inquiry for this exact change exists, with the same single ID in existing_confirm_request_ids; otherwise omit request_id and use existing_confirm_request_ids=[]. date_time_change carries neither. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
+    '같은 대화 snapshot에서 직원이 장비와 대여 일시 변경을 함께 승인했다면 kind=equipment_and_date_change로 한 번의 village_registered_reservation_change 호출에 묶는다. expected_before에는 제거·교체할 정확한 스케줄 행만, desired_after에는 추가·교체할 수량만, date_change에는 승인된 변경 기간을 담는다. 일시만 먼저 적용한 뒤 장비를 두 번째 mutation으로 남기지 않는다.',
 - Read the full same-room conversation. Native Hermes—not code or keywords—semantically decides whether a Village staff reply clearly and unconditionally authorizes the exact customer request; wording is open-ended.
 - Before choosing pending registration, compare the customer and period with active registered trades. An existing RQ can represent additions to that trade; in that case use village_registered_reservation_change with the exact missing delta and matching RQ, not a second pending registration. Only an independent rental should become a separate trade.
 ${INVENTORY_JUDGMENT}
 
-- Before registration, use village_read(kind=request,query=exact RQ). For a new inquiry, use catalog query="*" for identity, then village_read(kind=quote,quote.source=catalog) with the proposed period and full items before deciding availability. The request/quote inventory_context includes full physical inventory, set manifests, source issues and period-specific modelChoices. Interpret these yourself: do not stop at a raw name mismatch, do not treat an included cable/packing manifest as an independent unavailable rental, and do not call a catalog-only stock record a matching failure or a shortage. Resolve real model choices from the full conversation and shop defaults, compare available choices, and put every choice in set_component_selections. If a material customer preference remains, prepare one specific customer question naming the viable choices through the existing reply authorization policy; keep the inquiry pending instead of a vague inventory owner task. Never invent a stock count, conflate different filter types, or drop a tracked demand. Data/transport failures remain evidence gaps.
+- Before registration, use village_read(kind=request,query=exact RQ). For a new inquiry, use catalog query="*" for identity, then village_read(kind=quote,quote.source=catalog) with the proposed period and full items before deciding availability. The request/quote inventory_context includes full physical inventory, set manifests, source issues and period-specific modelChoices. Interpret these yourself: do not stop at a raw name mismatch, do not treat an included cable/packing manifest as an independent unavailable rental, and do not call a catalog-only stock record a matching failure or a shortage. Resolve real model choices from the full conversation and shop defaults, compare available choices, and put every choice in set_component_selections. If a material customer preference remains, prepare one specific customer question naming the viable choices through the existing reply authorization policy; preserve approved demand and ask that concrete question; do not turn a supply or catalog warning into a registration block. Never invent a stock count, conflate different filter types, or drop a tracked demand. Data/transport failures remain evidence gaps.
 - For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit once before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
 - After a successful village_confirmed_reservation_commit receipt, FINAL_JSON may omit staff_confirmed_registration instead of copying the full input and set components again. The host retains the sealed authorization and exact readback. Report remaining questions with their reply_decision, price_quote and grounding context; do not re-read or re-register a verified successful operation just to restate it in FINAL_JSON.
 - Fast/coalesced turn: if this same snapshot contains the inquiry and clear staff authorization but no RQ exists, call village_confirmed_reservation_commit once with request_id=null. pending_request_candidate contains exactly customer_name, phone, discount_type, memo and extra_request. Put set_component_selections at registration top level, never inside pending_request_candidate. This atomic operation creates/reuses and verifies the RQ, applies exact choices and registers it. Never invent an RQ ID or split intake and registration into two calls.
 - Bind source_evidence to the immutable room snapshot: copy conversation_evidence_hash exactly, cite the exact customer_message_ids and staff_message_ids in DOM order, and copy those selected message texts verbatim (joined by real newline characters, not literal backslash-n) into customer_request and staff_confirmation. Never invent or summarize message evidence.
 - You own sender and authorization interpretation from the complete conversation. A DOM role of unknown means the extractor lacks explicit sender metadata; it does not mean the message is unusable. Use the visible conversation, adjacent turns, known sender roles and supplied bubble layout together to identify who spoke. Cite the existing message IDs under the roles you determined; never modify the snapshot or contradict a known opposing sender. If the actual speaker remains ambiguous after that review, do not claim authorization.
 - Evaluate the customer's current plan and whether staff authorization still applies across ALL subsequent turns. Quote requests, thanks and administrative replies can leave an earlier approval valid; cancellation, replacement requests, new conditions or withdrawn approval can invalidate it. Choose the applicable staff evidence semantically, even when it is not the last staff message or the final message. confirmed=true asserts your review of the current full conversation; no separate post_confirmation_review object is required. Do not register cancelled or not-yet-approved changes.
-- Conditional/tentative, ambiguous-target, unresolved-inventory, customer-authored, or stale evidence is not authorization: use staff_confirmed_registration=null and do not call the tool.
+- Only current, unambiguous staff approval authorizes registration. Stock/catalog warnings do not invalidate it: commit approved demand, then report supply.
 - After exact registration success, do not repeat the staff's confirmation. Use no_reply when no customer question remains. A separate later price question still deserves village_read and its independently verified price answer; retain any unfinished document task. A registration receipt does not mean that answer or document has already been delivered. Blocked/failed/partial/missing/contradictory receipt is one draft-only no-send owner review and is never auto-replayed.
 - A registered_trade mutation must not call village_confirmation_request to create or recreate an RQ as a prerequisite. If a live pending inquiry for this exact change exists, the registered tool links/finalizes it after authoritative schedule readback. If none exists, execute against the verified trade directly without request_id.
 - Do not parse RQ or trade IDs from prose. Only exact typed fields backed by authoritative lookups count.
@@ -1202,7 +1203,9 @@ function staffConfirmedMutationDecisionErrors(decision, mutation, options = {}) 
       errors.push('registered staff_confirmed_mutation requires safety_checks.no_auto_reply_sent=true');
     }
     if (mutation.kind === 'date_time_change') {
-      if (existingIds.length > 0 || Object.hasOwn(mutation, 'request_id')) {
+      // Existing request IDs may describe separate pending additions in this room.
+      // Only the typed mutation request_id claims authority to mutate an RQ.
+      if (Object.hasOwn(mutation, 'request_id')) {
         errors.push('registered date_time_change must not claim a confirmation request ID');
       }
     } else if (!Object.hasOwn(mutation, 'request_id')) {
@@ -1481,14 +1484,17 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
         const reply = decisionReply(decision);
         const preservedAsActionableFollowUp = followUps.some((item) => (
           text(item?.type).trim() === 'reservation_review'
-          && text(item?.route).trim() === 'schedule'
+          && (text(item?.route).trim() === 'schedule'
+            || (text(item?.route).trim() === 'inventory'
+              && text(item?.actionFamily).trim() === 'inventory_check'
+              && item?.requiresHumanAction === true))
           && text(item?.status).trim() === 'open'
           && text(item?.taskKey).trim()
         ))
           && text(reply.replyMode || reply.reply_mode).trim() === 'no_reply'
           && reply.shouldCreateTask === true;
         if (!preservedAsActionableFollowUp) {
-          errors.push('an unregistered already_answered reservation requires an actionable schedule follow-up');
+          errors.push('an unregistered already_answered reservation requires an actionable schedule follow-up or inventory review');
         }
       }
     }
@@ -10169,7 +10175,7 @@ function exactTrustedRegisteredReservationChangeReceipt(receipt, { jobId, roomKe
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text(receipt.operation_id).trim())) return false;
   if (receipt.job_id !== jobId || receipt.room_key !== roomKey || receipt.room_revision !== roomRevision) return false;
   if (receipt.target_scope !== 'registered_trade' || !/^\d{6}-\d{3}$/.test(text(receipt.trade_id).trim())) return false;
-  if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change']
+  if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change']
     .includes(text(receipt.mutation_kind).trim())) return false;
   if (!['ok', 'blocked', 'failed', 'partial_success'].includes(text(receipt.status).trim())) return false;
   if (!Array.isArray(receipt.applied_stages)
@@ -10698,18 +10704,38 @@ function forceRegisteredMutationOwnerReview(decision = {}, { job, receipt = null
   };
 }
 
+function registeredMutationInventoryFollowUps(decision = {}, receipt = {}) {
+  const warnings = Array.isArray(receipt.authoritative_result?.inventoryWarnings)
+    ? receipt.authoritative_result.inventoryWarnings : [];
+  if (!warnings.length) return [];
+  const tradeId = text(receipt.trade_id).trim();
+  const customer = text(decision.customer?.name || decision.sheet_row_candidate?.customer_name || '고객');
+  const details = [...new Set(warnings.map(warning => text(warning?.message || warning?.equipment || warning).trim()).filter(Boolean))];
+  return [{
+    type: 'reservation_review', route: 'inventory', taskKey: `registered-supply-review:${tradeId}`,
+    priority: 'high', status: 'open', customer_name: customer,
+    title: `${customer} 예약 반영 후 재고 확인`,
+    summary: `승인된 요청은 거래 ${tradeId}에 반영했습니다. ${details.join(' / ')}`.slice(0, 2000),
+    recommended_action: '카톡 원문·세트 구성·현재 장비마스터를 대조해 실제 부족분과 필요한 모델 선택을 확인하세요. 세트에 포함된 일반 구성품을 별도 부족으로 보고하지 말고, 실제 부족분은 외부 조달 또는 대체 장비를 확보한 뒤 필요한 변경을 고객에게 안내하세요.',
+    suggested_reply_draft: '', evidence: details,
+    requiresHumanAction: true, actionFamily: 'inventory_check', businessKey: `trade:${tradeId}`,
+    due_hint: 'now', alertLevel: 'none'
+  }];
+}
+
 function forceRegisteredMutationSuccess(decision = {}, receipt) {
+  const inventoryFollowUps = registeredMutationInventoryFollowUps(decision, receipt);
   return {
     ...decision,
     should_write_to_sheet: false,
-    owner_review_required: false,
+    owner_review_required: inventoryFollowUps.length > 0,
     post_action_reconciled: true,
     safety_checks: {
       ...(decision?.safety_checks && typeof decision.safety_checks === 'object' ? decision.safety_checks : {}),
       no_auto_reply_sent: true
     },
     follow_up_items: (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [])
-      .filter((item) => text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done'),
+      .filter((item) => text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done').concat(inventoryFollowUps),
     suggested_reply_draft: '',
     registered_mutation_readback: receipt.authoritative_result,
     trusted_registered_reservation_change_receipt: receipt,
@@ -10719,7 +10745,7 @@ function forceRegisteredMutationSuccess(decision = {}, receipt) {
       text: '',
       confidence: 'high',
       reason: '직원 확정 변경이 권위 있는 원장 readback으로 검증되어 중복 고객 답장을 보내지 않습니다.',
-      shouldCreateTask: false,
+      shouldCreateTask: inventoryFollowUps.length > 0,
       safetyClass: 'no_send',
       grounding: 'authoritative_sheet',
       requiresRag: false,

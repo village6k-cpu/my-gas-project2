@@ -1367,6 +1367,10 @@ test('server registered change executor maps authenticated worker config into th
     input: {
       tradeId: '260824-008',
       operationId: 'registered-operation-1',
+      staffApproval: {
+        source: 'kakao_staff_confirmed', conversationRevision: 8,
+        customerRequest: '교체 요청', staffConfirmation: '교체 확정'
+      },
       sourceRequestId: 'RQ-260824-021',
       expectedPeriod: {
         startDate: '2026-08-28', startTime: '09:00', endDate: '2026-08-29', endTime: '18:00'
@@ -1594,6 +1598,11 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
       assert.deepEqual(input, {
         tradeId: TASK7_INCIDENT.trade_id,
         operationId: input.operationId,
+        staffApproval: {
+          source: 'kakao_staff_confirmed', conversationRevision: 8,
+          customerRequest: '28-135 취소하고 sony 70-200 gm 2.8 로 부탁드립니당',
+          staffConfirmation: '네'
+        },
         sourceRequestId: TASK7_INCIDENT.request_id,
         expectedPeriod: {
           startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00'
@@ -7252,3 +7261,104 @@ test('conditional typed decision and stale pending baseline remain no-write', as
   assert.equal(runnerCalls, 1);
   assert.equal(writes, 0);
 });
+
+
+function recoveryApplicationJob(finalStatus = 'blocked', priorCount = 1) {
+  const identity = { job_id: 'job-input-correction', room_key: 'room-input-correction', room_revision: 7 };
+  const receipts = Array.from({ length: priorCount + 1 }, (_, index) => {
+    const status = index === priorCount ? finalStatus : 'blocked';
+    const operationId = 'operation-input-correction-' + index;
+    return {
+      ...identity, schema: 'village-registered-reservation-change-receipt/v1',
+      receipt_id: 'receipt-input-correction-' + index, operation_id: operationId,
+      lease_id: 'lease-input-correction', request_digest: 'digest-input-correction-' + index,
+      trade_id: '260914-007', status,
+      created_at: '2026-09-14T07:42:0' + index + '.000Z',
+      applied_stages: status === 'blocked' ? [] : ['scheduleCorrectRegisteredTrade'],
+      authoritative_result: status === 'blocked' ? null : { success: true },
+      error: status === 'blocked' ? { code: 'gas_rejected', details: {
+        code: 'REGISTERED_CORRECTION_PREFLIGHT_REJECTED', noMutationPerformed: true,
+        operationId, tradeId: '260914-007', attemptedStage: 'preflight', appliedStages: []
+      } } : null
+    };
+  });
+  const operations = receipts.map((receipt) => ({
+    ...identity, schema: 'village-tool-operation-reservation/v1', state: 'completed',
+    tool: 'registered_reservation_change', receipt_id: receipt.receipt_id,
+    operation_id: receipt.operation_id, lease_id: receipt.lease_id, request_digest: receipt.request_digest
+  }));
+  return {
+    ...identity, event: { ...identity }, result: { content: 'FINAL_JSON {}' },
+    local_context: { job: { jobId: identity.job_id, roomKey: identity.room_key, roomRevision: identity.room_revision },
+      turn_internal: { snapshot: {} } },
+    tool_operation_history: operations.slice(0, -1), tool_operation: operations.at(-1),
+    tool_receipts: receipts, application: { state: 'pending' }
+  };
+}
+
+async function applyRecoveryReceiptJob(durableJob) {
+  const observed = { preparedReceipts: null, failure: null, finalized: false };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel: {
+      async claimApplication() { return { claimed: true, application_id: 'application-recovery', job: structuredClone(durableJob) }; },
+      async beginApplication() {}, async recordApplicationApplied() {},
+      async finalizeApplication() { observed.finalized = true; },
+      async failApplication(input) { observed.failure = input; return null; },
+      async listPendingApplicationFailureNotifications() { return []; }, async markApplicationFailureNotified() {}
+    },
+    getConfig: () => ({}),
+    prepare: async ({ trustedToolReceipts }) => {
+      observed.preparedReceipts = trustedToolReceipts;
+      return { status: 'ai_prepared', snapshot: {}, decision: { reply_decision: { replyMode: 'no_reply' } } };
+    },
+    apply: async ({ prepared }) => ({ prepared, autoReplyResult: { attempted: false, sent: false } }),
+    finalize: async ({ applied }) => ({ ...applied.prepared, status: 'ai_completed' })
+  });
+  await coordinator.enqueue(durableJob);
+  await coordinator.idle();
+  return observed;
+}
+
+for (const finalStatus of ['blocked', 'ok']) {
+  for (const priorCount of [1, 2]) {
+    test('Gateway finalizes ' + finalStatus + ' after ' + priorCount + ' proven no-write registered input corrections', async () => {
+      const durableJob = recoveryApplicationJob(finalStatus, priorCount);
+      const observed = await applyRecoveryReceiptJob(durableJob);
+      assert.equal(observed.failure, null);
+      assert.equal(observed.finalized, true);
+      assert.deepEqual(observed.preparedReceipts, [durableJob.tool_receipts.at(-1)]);
+      assert.equal(durableJob.tool_receipts.length, priorCount + 1, 'durable evidence remains intact');
+    });
+  }
+}
+
+for (const [label, alter] of [
+  ['an earlier committed mutation', (job) => {
+    job.tool_receipts[0].status = 'ok'; job.tool_receipts[0].error = null;
+    job.tool_receipts[0].authoritative_result = { success: true };
+    job.tool_receipts[0].applied_stages = ['scheduleCorrectRegisteredTrade'];
+  }],
+  ['missing no-write proof', (job) => { delete job.tool_receipts[0].error.details.noMutationPerformed; }],
+  ['a historical receipt outside its operation', (job) => { job.tool_receipts[0].request_digest = 'unreserved-digest'; }],
+  ['a historical operation outside this room', (job) => { job.tool_operation_history[0].room_key = 'other-room'; }],
+  ['missing historical operation', (job) => { job.tool_operation_history = []; }],
+  ['a different lease', (job) => {
+    job.tool_receipts[0].lease_id = 'other-lease'; job.tool_operation_history[0].lease_id = 'other-lease';
+  }],
+  ['a different target trade', (job) => {
+    job.tool_receipts[0].trade_id = '260914-099'; job.tool_receipts[0].error.details.tradeId = '260914-099';
+  }],
+  ['duplicate native operation identity', (job) => {
+    job.tool_receipts[0].operation_id = job.tool_receipts[1].operation_id;
+    job.tool_operation_history[0].operation_id = job.tool_operation.operation_id;
+    job.tool_receipts[0].error.details.operationId = job.tool_operation.operation_id;
+  }]
+]) {
+  test('Gateway rejects correction history with ' + label, async () => {
+    const job = recoveryApplicationJob('ok'); alter(job);
+    const observed = await applyRecoveryReceiptJob(job);
+    assert.equal(observed.preparedReceipts, null);
+    assert.equal(observed.finalized, false);
+    assert.match(observed.failure.error.message, /gateway_durable_tool_receipt_set_invalid/);
+  });
+}

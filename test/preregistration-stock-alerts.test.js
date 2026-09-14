@@ -284,13 +284,13 @@ test('retention preserves future receipts and waits for request writers before p
  assert.equal(props.getProperty(prefix+'checked_'+id),null);assert.equal(props.getProperty(prefix+'state_'+id),null);
 });
 
-test('entry points queue checks and the registration hook precedes schedule writes',()=>{
+test('entry points queue checks and inventory review is prepared before schedule writes',()=>{
  const source=fs.readFileSync(path.join(__dirname,'../checkAvailability.js'),'utf8');
  const register=source.slice(source.indexOf('function registerByReqID('),source.indexOf('function registerByReqID(')+42000);
  assert.match(source,/queuePreRegistrationStockCheck_\(triggerReqID\)/);
  const process=source.slice(source.indexOf('function _processByReqID('),source.indexOf('function hasProcessedRows_('));
  assert.ok(process.indexOf('queuePreRegistrationStockCheck_')>process.lastIndexOf('SpreadsheetApp.flush()'));
- const hook=register.indexOf('checkPreRegistrationStockBeforeRegister_');
+ const hook=register.indexOf('prepareRegistrationInventoryReview_');
  assert.ok(hook>0);assert.ok(hook<register.indexOf('schedSheet.getRange('));
  const delivery=fs.readFileSync(path.join(__dirname,'../inventoryRiskDelivery.js'),'utf8');assert.match(delivery,/function inventoryRiskHeartbeat\(\)[\s\S]*?flushPreRegistrationStockAlerts/);
 });
@@ -552,4 +552,10 @@ test('invalid numeric maintenance in an upgrade candidate cannot silently clear 
   const result=c.preRegistrationStockEvaluate_(r,snapshot({sets:[],schedules:[],equipment:[lower,upper]}));
   assert.ok(result.shortages.length>0 || result.uncertain.length>0);
  }
+});
+test('staff-approved demand keeps its durable review after registration, even while delivery is disabled',()=>{
+ const {c,props}=env();props.setProperty('preRegStock_v1_enabled','false');
+ c.queuePreRegistrationStockCheck_('RQ-260914-099',{includeRegistered:true,forceQueue:true});
+ assert.equal(props.getProperty('preRegStock_v1_registered_RQ-260914-099'),'true');
+ assert.ok(props.getProperty('preRegStock_v1_dirty_RQ-260914-099'));
 });

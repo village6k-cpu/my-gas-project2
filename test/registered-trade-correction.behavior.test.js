@@ -41,6 +41,8 @@ function harness({
   lockAvailable = true,
   addPreflightError = '',
   addMutationError = '',
+  addWarnings = [],
+  dateConflicts = [],
   checkoutStarted = false,
   leaseError = '',
   structureQueuePending = false,
@@ -63,8 +65,12 @@ function harness({
   useRealVerification = false,
   sourceEquipment = null,
   sourceDriftsBeforeFinalize = false,
+  realSourcePeriodMatch = false,
+  sourcePeriod = null,
+  sourceWrongIdentity = false,
+  ambiguousSourceMatch = false,
 } = {}) {
-  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
   const body = section(
     gas,
     'function normalizeRegisteredTradeCorrection_',
@@ -74,13 +80,14 @@ function harness({
   const calls = {
     preflight: [], mutate: [], lockTries: 0, lockReleases: 0,
     regenerations: 0, notifications: 0, lockHeldDuringRegeneration: null, triggerLockStates: [], reads: 0,
-    removeEntries: [],
+    removeEntries: [], staffDemandTokens: [],
     durableCheckoutReads: 0, historicalProjectionCalls: [],
     addHistoricalToken: null, removeHistoricalToken: null,
     sourceGroupReads: 0, sourceFinalizations: 0, events: [],
   };
   let lockHeld = false;
   let sourceFinalized = false;
+  let contractDateChanged = false;
   const effectiveBaselineRows = baselineRows || [
     { scheduleId: '260813-005-01', setName: '', name: 'FX9', qty: 1, isComponent: false },
   ];
@@ -113,6 +120,15 @@ function harness({
       getActiveSpreadsheet() {
         return {
           getSheetByName(name) {
+            if (realSourcePeriodMatch && name === '계약마스터') {
+              const period = contractDateChanged ? {
+                startDate: input.dateChange.newStartDate, startTime: input.dateChange.startTime,
+                endDate: input.dateChange.newEndDate, endTime: input.dateChange.endTime,
+              } : input.expectedPeriod;
+              const row = [input.tradeId, '테스트 고객', '010-0000-0000', '', period.startDate, period.startTime, period.endDate, period.endTime, 3, ''];
+              const rows = ambiguousSourceMatch ? [row, ['260813-006', ...row.slice(1)]] : [row];
+              return { getLastRow: () => rows.length + 1, getRange: () => ({ getValues: () => rows, getDisplayValues: () => rows }) };
+            }
             if (name !== '확인요청') return null;
             return {
               getLastRow: () => 2,
@@ -184,9 +200,11 @@ function harness({
       assert.equal(lockHeld, true, 'date mutation must run under the outer lock');
       assert.equal(options.lockAlreadyHeld, true);
       assert.equal(options.deferContractRegeneration, true);
+      calls.staffDemandTokens.push(options.staffApprovalToken);
       calls.mutate.push('date');
       calls.events.push('mutate:date');
-      return { success: true, status: 'CHANGED', requested: args };
+      contractDateChanged = true;
+      return { success: true, status: 'CHANGED', requested: args, conflicts: dateConflicts, availabilityWarnings: [] };
     },
     dashboardAddEquipments(_tid, _entries, options) {
       assert.deepEqual(
@@ -195,11 +213,13 @@ function harness({
         'combined availability must exclude the exact removal plan',
       );
       assert.equal(options.requireExactCatalog, true);
+      calls.staffDemandTokens.push(options.staffApprovalToken);
       if (options.dryRun) {
         calls.preflight.push('add');
         return addPreflightError ? { error: addPreflightError } : {
           success: true,
           dryRun: true,
+          warnings: addWarnings,
           plannedItems: _entries.map((entry, index) => ({
             scheduleId: `260813-005-${12 + index}`,
             setName: '',
@@ -273,9 +293,10 @@ function harness({
       const equipment = sourceEquipment || [{ name: 'BURANO 8K', qty: 1 }];
       const drifted = sourceDriftsBeforeFinalize && calls.sourceGroupReads === 2;
       return [{
-        reqID: 'RQ-260906-013', rows: [2], name: '테스트 고객', phone: '010-0000-0000',
+        reqID: 'RQ-260906-013', rows: [2], name: sourceWrongIdentity ? '다른 고객' : '테스트 고객', phone: sourceWrongIdentity ? '010-9999-9999' : '010-0000-0000',
         startDate: input.expectedPeriod.startDate, startTime: input.expectedPeriod.startTime,
         endDate: input.expectedPeriod.endDate, endTime: input.expectedPeriod.endTime,
+        ...(sourcePeriod || {}),
         topLevelEquipItems: drifted ? [{ name: '다른 장비', qty: 1 }] : equipment,
         registerActions: sourceFinalized ? ['등록'] : [],
         statuses: sourceFinalized ? ['등록완료(기존거래 보강)'] : [],
@@ -293,6 +314,12 @@ function harness({
     },
   };
   vm.runInNewContext(`${body}\nthis.correct = correctRegisteredTrade; this.normalize = normalizeRegisteredTradeCorrection_; this.recoverSourceRequest = finalizeRegisteredTradeSourceRequestRecovery;`, context);
+  if (realSourcePeriodMatch) {
+    context._confirmRequestDateKey_ = (value) => String(value || '');
+    context._confirmRequestTimeKey_ = (value) => String(value || '');
+    vm.runInNewContext(section(gas, 'function _findRegisteredTradesForConfirmRequest_', '\nfunction _reconcileRegisteredConfirmRequest_') +
+      section(gas, 'function _findRegisteredTradeForConfirmRequest_', '\n/**'), context);
+  }
   const verifyActual = context.verifyRegisteredTradeCorrectionState_;
 
   context.readRegisteredTradeCorrectionState_ = () => {
@@ -887,7 +914,7 @@ test('GAS correction boundary rejects nested extras and lossy quantity coercion'
 });
 
 test('combined availability projection removes every expanded schedule id before checking stock', () => {
-  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
   const addBody = section(gas, 'function dashboardAddEquipments', '\nvar DASHBOARD_ONSITE_IDEM_PROP_');
   assert.match(addBody, /excludeScheduleIds/);
   assert.match(addBody, /projectedRows\s*=\s*projectedRows\.filter/);
@@ -900,7 +927,7 @@ test('combined availability projection removes every expanded schedule id before
 });
 
 test('actual single-equipment GAS add preserves schedule suffix 100 without changing row width', () => {
-  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
   const body = section(gas, 'function dashboardAddEquipment(', '\n/**\n * Dashboard에서 장비 삭제.');
   const tradeId = '260813-005';
   const existing = [
@@ -961,7 +988,7 @@ test('actual single-equipment GAS add preserves schedule suffix 100 without chan
 });
 
 test('actual batch/set GAS add allocates unique monotonic suffixes 100 and 101', () => {
-  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
   const body = section(gas, 'function dashboardAddEquipments(', '\nvar DASHBOARD_ONSITE_IDEM_PROP_');
   const tradeId = '260813-005';
   let plannedRowWidths = [];
@@ -1024,7 +1051,7 @@ test('actual batch/set GAS add allocates unique monotonic suffixes 100 and 101',
 });
 
 test('actual historical GAS add preserves returned state and delegates no checkout baseline projection', () => {
-  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
   const body = section(gas, 'function dashboardAddEquipments(', '\nvar DASHBOARD_ONSITE_IDEM_PROP_');
   const tradeId = '260813-005';
   const privateToken = {};
@@ -1254,4 +1281,68 @@ test('authoritative verification counts only top-level items and rejects an unex
     () => verifyActual(baseline, polluted, correction, regeneration),
     /최상위 품목 목록 불일치/,
   );
+});
+
+
+test('staff approval reaches both atomic stages and preserves supply issues in authoritative readback', () => {
+  const { context, calls } = harness({
+    addWarnings: [{ equipment: 'BURANO 8K', message: 'BURANO 8K 가용 0/1' }],
+    dateConflicts: [{ 장비명: 'FX9', 요청수량: 1, 가용수량: 0 }]
+  });
+  const result = context.correct({ ...input, staffApproval: {
+    source: 'kakao_staff_confirmed', conversationRevision: 8,
+    customerRequest: '날짜와 장비 변경 부탁드립니다', staffConfirmation: '네 변경해드릴게요'
+  } });
+  assert.equal(result.success, true);
+  assert.deepEqual(calls.mutate, ['date', 'add', 'remove']);
+  assert.equal(calls.staffDemandTokens.length, 3);
+  assert.ok(calls.staffDemandTokens.every(token => token === context.REGISTERED_STAFF_DEMAND_TOKEN_));
+  assert.ok(result.authoritativeReadback.inventoryWarnings.some(issue => issue.equipment === 'BURANO 8K'));
+  assert.ok(result.authoritativeReadback.inventoryWarnings.some(issue => issue.장비명 === 'FX9'));
+});
+
+test('staff approval retains exact baseline and checkout removal fences', () => {
+  const approval = { source: 'kakao_staff_confirmed', conversationRevision: 8,
+    customerRequest: '장비 변경 부탁드립니다', staffConfirmation: '네 변경해드릴게요' };
+  const stale = harness();
+  assertPreflightRejected(() => stale.context.correct({ ...input, staffApproval: approval,
+    expectedPeriod: { ...input.expectedPeriod, startTime: '05:00' } }), /baseline period mismatch/);
+  assertNoWriteSideEffects(stale.calls);
+  const checkedOut = harness({ checkoutStarted: true });
+  assertPreflightRejected(() => checkedOut.context.correct({ ...input, staffApproval: approval }), /이미 반출된 품목/);
+  assertNoWriteSideEffects(checkedOut.calls);
+});
+
+
+test('composite source RQ finalizes against real contract matching after its baseline period changes', () => {
+  for (const sourcePeriod of [null, {
+    startDate: '2026-08-18', startTime: '04:30', endDate: '2026-08-21', endTime: '04:30'
+  }]) {
+    const { context, calls } = harness({ realSourcePeriodMatch: true, sourcePeriod, useRealVerification: true });
+    const result = context.correct({ ...input, sourceRequestId: 'RQ-260906-013' });
+    assert.equal(result.success, true, JSON.stringify(result));
+    assert.deepEqual(calls.mutate, ['date', 'add', 'remove']);
+    assert.equal(calls.regenerations, 1);
+    assert.equal(calls.sourceFinalizations, 1);
+    assert.equal(result.requestFinalization.requestId, 'RQ-260906-013');
+    assert.equal(calls.events.at(-1), 'finalize-rq');
+  }
+});
+
+test('composite source RQ keeps exact period, identity, uniqueness and drift fences', () => {
+  for (const options of [
+    { sourcePeriod: { ...input.expectedPeriod, startTime: '05:30' } },
+    { sourceWrongIdentity: true }, { ambiguousSourceMatch: true }
+  ]) {
+    const { context, calls } = harness({ realSourcePeriodMatch: true, ...options });
+    assertPreflightRejected(() => context.correct({ ...input, sourceRequestId: 'RQ-260906-013' }), /sourceRequestId/);
+    assertNoWriteSideEffects(calls);
+    assert.equal(calls.sourceFinalizations, 0);
+  }
+  const { context, calls } = harness({ realSourcePeriodMatch: true, sourceDriftsBeforeFinalize: true });
+  const result = context.correct({ ...input, sourceRequestId: 'RQ-260906-013' });
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'PARTIAL_STATE');
+  assert.equal(calls.sourceFinalizations, 0);
+  assert.deepEqual(calls.mutate, ['date', 'add', 'remove']);
 });

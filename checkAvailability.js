@@ -8975,6 +8975,13 @@ function dashboardAddEquipments(tid, entries, options) {
   if (options.historicalCorrectionToken && !historicalCorrection) {
     return { error: '반납완료 과거 정정은 등록변경 원자 작업에서만 허용됩니다.', code: 'FORBIDDEN' };
   }
+  var staffApprovedDemand = !!options.staffApprovalToken &&
+    typeof REGISTERED_STAFF_DEMAND_TOKEN_ !== 'undefined' &&
+    options.staffApprovalToken === REGISTERED_STAFF_DEMAND_TOKEN_ &&
+    lockAlreadyHeld && deferContractRegeneration;
+  if (options.staffApprovalToken && !staffApprovedDemand) {
+    return { error: '직원 승인 수요 반영은 검증된 등록변경 작업에서만 허용됩니다.', code: 'FORBIDDEN' };
+  }
   var requireExactCatalog = options.requireExactCatalog === true;
   var availabilityPreflighted = options.availabilityPreflighted === true && lockAlreadyHeld &&
     (typeof inventorySupplyPlan_ !== "function" || !!options.supplyPlan);
@@ -9149,7 +9156,7 @@ function dashboardAddEquipments(tid, entries, options) {
 
     var equipMeta = buildDashboardEquipmentMeta_(equipSheet);
     markProfile_('equipment_meta');
-    if (requireExactCatalog) {
+    if (requireExactCatalog && !staffApprovedDemand) {
       var unknownExactNames = addEntries.map(function(entry) { return entry.name; }).filter(function(name) {
         return !(setLookup.items && setLookup.items[name]) && !(equipMeta.equipment && equipMeta.equipment[name]);
       });
@@ -9198,13 +9205,24 @@ function dashboardAddEquipments(tid, entries, options) {
           scheduleData
         );
     markProfile_('availability_check');
-    if (!availability.ok) {
+    // Staff approval accepts customer demand; it does not repair invalid supply
+    // records or manufacture stock. Preserve the calculated plan and warnings.
+    var invalidSupply = (availability.conflicts || []).some(function(conflict) {
+      return conflict.code === 'INVALID_SUPPLY_ALLOCATION';
+    });
+    if (!availability.ok && (!staffApprovedDemand || invalidSupply)) {
       return attachProfile_({
         error: "가용 불가: " + availability.conflicts.map(function(c) { return c.message; }).join(", "),
         conflicts: availability.conflicts
       });
     }
 
+    var supplyWarnings = (availability.warnings || []).slice();
+    if (staffApprovedDemand) {
+      supplyWarnings = supplyWarnings.concat((availability.conflicts || []).map(function(conflict) {
+        return Object.assign({}, conflict, { kind: 'staff_approved_supply_issue' });
+      }));
+    }
     var newRows = [];
     rowSpecs.forEach(function(spec) {
       if (spec.components.length > 0) {
@@ -9248,8 +9266,9 @@ function dashboardAddEquipments(tid, entries, options) {
         requestedItems: addEntries.map(function(entry) { return { name: entry.name, qty: entry.qty, quantity: entry.qty }; }),
         equipmentNames: addEntries.map(function(entry) { return entry.name; }),
         customerName: 예약자명,
-        warnings: availability.warnings || [],
-        message: "가용 확인 완료"
+        warnings: supplyWarnings,
+        conflicts: availability.conflicts || [],
+        message: staffApprovedDemand ? "직원 승인 수요 확인 완료" : "가용 확인 완료"
       });
     }
 
@@ -9325,8 +9344,9 @@ function dashboardAddEquipments(tid, entries, options) {
       requestedItems: addEntries.map(function(entry) { return { name: entry.name, qty: entry.qty, quantity: entry.qty }; }),
       equipmentNames: addEntries.map(function(entry) { return entry.name; }),
       customerName: 예약자명,
-      warnings: availability.warnings || [],
-      message: "가용 확인 완료 후 추가"
+      warnings: supplyWarnings,
+      conflicts: availability.conflicts || [],
+      message: staffApprovedDemand ? "직원 승인 수요 추가 완료" : "가용 확인 완료 후 추가"
     });
   } finally {
     if (lock) {
@@ -15824,19 +15844,21 @@ function _confirmedReservationPeriodEquivalent_(left, right) {
     left.end_date === right.end_date && left.end_time === right.end_time;
 }
 
-function _assertConfirmedReservationCatalogPlan_(ss, plan) {
-  var listSheet = ss.getSheetByName("목록");
-  if (!listSheet || listSheet.getLastRow() < 2) throw new Error("목록 시트를 찾을 수 없습니다");
-  var values = listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues();
+function _collectConfirmedReservationCatalogIssues_(ss, plan) {
   var exact = {};
-  values.forEach(function(row) {
-    var name = String(row[0] || "").normalize("NFKC").trim();
-    if (name) exact[name] = true;
+  // 물리 장비/세트가 이미 있는데 자동완성 목록 갱신이 늦었다고 미연결로 오인하지 않는다.
+  [["목록", 1], ["장비마스터", 4], ["세트마스터", 1]].forEach(function(source) {
+    var sheet = ss.getSheetByName(source[0]);
+    if (!sheet || sheet.getLastRow() < 2) return;
+    sheet.getRange(2, source[1], sheet.getLastRow() - 1, 1).getDisplayValues().forEach(function(row) {
+      var name = String(row[0] || "").normalize("NFKC").trim();
+      if (name) exact[name] = true;
+    });
   });
-  plan.forEach(function(item) {
-    if (!exact[String(item.name || "").normalize("NFKC").trim()]) {
-      throw new Error("desired_after 장비가 목록 정본과 정확히 일치하지 않습니다: " + item.name);
-    }
+  return plan.filter(function(item) {
+    return !exact[String(item.name || "").normalize("NFKC").trim()];
+  }).map(function(item) {
+    return { kind: "catalog_unresolved", equipment: item.name, quantity: item.quantity };
   });
 }
 
@@ -16025,7 +16047,7 @@ function commitConfirmedReservation(args) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = ss.getSheetByName("확인요청");
     if (!sheet) throw new Error("확인요청 시트 없음");
-    _assertConfirmedReservationCatalogPlan_(ss, normalized.desired_after);
+    var catalogReviewIssues = _collectConfirmedReservationCatalogIssues_(ss, normalized.desired_after);
     var initialFence;
     if (normalized.request_id === null) {
       stage = "pending_request_bootstrap";
@@ -16169,6 +16191,7 @@ function commitConfirmedReservation(args) {
     if (confirmedResult && confirmedResult.success === true) {
       appliedStages.push("authoritative_readback");
       confirmedResult.applied_stages = appliedStages.slice();
+      confirmedResult.inventory_review = { status: "queued", catalog_issues: catalogReviewIssues || [] };
     }
     return confirmedResult;
   } catch (error) {
@@ -16210,6 +16233,18 @@ function commitConfirmedReservation(args) {
       try { userLock.releaseLock(); } catch (userReleaseError) {}
     }
   }
+}
+
+// 직원이 승인한 수요는 먼저 기록하고, 공급/연결 문제는 내구 큐에서 후속 보고한다.
+// 승인은 문구 검색이 아니라 검증된 confirmed capability 또는 기존 수동 승인에서 온다.
+function prepareRegistrationInventoryReview_(reqID, staffApproved) {
+  if (staffApproved) {
+    if (typeof queuePreRegistrationStockCheck_ !== "function") throw new Error("재고 후속 보고 큐를 찾을 수 없습니다");
+    queuePreRegistrationStockCheck_(reqID, { includeRegistered: true, forceQueue: true });
+    return { ready: true, status: "review_queued", inventoryVerified: false };
+  }
+  return typeof checkPreRegistrationStockBeforeRegister_ === "function"
+    ? checkPreRegistrationStockBeforeRegister_(reqID) : { ready: true, status: "disabled" };
 }
 
 function registerByReqID(sheet, triggerRow, registerOptions) {
@@ -16317,15 +16352,11 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       throw new Error("confirmed reservation post-process exact request fence mismatch");
     }
   }
-  const directRegisterApproved = requestHasDirectRegisterApproval_(allData, reqID);
-  // A real shortage must reach the owner before schedule/contract writes, including
-  // explicit staff-approved registrations. This does not replace their approval.
-  if(typeof checkPreRegistrationStockBeforeRegister_==='function') {
-    var stockNotice=checkPreRegistrationStockBeforeRegister_(reqID);
-    if(stockNotice.ready===false) {
-      markRequestRegisterFailed_(sheet,allData,reqID,'재고 경보 전달 확인 대기 — 확인요청은 보존되며 알림은 자동 재시도합니다');
-      return;
-    }
+  const directRegisterApproved = hasTransferredConfirmedLock || requestHasDirectRegisterApproval_(allData, reqID);
+  var stockNotice = prepareRegistrationInventoryReview_(reqID, directRegisterApproved);
+  if (stockNotice.ready === false) {
+    markRequestRegisterFailed_(sheet,allData,reqID,'재고 경보 전달 확인 대기 — 확인요청은 보존되며 알림은 자동 재시도합니다');
+    return;
   }
   var blockingRegisterIssue = getBlockingRegisterIssue_(allData, reqID, directRegisterApproved);
   if (blockingRegisterIssue) {
@@ -16887,6 +16918,8 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     customerNotificationAttempted: !suppressCustomerNotification,
     customerNotificationSent: false
   };
+
+  if (directRegisterApproved) queuePreRegistrationStockCheck_(reqID,{includeRegistered:true,forceQueue:true});
 
   // dashboard/timeline 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
   try { invalidateDashboardCache([반출일, 반납일]); } catch (e) {}
@@ -20045,7 +20078,7 @@ function parseWithClaude(text, imageBase64, imageMediaType) {
 }
 function normalizeRegisteredTradeCorrection_(args) {
   args = args || {};
-  var allowed = { tradeId: true, operationId: true, sourceRequestId: true, expectedPeriod: true, dateChange: true, remove: true, add: true };
+  var allowed = { tradeId: true, operationId: true, sourceRequestId: true, expectedPeriod: true, dateChange: true, remove: true, add: true, staffApproval: true };
   Object.keys(args).forEach(function(key) {
     if (!allowed[key]) throw new Error('지원하지 않거나 금지된 등록거래 보정 필드: ' + key);
   });
@@ -20166,16 +20199,41 @@ function normalizeRegisteredTradeCorrection_(args) {
   if (sourceRequestId && !remove.length && !add.length) {
     throw new Error('sourceRequestId는 장비 추가·삭제·교체 변경에만 사용할 수 있습니다');
   }
+  var staffApproval = null;
+  if (args.staffApproval !== undefined) {
+    var approval = args.staffApproval;
+    var approvalFields = { source: true, conversationRevision: true, customerRequest: true, staffConfirmation: true };
+    if (!approval || typeof approval !== 'object' || Array.isArray(approval) ||
+        Object.keys(approval).some(function(key) { return !approvalFields[key]; }) ||
+        approval.source !== 'kakao_staff_confirmed' ||
+        !Number.isSafeInteger(approval.conversationRevision) || approval.conversationRevision < 1 ||
+        typeof approval.customerRequest !== 'string' || !approval.customerRequest.trim() || approval.customerRequest.length > 2000 ||
+        typeof approval.staffConfirmation !== 'string' || !approval.staffConfirmation.trim() || approval.staffConfirmation.length > 2000) {
+      throw new Error('staffApproval에 정확한 카카오 직원 승인 근거가 필요합니다');
+    }
+    if (!expectedPeriod) throw new Error('staffApproval requires expectedPeriod');
+    if (remove.some(function(entry) { return entry.expectedQty === undefined; })) {
+      throw new Error('staffApproval requires exact removal expectedQty');
+    }
+    staffApproval = {
+      source: approval.source, conversationRevision: approval.conversationRevision,
+      customerRequest: approval.customerRequest.trim(), staffConfirmation: approval.staffConfirmation.trim()
+    };
+  }
   return {
     tradeId: tradeId,
     operationId: operationId,
     sourceRequestId: sourceRequestId,
+    staffApproval: staffApproval,
     expectedPeriod: expectedPeriod,
     dateChange: dateChange,
     remove: remove,
     add: add
   };
 }
+
+// Only the validated atomic correction may pass this in-process capability.
+var REGISTERED_STAFF_DEMAND_TOKEN_ = {};
 
 function _registeredTradeSourceRequestPlan_(correction) {
   var sourceRows = correction.add.length ? correction.add.map(function(row) {
@@ -20185,6 +20243,24 @@ function _registeredTradeSourceRequestPlan_(correction) {
   });
   if (!sourceRows.length) throw new Error('sourceRequestId 장비 변경 plan이 비어 있습니다');
   return sourceRows;
+}
+
+// The source RQ may describe the approved baseline or desired period. Resolve the
+// same customer against the contract's actual phase; the original RQ fingerprint
+// must still survive unchanged before it can be finalized.
+function _registeredTradeSourceRequestMatchPeriod_(group, correction, afterMutation) {
+  var source = [group.startDate, group.startTime, group.endDate, group.endTime];
+  if (!correction.dateChange) return source;
+  var baseline = correction.expectedPeriod;
+  if (!baseline) throw new Error('sourceRequestId 복합 변경에는 expectedPeriod 기준선이 필요합니다');
+  var expected = [baseline.startDate, baseline.startTime, baseline.endDate, baseline.endTime];
+  var desired = [correction.dateChange.newStartDate, correction.dateChange.startTime || baseline.startTime,
+    correction.dateChange.newEndDate, correction.dateChange.endTime || baseline.endTime];
+  var sourceKey = JSON.stringify(source);
+  if (sourceKey !== JSON.stringify(expected) && sourceKey !== JSON.stringify(desired)) {
+    throw new Error('sourceRequestId 기간이 승인된 변경 전/후 기간과 정확히 일치하지 않습니다');
+  }
+  return afterMutation ? desired : expected;
 }
 
 function _registeredTradeSourceRequestFingerprint_(group) {
@@ -20228,13 +20304,14 @@ function _resolveRegisteredTradeSourceRequest_(ss, correction, options) {
       throw new Error('sourceRequestId 확인요청은 이미 처리 중이거나 종결되었습니다: ' + correction.sourceRequestId);
     }
   }
+  var matchPeriod = _registeredTradeSourceRequestMatchPeriod_(group, correction, options.afterMutation === true);
   var linkedTradeId = _findRegisteredTradeForConfirmRequest_(ss, {
     예약자명: group.name,
     연락처: group.phone,
-    반출일: group.startDate,
-    반출시간: group.startTime,
-    반납일: group.endDate,
-    반납시간: group.endTime
+    반출일: matchPeriod[0],
+    반출시간: matchPeriod[1],
+    반납일: matchPeriod[2],
+    반납시간: matchPeriod[3]
   });
   if (linkedTradeId !== correction.tradeId) {
     throw new Error('sourceRequestId의 고객/기간이 대상 등록거래와 정확히 일치하지 않습니다');
@@ -20257,7 +20334,7 @@ function _resolveRegisteredTradeSourceRequest_(ss, correction, options) {
  * 첫 preflight 이후 RQ가 조금이라도 바뀌면 쓰지 않고 partial/human-review로 남긴다.
  */
 function _finalizeRegisteredTradeSourceRequest_(ss, correction, sourceFence) {
-  var current = _resolveRegisteredTradeSourceRequest_(ss, correction);
+  var current = _resolveRegisteredTradeSourceRequest_(ss, correction, { afterMutation: true });
   if (!current || current.requestId !== sourceFence.requestId ||
       current.fingerprint !== sourceFence.fingerprint || current.rowCount !== sourceFence.rowCount) {
     throw new Error('sourceRequestId 확인요청이 preflight 이후 변경되었습니다');
@@ -20707,6 +20784,15 @@ function correctRegisteredTrade(args) {
   var addPlan = null;
   var addResult = null;
   var removeResult = null;
+  var inventoryWarnings = [];
+  var staffApprovalToken = correction.staffApproval ? REGISTERED_STAFF_DEMAND_TOKEN_ : null;
+  function collectInventoryWarnings_(stage, warnings) {
+    (warnings || []).forEach(function(warning) {
+      inventoryWarnings.push(typeof warning === 'string'
+        ? { stage: stage, message: warning }
+        : Object.assign({ stage: stage }, warning));
+    });
+  }
   var mutationStarted = false;
   var attemptedStage = '';
   var structureChanged = false;
@@ -20816,12 +20902,16 @@ function correctRegisteredTrade(args) {
         correction.add,
         {
           dryRun: true,
+          lockAlreadyHeld: true,
+          deferContractRegeneration: true,
+          staffApprovalToken: staffApprovalToken,
           rawNames: true,
           requireExactCatalog: true,
           periodOverride: expectedPeriod,
           excludeScheduleIds: removalPlan.scheduleIds
         }
       ));
+      collectInventoryWarnings_('equipment_add', addPlan.warnings);
     }
     if (correction.dateChange) {
       var dateArgs = {
@@ -20837,15 +20927,18 @@ function correctRegisteredTrade(args) {
       }
       mutationStarted = true;
       attemptedStage = 'scheduleChangeDates';
-      assertRegisteredTradeCorrectionStage_('scheduleChangeDates', changeRegisteredTradeDates(
+      var dateResult = assertRegisteredTradeCorrectionStage_('scheduleChangeDates', changeRegisteredTradeDates(
         dateArgs,
         {
           lockAlreadyHeld: true,
           deferContractRegeneration: true,
+          staffApprovalToken: staffApprovalToken,
           excludeScheduleIds: removalPlan.scheduleIds,
           allowEmptyAvailabilityPlan: correction.add.length > 0
         }
       ));
+      collectInventoryWarnings_('date_change', dateResult.availabilityWarnings);
+      collectInventoryWarnings_('date_change', dateResult.conflicts);
       stages.push('scheduleChangeDates');
       attemptedStage = '';
     }
@@ -20858,6 +20951,7 @@ function correctRegisteredTrade(args) {
         {
           lockAlreadyHeld: true,
           deferContractRegeneration: true,
+          staffApprovalToken: staffApprovalToken,
           rawNames: true,
           requireExactCatalog: true,
           availabilityPreflighted: true,
@@ -20925,7 +21019,7 @@ function correctRegisteredTrade(args) {
       error: error && error.message ? error.message : String(error || 'unknown'),
       readback: partialReadback,
       authoritativeReadback: lockedBaseline && partialReadback
-        ? { before: lockedBaseline, after: partialReadback }
+        ? { before: lockedBaseline, after: partialReadback, inventoryWarnings: inventoryWarnings }
         : null,
       readbackError: readbackError,
       customerNotificationSent: false
@@ -21013,6 +21107,7 @@ function correctRegisteredTrade(args) {
     if (finalizationLock) finalizationLock.releaseLock();
   }
   var authoritativeReadback = { before: lockedBaseline, after: verifiedState };
+  if (inventoryWarnings.length) authoritativeReadback.inventoryWarnings = inventoryWarnings;
   if (requestFinalization) authoritativeReadback.requestFinalization = requestFinalization;
   return {
     success: true,
@@ -21063,6 +21158,14 @@ function changeRegisteredTradeDates(args, options) {
   var excludeScheduleIdMap = {};
   excludeScheduleIds.forEach(function(id) { excludeScheduleIdMap[id] = true; });
   var allowEmptyAvailabilityPlan = options.allowEmptyAvailabilityPlan === true && lockAlreadyHeld;
+  var staffApprovedDemand = !!options.staffApprovalToken &&
+    typeof REGISTERED_STAFF_DEMAND_TOKEN_ !== 'undefined' &&
+    options.staffApprovalToken === REGISTERED_STAFF_DEMAND_TOKEN_ &&
+    lockAlreadyHeld && deferContractRegeneration;
+  if (options.staffApprovalToken && !staffApprovedDemand) {
+    throw new Error('직원 승인 수요 반영은 검증된 등록변경 작업에서만 허용됩니다');
+  }
+  allowConflicts = allowConflicts || staffApprovedDemand;
   if (lockAlreadyHeld && !deferContractRegeneration) {
     throw new Error('바깥 잠금 경로는 계약서 재생성을 연기해야 합니다');
   }
@@ -21276,10 +21379,18 @@ function changeRegisteredTradeDates(args, options) {
     itemMap = inventoryPlan.itemMap;
     availabilityWarnings = inventoryPlan.availabilityWarnings;
     var unresolvedInventory = inventoryPlan.unresolvedInventory;
-        if (unresolvedInventory.length > 0) {
+    var hasNamelessDemand = availabilityTargetScheduleRows.some(function(entry) {
+      return !String(entry && entry.values && entry.values[3] || '').trim();
+    });
+    if (unresolvedInventory.length > 0 && (!staffApprovedDemand || hasNamelessDemand)) {
       throw new Error('UNRESOLVED_INVENTORY: ' + unresolvedInventory.join(', '));
     }
-    if (Object.keys(itemMap).length === 0 && !allowEmptyAvailabilityPlan) {
+    if (staffApprovedDemand) {
+      availabilityWarnings = availabilityWarnings.concat(unresolvedInventory.map(function(issue) {
+        return '직원 승인 수요 유지 · 재고 연결 확인 필요: ' + issue;
+      }));
+    }
+    if (Object.keys(itemMap).length === 0 && !allowEmptyAvailabilityPlan && !staffApprovedDemand) {
       throw new Error('UNRESOLVED_INVENTORY: 가용성을 계산할 장비가 없습니다');
     }
 
