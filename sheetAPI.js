@@ -1604,6 +1604,8 @@ function runFunction(funcName, params) {
     "repairTradeBillingCompanyDropdown",
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
+    "retireInventoryStockReports",
+    "applyInventorySemanticReview",
     "setInventoryIncludedComponents",
     "getInventoryStockQuestions",
     "getInventoryResolutionContext",
@@ -1888,10 +1890,10 @@ function runFunction(funcName, params) {
       var rsResult = repairTradeContractStatus.apply(null, rsArgs);
       return { success: true, function: funcName, result: rsResult, executionTime: (new Date() - startTime) + "ms" };
     }
-    if (["setInventoryIncludedComponents", "getInventoryStockQuestions", "getInventoryResolutionContext", "getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts", "setupPreRegistrationStockAlerts", "getPreRegistrationStockAlertStatus", "checkPreRegistrationStockAlert", "flushPreRegistrationStockAlerts", "claimPreRegistrationStockAlertRelay", "authorizePreRegistrationStockAlertRelay", "acknowledgePreRegistrationStockAlertRelay"].indexOf(funcName)>=0) {
+    if (["retireInventoryStockReports", "applyInventorySemanticReview", "setInventoryIncludedComponents", "getInventoryStockQuestions", "getInventoryResolutionContext", "getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts", "setupPreRegistrationStockAlerts", "getPreRegistrationStockAlertStatus", "checkPreRegistrationStockAlert", "flushPreRegistrationStockAlerts", "claimPreRegistrationStockAlertRelay", "authorizePreRegistrationStockAlertRelay", "acknowledgePreRegistrationStockAlertRelay"].indexOf(funcName)>=0) {
       var inventoryArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
       if(!Array.isArray(inventoryArgs))inventoryArgs=[inventoryArgs];
-      var inventoryFunctions={setInventoryIncludedComponents:setInventoryIncludedComponents,getInventoryStockQuestions:getInventoryStockQuestions,getInventoryResolutionContext:getInventoryResolutionContext,getInventorySupplyPolicy:getInventorySupplyPolicy,setScheduleSupplyAllocation:setScheduleSupplyAllocation,getInventoryRiskReport:getInventoryRiskReport,getInventoryRiskMonitorStatus:getInventoryRiskMonitorStatus,
+      var inventoryFunctions={retireInventoryStockReports:retireInventoryStockReports,applyInventorySemanticReview:applyInventorySemanticReview,setInventoryIncludedComponents:setInventoryIncludedComponents,getInventoryStockQuestions:getInventoryStockQuestions,getInventoryResolutionContext:getInventoryResolutionContext,getInventorySupplyPolicy:getInventorySupplyPolicy,setScheduleSupplyAllocation:setScheduleSupplyAllocation,getInventoryRiskReport:getInventoryRiskReport,getInventoryRiskMonitorStatus:getInventoryRiskMonitorStatus,
         setupInventoryRiskMonitor:setupInventoryRiskMonitor,flushInventoryRiskAlerts:flushInventoryRiskAlerts,
         setupPreRegistrationStockAlerts:setupPreRegistrationStockAlerts,getPreRegistrationStockAlertStatus:getPreRegistrationStockAlertStatus,
         claimPreRegistrationStockAlertRelay:claimPreRegistrationStockAlertRelay,authorizePreRegistrationStockAlertRelay:authorizePreRegistrationStockAlertRelay,acknowledgePreRegistrationStockAlertRelay:acknowledgePreRegistrationStockAlertRelay,

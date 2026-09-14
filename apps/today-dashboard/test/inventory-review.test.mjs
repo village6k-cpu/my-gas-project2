@@ -14,3 +14,12 @@ test('generic choices cannot become global aliases and missing components can ge
  assert.equal(core.validateInventoryReview(plan,c).action,'ask_owner');
  c.sources[0].kinds=['model_selection'];const alias={...plan,action:'link_existing',equipmentId:'M1',equipmentName:'LVM-170A'};delete alias.question;assert.throws(()=>core.validateInventoryReview(alias,c),/모델 선택/);
 });
+test('AI can classify a set manifest as included or split its physical inventory without a global name alias',()=>{
+ const c=context();c.catalog.semanticScopes=[{setName:'Kit',componentName:'monitor + arm',sourceHash:'current'}];
+ const p={action:'classify_component',reason:'Read the complete kit and physical inventory.',resolutions:[{...c.catalog.semanticScopes[0],disposition:'stock',allocations:[{equipmentId:'M1',equipmentName:'LVM-170A',quantity:1}]}]};
+ const r=core.validateInventoryReview(p,c);assert.equal(r.action,'classify_component');assert.equal(r.resolutions.length,1);
+ assert.throws(()=>core.validateInventoryReview({...p,resolutions:[{...p.resolutions[0],sourceHash:'stale'}]},c));
+});
+test('an unrelated learned alias does not invalidate a correctly scoped inventory decision',()=>{
+ const a=core.reviewCatalogHash(catalog),b=core.reviewCatalogHash({...catalog,equipment:catalog.equipment.map(e=>({...e,aliases:['another valid product description']}))});assert.equal(a,b);
+});

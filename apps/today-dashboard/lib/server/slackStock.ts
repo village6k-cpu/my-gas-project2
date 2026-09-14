@@ -2,6 +2,7 @@ import 'server-only';
 import {getInventoryAuditServiceClient} from './inventoryAuditDb';
 import {getInventoryAuditMirrorConfig} from './inventoryAuditMirrorCore.mjs';
 import {validateStockConfirmation,stockThreadHash,stockNameKey,stockGasRequest,stockQuestionBatch} from './slackStockCore.mjs';
+import {validateInventoryReview} from './inventoryReviewCore.mjs';
 import {enrichInventoryReviewContext,applyInventoryReview,inventoryQuestionDelivery} from './inventoryReview';
 type Obj=Record<string,any>;
 async function gas(action:string,body:Obj={},timeoutMs=30000) {
@@ -12,7 +13,14 @@ async function gas(action:string,body:Obj={},timeoutMs=30000) {
 }
 async function context(){const data=await gas('run',{func:'getInventoryStockQuestions',args:[{refresh:true}]});if(!data.result?.reports)throw Error('재고 보고 조회 실패');return enrichInventoryReviewContext(data.result);}
 export async function processInventoryQuestionDelivery(body:Obj){return inventoryQuestionDelivery(body,context);}
-export async function reviewStock(input:unknown,execute:boolean){const result=await applyInventoryReview(await context(),input,execute);if(execute&&result.action==='link_existing'){const fresh=await context();result.effective=fresh.equipment.some((e:Obj)=>e.id===result.equipmentId&&(e.aliases||[]).includes(result.sourceName));if(!result.effective)throw Error('장비 연결 저장 완료; 실제 재고 계산 반영 확인 재시도 필요');}return result;}
+export async function reviewStock(input:unknown,execute:boolean){const c=await context();
+ if((input as Obj)?.action==='classify_component'){
+  if(c.sourceIssues?.length)throw Error('전체 재고 자료 확인 필요');
+  const plan=validateInventoryReview(input,{catalog:c.catalog});
+  const data=await gas('run',{func:'applyInventorySemanticReview',args:[{reason:plan.reason,resolutions:plan.resolutions,execute}]});
+  return {ok:true,...data.result};
+ }
+ const result=await applyInventoryReview(c,input,execute);if(execute&&result.action==='link_existing'){const fresh=await context();result.effective=fresh.equipment.some((e:Obj)=>e.id===result.equipmentId&&(e.aliases||[]).includes(result.sourceName));if(!result.effective)throw Error('장비 연결 저장 완료; 실제 재고 계산 반영 확인 재시도 필요');}return result;}
 function ownerIds(){const ids=(process.env.SLACK_INVENTORY_OWNER_IDS || '').split(',').map(s=>s.trim()).filter(Boolean);if(!ids.length || ids.some(s=>!/^U[A-Z0-9]+$/.test(s)))throw Error('재고 확인 소유자 설정 필요');return ids;}
 // The authenticated local collector owns Slack credentials and fetches the complete
 // thread again immediately before apply, just as the existing SlackOps collector.

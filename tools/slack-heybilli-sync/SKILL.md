@@ -203,6 +203,8 @@ Slack thread collection stays in the existing local Hermes runtime. The cloud re
 
 stockInvestigations가 있으면 직원 댓글·거래 pending이 없어도 작업한다. stockCatalog 전체 장비, 분류, 별칭, 세트 구성, 원문 예약을 읽는다. 문자열 검색 후보가 비었다는 이유로 멈추지 않는다.
 
+- 먼저 전체 세트 구성과 inventoryPolicy로 독립 대여품/동봉품/복수 실물 묶음을 판단한다. 자료로 판단 가능한 케이블·부속·정책상 메모리/배터리 제외에 대해 대표님께 재고 수량을 묻지 않는다.
+- 세트 문맥의 판단은 review-stock {action:"classify_component",reason,resolutions:[{setName,componentName,sourceHash,disposition:"included"|"stock",allocations:[]}]}를 사용한다. 세 필드는 stockCatalog.semanticScopes에서 가져온다. included는 빈 allocations, stock은 원문 구성품 1개당 [{equipmentId,equipmentName,quantity}]로 한 개 이상 실물 배정. 상위 세트와 중복 계산하지 않는다. dry-run 후 LIVE --write, verified/effective 확인. 이름 하드코딩이나 전역 별칭 없이 문맥과 근거를 보존한다. waiting_owner라도 자료로 해결 가능하면 분류하고 기존 질문을 재발송하지 않는다.
 - 동일한 실제 장비임을 확인하면 review-stock으로 link_existing을 저장한다. {sourceId,sourceHash,catalogHash,action:"link_existing",equipmentId,equipmentName,reason}를 stdin으로 전달하고 dry-run 후 LIVE에서 --write한다. 저장 뒤 verified=true와 effective=true를 확인한다. 실제 재고 수량은 변경하지 않는다.
 - 모델 선택과 동일 장비 식별을 구별한다. 일반적인 7인치 모니터·매트박스 명칭을 한 모델의 전역 별칭으로 만들지 않는다. 후보가 여럿이면 예약자·기간·실제 후보를 담은 구체적인 질문을 한다.
 - 전체 목록에도 장비가 없거나 실보유수량을 모르면 {sourceId,sourceHash,catalogHash,action:"ask_owner",reason,question}를 review-stock에 전달한다. 기존 장비를 조사한 근거와 필요한 총보유·정비수량을 묻는다. CLI가 로컬 Slack 인증으로 실제 전송과 영수증을 검증한다. 별도로 같은 질문을 보내지 않는다.

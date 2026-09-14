@@ -12,13 +12,13 @@ export async function enrichInventoryReviewContext(c:Obj):Promise<Obj>{
  const equipment=c.equipment||[],sets=[...(c.sets||[])],reports=[...(c.reports||[])];
  for(const row of reviews){
   const exists=equipment.some((e:Obj)=>[e.name,...(e.aliases||[])].some(n=>stockNameKey(n)===stockNameKey(row.source_name)));
-  if(row.action==='ask_owner'&&row.posted_at&&row.question_ts&&!exists){
+  if(row.action==='ask_owner'&&!row.cancelled_at&&row.posted_at&&row.question_ts&&!exists){
    reports.push({id:row.id,channel:row.question_channel,ts:row.question_ts,names:[row.source_name],question:row.question_text,review:row.evidence});
    if(!sets.some((s:Obj)=>s.name===row.source_name))sets.push({name:row.source_name,price:null,components:[],source:'reported_equipment'});
   }
  }
- const catalog={equipment,sets},sources=prepareInventoryInvestigations(c.investigations||[]);
- const investigations=sources.filter((s:Obj)=>s.kinds.includes('model_selection')||!reviews.some(r=>r.source_key===s.id&&r.action==='ask_owner'&&!r.cancelled_at)).map((s:Obj)=>{const question=reviews.find(r=>r.source_key===s.id&&r.action==='ask_owner'&&!r.cancelled_at);return question?{...s,status:'waiting_model_choice',question:{text:question.question_text,channel:question.question_channel,ts:question.question_ts}}:s;});
+ const catalog={equipment,sets,semanticScopes:c.semanticScopes||[],inventoryPolicy:c.inventoryPolicy},sources=prepareInventoryInvestigations(c.investigations||[]);
+ const investigations=sources.map((s:Obj)=>{const question=reviews.find(r=>r.source_key===s.id&&r.action==='ask_owner'&&!r.cancelled_at);return question?{...s,status:s.kinds.includes('model_selection')?'waiting_model_choice':'waiting_owner',question:{text:question.question_text,channel:question.question_channel,ts:question.question_ts}}:s;});
  return {...c,reports:[...new Map(reports.map((r:Obj)=>[r.id,r])).values()],sets,ledger,reviews,catalog,catalogHash:reviewCatalogHash(catalog),sources,investigations:stockQuestionBatch(investigations)};
 }
 export async function applyInventoryReview(c:Obj,input:unknown,execute:boolean):Promise<Obj>{
