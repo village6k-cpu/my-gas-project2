@@ -89,7 +89,7 @@ function validateReceipt(receipt) {
   } else if (receipt.schema === 'village-registered-reservation-change-receipt/v1') {
     if (receipt?.target_scope !== 'registered_trade') throw channelError('invalid_receipt', 'target_scope must be registered_trade');
     if (!/^\d{6}-\d{3}$/.test(String(receipt?.trade_id || ''))) throw channelError('invalid_receipt', 'trade_id is invalid');
-    if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change']
+    if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change', 'reservation_cancel']
       .includes(receipt?.mutation_kind)) throw channelError('invalid_receipt', 'mutation_kind is invalid');
     if (!isObjectOrNull(receipt?.authoritative_result)) throw channelError('invalid_receipt', 'authoritative_result must be an object or null');
     if (!Array.isArray(receipt?.applied_stages)) throw channelError('invalid_receipt', 'applied_stages must be a list');

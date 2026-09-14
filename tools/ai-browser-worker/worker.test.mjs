@@ -13919,3 +13919,24 @@ test('single component replacement receipt requires the same schedule ID, parent
     } else assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'), true, failure);
   }
 });
+
+test('trusted cancellation survives finalization and contradictory cancelled readback stays unresolved',async()=>{
+ const {job,turn}=gatewayTurnFixture();
+ const initial=registeredReceiptFixture(job);
+ const before=initial.authoritative_result.before; before.contract.status='예약';
+ const mutation=registeredMutationFixture('reservation_cancel',{expected_before:before.schedule.rows.map(r=>({schedule_id:r.scheduleId,name:r.name,quantity:r.qty})),desired_after:[]});
+ delete mutation.request_id;
+ const after={...before,contract:{...before.contract,status:'취소'},schedule:{rows:[],periods:[],topLevelQuantities:{}},ledger:null};
+ const receipt=registeredReceiptFixture(job,{mutation_kind:mutation.kind,authorized_mutation:mutation,applied_stages:['updateContractStatus'],authoritative_result:{before,after}});
+ delete receipt.authoritative_result.requestFinalization;
+ for(const failure of [null,'status','rows','period','scope']){
+  const current=structuredClone(receipt);
+  if(failure==='status')current.authoritative_result.after.contract.status='예약';
+  if(failure==='rows')current.authoritative_result.after.schedule.rows=[before.schedule.rows[0]];
+  if(failure==='period')current.authoritative_result.after.contract.startTime='11:00';
+  if(failure==='scope')current.authoritative_result.before.schedule.rows.pop();
+  const prepared=await workerModule.prepareKakaoGatewayDecision({config:{},job,turn,finalText:'FINAL_JSON\n'+JSON.stringify(registeredDecisionFixture({staff_confirmed_mutation:mutation,existing_confirm_request_ids:[]})),trustedToolReceipts:[current]});
+  if(!failure){assert.deepEqual(prepared.gatewaySafetyFailures,[]);assert.equal(prepared.decision.reply_decision.replyMode,'no_reply');}
+  else assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'),true,failure);
+ }
+});

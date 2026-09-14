@@ -5725,7 +5725,24 @@ function updateTradeDiscountType(tid, discountType, options) {
   };
 }
 
-function updateDashboardContractStatus(tradeId, status) {
+// 현재 대화에서 AI가 선택한 취소 대상과 실시간 원장을 대조한다. 의도는 키워드로 재판단하지 않는다.
+function validateRegisteredCancellationBaseline_(tradeId, expected, state) {
+  if (!expected || !expected.operationId || !expected.expectedPeriod || !Array.isArray(expected.expectedRows) || !expected.expectedRows.length) throw new Error('취소 기준선이 필요합니다');
+  var approval=expected.staffApproval;
+  if (!approval || approval.source !== 'kakao_staff_confirmed' || !approval.customerRequest || !approval.staffConfirmation || !(approval.conversationRevision > 0)) throw new Error('취소 합의 근거가 필요합니다');
+  if (state.contract.status !== '예약') throw new Error('예약 상태의 거래만 자동 취소할 수 있습니다');
+  ['startDate','startTime','endDate','endTime'].forEach(function(key) { if (!expected.expectedPeriod[key] || state.contract[key] !== expected.expectedPeriod[key]) throw new Error('취소 대상 예약 기간이 변경되었습니다'); });
+  var rows=state.schedule.rows, seen={};
+  if (rows.length !== expected.expectedRows.length) throw new Error('취소 대상 스케줄이 변경되었습니다');
+  expected.expectedRows.forEach(function(row) {
+    if (String(row.scheduleId).indexOf(tradeId+'-') !== 0 || seen[row.scheduleId]) throw new Error('취소 대상 스케줄ID가 올바르지 않습니다');
+    seen[row.scheduleId]=true;
+    var matches=rows.filter(function(current){return current.scheduleId===row.scheduleId;});
+    if(matches.length!==1 || matches[0].name!==row.expectedName || matches[0].qty!==row.expectedQty) throw new Error('취소 대상 장비 또는 수량이 변경되었습니다');
+  });
+}
+
+function updateDashboardContractStatus(tradeId, status, expectedCancellation) {
   tradeId = String(tradeId || '').trim();
   status = String(status || '').trim();
   var allowed = { "예약": true, "반출": true, "취소": true, "반납완료": true };
@@ -5737,6 +5754,7 @@ function updateDashboardContractStatus(tradeId, status) {
   var lockAcquired = false;
   var structureProjectionQueued = false;
   var cancelCleanupQueued = false;
+  var cancellationWriteAttempted = false;
   try {
     lockAcquired = lock.tryLock(1000);
     if (!lockAcquired) {
@@ -5805,6 +5823,12 @@ function updateDashboardContractStatus(tradeId, status) {
         }
 
         if (status === "취소") {
+          var cancellationBefore = null;
+          if (expectedCancellation) {
+            cancellationBefore = readRegisteredTradeCorrectionState_(tradeId, false);
+            validateRegisteredCancellationBaseline_(tradeId, expectedCancellation, cancellationBefore);
+          }
+          cancellationWriteAttempted = true;
           sheet.getRange(row, 10).setValue(status); // J열: 계약상태
           var cancelProps = PropertiesService.getScriptProperties();
           cancelProps.deleteProperty('returnDone_' + tradeId);
@@ -5813,6 +5837,12 @@ function updateDashboardContractStatus(tradeId, status) {
           cancelContract(ss, tradeId, row);
           cancelCleanupQueued = true;
           invalidateDashboardCache();
+          if (expectedCancellation) {
+            var cancellationAfter = readRegisteredTradeCorrectionState_(tradeId, false, true);
+            if (cancellationAfter.contract.status !== '취소' || cancellationAfter.schedule.rows.length) throw new Error('취소 후 원장 검증 실패');
+            return { success:true, tradeId:tradeId, operationId:expectedCancellation.operationId, status:status, row:row, cancelled:true,
+              customerNotificationSent:false, readback:cancellationAfter, authoritativeReadback:{before:cancellationBefore,after:cancellationAfter} };
+          }
           return { success: true, tradeId: tradeId, status: status, row: row, cancelled: true };
         }
 
@@ -5846,7 +5876,7 @@ function updateDashboardContractStatus(tradeId, status) {
     }
     return { error: "계약마스터에서 거래ID를 찾지 못했습니다" };
   } catch (err) {
-    return { error: err.message };
+    return { success:false, error:err.message, ...(expectedCancellation ? {outcomeUnknown:cancellationWriteAttempted, noMutationPerformed:!cancellationWriteAttempted} : {}) };
   } finally {
     if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
     if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
@@ -20595,7 +20625,7 @@ function registeredTradeCorrectionTime_(raw, display) {
   return match ? ('0' + match[1]).slice(-2) + ':' + match[2] : '';
 }
 
-function readRegisteredTradeCorrectionState_(tradeId, includeLedger) {
+function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptySchedule) {
   includeLedger = includeLedger !== false;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var contractSheet = ss.getSheetByName('계약마스터');
@@ -20642,7 +20672,7 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger) {
       registeredTradeCorrectionTime_(scheduleRaw[si][8], scheduleDisplay[si][8])
     ].join('|')] = true;
   }
-  if (!rows.length) throw new Error('스케줄상세에 거래ID가 없습니다: ' + tradeId);
+  if (!rows.length && allowEmptySchedule !== true) throw new Error('스케줄상세에 거래ID가 없습니다: ' + tradeId);
 
   if (!includeLedger) {
     return {
