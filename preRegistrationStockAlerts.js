@@ -31,8 +31,12 @@ function preRegistrationStockEvaluate_(request,snapshot) {
     var schedule=rows.map(function(d){return {equipment:identity.byId[d.equipmentId].name,qty:d.quantity,startDT:new Date(d.start),endDT:new Date(d.end),status:d.status};});
     var items=Object.keys(group.items).filter(function(name){
       var original=(snapshot.equipment || []).find(function(e){return e.name===name;});
-      if(inventoryRiskNumber_(original.stock)===null || inventoryRiskNumber_(original.maintenance)===null || Number(original.maintenance)>Number(original.stock)) {
-        uncertain.push({kind:'unknown_stock',equipment:name});return false;
+      if(inventoryRiskNumber_(original.stock)===null || inventoryRiskMaintenance_(original)===null || inventoryRiskMaintenance_(original)>Number(original.stock)) {
+        // The shared report may already contain this equipment's invalid counts.
+        // When another booking owns that report row, add the current request once.
+        if(!uncertain.some(function(a){return a.kind==='unknown_stock' && a.equipment===name;}))
+          uncertain.push({kind:'unknown_stock',equipment:name});
+        return false;
       }
       return true;
     }).map(function(name){return {name:name,qty:group.items[name]};});
