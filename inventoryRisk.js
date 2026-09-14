@@ -13,6 +13,11 @@ function inventoryRiskNumber_(value) {
   return Number.isFinite(number) && number >= 0 && Number.isInteger(number) ? number : null;
 }
 
+function inventoryRiskMaintenance_(item) {
+  // Existing master/registration convention: a normal item has no repairs when
+  // its maintenance cell is blank. Unknown totals and repair states stay unknown.
+  return item.maintenance === '' && item.status === '정상' ? 0 : inventoryRiskNumber_(item.maintenance);
+}
 function inventoryRiskIdentity_(equipment) {
   var keys = {}, exact = {}, byId = {};
   (equipment || []).forEach(function(item) {
@@ -239,7 +244,7 @@ function buildInventoryRiskReport_(snapshot, options) {
   if(typeof options.onDemands==='function')options.onDemands(demands,identity);
   demands.forEach(function(row){if(!pools[row.equipmentId])pools[row.equipmentId]=[];pools[row.equipmentId].push(row);});
   Object.keys(pools).forEach(function(id) {
-    var item=identity.byId[id], stock=inventoryRiskNumber_(item.stock), maint=inventoryRiskNumber_(item.maintenance);
+    var item=identity.byId[id], stock=inventoryRiskNumber_(item.stock), maint=inventoryRiskMaintenance_(item);
     if(stock===null || maint===null || maint>stock) {risk('unknown_stock',pools[id][0],{equipment:item.name,equipmentId:id});return;}
     if(['정비중','수리중'].indexOf(item.status)>=0 && maint===0) risk('maintenance_unquantified',pools[id][0],{equipment:item.name,equipmentId:id});
     var available=Math.max(0,stock-maint);

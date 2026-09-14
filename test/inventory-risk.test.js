@@ -84,3 +84,16 @@ test('different rental stages of a set retain their own expansion',()=>{
  const r=report(data([row({name:'FX3 세트',setName:'FX3 세트'}),row({id:'c',setName:'FX3 세트'}),row({id:'later',name:'FX3 세트',setName:'FX3 세트',quantity:3,start:'2026-10-12T10:00:00+09:00',end:'2026-10-13T10:00:00+09:00'})],[item()],sets));
  assert.equal(conflicts(r)[0].shortage,1);
 });
+
+test('normal equipment with a blank maintenance cell keeps the master stock usable',()=>{
+ const source=data([row({quantity:1})],[item({stock:1,maintenance:'',status:'정상'})]);const before=JSON.stringify(source);
+ const r=report(source);assert.equal(r.alerts.some(a=>a.kind==='unknown_stock'),false);assert.equal(conflicts(r).length,0);
+ assert.equal(JSON.stringify(source),before,'calculation must not write a zero into the source sheet');
+ const shortage=conflicts(report(data([row({quantity:2})],source.equipment)))[0];assert.equal(shortage.stock,1);assert.equal(shortage.shortage,1);
+});
+
+test('blank maintenance never makes a repair-state or unknown-state item available',()=>{
+ for(const status of ['정비중','수리중','']){const r=report(data([row()],[item({stock:1,maintenance:'',status})]));assert.ok(r.alerts.some(a=>a.kind==='unknown_stock'));assert.equal(conflicts(r).length,0);}
+ for(const maintenance of ['미확인',-1,2])assert.ok(report(data([row()],[item({stock:1,maintenance,status:'정상'})])).alerts.some(a=>a.kind==='unknown_stock'));
+ assert.ok(report(data([row()],[item({stock:'',maintenance:'',status:'정상'})])).alerts.some(a=>a.kind==='unknown_stock'));
+});

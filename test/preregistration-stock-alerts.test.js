@@ -527,3 +527,29 @@ test('identity-only registration keeps AI evidence without requiring a vague Sla
  const result=c.checkPreRegistrationStockBeforeRegister_(r.id);assert.equal(result.ready,true);assert.equal(result.inventoryVerified,false);assert.equal(result.status,'identity_review_queued');assert.equal(sent,0);
  const evaluation=c.preRegistrationStockEvaluate_(r,c.readInventoryRiskSnapshot_());assert.equal(evaluation.uncertain[0].equipment,'브랜드 모니터');
 });
+
+test('normal blank maintenance agrees with registration stock arithmetic and produces no false owner question',()=>{
+ const {c}=env(),s=snapshot({equipment:[equipment({stock:1,maintenance:'',status:'정상'})],schedules:[]}),r=request();const before=JSON.stringify([s,r]);
+ const result=c.preRegistrationStockEvaluate_(r,s);assert.equal(result.uncertain.length,0);assert.equal(result.shortages.length,0);assert.equal(c.preRegistrationStockText_(result),null);assert.equal(JSON.stringify([s,r]),before);
+ r.rows[0].quantity=2;const shortage=c.preRegistrationStockEvaluate_(r,s);assert.equal(shortage.uncertain.length,0);assert.equal(shortage.shortages.length,1);assert.equal(shortage.shortages[0].available,1);assert.equal(shortage.shortages[0].shortage,1);
+});
+
+test('unknown stock from the shared report and request check creates one warning with request evidence',()=>{
+ const {c}=env(),s=snapshot({equipment:[equipment({stock:'',maintenance:0})],schedules:[]});
+ const result=c.preRegistrationStockEvaluate_(request(),s);assert.equal(result.uncertain.length,1);assert.equal(result.uncertain[0].bookings.length,1);
+ const text=c.preRegistrationStockText_(result);assert.equal(text.split('❓').length-1,1);
+});
+
+test('invalid inventory already used by another booking still produces one owner warning for this request',()=>{
+ const {c}=env(),s=snapshot({equipment:[equipment({stock:1,maintenance:'',status:'수리중'})]});
+ const result=c.preRegistrationStockEvaluate_(request(),s);assert.equal(result.shortages.length,0);assert.equal(result.uncertain.length,1);assert.equal(result.uncertain[0].kind,'unknown_stock');
+});
+test('invalid numeric maintenance in an upgrade candidate cannot silently clear a shortage',()=>{
+ const {c}=env(),lower=equipment({id:'g1',name:'소니 GM 70-200mm',stock:0,aliases:[]});
+ const r=request({rows:[{id:'g',name:lower.name,quantity:1,...period}]});
+ for(const maintenance of [0.5,Infinity]){
+  const upper=equipment({id:'g2',name:'소니 GM 70-200mm II',stock:1,maintenance,aliases:[]});
+  const result=c.preRegistrationStockEvaluate_(r,snapshot({sets:[],schedules:[],equipment:[lower,upper]}));
+  assert.ok(result.shortages.length>0 || result.uncertain.length>0);
+ }
+});
