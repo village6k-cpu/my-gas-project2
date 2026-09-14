@@ -10,6 +10,7 @@ function inventorySemanticScopes_(snapshot) {
 function inventorySemanticKey_(scope){return INVENTORY_SEMANTIC_PREFIX_+inventoryRiskDigest_([scope.setName,scope.componentName]);}
 function inventoryApplySemanticReviews_(snapshot) {
  // Observed replacement/packing rows are evidence, never new default kit contents.
+ (snapshot.sets || []).forEach(function(set){if(!set.components.length)set.components.push({name:set.name,quantity:1,note:'',tracked:true,wholeItem:true});});
  var observed=(snapshot.schedules || []).concat(typeof inventoryReviewPendingRows_==='function'?inventoryReviewPendingRows_():[]);
  observed.forEach(function(row){
   if(!row.setName||!row.name||Date.parse(row.end || '')<Date.now()||!Number.isFinite(Date.parse(row.end || '')))return;

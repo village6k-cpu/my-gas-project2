@@ -49,3 +49,12 @@ test('another standalone item in the same trade cannot erase a stocked kit heade
  for(const [id,name,setName]of [['a','Light','Light'],['b','packing','Light'],['c','Light head','']])s.schedules.push({id,tradeId:'t',name,setName,quantity:1,start:'2099-01-01T00:00:00Z',end:'2099-01-02T00:00:00Z'});
  const r=c.buildInventoryRiskReport_(s,{now:'2098-12-31T00:00:00Z'});assert.equal(r.alerts.find(a=>a.kind==='shortage')?.shortage,1);
 });
+
+test('a catalog bundle with no manifest can be allocated to existing physical parts by AI',()=>{
+ const c=env(),s=snapshot();s.sets=[{name:'monitor bundle',price:20000,components:[]}];c.inventoryApplySemanticReviews_(s);const scope=s.semanticScopes.find(x=>x.componentName==='monitor bundle');assert.ok(scope);c.readInventoryRiskSnapshot_=()=>s;
+ c.applyInventorySemanticReview({reason:'The sales bundle consists of one existing monitor.',resolutions:[{...scope,disposition:'stock',allocations:[{equipmentId:'M1',equipmentName:'Field monitor',quantity:1}]}]});c.inventoryApplySemanticReviews_(s);
+ s.schedules=[{id:'s',tradeId:'t',setName:'monitor bundle',name:'monitor bundle',quantity:2,start:'2099-01-01T00:00:00Z',end:'2099-01-02T00:00:00Z'}];assert.equal(c.buildInventoryRiskReport_(s,{now:'2098-12-31T00:00:00Z'}).alerts.find(a=>a.kind==='shortage')?.shortage,1);
+});
+test('unknown physical kit remains an AI investigation when its packing contents are included',()=>{
+ const c=env(),s={equipment:[],sets:[{name:'new speaker',components:[{name:'included mics',quantity:1,tracked:false}]}],schedules:[{id:'a',tradeId:'t',setName:'new speaker',name:'new speaker',quantity:1,start:'2099-01-01T00:00:00Z',end:'2099-01-02T00:00:00Z'}]};assert.ok(c.buildInventoryRiskReport_(s,{now:'2098-12-31T00:00:00Z'}).alerts.some(a=>a.kind==='catalog_stock_missing'&&a.equipment==='new speaker'));
+});

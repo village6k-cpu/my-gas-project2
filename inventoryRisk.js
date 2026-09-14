@@ -202,7 +202,7 @@ function buildInventoryRiskReport_(snapshot, options) {
       });
       // An explicit physical component owns its checkout/exclusion/external-supply
       // state. The header is counted only when the main item is represented by it.
-      if(headerItem && !mainExpanded)allocate(row);
+      if(headerItem && !mainExpanded || !headerItem && group.set.components.filter(function(c){return !c.observedOnly;}).every(function(c){return c.tracked===false;}))allocate(row);
       if(expanded[row.setGroup]) return;
       group.set.components.forEach(function(component,index) {
         if(component.tracked===false || component.observedOnly) return;
