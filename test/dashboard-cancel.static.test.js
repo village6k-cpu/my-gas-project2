@@ -70,7 +70,7 @@ const cancelTriggerBody = code.slice(
   code.indexOf('function scheduleCancelledTradeCleanupTriggerOutsideLock_'),
   code.indexOf('\nfunction ensureCancelledTradeCleanupTrigger_', code.indexOf('function scheduleCancelledTradeCleanupTriggerOutsideLock_')),
 );
-assert.match(cancelTriggerBody, /currentAt > Date\.now\(\) && currentAt <= desiredAt \+ 1000/);
+// 실행 지연 중 rescue가 트리거를 취소하지 않는지는 cancellation-trigger-liveness 행위 테스트로 검증한다.
 // 트리거 교체는 공용 프리미티브(replaceOneShotTrigger_)가 담당한다. 그 안에서
 // "1개 남긴 채 create → 성공 뒤 잔여 삭제" 순서를 지키므로 실행 경로가 0개가 되지 않고,
 // 동시에 개수가 1로 수렴해 20개 쿼터를 먹지 않는다.
