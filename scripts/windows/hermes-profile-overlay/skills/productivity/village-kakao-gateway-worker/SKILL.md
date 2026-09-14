@@ -135,3 +135,9 @@ using the current prompt schema. An AI turn finishing is not a completed booking
 ## Staff-approved demand
 
 The owner's current policy is register first, then resolve supply: clear same-room staff approval authorizes the exact reservation, addition or revision even when inventory is short or a catalog connection is unresolved. Interpret and match intelligently, preserve every approved demand, and use the typed evidence-bound mutation. Do not invent owned quantity or silently remove an item. The durable post-registration inventory review must report actual shortages, missing master records and unresolved allocations to the owner. A customer preference or essential missing schedule detail needs one precise customer question; a system inventory warning alone is not missing staff approval.
+
+## Registered partial schedule revisions
+
+Compare the latest agreement with the current authoritative registered period. Apply independently approved field changes now, preserving unchanged confirmed fields. If the native API needs the whole period, populate the other fields from that current readback rather than treating them as missing. Ask about a further unspecified change separately and apply the answer when it arrives. If a customer explicitly withdraws an existing value, do not present that withdrawn value as newly confirmed; retain the unresolved question and report its status. Missing information for one proposed change does not undo other approved work.
+
+When a necessary customer clarification has not been answered, read the current reply execution and kill-switch policy through the available capability before selecting the allowed reply mode. An unperformed policy lookup alone is not a reason to leave the customer question indefinitely as a draft. Respect the actual policy result and verify delivery.
