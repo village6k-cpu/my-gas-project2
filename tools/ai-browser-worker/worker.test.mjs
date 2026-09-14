@@ -13887,3 +13887,35 @@ test('composite registered receipt proves both period and equipment while retain
     }
   }
 });
+
+
+test('single component replacement receipt requires the same schedule ID, parent, quantity and all unrelated rows', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const beforeRows = REGISTERED_SET_ROWS.slice(0, 3);
+  const mutation = registeredMutationFixture('equipment_replace', {
+    expected_before: [{ schedule_id: beforeRows[1].scheduleId, name: beforeRows[1].name, quantity: beforeRows[1].qty }],
+    desired_after: [{ name: 'Replacement component', quantity: 1 }]
+  });
+  const exactAfter = beforeRows.map((row, index) => index === 1 ? { ...row, name: 'Replacement component' } : { ...row });
+  for (const failure of [null, 'row-id', 'parent', 'qty', 'sibling', 'missing-parent', 'mixed']) {
+    const afterRows = structuredClone(exactAfter);
+    const currentMutation = structuredClone(mutation);
+    const before = structuredClone(beforeRows);
+    if (failure === 'row-id') afterRows[1].scheduleId = '260824-008-04';
+    if (failure === 'parent') afterRows[1].setName = 'Different Set';
+    if (failure === 'qty') afterRows[1].qty = 2;
+    if (failure === 'sibling') afterRows[2].name = 'Changed sibling';
+    if (failure === 'missing-parent') { before.shift(); afterRows.shift(); }
+    if (failure === 'mixed') currentMutation.desired_after.push({ name: 'Unpaired addition', quantity: 1 });
+    const receipt = registeredReceiptFixture(job, { authorized_mutation: currentMutation, authoritative_result: {
+      before: registeredAuthoritativeState({ rows: before }), after: registeredAuthoritativeState({ rows: afterRows })
+    } });
+    const prepared = await workerModule.prepareKakaoGatewayDecision({ config: {}, job, turn,
+      finalText: 'FINAL_JSON\n' + JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: currentMutation })),
+      trustedToolReceipts: [receipt] });
+    if (!failure) {
+      assert.equal(prepared.gatewaySafetyFailures.length, 0, JSON.stringify(prepared.gatewaySafetyFailures));
+      assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+    } else assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'), true, failure);
+  }
+});

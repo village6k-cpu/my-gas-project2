@@ -1346,3 +1346,42 @@ test('composite source RQ keeps exact period, identity, uniqueness and drift fen
   assert.equal(calls.sourceFinalizations, 0);
   assert.deepEqual(calls.mutate, ['date', 'add', 'remove']);
 });
+
+
+test('single component replacement stays inside the native atomic correction without add/remove side effects', () => {
+  const componentRows = [
+    { scheduleId: '260813-005-01', setName: 'Cinema Set', name: 'Cinema Set', qty: 1, isComponent: false },
+    { scheduleId: '260813-005-02', setName: 'Cinema Set', name: 'Monitor A', qty: 1, isComponent: true },
+    { scheduleId: '260813-005-03', setName: 'Cinema Set', name: 'Battery', qty: 2, isComponent: true },
+  ];
+  const final = successState();
+  final.contract = { ...final.contract, ...input.expectedPeriod };
+  final.schedule = { periods: ['2026-08-17|04:30|2026-08-20|04:30'], rows: componentRows.map(row =>
+    row.scheduleId === '260813-005-02' ? { ...row, name: 'Monitor B' } : { ...row }), topLevelQuantities: { 'Cinema Set': 1 } };
+  final.ledger.startDate = '2026-08-17';
+  const correction = { ...input, dateChange: undefined,
+    staffApproval: { source: 'kakao_staff_confirmed', conversationRevision: 8, customerRequest: 'change monitor', staffConfirmation: 'confirmed' },
+    remove: [{ scheduleId: '260813-005-02', expectedName: 'Monitor A', expectedQty: 1 }], add: [{ name: 'Monitor B', qty: 1 }] };
+  for (const checkoutStarted of [false, true]) {
+    const h = harness({ baselineRows: componentRows, useRealRemovalPreflight: true, useRealVerification: true, finalState: final, checkoutStarted });
+    h.context.preflightRegisteredTradeComponentReplacement_ = (_trade, plan) => ({ ...plan, warnings: [{ equipment: 'Monitor B', message: 'supply shortage' }] });
+    h.context.applyRegisteredTradeComponentReplacement_ = () => { h.calls.mutate.push('component-replace'); return { success: true }; };
+    const result = h.context.correct(correction);
+    if (checkoutStarted) {
+      assert.equal(result.success, false);
+      assertNoWriteSideEffects(h.calls);
+    } else {
+      assert.equal(result.success, true, JSON.stringify(result));
+      assert.deepEqual(h.calls.mutate, ['component-replace']);
+      assert.equal(h.calls.regenerations, 1);
+      assert.equal(result.authoritativeReadback.inventoryWarnings[0].stage, 'equipment_replace');
+      for (const corrupt of [
+        final.schedule.rows.map((row, index) => index === 1 ? { ...row, scheduleId: '260813-005-09' } : row),
+        final.schedule.rows.map((row, index) => index === 1 ? { ...row, setName: 'Different Set' } : row),
+        final.schedule.rows.map((row, index) => index === 2 ? { ...row, qty: 3 } : row),
+      ]) assert.throws(() => h.verifyActual(h.baseline, { ...final, schedule: { ...final.schedule, rows: corrupt } }, correction,
+        { success: true, url: final.ledger.contractLink, fileId: 'file', linkUpdate: { success: true } },
+        { componentReplacement: { success: true } }), /component.*readback/i);
+    }
+  }
+});

@@ -724,6 +724,7 @@ export function buildHermesPrompt(job, options = {}) {
 - Clear, unconditional staff authorization of an exact pending RQ must use village_confirmed_reservation_commit. Use village_confirmation_request maintenance only for an explicit RQ edit that does not authorize registration.
 - Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use village_registered_reservation_change before FINAL_JSON and verify its authoritative result. Authority comes from the current registered trade, exact schedule rows/period and staff approval. A prior intake RQ may have been finalized or removed; its absence does not block a registered change. For equipment changes, include request_id only when a live pending inquiry for this exact change exists, with the same single ID in existing_confirm_request_ids; otherwise omit request_id and use existing_confirm_request_ids=[]. date_time_change carries neither. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
     '같은 대화 snapshot에서 직원이 장비와 대여 일시 변경을 함께 승인했다면 kind=equipment_and_date_change로 한 번의 village_registered_reservation_change 호출에 묶는다. expected_before에는 제거·교체할 정확한 스케줄 행만, desired_after에는 추가·교체할 수량만, date_change에는 승인된 변경 기간을 담는다. 일시만 먼저 적용한 뒤 장비를 두 번째 mutation으로 남기지 않는다.',
+    '세트 구성품 하나만 같은 수량의 다른 품목으로 교체하도록 승인되었으면 equipment_replace의 expected_before에 선택한 구성품 스케줄ID·현재 이름·수량 한 행, desired_after에 대체 품목·동일 수량 한 행만 담는다. 이 경로는 기존 스케줄ID와 세트 소속을 유지한다. 다른 장비 추가나 수량 변경을 함께 섞지 않는다.',
 - Read the full same-room conversation. Native Hermes—not code or keywords—semantically decides whether a Village staff reply clearly and unconditionally authorizes the exact customer request; wording is open-ended.
 - Before choosing pending registration, compare the customer and period with active registered trades. An existing RQ can represent additions to that trade; in that case use village_registered_reservation_change with the exact missing delta and matching RQ, not a second pending registration. Only an independent rental should become a separate trade.
 ${INVENTORY_JUDGMENT}
@@ -10378,7 +10379,24 @@ function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
       const current = before.rowsById.get(text(expected?.schedule_id).trim());
       return current?.isComponent === true;
     });
-    if (componentRewriteRequested) return false;
+    if (componentRewriteRequested) {
+      if (mutation.kind !== 'equipment_replace' || mutation.date_change !== null ||
+        mutation.expected_before.length !== 1 || mutation.desired_after.length !== 1) return false;
+      const expected = mutation.expected_before[0], desired = mutation.desired_after[0];
+      const current = before.rowsById.get(text(expected.schedule_id).trim());
+      if (!current || !current.isComponent || current.name !== text(expected.name).trim() ||
+        current.qty !== expected.quantity || current.qty !== desired.quantity ||
+        current.name === text(desired.name).trim() || current.setName === text(desired.name).trim()) return false;
+      let parentIndex = before.rows.indexOf(current) - 1;
+      while (parentIndex >= 0 && before.rows[parentIndex].isComponent && before.rows[parentIndex].setName === current.setName) parentIndex--;
+      const parent = before.rows[parentIndex];
+      if (!parent || parent.isComponent || parent.name !== current.setName || parent.setName !== current.setName ||
+        before.rows.length !== after.rows.length || !sameGatewayDecisionValue(before.topLevel, after.topLevel)) return false;
+      return before.rows.every((row, index) => sameRegisteredScheduleRow(
+        row.scheduleId === current.scheduleId ? { ...row, name: text(desired.name).trim() } : row,
+        after.rows[index]
+      ));
+    }
   }
 
   const additionDelta = registeredMutationDeltaQuantities(mutation?.desired_after);

@@ -251,3 +251,78 @@ test('validated mutation builder carries its evidence through both strict correc
   assert.throws(() => normalizeCorrectionInput({ ...built, staffApproval: { ...expectedApproval, source: 'customer' } }), /staffApproval/);
   assert.throws(() => c.normalizeRegisteredTradeCorrection_({ ...args, staffApproval: { ...expectedApproval, conversationRevision: 0 } }), /staffApproval/);
 });
+
+
+const COMPONENT_APPROVAL = { source: 'kakao_staff_confirmed', conversationRevision: 8,
+  customerRequest: 'replace the selected component', staffConfirmation: 'confirmed' };
+
+function componentHarness({ name = 'Scarce light', missingParent = false, ...options } = {}) {
+  const h = gasHarness(options);
+  const old = h.schedule.rows[1];
+  h.schedule.rows = [h.schedule.rows[0],
+    [TRADE + '-01', TRADE, 'Cinema Set', 'Cinema Set', 1, ...OLD, '대기', 'parent memo', 9000, '테스트 예약자'],
+    [TRADE + '-02', TRADE, 'Cinema Set', old[3], 2, ...OLD, '대기', '  manual memo\nkeep spaces  ', 0, '테스트 예약자'],
+    [TRADE + '-03', TRADE, 'Cinema Set', 'Sibling', 1, ...OLD, '대기', 'sibling memo', 0, '테스트 예약자'],
+    [TRADE + '-04', TRADE, '', 'Unrelated', 1, ...OLD, '대기', 'other memo', 3000, '테스트 예약자']
+  ];
+  if (missingParent) h.schedule.rows.splice(1, 1);
+  h.context.findDashboardRowsByValue_ = (sheet, column, _last, value) => sheet.rows
+    .map((row, index) => index > 0 && row[column - 1] === value ? index + 1 : 0).filter(Boolean);
+  h.context.findDashboardScheduleRowsForEquipments_ = sheet => sheet.rows.slice(1).map(row => [...row]);
+  h.context.buildDashboardScheduleData_ = rows => rows.map(row => ({
+    contractID: row[1], equipment: row[3], qty: row[4], startDT: h.context.parseDT(row[5], row[6]),
+    endDT: h.context.parseDT(row[7], row[8]), status: row[9], note: row[10],
+    ...(options.invalidAllocation ? { equipment: name, supplyError: 'invalid saved allocation' } : {})
+  }));
+  const projectionCalls = [];
+  h.context.scheduleDashboardStructureProjectionUnderLock_ = (...args) => projectionCalls.push(plain(args));
+  vm.runInNewContext([
+    functionSource('planRegisteredTradeComponentReplacement_'),
+    functionSource('preflightRegisteredTradeComponentReplacement_'),
+    functionSource('applyRegisteredTradeComponentReplacement_')
+  ].join('\n'), h.context);
+  const baseline = { contract: { startDate: OLD[0], startTime: OLD[1], endDate: OLD[2], endTime: OLD[3] },
+    schedule: { rows: h.schedule.rows.slice(1).map(row => ({ scheduleId: row[0], setName: row[2], name: row[3], qty: row[4], isComponent: Boolean(row[2]) && row[2] !== row[3] })) } };
+  const correction = { tradeId: TRADE, staffApproval: COMPONENT_APPROVAL, dateChange: null,
+    remove: [{ scheduleId: TRADE + '-02', expectedName: old[3], expectedQty: 2 }], add: [{ name, qty: 2 }] };
+  const plan = h.context.planRegisteredTradeComponentReplacement_(baseline, correction);
+  return { ...h, correction, baseline, plan, projectionCalls };
+}
+
+test('single approved component replacement changes only the selected name while preserving parent, quantity and all state', () => {
+  for (const name of ['Scarce light', 'Unmapped approved monitor']) {
+    const h = componentHarness({ name });
+    const before = structuredClone(h.schedule.rows);
+    const plan = h.context.preflightRegisteredTradeComponentReplacement_(TRADE, h.plan, h.options.staffApprovalToken);
+    assert.ok(plan.warnings.some(warning => warning.equipment === name));
+    const result = h.context.applyRegisteredTradeComponentReplacement_(TRADE, plan, h.options.staffApprovalToken);
+    assert.equal(result.success, true);
+    before[2][3] = name;
+    assert.deepEqual(h.schedule.rows, before);
+    assert.deepEqual(h.projectionCalls, [[TRADE, { syncStructure: true }]]);
+    assert.equal(h.equipment.writes, 0);
+    assert.throws(() => h.context.applyRegisteredTradeComponentReplacement_(TRADE, plan, h.options.staffApprovalToken), /baseline/i);
+  }
+});
+
+test('single component replacement fences exact source, parent, quantity, mixed deltas and saved supply', () => {
+  const h = componentHarness();
+  for (const changes of [
+    { staffApproval: null }, { add: [{ name: 'Scarce light', qty: 3 }] },
+    { add: [{ name: 'Scarce light', qty: 2 }, { name: 'Another item', qty: 1 }] },
+    { dateChange: { newStartDate: '2026-09-16' } },
+    { add: [{ name: 'Cinema Set', qty: 2 }] },
+    { remove: [{ scheduleId: TRADE + '-02', expectedName: 'Different previous', expectedQty: 2 }] }
+  ]) assert.equal(h.context.planRegisteredTradeComponentReplacement_(h.baseline, { ...h.correction, ...changes }), null);
+  assert.equal(componentHarness({ missingParent: true }).plan, null);
+  const plan = h.context.preflightRegisteredTradeComponentReplacement_(TRADE, h.plan, h.options.staffApprovalToken);
+  h.schedule.rows[2][4] = 3;
+  assert.throws(() => h.context.applyRegisteredTradeComponentReplacement_(TRADE, plan, h.options.staffApprovalToken), /baseline/i);
+  assert.equal(h.schedule.writes, 0);
+  for (const options of [{ invalidAllocation: true }, { missingEquipmentSheet: true }]) {
+    const bad = componentHarness(options);
+    assert.throws(() => bad.context.preflightRegisteredTradeComponentReplacement_(TRADE, bad.plan, bad.options.staffApprovalToken));
+    assert.equal(bad.schedule.writes, 0);
+  }
+  assert.throws(() => h.context.preflightRegisteredTradeComponentReplacement_(TRADE, h.plan, {}), /FORBIDDEN/);
+});
