@@ -13794,3 +13794,96 @@ test('appendToSheet preserves uncertain pending cutover evidence without replay'
   assert.equal(result.reqID,'RQ-260907-099');
   assert.equal(result.error_type,'pending_request_cutover_uncertain');
 });
+
+
+test('inventory review preserves an unregistered staff-approved reservation without asserting registration', () => {
+  const decision = gatewayDecisionFixture({
+    classification: 'already_answered', should_write_to_sheet: false, owner_review_required: true,
+    existing_confirm_request_ids: ['RQ-260914-014'],
+    reservation_inquiry: { is_reservation_inquiry: true, confirmed: true, already_registered: false },
+    follow_up_items: [{
+      type: 'reservation_review', route: 'inventory', taskKey: 'inventory:approved-reservation',
+      priority: 'high', status: 'open', title: 'Approved reservation equipment mapping review',
+      customer_name: 'Test customer', summary: 'The approved reservation has an unresolved catalog item.',
+      recommended_action: 'Resolve the equipment mapping and finish the approved registration.',
+      suggested_reply_draft: '', evidence: ['The staff approved the current customer plan.'],
+      blocking_reason: 'Catalog mapping warning', requiresHumanAction: true,
+      actionFamily: 'inventory_check', businessKey: 'request:RQ-260914-014', due_hint: 'now'
+    }],
+    reply_decision: { replyMode: 'no_reply', text: '', shouldCreateTask: true, safetyClass: 'no_send' }
+  });
+  const accepted = validateAiDecisionContract(decision);
+  assert.equal(accepted.valid, true, accepted.errors.join('; '));
+  assert.equal(decision.reservation_inquiry.already_registered, false);
+  assert.equal(decision.should_write_to_sheet, false);
+  for (const change of [
+    { status: 'closed' }, { taskKey: '' }, { actionFamily: 'document_approval' },
+    { requiresHumanAction: false }, { type: 'faq_answer' }, { route: 'document' }
+  ]) {
+    const invalid = structuredClone(decision);
+    Object.assign(invalid.follow_up_items[0], change);
+    assert.equal(validateAiDecisionContract(invalid).valid, false, JSON.stringify(change));
+  }
+  const dropped = structuredClone(decision);
+  dropped.reply_decision.shouldCreateTask = false;
+  assert.equal(validateAiDecisionContract(dropped).valid, false);
+});
+
+test('registered date change can retain another pending addon RQ as context without authorizing its mutation', async () => {
+  const mutation = registeredMutationFixture('date_time_change');
+  const decision = registeredDecisionFixture({
+    staff_confirmed_mutation: mutation, existing_confirm_request_ids: ['RQ-260914-011']
+  });
+  const accepted = validateAiDecisionContract(decision, { roomRevision: 7 });
+  assert.equal(accepted.valid, true, accepted.errors.join('; '));
+  assert.equal(Object.hasOwn(decision.staff_confirmed_mutation, 'request_id'), false);
+  const falselyTargeted = structuredClone(decision);
+  falselyTargeted.staff_confirmed_mutation.request_id = 'RQ-260914-011';
+  assert.equal(validateAiDecisionContract(falselyTargeted, { roomRevision: 7 }).valid, false);
+  const unchecked = structuredClone(decision);
+  unchecked.safety_checks.duplicate_checked_schedule_detail = false;
+  assert.equal(validateAiDecisionContract(unchecked, { roomRevision: 7 }).valid, false);
+  const { job, turn } = gatewayTurnFixture();
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    job, turn, finalText: JSON.stringify(decision), trustedToolReceipts: []
+  });
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.decision.trusted_registered_reservation_change_receipt, undefined);
+});
+
+test('composite registered receipt proves both period and equipment while retaining unrelated rows', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture('equipment_and_date_change', { date_change: {
+    new_start_date: '2026-08-27', new_start_time: '07:00', new_end_date: '2026-08-27', new_end_time: '18:00'
+  } });
+  const exact = registeredReceiptFixture(job, { mutation_kind: mutation.kind, authorized_mutation: mutation });
+  const afterRows = exact.authoritative_result.after.schedule.rows;
+  exact.authoritative_result.after = registeredAuthoritativeState({ startTime: '07:00', rows: afterRows });
+  for (const failure of [null, 'period', 'equipment', 'unrelated-row']) {
+    const receipt = structuredClone(exact);
+    if (failure === 'period') receipt.authoritative_result.after = registeredAuthoritativeState({ rows: afterRows });
+    if (failure === 'equipment') receipt.authoritative_result.after = registeredAuthoritativeState({
+      startTime: '07:00', rows: exact.authoritative_result.before.schedule.rows
+    });
+    if (failure === 'unrelated-row') receipt.authoritative_result.after = registeredAuthoritativeState({
+      startTime: '07:00', rows: [afterRows[0], { ...afterRows[1], qty: 3 }]
+    });
+    let replayCalls = 0;
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: 'FINAL_JSON\n' + JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: mutation })),
+      trustedToolReceipts: [receipt],
+      dependencies: { executeRegisteredReservationChange: async () => { replayCalls += 1; } }
+    });
+    assert.equal(replayCalls, 0);
+    if (!failure) {
+      assert.equal(prepared.gatewaySafetyFailures.length, 0, JSON.stringify(prepared.gatewaySafetyFailures));
+      assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+      assert.equal(prepared.decision.staff_confirmed_mutation.kind, 'equipment_and_date_change');
+    } else {
+      assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'), true, failure);
+      assert.equal(prepared.decision.owner_review_required, true, failure);
+      assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+    }
+  }
+});

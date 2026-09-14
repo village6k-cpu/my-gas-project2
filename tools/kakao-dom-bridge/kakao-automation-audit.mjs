@@ -58,7 +58,8 @@ const REGISTERED_ACTION = Object.freeze({
   equipment_remove: 'remove',
   equipment_replace: 'replace',
   equipment_quantity_change: 'quantity_change',
-  date_time_change: 'date_time_change'
+  date_time_change: 'date_time_change',
+  equipment_and_date_change: 'update'
 });
 
 function invalidAuditEvent() {
@@ -491,7 +492,8 @@ function registeredSummary(actionType, tradeId, outcome) {
     remove: '장비를 삭제',
     replace: '장비를 교체',
     quantity_change: '장비 수량을 변경',
-    date_time_change: '대여 일정을 변경'
+    date_time_change: '대여 일정을 변경',
+    update: '장비와 대여 일정을 변경'
   }[actionType];
   if (outcome === 'success') return `등록예약 ${tradeId}에 ${verb}했습니다.`;
   if (outcome === 'partial_success') return `등록예약 ${tradeId} 변경이 부분 반영되었습니다.`;
@@ -524,7 +526,7 @@ function buildRegisteredEvent({ durableJob, operation, receipt, customerLabel, h
     throw new TypeError('trusted tool receipt set is invalid');
   }
   const changeItems = [];
-  if (actionType === 'date_time_change') {
+  if (actionType === 'date_time_change' || receipt.mutation_kind === 'equipment_and_date_change') {
     const before = contractPeriod(result, 'before');
     const after = contractPeriod(result, 'after');
     if (before.start !== null || after.start !== null) {
@@ -533,7 +535,8 @@ function buildRegisteredEvent({ durableJob, operation, receipt, customerLabel, h
     if (before.end !== null || after.end !== null) {
       changeItems.push({ field: 'end_at', before: before.end, after: after.end });
     }
-  } else {
+  }
+  if (actionType !== 'date_time_change') {
     const before = equipmentText(mutation.expected_before);
     const after = equipmentText(mutation.desired_after);
     if (before !== null || after !== null) changeItems.push({ field: 'equipment', before, after });

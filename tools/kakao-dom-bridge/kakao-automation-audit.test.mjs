@@ -964,3 +964,25 @@ test('audit store records only content-free projection status and never falls ba
     updated_at: '2026-09-07T02:00:00.000Z'
   });
 });
+
+
+test('composite registered audit records equipment and both period endpoints in one existing update action', () => {
+  const receipt = registeredReceipt();
+  receipt.mutation_kind = receipt.authorized_mutation.kind = 'equipment_and_date_change';
+  receipt.authorized_mutation.date_change = {
+    new_start_date: '2026-09-07', new_start_time: '08:30', new_end_date: '2026-09-08', new_end_time: '19:30'
+  };
+  receipt.authoritative_result.after.contract.startTime = '08:30';
+  receipt.authoritative_result.after.contract.endDate = '2026-09-08';
+  const events = buildKakaoAutomationAuditEvents({ durableJob: baseJob({
+    tool: 'registered_reservation_change', operationId: REGISTERED_OPERATION, receipt
+  }) });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].action_type, 'update');
+  assert.equal(events[0].summary, '등록예약 260907-001에 장비와 대여 일정을 변경했습니다.');
+  assert.deepEqual(events[0].change_items, [
+    { field: 'start_at', before: '2026-09-07 07:30', after: '2026-09-07 08:30' },
+    { field: 'end_at', before: '2026-09-07 19:30', after: '2026-09-08 19:30' },
+    { field: 'equipment', before: null, after: '강풍기 1개' }
+  ]);
+});

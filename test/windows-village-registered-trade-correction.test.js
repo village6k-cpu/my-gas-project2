@@ -482,3 +482,30 @@ test('a send-only request skips the correction action entirely', async () => {
   assert.equal(result.verified, true);
   assert.equal(result.readback, null);
 });
+
+
+test('staff approval crosses the one-POST runner with supply issues retained in authoritative readback', async () => {
+  const staffApproval = { source: 'kakao_staff_confirmed', conversationRevision: 8,
+    customerRequest: '장비 변경 부탁드립니다', staffConfirmation: '네 변경해드릴게요' };
+  const inventoryWarnings = [{ equipment: '추가 조명', message: '재고 연결 확인 필요' }];
+  const payload = correctedPayload();
+  payload.authoritativeReadback.inventoryWarnings = inventoryWarnings;
+  const fixture = createFetchFixture({ responseByAction: { scheduleCorrectRegisteredTrade: payload } });
+  const result = await runRegisteredTradeCorrection({
+    config, input: { ...fullInput, staffApproval, sendEstimate: false }, fetchImpl: fixture.fetchImpl
+  });
+  assert.equal(fixture.calls.length, 1);
+  assert.deepEqual(fixture.calls[0].body.args.staffApproval, staffApproval);
+  assert.deepEqual(result.authoritativeReadback.inventoryWarnings, inventoryWarnings);
+  assert.equal(result.send.attempted, false);
+});
+
+test('staff approval requires complete authority and exact removal quantities', () => {
+  const approval = { source: 'kakao_staff_confirmed', conversationRevision: 8,
+    customerRequest: '장비 변경 부탁드립니다', staffConfirmation: '네 변경해드릴게요' };
+  assert.throws(() => normalizeCorrectionInput({ ...fullInput, staffApproval: approval,
+    remove: [{ scheduleId: '260810-003-04', expectedName: '소니 GM 줌렌즈 세트' }] }), /expectedQty/);
+  assert.throws(() => normalizeCorrectionInput({ ...fullInput, staffApproval: { ...approval, allowAny: true } }), /staffApproval/);
+  assert.throws(() => normalizeCorrectionInput({ ...fullInput, staffApproval: { ...approval, staffConfirmation: ' ' } }), /staffApproval/);
+  assert.throws(() => normalizeCorrectionInput({ ...fullInput, staffApproval: { ...approval, customerRequest: 123 } }), /staffApproval/);
+});

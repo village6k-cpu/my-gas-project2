@@ -9,7 +9,7 @@ const TOP_LEVEL_FIELDS = new Set([
   'expected_period', 'expected_before', 'desired_after', 'date_change'
 ]);
 const KINDS = new Set([
-  'equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change'
+  'equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change'
 ]);
 const TRADE_ID = /^\d{6}-\d{3}$/;
 const REQUEST_ID = /^RQ-\d{6}-\d{3}$/;
@@ -154,6 +154,16 @@ function validateRegisteredKindShape(mutation, errors) {
     const namesMatch = JSON.stringify(beforeNames) === JSON.stringify(afterNames);
     const quantityDiffers = namesMatch && beforeNames.some((name) => beforeQuantities.get(name) !== afterQuantities.get(name));
     if (!before.length || !after.length || hasDateChange || !namesMatch || !quantityDiffers) shapeError();
+  } else if (mutation.kind === 'equipment_and_date_change') {
+    const expected = periodInstant(mutation.expected_period);
+    const desired = periodInstant(mutation.date_change, 'new_');
+    const beforeQuantities = rowQuantitiesByName(before);
+    const afterQuantities = rowQuantitiesByName(after);
+    const names = new Set([...(beforeQuantities?.keys() || []), ...(afterQuantities?.keys() || [])]);
+    const equipmentDiffers = beforeQuantities && afterQuantities
+      && [...names].some((name) => (beforeQuantities.get(name) || 0) !== (afterQuantities.get(name) || 0));
+    if (!equipmentDiffers || !hasDateChange || !expected || !desired || desired.end <= desired.start
+      || (expected.start === desired.start && expected.end === desired.end)) shapeError();
   } else if (mutation.kind === 'date_time_change') {
     const expected = periodInstant(mutation.expected_period);
     const desired = periodInstant(mutation.date_change, 'new_');
@@ -201,6 +211,7 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
     }
   }
   if (scope === 'pending_request') {
+    if (mutation.kind === 'equipment_and_date_change') errors.push('equipment_and_date_change requires registered_trade');
     if (!REQUEST_ID.test(text(mutation.request_id))) errors.push('request_id is invalid');
     if (Object.hasOwn(mutation, 'trade_id')) errors.push('trade_id is forbidden for pending_request');
     if (Object.hasOwn(mutation, 'expected_period')) errors.push('expected_period is forbidden for pending_request');
@@ -231,6 +242,14 @@ export function buildRegisteredTradeCorrectionInput(mutation, operationId) {
   return {
     tradeId: mutation.trade_id,
     operationId: normalizedOperationId,
+    // Derived here only after exact staff-confirmed mutation validation. The model
+    // cannot provide a separate inventory bypass flag through its strict schema.
+    staffApproval: {
+      source: 'kakao_staff_confirmed',
+      conversationRevision: mutation.source_evidence.conversation_revision,
+      customerRequest: mutation.source_evidence.customer_request,
+      staffConfirmation: mutation.source_evidence.staff_confirmation
+    },
     ...(Object.hasOwn(mutation, 'request_id') ? { sourceRequestId: mutation.request_id } : {}),
     expectedPeriod: {
       startDate: mutation.expected_period.start_date,

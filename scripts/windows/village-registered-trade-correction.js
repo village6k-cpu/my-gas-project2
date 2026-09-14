@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 
 const ALLOWED_INPUT_FIELDS = new Set([
-  'tradeId', 'operationId', 'sourceRequestId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate'
+  'tradeId', 'operationId', 'sourceRequestId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate', 'staffApproval'
 ]);
 const ALLOWED_DATE_FIELDS = new Set([
   'newStartDate', 'newEndDate', 'startTime', 'endTime', 'allowConflicts'
@@ -132,6 +132,24 @@ function normalizeExpectedPeriod(value) {
   return normalized;
 }
 
+function normalizeStaffApproval(value) {
+  if (value === undefined) return null;
+  const fields = new Set(['source', 'conversationRevision', 'customerRequest', 'staffConfirmation']);
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).some(field => !fields.has(field))
+      || value.source !== 'kakao_staff_confirmed'
+      || typeof value.customerRequest !== 'string' || typeof value.staffConfirmation !== 'string'
+      || !Number.isSafeInteger(value.conversationRevision) || value.conversationRevision < 1) {
+    throw new Error('staffApproval requires exact Kakao staff confirmation evidence');
+  }
+  return {
+    source: value.source,
+    conversationRevision: value.conversationRevision,
+    customerRequest: requiredText(value.customerRequest, 'staffApproval.customerRequest', 2000),
+    staffConfirmation: requiredText(value.staffConfirmation, 'staffApproval.staffConfirmation', 2000)
+  };
+}
+
 function normalizeCorrectionInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('correction input must be a JSON object');
@@ -217,8 +235,15 @@ function normalizeCorrectionInput(input) {
     dateChange: normalizeDateChange(input.dateChange),
     remove,
     add,
-    sendEstimate: booleanValue(input.sendEstimate, 'sendEstimate', false)
+    sendEstimate: booleanValue(input.sendEstimate, 'sendEstimate', false),
+    staffApproval: normalizeStaffApproval(input.staffApproval)
   };
+  if (normalized.staffApproval) {
+    if (!normalized.expectedPeriod) throw new Error('staffApproval requires expectedPeriod');
+    if (remove.some(entry => entry.expectedQty === undefined)) {
+      throw new Error('staffApproval requires exact removal expectedQty');
+    }
+  }
   if (!normalized.dateChange && remove.length === 0 && add.length === 0 && !normalized.sendEstimate) {
     throw new Error('At least one correction or send must be requested');
   }
@@ -339,6 +364,7 @@ async function runRegisteredTradeCorrection({
     const args = {
       tradeId: normalized.tradeId,
       operationId: normalized.operationId,
+      ...(normalized.staffApproval ? { staffApproval: normalized.staffApproval } : {}),
       ...(normalized.sourceRequestId ? { sourceRequestId: normalized.sourceRequestId } : {}),
       ...(normalized.expectedPeriod ? { expectedPeriod: normalized.expectedPeriod } : {}),
       ...(normalized.dateChange ? { dateChange: normalized.dateChange } : {}),

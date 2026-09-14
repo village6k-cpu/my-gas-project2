@@ -6,7 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const gas = fs.readFileSync(path.resolve(__dirname, '..', 'checkAvailability.js'), 'utf8');
+const gas = fs.readFileSync(path.resolve(__dirname, '..', 'checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
 const api = fs.readFileSync(path.resolve(__dirname, '..', 'sheetAPI.js'), 'utf8');
 
 test('GAS exposes a typed exact-fenced confirmed registration operation instead of a generic 등록 action', () => {
@@ -203,7 +203,7 @@ function productionCommitContext(overrides = {}) {
     SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: (name) => name === '확인요청' ? sheet : {} }) },
     CONFIRMED_RESERVATION_LOCK_CAPABILITY_: capability,
     _normalizeConfirmedReservationCommit_: () => structuredClone(normalized),
-    _assertConfirmedReservationCatalogPlan_: () => {},
+    _collectConfirmedReservationCatalogIssues_: () => {},
     _resolveStaffConfirmedPendingRequestFence_: () => ({
       group: { reqID: 'RQ-260907-001', rows: [2], setComponentItems: [] },
       expectedSetComponents: []

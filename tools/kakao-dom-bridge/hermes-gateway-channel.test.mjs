@@ -1845,3 +1845,25 @@ test('restart backfills a pending notification for a legacy superseded unresolve
     assert.equal(await restarted.claim({ consumerId: 'gateway-native', waitMs: 0 }), null);
   });
 });
+
+
+test('composite receipt persists as one operation and keeps the different-second-mutation fence after restart', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-composite', 'room-composite', 6));
+    const claim = await channel.claim({ consumerId: 'gateway-composite', waitMs: 0 });
+    const operation = registeredReservationChangeOperation(claim);
+    const reserved = await channel.reserveToolOperation(operation);
+    const receipt = registeredReservationChangeReceipt(claim, reserved.reservation.operation_id, undefined, {
+      mutation_kind: 'equipment_and_date_change'
+    });
+    const recorded = await channel.recordToolReceipt(receipt);
+    assert.equal(recorded.tool_receipts.length, 1);
+    assert.equal(recorded.tool_operation.state, 'completed');
+    assert.equal((await channel.reserveToolOperation(operation)).created, false);
+    const restarted = createHermesGatewayChannel({ directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now });
+    assert.equal((await restarted.get(claim.job_id)).tool_receipts[0].mutation_kind, 'equipment_and_date_change');
+    await assert.rejects(restarted.reserveToolOperation({ ...operation, request_digest: 'second-equipment-change' }), {
+      code: 'confirmation_operation_conflict'
+    });
+  });
+});

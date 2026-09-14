@@ -292,6 +292,8 @@ test('rejects null fields belonging to the other mutation scope and a baseline f
 test('projects a registered mutation with exact expected period and quantities', () => {
   assert.deepEqual(buildRegisteredTradeCorrectionInput(MUTATION, 'operation-260827-001'), {
     tradeId: '260824-008', operationId: 'operation-260827-001', sourceRequestId: 'RQ-260827-001',
+    staffApproval: { source: 'kakao_staff_confirmed', conversationRevision: 8,
+      customerRequest: '28-135 취소하고 sony 70-200 gm 2.8 로 부탁드립니당', staffConfirmation: '네' },
     expectedPeriod: { startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00' },
     remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
     add: [{ name: '소니 GM 70-200mm II', qty: 1 }],
@@ -377,6 +379,8 @@ test('equipment mutation crosses the real correction runner seam once without an
     tradeId: '260824-008',
     operationId: REAL_RUNNER_OPERATION_ID,
     sourceRequestId: 'RQ-260827-001',
+    staffApproval: { source: 'kakao_staff_confirmed', conversationRevision: 8,
+      customerRequest: '28-135 취소하고 sony 70-200 gm 2.8 로 부탁드립니당', staffConfirmation: '네' },
     expectedPeriod: { startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00' },
     remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
     add: [{ name: '소니 GM 70-200mm II', qty: 1 }]
@@ -413,6 +417,8 @@ test('date-time mutation crosses the real correction runner seam once with the e
   assert.deepEqual(calls[0].args, {
     tradeId: '260824-008',
     operationId: REAL_RUNNER_OPERATION_ID,
+    staffApproval: { source: 'kakao_staff_confirmed', conversationRevision: 8,
+      customerRequest: '28-135 취소하고 sony 70-200 gm 2.8 로 부탁드립니당', staffConfirmation: '네' },
     expectedPeriod: { startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00' },
     dateChange: {
       newStartDate: '2026-08-28',
@@ -571,4 +577,71 @@ test('returns failed receipt for an unstructured failure before any write and re
     executeVillageRegisteredReservationChange(request({ roomRevision: 9 })),
     /room revision/i
   );
+});
+
+
+function compositeMutation(overrides = {}) {
+  return { ...clone(MUTATION), kind: 'equipment_and_date_change', date_change: {
+    new_start_date: '2026-08-27', new_start_time: '07:00',
+    new_end_date: '2026-08-27', new_end_time: '18:00'
+  }, ...overrides };
+}
+
+test('composite registered change validates one approved date plus exact equipment delta and builds one atomic input', () => {
+  for (const delta of [
+    {}, { expected_before: [] }, { desired_after: [] },
+    { desired_after: [{ name: MUTATION.expected_before[0].name, quantity: 2 }] }
+  ]) {
+    const mutation = compositeMutation(delta);
+    assert.equal(valid(mutation).valid, true, JSON.stringify(valid(mutation).errors));
+    const input = buildRegisteredTradeCorrectionInput(mutation, REAL_RUNNER_OPERATION_ID);
+    assert.equal(input.operationId, REAL_RUNNER_OPERATION_ID);
+    assert.equal(input.dateChange.startTime, '07:00');
+    assert.equal(input.dateChange.allowConflicts, false);
+    assert.deepEqual(input.remove, mutation.expected_before.map(row => ({
+      scheduleId: row.schedule_id, expectedName: row.name, expectedQty: row.quantity
+    })));
+    assert.deepEqual(input.add, mutation.desired_after.map(row => ({ name: row.name, qty: row.quantity })));
+    assert.equal(input.staffApproval.conversationRevision, 8);
+  }
+  const noRq = compositeMutation(); delete noRq.request_id;
+  assert.equal(valid(noRq).valid, true);
+  assert.equal(Object.hasOwn(buildRegisteredTradeCorrectionInput(noRq, REAL_RUNNER_OPERATION_ID), 'sourceRequestId'), false);
+});
+
+test('composite change rejects empty or unchanged deltas, missing or unchanged dates, stale evidence and wrong schedule identities', () => {
+  for (const mutation of [
+    compositeMutation({ expected_before: [], desired_after: [] }),
+    compositeMutation({ desired_after: [{ name: MUTATION.expected_before[0].name, quantity: 1 }] }),
+    compositeMutation({ date_change: null }),
+    compositeMutation({ date_change: { new_start_date: '2026-08-27', new_start_time: '06:00', new_end_date: '2026-08-27', new_end_time: '18:00' } }),
+    compositeMutation({ date_change: { new_start_date: '2026-08-27', new_start_time: '19:00', new_end_date: '2026-08-27', new_end_time: '18:00' } }),
+    compositeMutation({ source_evidence: { ...MUTATION.source_evidence, conversation_revision: 7 } }),
+    compositeMutation({ expected_before: [{ schedule_id: '260824-999-07', name: '장비', quantity: 1 }] }),
+    { ...clone(PENDING_MUTATION), kind: 'equipment_and_date_change', date_change: compositeMutation().date_change }
+  ]) assert.equal(valid(mutation).valid, false, JSON.stringify(mutation));
+  assert.equal(valid({ ...compositeMutation(), kind: 'equipment_add', expected_before: [] }).valid, false);
+});
+
+test('composite native execution sends a single correction request containing equipment and period', async () => {
+  const fixture = request({ mutation: compositeMutation() });
+  const originalRun = fixture.dependencies.runRegisteredTradeCorrection;
+  const calls = [];
+  fixture.dependencies.runRegisteredTradeCorrection = async (...args) => {
+    calls.push(args);
+    const result = await originalRun(...args);
+    for (const state of [result.authoritativeReadback.after, result.readback]) {
+      state.contract.startTime = '07:00';
+      state.schedule.periods = ['2026-08-27|07:00|2026-08-27|18:00'];
+    }
+    return result;
+  };
+  const receipt = await executeVillageRegisteredReservationChange(fixture, fixture.dependencies);
+  assert.equal(receipt.status, 'ok', JSON.stringify(receipt.error));
+  assert.equal(receipt.mutation_kind, 'equipment_and_date_change');
+  assert.equal(calls.length, 1);
+  const wire = calls[0][0].input;
+  assert.equal(wire.dateChange.startTime, '07:00');
+  assert.equal(wire.add[0].name, '소니 GM 70-200mm II');
+  assert.equal(wire.remove[0].scheduleId, '260824-008-07');
 });

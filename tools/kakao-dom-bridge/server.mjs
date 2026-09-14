@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
 import { isSharedHermesGatewayIdle } from '../ai-browser-worker/shared-hermes-browser.mjs';
+import { effectiveRegisteredOperationReceipts } from '../ai-browser-worker/registered-operation-recovery.mjs';
 import { deriveCustomerReplyOutcome } from '../work-orchestrator-v2/automation-resolution.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
@@ -2605,17 +2606,36 @@ export function createGatewayResultApplicationCoordinator({
         : operation.tool === 'confirmed_reservation_commit'
           ? 'village-confirmed-reservation-commit-receipt/v1'
         : 'village-confirmation-receipt/v1';
-    const exact = receipts.filter((receipt) => (
+    const matchesOperation = (receipt, reserved) => (
       receipt?.schema === expectedSchema
-      && receipt.receipt_id === operation.receipt_id
-      && receipt.operation_id === operation.operation_id
-      && receipt.lease_id === operation.lease_id
-      && receipt.request_digest === operation.request_digest
+      && receipt.receipt_id === reserved.receipt_id
+      && receipt.operation_id === reserved.operation_id
+      && receipt.lease_id === reserved.lease_id
+      && receipt.request_digest === reserved.request_digest
       && receipt.job_id === durableJob.job_id
       && receipt.room_key === durableJob.room_key
       && receipt.room_revision === durableJob.room_revision
-    ));
-    if (receipts.length !== 1 || exact.length !== 1) {
+    );
+    let effectiveReceipts = receipts;
+    if (receipts.length > 1 && operation.tool === 'registered_reservation_change') {
+      const history = Array.isArray(durableJob.tool_operation_history) ? durableJob.tool_operation_history : [];
+      const operations = [...history, operation];
+      const exactHistory = operations.length === receipts.length && operations.every((reserved) => (
+        reserved?.schema === 'village-tool-operation-reservation/v1'
+        && reserved.state === 'completed' && reserved.tool === operation.tool
+        && reserved.job_id === durableJob.job_id && reserved.room_key === durableJob.room_key
+        && reserved.room_revision === durableJob.room_revision
+        && receipts.filter((receipt) => matchesOperation(receipt, reserved)).length === 1
+      ));
+      if (exactHistory) {
+        // Native preflight proof can exclude earlier zero-write attempts from result
+        // reconciliation. Persisted history and the one committed mutation fence remain intact.
+        effectiveReceipts = effectiveRegisteredOperationReceipts(receipts,
+          (receipt) => operations.filter((reserved) => matchesOperation(receipt, reserved)).length === 1);
+      }
+    }
+    const exact = effectiveReceipts.filter((receipt) => matchesOperation(receipt, operation));
+    if (effectiveReceipts.length !== 1 || exact.length !== 1) {
       throw new Error('gateway_durable_tool_receipt_set_invalid');
     }
     return exact;
