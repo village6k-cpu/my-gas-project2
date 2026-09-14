@@ -2635,6 +2635,10 @@ function dashboardTradeMutationLeaseError_(props, tid, ownKind, ownToken) {
   if (setupClosing && ownKind !== 'setup') {
     return { error: '같은 거래의 반출 상태를 처리 중입니다.', code: 'BUSY', retryable: true };
   }
+  var priceLease = activeDashboardMutationLease_(props, 'registeredTradePriceMutation_' + tid);
+  if (priceLease && !(ownKind === 'registeredTradePrice' && String(priceLease.token || '') === String(ownToken || ''))) {
+    return { error: '같은 거래의 단가와 계약서를 정정 중입니다.', code: 'BUSY', retryable: true };
+  }
   var itemLease = activeDashboardMutationLease_(props, 'checkoutItemMutation_' + tid);
   if (itemLease && !(ownKind === 'checkoutItem' && String(itemLease.token || '') === String(ownToken || ''))) {
     return { error: '같은 거래의 품목 반출 체크를 저장 중입니다.', code: 'BUSY', retryable: true };
@@ -20078,7 +20082,7 @@ function parseWithClaude(text, imageBase64, imageMediaType) {
 }
 function normalizeRegisteredTradeCorrection_(args) {
   args = args || {};
-  var allowed = { tradeId: true, operationId: true, sourceRequestId: true, expectedPeriod: true, dateChange: true, remove: true, add: true, staffApproval: true };
+  var allowed = { tradeId: true, operationId: true, sourceRequestId: true, expectedPeriod: true, dateChange: true, remove: true, add: true, staffApproval: true, priceChanges: true };
   Object.keys(args).forEach(function(key) {
     if (!allowed[key]) throw new Error('지원하지 않거나 금지된 등록거래 보정 필드: ' + key);
   });
@@ -20195,7 +20199,8 @@ function normalizeRegisteredTradeCorrection_(args) {
     return { name: name, qty: entry.qty };
   });
   if (add.length > 100) throw new Error('add는 최대 100개입니다');
-  if (!dateChange && !remove.length && !add.length) throw new Error('날짜·제거·추가 중 하나 이상이 필요합니다');
+  var priceChanges = normalizeRegisteredTradePriceChanges_(args.priceChanges, tradeId);
+  if (!dateChange && !remove.length && !add.length && !priceChanges.length) throw new Error('날짜·제거·추가·단가 중 하나 이상이 필요합니다');
   if (sourceRequestId && !remove.length && !add.length) {
     throw new Error('sourceRequestId는 장비 추가·삭제·교체 변경에만 사용할 수 있습니다');
   }
@@ -20220,7 +20225,10 @@ function normalizeRegisteredTradeCorrection_(args) {
       customerRequest: approval.customerRequest.trim(), staffConfirmation: approval.staffConfirmation.trim()
     };
   }
-  return {
+  if (priceChanges.length && (!staffApproval || !expectedPeriod || dateChange || remove.length || add.length || sourceRequestId)) {
+    throw new Error('priceChanges requires staffApproval and expectedPeriod, and must be price-only');
+  }
+  var normalized = {
     tradeId: tradeId,
     operationId: operationId,
     sourceRequestId: sourceRequestId,
@@ -20230,6 +20238,8 @@ function normalizeRegisteredTradeCorrection_(args) {
     remove: remove,
     add: add
   };
+  if (priceChanges.length) normalized.priceChanges = priceChanges;
+  return normalized;
 }
 
 // Only the validated atomic correction may pass this in-process capability.
@@ -20862,8 +20872,187 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
   return finalState;
 }
 
+function normalizeRegisteredTradePriceChanges_(value, tradeId) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.length || value.length > 10) throw new Error('priceChanges must contain 1 to 10 exact rows');
+  var seen = {};
+  return value.map(function(entry) {
+    var allowed = { scheduleId: true, expectedName: true, expectedQty: true, expectedUnitPrice: true, unitPrice: true };
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).some(function(key) { return !allowed[key]; })) throw new Error('invalid priceChanges fields');
+    var id = entry.scheduleId, name = entry.expectedName;
+    if (typeof id !== 'string' || !/^\d{6}-\d{3}-\d+$/.test(id) || id.indexOf(tradeId + '-') !== 0 || seen[id]) throw new Error('invalid or duplicate priceChanges scheduleId');
+    if (typeof name !== 'string' || !name.trim() || name.length > 160) throw new Error('priceChanges expectedName required');
+    if (!Number.isSafeInteger(entry.expectedQty) || entry.expectedQty < 1 || entry.expectedQty > 99) throw new Error('invalid priceChanges expectedQty');
+    ['expectedUnitPrice', 'unitPrice'].forEach(function(key) {
+      if (!Number.isSafeInteger(entry[key]) || entry[key] < 0) throw new Error('invalid priceChanges ' + key);
+    });
+    if (entry.expectedUnitPrice === entry.unitPrice) throw new Error('priceChanges must change the unit price');
+    seen[id] = true;
+    return { scheduleId: id, expectedName: name.trim(), expectedQty: entry.expectedQty, expectedUnitPrice: entry.expectedUnitPrice, unitPrice: entry.unitPrice };
+  });
+}
+
+function registeredTradePriceDigest_(value) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, JSON.stringify(value), Utilities.Charset.UTF_8)
+    .map(function(byte) { return ('0' + ((byte + 256) % 256).toString(16)).slice(-2); }).join('');
+}
+
+// Preserve every schedule cell and every contract field, including notes, status,
+// quantities and discount. Only the explicitly approved schedule L cells may differ.
+function readRegisteredTradePriceSnapshot_(tradeId) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedule = ss.getSheetByName('스케줄상세'), contract = ss.getSheetByName('계약마스터');
+  if (!schedule || !contract || schedule.getLastRow() < 2 || contract.getLastRow() < 2) throw new Error('price correction sheets missing');
+  var rows = schedule.getRange(2, 1, schedule.getLastRow() - 1, 13).getValues();
+  var seen = {}, selected = [];
+  rows.forEach(function(row, index) {
+    if (String(row[1] || '').trim() !== tradeId) return;
+    var id = String(row[0] || '').trim();
+    if (!id || seen[id]) throw new Error('price correction duplicate scheduleId');
+    seen[id] = true;
+    selected.push({ row: index + 2, cells: row });
+  });
+  var contracts = contract.getRange(2, 1, contract.getLastRow() - 1, contract.getLastColumn()).getValues().filter(function(row) {
+    return String(row[0] || '').trim() === tradeId;
+  });
+  if (!selected.length || contracts.length !== 1) throw new Error('price correction identity is not unique');
+  return { schedule: selected, contract: contracts[0] };
+}
+
+function registeredTradePriceSnapshotDigest_(snapshot) {
+  // Physical row numbers may change when another trade is inserted. IDs and the
+  // complete in-trade ordering/cells must still match before each write/readback.
+  return registeredTradePriceDigest_({ schedule: snapshot.schedule.map(function(row) { return row.cells; }), contract: snapshot.contract });
+}
+
+function readRegisteredTradePriceLedger_(tradeId) {
+  var url = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+  if (!url) throw new Error('price correction ledger URL missing');
+  var sheet = SpreadsheetApp.openByUrl(url).getSheetByName('거래내역');
+  if (!sheet || sheet.getLastRow() < 2) throw new Error('price correction ledger missing');
+  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 9).getValues().filter(function(row) { return String(row[4] || '').trim() === tradeId; });
+  if (rows.length !== 1 || !Number.isSafeInteger(rows[0][8]) || rows[0][8] < 0) throw new Error('price correction ledger identity/amount is not exact');
+  return { contractUrl: String(rows[0][2] || '').trim(), amount: rows[0][8] };
+}
+
+function readRegisteredTradePriceContract_(correction, snapshot, regeneration) {
+  if (!regeneration || regeneration.success !== true || !regeneration.fileId || !regeneration.url || !regeneration.linkUpdate || regeneration.linkUpdate.success !== true) throw new Error('price correction contract regeneration unverified');
+  var ws = SpreadsheetApp.openById(regeneration.fileId).getSheets()[0];
+  invalidateContractSheetScan_();
+  var layout = findTemplateRows(ws), refs = findContractPaymentRefs_(ws, layout);
+  if (!layout.itemStart || !layout.itemRows) throw new Error('price correction contract layout missing');
+  var items = correction.priceChanges.map(function(change) {
+    var index = -1;
+    snapshot.schedule.forEach(function(row, i) { if (row.cells[0] === change.scheduleId) index = i; });
+    if (index < 0 || index >= layout.itemRows * 2) throw new Error('price correction contract item index missing');
+    // The existing generator writes schedule rows in order: B/D/F or H/J/L.
+    var col = index < layout.itemRows ? 2 : 8;
+    var cells = ws.getRange(layout.itemStart + index % layout.itemRows, col, 1, 5).getValues()[0];
+    if (String(cells[0] || '').trim() !== change.expectedName || cells[2] !== change.expectedQty || Number(cells[4]) !== change.unitPrice) throw new Error('price correction generated contract item mismatch');
+    return { scheduleId: change.scheduleId, name: change.expectedName, qty: cells[2], unitPrice: Number(cells[4]), isComponent: false };
+  });
+  var amount = readContractAmount_(ws, refs.finalAmountCell);
+  if (!Number.isSafeInteger(amount) || amount < 0) throw new Error('price correction generated contract amount invalid');
+  return { items: items, amount: amount };
+}
+
+function registeredTradePriceResult_(correction, receipt, snapshot, replayed) {
+  if (registeredTradePriceSnapshotDigest_(snapshot) !== receipt.afterDigest) throw new Error('price correction final schedule/contract readback mismatch');
+  var state = readRegisteredTradeCorrectionState_(correction.tradeId);
+  if (JSON.stringify(state.contract) !== JSON.stringify(receipt.beforeContract)) throw new Error('price correction contract state changed');
+  var contract = readRegisteredTradePriceContract_(correction, snapshot, receipt.regeneration);
+  var ledger = readRegisteredTradePriceLedger_(correction.tradeId);
+  if (ledger.contractUrl !== receipt.regeneration.url || ledger.amount !== contract.amount || (receipt.contractAmount !== undefined && contract.amount !== receipt.contractAmount)) throw new Error('price correction contract/ledger readback mismatch');
+  var before = [], after = [];
+  correction.priceChanges.forEach(function(change) {
+    before.push({ scheduleId: change.scheduleId, name: change.expectedName, qty: change.expectedQty, unitPrice: change.expectedUnitPrice, isComponent: false });
+    after.push({ scheduleId: change.scheduleId, name: change.expectedName, qty: change.expectedQty, unitPrice: change.unitPrice, isComponent: false });
+  });
+  state.schedule.rows.forEach(function(row, index) { row.unitPrice = snapshot.schedule[index].cells[11]; });
+  state.ledger.amount = ledger.amount;
+  var proof = { before: before, after: after, contractItems: contract.items, contractAmount: contract.amount, ledgerAmount: ledger.amount, contractUrl: ledger.contractUrl,
+    beforeDigest: receipt.beforeDigest, afterDigest: receipt.afterDigest };
+  return { success: true, status: 'CORRECTED', tradeId: correction.tradeId, operationId: correction.operationId, replayed: !!replayed,
+    stages: ['scheduleChangeUnitPrices', 'regenerateContract'], contractRegeneration: receipt.regeneration,
+    readback: state, authoritativeReadback: { before: { contract: receipt.beforeContract, schedule: { scope: 'priceChanges', rows: before }, ledger: null }, after: state, priceChanges: proof },
+    priceReadback: proof, customerNotificationSent: false };
+}
+
+// A permanent, digest-bound receipt fences BOTH price writes and regeneration.
+// An interrupted/partial operation is read back by an operator; it never retries
+// either side effect. The short shared lease protects the unlocked Drive work.
+function correctRegisteredTradePrices_(correction) {
+  var props = PropertiesService.getScriptProperties(), lock = LockService.getScriptLock();
+  var key = 'registeredTradePriceReceipt_v1_' + correction.operationId;
+  var leaseKey = 'registeredTradePriceMutation_' + correction.tradeId;
+  var digest = registeredTradePriceDigest_(correction), held = false, claimed = false, ownsLease = false, receipt = null, stages = [];
+  try {
+    if (!lock.tryLock(1500)) return { success: false, code: 'BUSY', noMutationPerformed: true, customerNotificationSent: false };
+    held = true;
+    var block = dashboardTradeMutationLeaseError_(props, correction.tradeId, 'registeredTradePrice', correction.operationId);
+    if (block) throw new Error(block.error || 'price correction busy');
+    var previous = props.getProperty(key);
+    if (previous) {
+      receipt = JSON.parse(previous);
+      if (receipt.version !== 1 || receipt.requestDigest !== digest || receipt.tradeId !== correction.tradeId) throw new Error('price correction operationId receipt conflict');
+      claimed = true;
+      stages = receipt.stages || [];
+      if (receipt.phase !== 'completed') throw new Error('price correction operation is incomplete; do not replay writes or regeneration');
+      return registeredTradePriceResult_(correction, receipt, readRegisteredTradePriceSnapshot_(correction.tradeId), true);
+    }
+    var baseline = readRegisteredTradeCorrectionState_(correction.tradeId, false);
+    Object.keys(correction.expectedPeriod).forEach(function(key) { if (baseline.contract[key] !== correction.expectedPeriod[key]) throw new Error('price correction baseline period mismatch'); });
+    if (isDashboardTradeCheckoutStarted_(SpreadsheetApp.getActiveSpreadsheet(), correction.tradeId)) throw new Error('price correction cannot change an active checkout');
+    var snapshot = readRegisteredTradePriceSnapshot_(correction.tradeId), expected = JSON.parse(JSON.stringify(snapshot));
+    readRegisteredTradePriceLedger_(correction.tradeId);
+    correction.priceChanges.forEach(function(change) {
+      var row = expected.schedule.filter(function(row) { return row.cells[0] === change.scheduleId; })[0];
+      if (!row || String(row.cells[3] || '').trim() !== change.expectedName || row.cells[4] !== change.expectedQty || row.cells[11] !== change.expectedUnitPrice || (row.cells[2] && row.cells[2] !== row.cells[3])) throw new Error('price correction exact top-level row preflight mismatch: ' + change.scheduleId);
+      row.cells[11] = change.unitPrice;
+    });
+    receipt = { version: 1, tradeId: correction.tradeId, requestDigest: digest, phase: 'claimed', beforeContract: baseline.contract,
+      beforeDigest: registeredTradePriceSnapshotDigest_(snapshot), afterDigest: registeredTradePriceSnapshotDigest_(expected), stages: [] };
+    // Claim first: even a crash during setValue must leave a non-replayable ID.
+    props.setProperty(key, JSON.stringify(receipt)); claimed = true;
+    props.setProperty(leaseKey, JSON.stringify({ token: correction.operationId, at: Date.now() })); ownsLease = true;
+    if (registeredTradePriceSnapshotDigest_(readRegisteredTradePriceSnapshot_(correction.tradeId)) !== receipt.beforeDigest) throw new Error('price correction baseline drifted before write');
+    var currentExpected = snapshot;
+    correction.priceChanges.forEach(function(change) {
+      var current = readRegisteredTradePriceSnapshot_(correction.tradeId);
+      if (registeredTradePriceSnapshotDigest_(current) !== registeredTradePriceSnapshotDigest_(currentExpected)) throw new Error('price correction row drifted before write');
+      var row = current.schedule.filter(function(entry) { return entry.cells[0] === change.scheduleId; })[0];
+      SpreadsheetApp.getActiveSpreadsheet().getSheetByName('스케줄상세').getRange(row.row, 12).setValue(change.unitPrice);
+      currentExpected.schedule.filter(function(entry) { return entry.cells[0] === change.scheduleId; })[0].cells[11] = change.unitPrice;
+    });
+    SpreadsheetApp.flush();
+    if (registeredTradePriceSnapshotDigest_(readRegisteredTradePriceSnapshot_(correction.tradeId)) !== receipt.afterDigest) throw new Error('price correction immediate readback mismatch');
+    stages.push('scheduleChangeUnitPrices'); receipt.stages = stages.slice(); receipt.phase = 'regenerating';
+    props.setProperty(key, JSON.stringify(receipt));
+    lock.releaseLock(); held = false;
+    var regeneration = regenerateContractById(correction.tradeId, undefined, { strictLedgerLink: true });
+    if (!regeneration || regeneration.success !== true) throw new Error('price correction regeneration failed');
+    stages.push('regenerateContract');
+    if (!lock.tryLock(1500)) throw new Error('price correction final readback lock unavailable');
+    held = true;
+    receipt.regeneration = { success: true, fileId: regeneration.fileId, url: regeneration.url, linkUpdate: regeneration.linkUpdate };
+    SpreadsheetApp.flush();
+    var result = registeredTradePriceResult_(correction, receipt, readRegisteredTradePriceSnapshot_(correction.tradeId), false);
+    receipt.phase = 'completed'; receipt.stages = stages.slice(); receipt.contractAmount = result.priceReadback.contractAmount;
+    props.setProperty(key, JSON.stringify(receipt));
+    return result;
+  } catch (error) {
+    return { success: false, status: claimed ? 'PARTIAL_STATE' : 'ERROR', code: claimed ? 'PARTIAL_STATE' : 'REGISTERED_CORRECTION_PREFLIGHT_REJECTED',
+      outcomeUnknown: claimed, noMutationPerformed: !claimed, tradeId: correction.tradeId, operationId: correction.operationId,
+      appliedStages: stages, error: error.message || String(error), customerNotificationSent: false };
+  } finally {
+    if (!held && ownsLease) held = lock.tryLock(1500);
+    if (held) { if (ownsLease) clearDashboardMutationLease_(props, leaseKey, correction.operationId); lock.releaseLock(); }
+  }
+}
+
 function correctRegisteredTrade(args) {
   var correction = normalizeRegisteredTradeCorrection_(args);
+  if (correction.priceChanges) return correctRegisteredTradePrices_(correction);
   var historicalAuthority = null;
   var historicalCandidate = correction.add.length > 0 && !correction.dateChange;
   // Supabase HTTP는 ScriptLock 밖에서만 수행한다. 이 조회는 반출 순간에 고정된 taken_qty와
