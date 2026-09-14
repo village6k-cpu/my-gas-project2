@@ -20611,6 +20611,97 @@ function preflightRegisteredTradeRemoval_(state, removals) {
   return { success: true, scheduleIds: Object.keys(expanded) };
 }
 
+// A single same-quantity equipment_replace identifies one component slot. Mixed
+// deltas have no pairing evidence and must keep the existing re-add rejection.
+function planRegisteredTradeComponentReplacement_(baseline, correction) {
+  if (!correction.staffApproval || correction.dateChange || correction.remove.length !== 1 || correction.add.length !== 1) return null;
+  var expected = correction.remove[0], desired = correction.add[0];
+  var rows = baseline.schedule.rows || [];
+  var indices = [];
+  rows.forEach(function(row, index) { if (row.scheduleId === expected.scheduleId) indices.push(index); });
+  if (indices.length !== 1) return null;
+  var index = indices[0], current = rows[index];
+  if (!current.isComponent || current.name !== expected.expectedName || Number(current.qty) !== expected.expectedQty ||
+      expected.expectedQty !== desired.qty || desired.name === current.name || desired.name === current.setName) return null;
+  var parentIndex = index - 1;
+  while (parentIndex >= 0 && rows[parentIndex].isComponent && rows[parentIndex].setName === current.setName) parentIndex--;
+  var parent = rows[parentIndex];
+  if (!parent || parent.isComponent || parent.name !== current.setName || parent.setName !== current.setName) return null;
+  return { scheduleId: current.scheduleId, parentScheduleId: parent.scheduleId, setName: current.setName,
+    expectedName: current.name, newName: desired.name, qty: current.qty, period: baseline.contract };
+}
+
+function preflightRegisteredTradeComponentReplacement_(tradeId, plan, token) {
+  if (!plan || token !== REGISTERED_STAFF_DEMAND_TOKEN_) throw new Error('FORBIDDEN component replacement');
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('스케줄상세');
+  var equipment = ss.getSheetByName('장비마스터');
+  if (!sheet || !equipment) throw new Error('구성품 교체의 스케줄/장비마스터를 읽을 수 없습니다');
+  var lastRow = sheet.getLastRow();
+  var targets = findDashboardRowsByValue_(sheet, 1, lastRow, plan.scheduleId);
+  var parents = findDashboardRowsByValue_(sheet, 1, lastRow, plan.parentScheduleId);
+  if (targets.length !== 1 || parents.length !== 1 || parents[0] >= targets[0]) throw new Error('component baseline row/parent mismatch');
+  var cells = sheet.getRange(targets[0], 1, 1, 13).getValues()[0];
+  var parentCells = sheet.getRange(parents[0], 1, 1, 13).getValues()[0];
+  if (String(cells[1]) !== tradeId || String(cells[2]) !== plan.setName || String(cells[3]) !== plan.expectedName ||
+      Number(cells[4]) !== Number(plan.qty) || String(parentCells[1]) !== tradeId ||
+      String(parentCells[2]) !== plan.setName || String(parentCells[3]) !== plan.setName) throw new Error('component baseline mismatch');
+  var display = sheet.getRange(targets[0], 1, 1, 13).getDisplayValues()[0];
+  var startDT = parseDT(display[5], display[6]), endDT = parseDT(display[7], display[8]);
+  if (!startDT || !endDT || endDT <= startDT ||
+      startDT.getTime() !== parseDT(plan.period.startDate, plan.period.startTime).getTime() ||
+      endDT.getTime() !== parseDT(plan.period.endDate, plan.period.endTime).getTime()) throw new Error('component baseline period mismatch');
+  var oldNote = String(cells[10] || '');
+  if (typeof inventorySupplyAllocations_ === 'function') {
+    var savedAllocations = inventorySupplyAllocations_({ equipment: plan.expectedName, qty: plan.qty, startDT: startDT, endDT: endDT, note: oldNote });
+    if (savedAllocations.some(function(allocation) { return allocation.source === 'external'; })) {
+      throw new Error('외부 조달 구성품 변경은 공급처 배정을 함께 확인해야 합니다');
+    }
+  }
+  var physicalRows = findDashboardScheduleRowsForEquipments_(sheet, lastRow, [plan.newName]).filter(function(row) {
+    return String(row[0] || '').trim() !== plan.scheduleId;
+  });
+  var availability = checkAvailabilityForAddCached_([{ name: plan.newName, qty: plan.qty }], startDT, endDT,
+    buildDashboardEquipmentMeta_(equipment), buildDashboardScheduleData_(physicalRows, [plan.newName]));
+  if ((availability.conflicts || []).some(function(issue) { return issue.code === 'INVALID_SUPPLY_ALLOCATION'; })) {
+    throw new Error('구성품 교체 가용성 자료의 공급 배정이 올바르지 않습니다');
+  }
+  var warnings = (availability.warnings || []).concat((availability.conflicts || []).map(function(issue) {
+    return Object.assign({}, issue, { kind: 'staff_approved_supply_issue' });
+  }));
+  // Remove only structured supply lines; preserve the user's note whitespace.
+  var newNote = oldNote;
+  if (typeof inventorySupplyNote_ === 'function') {
+    newNote = oldNote.replace(/^\[(외부조달|상위대체)\][^\r\n]*(?:\r?\n|$)/gm, '');
+    var supplyNote = inventorySupplyNote_('', { equipment: plan.newName, qty: plan.qty, startDT: startDT, endDT: endDT }, availability.allocations || []);
+    if (supplyNote) newNote += (newNote && !/\n$/.test(newNote) ? '\n' : '') + supplyNote;
+  }
+  return Object.assign({}, plan, { row: targets[0], parentRow: parents[0], cells: cells, parentCells: parentCells,
+    newNote: newNote, warnings: warnings });
+}
+
+function applyRegisteredTradeComponentReplacement_(tradeId, plan, token) {
+  if (!plan || token !== REGISTERED_STAFF_DEMAND_TOKEN_) throw new Error('FORBIDDEN component replacement');
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('스케줄상세');
+  var targets = findDashboardRowsByValue_(sheet, 1, sheet.getLastRow(), plan.scheduleId);
+  var parents = findDashboardRowsByValue_(sheet, 1, sheet.getLastRow(), plan.parentScheduleId);
+  if (targets.length !== 1 || parents.length !== 1 || targets[0] !== plan.row || parents[0] !== plan.parentRow ||
+      JSON.stringify(sheet.getRange(plan.row, 1, 1, 13).getValues()[0]) !== JSON.stringify(plan.cells) ||
+      JSON.stringify(sheet.getRange(plan.parentRow, 1, 1, 13).getValues()[0]) !== JSON.stringify(plan.parentCells)) {
+    throw new Error('component baseline changed after preflight');
+  }
+  sheet.getRange(plan.row, 4).setValue(plan.newName);
+  if (plan.newNote !== String(plan.cells[10] || '')) sheet.getRange(plan.row, 11).setValue(plan.newNote);
+  var expectedCells = plan.cells.slice(); expectedCells[3] = plan.newName; expectedCells[10] = plan.newNote;
+  if (JSON.stringify(sheet.getRange(plan.row, 1, 1, 13).getValues()[0]) !== JSON.stringify(expectedCells)) {
+    throw new Error('component immediate readback mismatch');
+  }
+  scheduleDashboardStructureProjectionUnderLock_(tradeId, { syncStructure: true });
+  try { invalidateDashboardCache(); } catch (cacheError) {}
+  try { invalidateTimelineCache(); } catch (timelineError) {}
+  return { success: true, scheduleId: plan.scheduleId, parentScheduleId: plan.parentScheduleId, warnings: plan.warnings };
+}
+
 function assertRegisteredTradeCorrectionStage_(stage, result) {
   if (!result || result.success !== true) {
     throw new Error(stage + ' 실패: ' + String(result && (result.error || result.message || result.code) || 'unknown'));
@@ -20619,6 +20710,20 @@ function assertRegisteredTradeCorrectionStage_(stage, result) {
 }
 
 function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction, regeneration, operationResults) {
+  operationResults = operationResults || {};
+  var componentProjection = operationResults.componentReplacement
+    ? planRegisteredTradeComponentReplacement_(baseline, correction) : null;
+  if (operationResults.componentReplacement && !componentProjection) throw new Error('component final readback has no exact plan');
+  if (componentProjection) {
+    var beforeRows = baseline.schedule.rows || [], afterRows = finalState.schedule.rows || [];
+    if (beforeRows.length !== afterRows.length || baseline.contract.status !== finalState.contract.status) throw new Error('component final readback changed state');
+    beforeRows.forEach(function(row, index) {
+      var actual = afterRows[index];
+      var expectedName = row.scheduleId === componentProjection.scheduleId ? componentProjection.newName : row.name;
+      if (!actual || row.scheduleId !== actual.scheduleId || row.setName !== actual.setName || expectedName !== actual.name ||
+          Number(row.qty) !== Number(actual.qty) || row.isComponent !== actual.isComponent) throw new Error('component final readback row mismatch');
+    });
+  }
   var dateChange = correction.dateChange;
   var expectedPeriod = dateChange ? {
     startDate: dateChange.newStartDate,
@@ -20658,7 +20763,7 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
       if (!expectedItems[row.name]) delete expectedItems[row.name];
     }
   });
-  correction.add.forEach(function(entry) {
+  (componentProjection ? [] : correction.add).forEach(function(entry) {
     expectedItems[entry.name] = (expectedItems[entry.name] || 0) + entry.qty;
   });
   var actualItems = finalState.schedule.topLevelQuantities || {};
@@ -20670,7 +20775,7 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
   });
 
   operationResults = operationResults || {};
-  if (operationResults.addPlan || operationResults.removalPlan || operationResults.add || operationResults.remove) {
+  if (!componentProjection && (operationResults.addPlan || operationResults.removalPlan || operationResults.add || operationResults.remove)) {
     function sortedTextList_(values) {
       return (values || []).map(function(value) { return String(value || '').trim(); }).filter(Boolean).sort();
     }
@@ -20784,6 +20889,8 @@ function correctRegisteredTrade(args) {
   var addPlan = null;
   var addResult = null;
   var removeResult = null;
+  var componentPlan = null;
+  var componentResult = null;
   var inventoryWarnings = [];
   var staffApprovalToken = correction.staffApproval ? REGISTERED_STAFF_DEMAND_TOKEN_ : null;
   function collectInventoryWarnings_(stage, warnings) {
@@ -20834,6 +20941,9 @@ function correctRegisteredTrade(args) {
         return row && row.isComponent;
       });
       if (componentReaddTargets.length) {
+        componentPlan = planRegisteredTradeComponentReplacement_(lockedBaseline, correction);
+      }
+      if (componentReaddTargets.length && !componentPlan) {
         var blockedComponentIds = componentReaddTargets.map(function(row) {
           return String(row.scheduleId || '').trim();
         });
@@ -20864,6 +20974,7 @@ function correctRegisteredTrade(args) {
     }
     var checkoutStarted = (correction.add.length || correction.remove.length) &&
       isDashboardTradeCheckoutStarted_(SpreadsheetApp.getActiveSpreadsheet(), correction.tradeId);
+    if (checkoutStarted && componentPlan) throw new Error('반출 기준선을 보존하기 위해 반출 시작 거래의 구성품 교체를 차단했습니다');
     if (checkoutStarted && lockedBaseline.contract.status === '반납완료') {
       var exactReturnedAuthority = historicalCandidate &&
         historicalAuthority && historicalAuthority.ok === true && historicalAuthority.tradeFound === true &&
@@ -20896,7 +21007,12 @@ function correctRegisteredTrade(args) {
       endDate: correction.dateChange.newEndDate,
       endTime: correction.dateChange.endTime || lockedBaseline.contract.endTime
     } : null;
-    if (correction.add.length) {
+    if (componentPlan) {
+      componentPlan = preflightRegisteredTradeComponentReplacement_(correction.tradeId, componentPlan, staffApprovalToken);
+      collectInventoryWarnings_('equipment_replace', componentPlan.warnings);
+      removalPlan = { success: true, scheduleIds: [] };
+    }
+    if (correction.add.length && !componentPlan) {
       addPlan = assertRegisteredTradeCorrectionStage_('add preflight', dashboardAddEquipments(
         correction.tradeId,
         correction.add,
@@ -20942,7 +21058,16 @@ function correctRegisteredTrade(args) {
       stages.push('scheduleChangeDates');
       attemptedStage = '';
     }
-    if (correction.add.length) {
+    if (componentPlan) {
+      mutationStarted = true;
+      attemptedStage = 'scheduleReplaceComponent';
+      componentResult = assertRegisteredTradeCorrectionStage_('scheduleReplaceComponent',
+        applyRegisteredTradeComponentReplacement_(correction.tradeId, componentPlan, staffApprovalToken));
+      stages.push('scheduleReplaceComponent');
+      attemptedStage = '';
+      structureChanged = true;
+    }
+    if (correction.add.length && !componentPlan) {
       mutationStarted = true;
       attemptedStage = 'scheduleAddEquips';
       addResult = assertRegisteredTradeCorrectionStage_('scheduleAddEquips', dashboardAddEquipments(
@@ -20965,7 +21090,7 @@ function correctRegisteredTrade(args) {
       attemptedStage = '';
       structureChanged = true;
     }
-    if (correction.remove.length) {
+    if (correction.remove.length && !componentPlan) {
       mutationStarted = true;
       attemptedStage = 'scheduleRemoveEquips';
       removeResult = assertRegisteredTradeCorrectionStage_('scheduleRemoveEquips', dashboardRemoveEquipmentBatch(
@@ -21090,7 +21215,7 @@ function correctRegisteredTrade(args) {
       finalState,
       correction,
       regeneration,
-      { addPlan: addPlan, removalPlan: removalPlan, add: addResult, remove: removeResult }
+      { addPlan: addPlan, removalPlan: removalPlan, add: addResult, remove: removeResult, componentReplacement: componentResult }
     );
     attemptedStage = '';
     if (sourceRequestFence) {
