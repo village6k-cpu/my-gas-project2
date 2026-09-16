@@ -10595,6 +10595,10 @@ function hasIndependentCustomerReply(decision = {}) {
   const grounding = replyGrounding(decision);
   return (isTypedPriceReply(decision) && replyRequiresRag(decision) === false)
     || (safety === 'simple_ack' && grounding === 'visible_conversation' && replyRequiresRag(decision) === false)
+    // Asking for missing intake details is not a claim that a schedule write ran.
+    // The ordinary send gate still rejects unverified commitments in the text.
+    || (['contact_request', 'reservation_intake_ack'].includes(safety)
+      && ['visible_conversation', 'authoritative_sheet'].includes(grounding) && replyRequiresRag(decision) === false)
     || (safety === 'current_policy_answer' && grounding === 'current_confirmed_policy' && replyRequiresRag(decision) === false)
     || (safety === 'rag_grounded_answer' && grounding === 'retrieved_rag' && replyRequiresRag(decision) === true);
 }

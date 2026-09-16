@@ -1501,6 +1501,29 @@ test('a rejected schedule execution retains the original AI reply intent for com
   assert.equal(prepared.replyExecutionIntent.requested,true);
 });
 
+test('intake clarification grounded in a read does not require a write receipt', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  for(const safetyClass of ['contact_request','reservation_intake_ack']) {
+    for(const grounding of ['visible_conversation','authoritative_sheet']) {
+      const decision=gatewayDecisionFixture({classification:'reservation',should_write_to_sheet:false,
+        reply_decision:{replyMode:'auto_send',text:'정확한 반납 날짜와 시간을 알려주시겠어요?',
+          confidence:'high',safetyClass,grounding,requiresRag:false,attachmentKeys:[],alreadyDelivered:false}});
+      for(const receipts of [[],[confirmationReceiptFixture(job)]]) {
+        const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,
+          finalText:JSON.stringify(decision),trustedToolReceipts:receipts});
+        assert.deepEqual(prepared.gatewaySafetyFailures,[],`${safetyClass}/${grounding}/${receipts.length}`);
+        assert.equal(prepared.decision.reply_decision.replyMode,'auto_send');
+        assert.equal(canAutoSendCustomerAnswer(prepared.decision,{autoSendEnabled:true}).allowed,true);
+        const falseCommitment={...prepared.decision,reply_decision:{...prepared.decision.reply_decision,text:'예약 확정되었습니다.'}};
+        assert.equal(canAutoSendCustomerAnswer(falseCommitment,{autoSendEnabled:true}).reason,'sensitive_commitment_text');
+      }
+      const unexecuted=await workerModule.prepareKakaoGatewayDecision({job,turn,
+        finalText:JSON.stringify({...decision,should_write_to_sheet:true})});
+      assert.equal(unexecuted.decision.reply_decision.replyMode,'draft_only');
+    }
+  }
+});
+
 test('invalid business validation does not erase the original requested reply', async () => {
   const {job,turn}=gatewayTurnFixture();
   const decision=gatewayDecisionFixture({reply_decision:{safetyClass:'sensitive_commitment',grounding:'visible_conversation'}});
