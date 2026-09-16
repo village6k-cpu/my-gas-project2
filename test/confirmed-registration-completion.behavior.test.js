@@ -32,9 +32,9 @@ test('final approved form can complete an incomplete pending period and customer
   assert.equal(replacement.반출시간,'21:00');
 });
 
-test('final registration still rejects incomplete desired periods and contact reassignment',async()=>{
+test('final registration still rejects incomplete desired periods and unsupported contact changes',async()=>{
   const module=await import('../tools/ai-browser-worker/staff-confirmed-registration.mjs');
-  for(const change of [x=>{x.desired_period.end_time='';},x=>{x.customer_identity_update.expected_phone='01000000001';}]) {
+  for(const change of [x=>{x.desired_period.end_time='';},x=>{x.customer_identity_update.phone='01000000003';}]) {
     const x=registration();change(x);
     assert.equal(module.validateStaffConfirmedRegistration(x,{roomRevision:8}).valid,false);
     assert.throws(()=>normalizeConfirmedReservationCommit(x));

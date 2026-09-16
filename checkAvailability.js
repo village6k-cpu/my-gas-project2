@@ -12043,7 +12043,7 @@ function _assertPendingCustomerIdentityUpdate_(group, update, req, evidence) {
   if (update.expected_name.trim() !== group.name || _confirmRequestPhoneKey_(update.expected_phone) !== currentPhone ||
       !update.name.trim() || update.name.trim().length > 120 || phone.length < 8 || phone.length > 15 ||
       !/^[\d\s()+.\-]+$/.test(update.phone) || update.name.trim() !== String(req.예약자명 || "").trim() ||
-      phone !== _confirmRequestPhoneKey_(req.연락처) || (currentPhone && currentPhone !== phone) ||
+      phone !== _confirmRequestPhoneKey_(req.연락처) || (currentPhone && currentPhone !== phone && source.replace(/[\s()+.\-]/g, "").indexOf(phone) < 0) ||
       source.indexOf(update.name.trim()) < 0 || contactSource.replace(/[\s()+.\-]/g, "").indexOf(phone) < 0) {
     throw new Error("고객 정보 보완의 baseline 또는 대화 근거가 일치하지 않습니다.");
   }
