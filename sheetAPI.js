@@ -1631,6 +1631,8 @@ function runFunction(funcName, params) {
     "setupMyPage",
     "testRegisterAlimtalk",
     "testGuideAlimtalk",
+    "configureGuideDoorAccess",
+    "getGuideDoorAccessStatus",
     "diagGuideAlimtalkSchedule",
     "markGuideAlimtalkSent",
     "repairTradeContractStatus",
@@ -1777,6 +1779,11 @@ function runFunction(funcName, params) {
       }
       var tgResult = testGuideAlimtalk(tgArgs || {});
       return { success: !tgResult.error, function: funcName, result: tgResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "configureGuideDoorAccess" || funcName === "getGuideDoorAccessStatus") {
+      var doorArgs = typeof params.args === "string" ? JSON.parse(params.args) : (params.args || {});
+      var doorResult = funcName === "configureGuideDoorAccess" ? configureGuideDoorAccess(doorArgs) : getGuideDoorAccessStatus();
+      return { success: !doorResult.error, function: funcName, result: doorResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "diagGuideAlimtalkSchedule") {
       var dgArgs = params.args;

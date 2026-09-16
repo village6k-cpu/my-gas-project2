@@ -18321,7 +18321,7 @@ function doClearRequests() {
  * 팝빌 API 토큰 발급
  * 스크립트 속성에 POPBILL_LINK_ID, POPBILL_SECRET_KEY 필요
  */
-var POPBILL_TOKEN_CACHE_KEY_ = 'popbillSessionToken_v1';
+var POPBILL_TOKEN_CACHE_KEY_ = 'popbillSessionToken_v2';
 
 function _getPopbillToken(forceRefresh) {
   // 세션 토큰은 수 시간 유효한데 매 발송마다 재발급하면 외부 HTTP 1회가 통째로 낭비.
@@ -18346,7 +18346,7 @@ function _getPopbillToken(forceRefresh) {
   var forwardIP = '*';
   var reqBody = JSON.stringify({
     access_id: corpNum,
-    scope: ['153', '154', '155', '156', '157']
+    scope: ['member', '153', '154', '155', '156', '157']
   });
 
   var sha = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, reqBody, Utilities.Charset.UTF_8);
@@ -18583,10 +18583,10 @@ function testGuideAlimtalk(args) {
   var 종류 = String(args.종류 || "반출").trim();
   var 이름 = String(args.이름 || "테스트").trim();
   var isCheckin = 종류 === "반납";
-  var tpl = isCheckin ? TPL_CHECKIN : _getCheckoutGuideTemplate_();
-  var msg = isCheckin ? _buildCheckinMsg(이름) : _buildCheckoutGuideMsg(이름);
+  var guide = getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름);
+  var tpl = guide.templateCode;
   try {
-    var res = sendAlimtalk(tpl, 연락처, 이름, msg, { '#{고객명}': 이름 });
+    var res = sendAlimtalk(tpl, 연락처, 이름, guide.content, guide.vars);
     return { success: true, 종류: 종류, template: tpl, popbill: res };
   } catch (e) {
     return { error: e.message, 종류: 종류, template: tpl };
@@ -18643,13 +18643,13 @@ function _buildCheckoutLegacyMsg(customerName) {
 /**
  * 반납 안내톡 메시지 생성
  */
-function _buildCheckinMsg(customerName) {
+function _buildCheckinMsg(customerName, includeDoorAccess) {
   return customerName + ' 감독님, 안녕하세요.\n'
     + '빌리지 렌탈샵입니다.\n\n'
     + '예약하신 장비 대여 건의 반납일이 다가와 안내드립니다.\n'
     + '만약 직원이 부재할 시에 아래 내용을 참고해주세요 : )\n\n'
     + '1. 장비를 한쪽에 잘 모아서 반납하신 후 사진 촬영하여 카카오톡 채널로 공유 부탁드립니다.\n\n'
-    + '2. 나가실 때는 검정 철문은 닫지 마시고 나무로 된 문만 잘 닫힌 것 확인 후 가주시면 됩니다.\n\n'
+    + (includeDoorAccess ? '' : '2. 나가실 때는 검정 철문은 닫지 마시고 나무로 된 문만 잘 닫힌 것 확인 후 가주시면 됩니다.\n\n')
     + '감사합니다 : )\n\n'
     + '*가급적이면 장비는 안쪽부터 차례대로 넣어주세요!';
 }
@@ -19086,9 +19086,8 @@ function checkGuideAlimtalk() {
     var outFlag = 'out_' + tid;
     if (!sentData[outFlag] && nowMs >= outSendMs && nowMs < checkoutMs) {
       try {
-        var outMsg = _buildCheckoutGuideMsg(cust.name);
-        var outVars = { '#{고객명}': cust.name };
-        var outRes = sendAlimtalk(_getCheckoutGuideTemplate_(), cust.tel, cust.name, outMsg, outVars);
+        var outGuide = getGuideAlimtalkPayload_('checkout', cust.name);
+        var outRes = sendAlimtalk(outGuide.templateCode, cust.tel, cust.name, outGuide.content, outGuide.vars);
         if (!_alimtalkAccepted_(outRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(outRes));
         sentData[outFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
         results.sent.push('반출 ' + tid + ' ' + cust.name);
@@ -19111,9 +19110,8 @@ function checkGuideAlimtalk() {
       var inDeadlineMs = returnMs;  // 반납 시각 지나면 발송 안 함 (이미 반납했을 것)
       if (!sentData[inFlag] && nowMs >= inSendMs && nowMs < inDeadlineMs) {
         try {
-          var inMsg = _buildCheckinMsg(cust.name);
-          var inVars = { '#{고객명}': cust.name };
-          var inRes = sendAlimtalk(TPL_CHECKIN, cust.tel, cust.name, inMsg, inVars);
+          var inGuide = getGuideAlimtalkPayload_('checkin', cust.name);
+          var inRes = sendAlimtalk(inGuide.templateCode, cust.tel, cust.name, inGuide.content, inGuide.vars);
           if (!_alimtalkAccepted_(inRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(inRes));
           sentData[inFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
           results.sent.push('반납 ' + tid + ' ' + cust.name);
