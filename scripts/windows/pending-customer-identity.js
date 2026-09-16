@@ -23,7 +23,7 @@ function normalizePendingCustomerIdentity(value, sourceText, roomMemo) {
   const contactSource=source+'\n'+normalizeRoomMemoEvidence(roomMemo);
   if (!result.name || result.name.length>120 || !result.expected_name ||
       !/^[\d\s()+.\-]+$/.test(result.phone) || phone.length<8 || phone.length>15 ||
-      (oldPhone && oldPhone!==phone) || !source.includes(result.name) ||
+      (oldPhone && oldPhone!==phone && !source.replace(/[\s()+.\-]/g,'').includes(phone)) || !source.includes(result.name) ||
       !contactSource.replace(/[\s()+.\-]/g,'').includes(phone)) throw new Error('customer_identity_update contradicts existing contact or selected customer evidence');
   if (value.discount_type !== undefined) {
     if (!['일반','학생','개인사업자/프리랜서','단골','제휴'].includes(value.discount_type)) throw new Error('customer_identity_update.discount_type is invalid');

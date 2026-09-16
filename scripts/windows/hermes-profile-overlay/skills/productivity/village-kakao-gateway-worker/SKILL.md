@@ -82,8 +82,14 @@ Compare actual final equipment before replaying any addition or substitution.
   and `replace_full_plan` on the same exact RQ. Copy live expected plan, expanded
   set components and all four period fields (including blanks). Supply the final
   full plan, preserving unchanged contact, discount, memo and extra request.
-  If a final customer form completes a nickname or blank phone, use the optional
+  If a final customer form completes identity or explicitly corrects an existing phone, use the optional
   `customer_identity_update` with exact old and final values and source evidence.
+  A changed known phone must be in the selected customer messages, not only a room memo.
+  A stored nonempty phone does not prevent the customer from correcting it.
+- **Missing information after staff approval:** keep the same pending booking, ask the
+  customer once for genuinely unresolved required details, and complete registration
+  from the reply using the existing approval. A confirmation or thanks does not fill
+  missing dates/times. Do not stop at an owner-only review or repeat an unanswered question.
 - **Staff-authorized final reservation:** semantically assess whether staff has
   accepted this exact current request without unresolved conditions. Approval is
   not a keyword and need not be the latest message. Call the separate

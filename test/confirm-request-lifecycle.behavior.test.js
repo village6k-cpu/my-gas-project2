@@ -133,7 +133,7 @@ for (const label of ['contradicting known contact','stale nickname','unsupported
     const h=harness({contracts:[],requests:[pending({10:'지윤',11:label==='contradicting known contact'?'01000000001':''})]});
     assert.throws(()=>h.insert(request([['새 장비',1]],{예약자명:'김지윤',연락처:'01000000002',
       customer_requested_pending_revision:revision({source_evidence:{...evidence,customer_request:label==='unsupported final identity'?'예약할게요':'김지윤 01000000002'},
-        customer_identity_update:{expected_name:label==='stale nickname'?'다른 이름':'지윤',expected_phone:label==='contradicting known contact'?'01000000001':'',name:'김지윤',phone:'01000000002'}})})));
+        customer_identity_update:{expected_name:label==='stale nickname'?'다른 이름':'지윤',expected_phone:label==='contradicting known contact'?'01000000009':'',name:'김지윤',phone:'01000000002'}})})));
     assert.equal(h.sheets['확인요청'].writes,0);
   });
 }
