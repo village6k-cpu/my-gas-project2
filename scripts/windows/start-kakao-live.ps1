@@ -83,9 +83,18 @@ if ($ConfirmKakaoGatewayCutover.IsPresent -and -not $RollbackToCli.IsPresent) {
     }
     $modelContractPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'hermes-model-contract.json') -ErrorAction Stop).Path
     $modelContract = [IO.File]::ReadAllText($modelContractPath, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
-    if ($modelContract.kakaoworker.provider -ne 'xai-oauth' -or $modelContract.kakaoworker.model -ne 'grok-4.5' -or
-        $modelContract.kakaoworker.reasoning_effort -ne 'high' -or [int]$modelContract.kakaoworker.max_turns -ne 90) {
-        throw 'Gateway cutover model contract drifted.'
+    # The selected model is owned by the contract, not this recovery script.
+    # A provider change must not disable authenticated chat-list repair.
+    foreach ($field in @('provider', 'model', 'reasoning_effort')) {
+        if ($modelContract.kakaoworker.$field -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($modelContract.kakaoworker.$field)) {
+            throw "Gateway model contract requires kakaoworker.$field."
+        }
+    }
+    $configuredTurnLimit = 0
+    if (-not [int]::TryParse([string]$modelContract.kakaoworker.max_turns, [ref]$configuredTurnLimit) -or
+        $configuredTurnLimit -le 0) {
+        throw 'Gateway model contract requires a positive integer max_turns.'
     }
 }
 
