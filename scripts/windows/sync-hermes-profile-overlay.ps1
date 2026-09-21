@@ -54,6 +54,9 @@ $retiredSkillNames = @(
     'village-brain-first',
     'village-runtime-router'
 )
+$retiredUsageMetadataNames = @(
+    'village-official-quote-delivery'
+)
 $skillNameAliases = @{
     'village-brain-first' = 'village-history-evidence'
 }
@@ -1016,7 +1019,7 @@ try {
             -TargetPath (Join-Path $stagingRoot '.usage.json') `
             -NameAliases $skillNameAliases `
             -OwnerManagedNames $ownerManagedSkillNames `
-            -RetiredNames $retiredSkillNames
+            -RetiredNames $retiredUsageMetadataNames
     }
     if (@($rootNames | Select-Object -Unique).Count -ne $rootNames.Count) {
         throw 'Rebuilt Windows skill tree contains duplicate skill names.'
