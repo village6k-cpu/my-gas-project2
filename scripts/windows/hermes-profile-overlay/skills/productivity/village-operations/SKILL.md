@@ -20,6 +20,9 @@ already understood action; it does not replace business judgment.
 ## Authority
 
 - The current user may authorize internal Village work in the current request.
+- Start safe read-only investigation before asking for confirmation. Ask only when
+  live evidence cannot resolve ambiguity that materially changes money, equipment,
+  recipient, schedule, or an irreversible effect; broad scope is not ambiguity.
 - An internal write approval does not authorize a customer-facing send.
 - Kakao, SMS, iMessage, email, or proactive/cross-channel Slack delivery needs
   separate explicit approval for the exact recipient and content.
@@ -79,6 +82,12 @@ repeat a possibly completed write or send.
 
 - Infer the complete request from the supplied text/image and relevant customer
   context before calling an execution tool.
+- A current staff instruction containing `등록` authorizes the exact live customer
+  request; do not require older staff acceptance. Establish the request and cart
+  from current evidence.
+- For `가능하면 등록`, register the verified subset when exclusions do not change
+  the booking's meaning. Record exclusions; block the whole only when an excluded
+  item is essential or safe partial registration is unavailable.
 - Resolve equipment to exact catalog names using broad searches and context.
 - Split into the minimum schedules when different equipment groups have
   different pickup or return times.
@@ -121,6 +130,16 @@ interprets business intent.
   explicit discounts, and approved overrides.
 - Preview and final delivery are separate. Generate or verify the artifact first,
   then send only with exact approval and delivery readback.
+- A rental surcharge unit price follows the established per-requested-unit,
+  per-billable-day convention unless the source says flat total or conflicts.
+  Do not ask when live conversation and catalog convention already resolve it.
+- For an approved official manual quote, default to finance GAS
+  `sendEstimateManual` through Popbill Alimtalk. A stopped Kakao browser does not
+  block it. Attach through Kakao only when staff requests that channel or provider
+  delivery fails while the same exact artifact remains authorized.
+- After staff has seen the exact current preview, a bare `보내` authorizes that
+  unchanged artifact. Do not require another approval unless evidence or content
+  changed after the preview.
 - Prefer an existing stable artifact/link when the requested correction does not
   require regeneration.
 
