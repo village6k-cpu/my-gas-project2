@@ -48,10 +48,14 @@ $retiredSkillNames = @(
     'minecraft-modpack-server',
     'obliteratus',
     'google-workspace',
+    'village-official-quote-delivery',
     'village-operations-windows',
     'rpa-automation-operations-windows',
     'village-brain-first',
     'village-runtime-router'
+)
+$retiredUsageMetadataNames = @(
+    'village-official-quote-delivery'
 )
 $skillNameAliases = @{
     'village-brain-first' = 'village-history-evidence'
@@ -547,7 +551,8 @@ function Merge-UsageMetadata {
         [string]$ActivePath,
         [Parameter(Mandatory = $true)][string]$TargetPath,
         [hashtable]$NameAliases = @{},
-        [string[]]$OwnerManagedNames = @()
+        [string[]]$OwnerManagedNames = @(),
+        [string[]]$RetiredNames = @()
     )
 
     $sourceObject = Read-JsonMetadata -Path $SourcePath
@@ -561,6 +566,9 @@ function Merge-UsageMetadata {
     $names = @($sourceRecords.Keys + $activeRecords.Keys | Sort-Object -Unique)
     $mergedRecords = [ordered]@{}
     foreach ($name in $names) {
+        if ($RetiredNames -contains $name) {
+            continue
+        }
         if ($sourceRecords.ContainsKey($name) -and $activeRecords.ContainsKey($name)) {
             $mergedRecords[$name] = Merge-UsageRecord `
                 -SourceRecord $sourceRecords[$name] `
@@ -1010,7 +1018,8 @@ try {
             -ActivePath (Join-Path $skillsRoot '.usage.json') `
             -TargetPath (Join-Path $stagingRoot '.usage.json') `
             -NameAliases $skillNameAliases `
-            -OwnerManagedNames $ownerManagedSkillNames
+            -OwnerManagedNames $ownerManagedSkillNames `
+            -RetiredNames $retiredUsageMetadataNames
     }
     if (@($rootNames | Select-Object -Unique).Count -ne $rootNames.Count) {
         throw 'Rebuilt Windows skill tree contains duplicate skill names.'

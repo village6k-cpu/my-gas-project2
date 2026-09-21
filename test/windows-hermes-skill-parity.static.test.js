@@ -361,6 +361,15 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
       platforms: ['windows'],
       body: '# Customer Alias Memory\n\nAGENT_CREATED_SKILL_MUST_SURVIVE\n'
     });
+    writeSkill(
+      workerProfile,
+      path.join('productivity', 'village-official-quote-delivery'),
+      'village-official-quote-delivery',
+      {
+        platforms: ['windows'],
+        body: '# Learned Quote Router\n\nAGENT_CREATED_RIGID_ROUTER_MUST_BE_RETIRED\n'
+      }
+    );
     fs.writeFileSync(
       path.join(workerProfile, 'skills', '.usage.json'),
       JSON.stringify({
@@ -378,7 +387,8 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
           patch_count: 2,
           last_patched_at: new Date().toISOString()
         },
-        'customer-alias-memory': { created_by: 'agent', patch_count: 0 }
+        'customer-alias-memory': { created_by: 'agent', patch_count: 0 },
+        'village-official-quote-delivery': { created_by: 'agent', patch_count: 3 }
       }, null, 2),
       'utf8'
     );
@@ -404,6 +414,11 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
       fs.readFileSync(path.join(workerProfile, 'skills', 'learned', 'customer-alias-memory', 'SKILL.md'), 'utf8'),
       /AGENT_CREATED_SKILL_MUST_SURVIVE/
     );
+    assert.equal(
+      readSkillNames(path.join(workerProfile, 'skills')).includes('village-official-quote-delivery'),
+      false,
+      'the incident-trained quote router must be retired so the owner-managed AI-first contract remains authoritative'
+    );
     const usage = JSON.parse(fs.readFileSync(path.join(workerProfile, 'skills', '.usage.json'), 'utf8'));
     assert.equal(usage['village-operations'].patch_count, 1);
     assert.equal(usage['village-operations'].created_by, null);
@@ -414,6 +429,7 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
     assert.equal(usage['village-capability-development'].agent_created, false);
     assert.equal(usage['village-capability-development'].pinned, true);
     assert.equal(usage['customer-alias-memory'].created_by, 'agent');
+    assert.equal(usage['village-official-quote-delivery'], undefined);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }

@@ -49,6 +49,7 @@ See [Windows runtime and sources](references/windows-runtime-and-sources.md). Fo
 
 ## Interpret before execution
 
+For broad registration or manual quote delivery, open [AI-first execution rules](references/ai-first-execution-rules.md).
 - Read the whole request and preserve source dates/times, quantities, option
   groupings, discounts, memo text, and whether the user asked to act or preview.
 - Resolve aliases contextually against the broad equipment/customer sources.
