@@ -3,12 +3,12 @@
   "root": {
     "provider": "openai-codex",
     "model": "gpt-5.6-sol",
-    "reasoning_effort": "high"
+    "reasoning_effort": "medium"
   },
   "kakaoworker": {
     "provider": "openai-codex",
     "model": "gpt-5.6-sol",
-    "reasoning_effort": "high",
+    "reasoning_effort": "medium",
     "max_turns": 90,
     "disabled_toolsets": [
       "computer_use"
