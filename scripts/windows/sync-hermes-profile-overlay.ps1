@@ -6,8 +6,10 @@ Explicit Hermes skill migration and recovery import.
 This command is not part of normal gateway, Kakao worker, bridge, restart, or
 watchdog startup. It stages and atomically replaces a selected profile's skill
 tree, so an operator must first create a verified backup and review the emitted
-preservation/conflict report. Run it only for a manual migration or explicit
-recovery; the live profile owns its native learning between imports.
+preservation/conflict report. Execution requires the explicit
+ConfirmProfileSkillTreeReplacement acknowledgement. Run it only for a manual
+migration or explicit recovery; the live profile owns its native learning
+between imports.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
 param(
@@ -20,11 +22,17 @@ param(
 
     [switch]$ProfileScoped,
 
+    [switch]$ConfirmProfileSkillTreeReplacement,
+
     [string]$KakaoPluginSourcePath = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not $ConfirmProfileSkillTreeReplacement.IsPresent -and -not $WhatIfPreference) {
+    throw 'Refusing full Hermes skill-tree replacement without -ConfirmProfileSkillTreeReplacement. Use -WhatIf to inspect a plan; execute only after a verified backup and conflict review.'
+}
 
 $excludedDirectoryNames = @(
     '.git', '.github', '.hub', '.archive', '.venv', 'venv', 'node_modules',

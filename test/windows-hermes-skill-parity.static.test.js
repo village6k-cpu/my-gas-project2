@@ -48,6 +48,27 @@ function readSkillNames(skillsRoot) {
     .sort();
 }
 
+test('full profile sync refuses execution without explicit replacement acknowledgement', { skip: process.platform !== 'win32' }, () => {
+  const result = spawnSync(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      `& '${syncScript.replaceAll("'", "''")}' -ProfileHome 'C:\\missing-profile' -MacHermesHome 'C:\\missing-mirror' -Confirm:$false`
+    ],
+    { encoding: 'utf8' }
+  );
+
+  assert.notEqual(result.status, 0, 'an unacknowledged full skill-tree replacement must fail closed');
+  assert.match(
+    `${result.stdout}\n${result.stderr}`,
+    /ConfirmProfileSkillTreeReplacement/,
+    'the failure must name the deliberate recovery-only acknowledgement switch'
+  );
+});
+
 test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA profile-scoped', { skip: process.platform !== 'win32' }, () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'village-hermes-parity-'));
   const macHome = path.join(tempRoot, 'mac-home');
@@ -93,7 +114,7 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
     writeSkill(profileHome, path.join('000-windows', 'village-operations-windows'), 'village-operations-windows', { platforms: ['windows'] });
     writeSkill(profileHome, path.join('000-windows', 'rpa-automation-operations-windows'), 'rpa-automation-operations-windows', { platforms: ['windows'] });
 
-    const command = `& '${syncScript.replaceAll("'", "''")}' -ProfileHome '${profileHome.replaceAll("'", "''")}' -MacHermesHome '${macHome.replaceAll("'", "''")}' -Confirm:$false`;
+    const command = `& '${syncScript.replaceAll("'", "''")}' -ProfileHome '${profileHome.replaceAll("'", "''")}' -MacHermesHome '${macHome.replaceAll("'", "''")}' -ConfirmProfileSkillTreeReplacement -Confirm:$false`;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const result = spawnSync(
         'powershell.exe',
@@ -258,7 +279,7 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
       'utf8'
     );
 
-    const command = `& '${syncScript.replaceAll("'", "''")}' -ProfileHome '${workerProfile.replaceAll("'", "''")}' -MacHermesHome '${macHome.replaceAll("'", "''")}' -ProfileScoped -Confirm:$false`;
+    const command = `& '${syncScript.replaceAll("'", "''")}' -ProfileHome '${workerProfile.replaceAll("'", "''")}' -MacHermesHome '${macHome.replaceAll("'", "''")}' -ProfileScoped -ConfirmProfileSkillTreeReplacement -Confirm:$false`;
     const result = spawnSync(
       'powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
@@ -337,7 +358,7 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
       'utf8'
     );
 
-    const command = `& '${syncScript.replaceAll("'", "''")}' -ProfileHome '${workerProfile.replaceAll("'", "''")}' -MacHermesHome '${macHome.replaceAll("'", "''")}' -ProfileScoped -Confirm:$false`;
+    const command = `& '${syncScript.replaceAll("'", "''")}' -ProfileHome '${workerProfile.replaceAll("'", "''")}' -MacHermesHome '${macHome.replaceAll("'", "''")}' -ProfileScoped -ConfirmProfileSkillTreeReplacement -Confirm:$false`;
     const first = spawnSync(
       'powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],

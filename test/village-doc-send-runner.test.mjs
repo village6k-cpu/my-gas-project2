@@ -1,11 +1,67 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   executeVillageDocumentCommand,
   executeVillageDocumentRequest,
   main,
   planVillageDocumentCommand
 } from '../tools/village-doc-send/runner.mjs';
+
+const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+const runnerPath = path.resolve(testDirectory, '..', 'tools', 'village-doc-send', 'runner.mjs');
+
+test('CLI entrypoint executes on Windows instead of silently exiting', () => {
+  const result = spawnSync(process.execPath, [runnerPath], { encoding: 'utf8' });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /사용법:/);
+});
+
+test('CLI configuration reuses the canonical Village environment without API rediscovery', async () => {
+  const tempRoot = mkdtempSync(path.join(tmpdir(), 'village-doc-runner-env-'));
+  const envFile = path.join(tempRoot, '.env.finance');
+  writeFileSync(envFile, 'VILLAGE2_API_KEY=doc-key\n', 'utf8');
+
+  try {
+    const request = {
+      document_type: 'quote',
+      mode: 'preview',
+      manual_data: {
+        고객명: '테스트 고객',
+        연락처: '',
+        대여기간: '2026-09-23 09:00 ~ 2026-09-26 09:00',
+        items: [{ 품목: '테스트 장비', 수량: 1, 일수: 3, 단가: 10000 }]
+      }
+    };
+    const encoded = Buffer.from(JSON.stringify(request), 'utf8').toString('base64url');
+    const calls = [];
+    const result = await main(['--request-base64', encoded], {}, {
+      envFile,
+      fetchJson: async (url, options) => {
+        calls.push({ url: String(url), options });
+        return {
+          status: 'ERROR',
+          error: '연락처가 유효하지 않습니다.',
+          fileId: 'preview-file'
+        };
+      },
+      log: () => {}
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.preview, true);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /^https:\/\/script\.google\.com\/macros\/s\//);
+    assert.equal(JSON.parse(calls[0].options.body).key, 'doc-key');
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
 
 test('plans natural Slack command by resolving customer/date to tradeId before document action', async () => {
   const calls = [];

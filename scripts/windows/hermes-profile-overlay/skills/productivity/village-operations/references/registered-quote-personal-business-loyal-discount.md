@@ -10,12 +10,12 @@ Use when staff says to resend a quote with `개인사업자에 단골 할인`, `
 3. For `개인사업자 + 단골` in the current official quote code, pass `discountType=단골` to `previewQuote`.
    - `Quote.js` maps `단골` to `사업자20% × 단골10%` and labels it `사업자20% · 단골10%`.
    - Do not pass only `개인사업자/프리랜서`; that would omit the loyal-customer 10%.
-4. Generate approval-gated preview only first:
+4. Generate and verify the no-contact artifact before any send:
    - `GET agreement?action=previewQuote&key=...&id={거래ID}&discountType=단골`
    - Export the generated sheet CSV from `https://docs.google.com/spreadsheets/d/{fileId}/export?format=csv&gid=0` and verify item rows, discount label, and total.
    - For the returned Drive `pdfUrl`, `drive.google.com/file/d/.../view` is a preview HTML page. For local attachment verification/download, use `https://drive.google.com/uc?export=download&id={driveFileId}` and confirm the bytes start with `%PDF`.
 5. Visually inspect a thumbnail when possible. Confirm it is a one-page official Village quote with legible customer name, period, discount label, item rows, and total.
-6. Final report must state `고객 발송은 아직 안 했음`; send only after explicit approval.
+6. If the current request directly authorizes delivery and the trade/recipient/version are unique, send the verified artifact once in the same turn. For preview-only wording, report `고객 발송은 아직 안 했음` and stop.
 
 ## Calculation check
 

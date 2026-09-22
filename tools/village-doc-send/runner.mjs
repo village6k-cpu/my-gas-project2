@@ -1,9 +1,35 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parseVillageDocumentCommand } from './intent.mjs';
 import {
   buildDocumentAction,
   buildTradeCandidatesUrl,
   selectUniqueTradeCandidate,
 } from './resolver.mjs';
+
+const DEFAULT_VILLAGE_ENV_FILE = 'C:\\Village\\village-ai\\.env.finance';
+const DEFAULT_VILLAGE_DOCUMENT_API_URL = 'https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec';
+const RUNNER_ENV_NAMES = new Set([
+  'VILLAGE2_API_URL',
+  'VILLAGE2_API_KEY',
+  'VILLAGE_SCHEDULE_API_URL',
+  'VILLAGE_SCHEDULE_API_KEY',
+  'VILLAGE_DOCUMENT_API_URL',
+  'VILLAGE_DOCUMENT_API_KEY',
+  'VILLAGE_OPS_KEY'
+]);
+
+function loadRunnerEnvironment(env = {}, envFile = DEFAULT_VILLAGE_ENV_FILE) {
+  const resolved = { ...env };
+  if (!envFile || !fs.existsSync(envFile)) return resolved;
+  for (const line of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!match || !RUNNER_ENV_NAMES.has(match[1]) || resolved[match[1]]) continue;
+    resolved[match[1]] = match[2].replace(/^(['"])([\s\S]*)\1$/, '$2');
+  }
+  return resolved;
+}
 
 async function defaultFetchJson(url, options) {
   const response = await fetch(url, options);
@@ -285,11 +311,16 @@ export async function main(argv = process.argv.slice(2), env = process.env, runt
   const { execute, input, request } = parseCliArgs(argv);
   if (!input && !request) throw new Error('사용법: node tools/village-doc-send/runner.mjs "6월 1일 김태완 건 견적서 발송해줘" [--execute] | --request-base64 <base64url-json>');
 
+  const runnerEnv = loadRunnerEnvironment(env, runtime.envFile || DEFAULT_VILLAGE_ENV_FILE);
+
   const options = {
-    scheduleApiBaseUrl: env.VILLAGE_SCHEDULE_API_URL,
-    scheduleApiKey: env.VILLAGE_SCHEDULE_API_KEY,
-    documentApiBaseUrl: env.VILLAGE_DOCUMENT_API_URL,
-    documentApiKey: env.VILLAGE_DOCUMENT_API_KEY || env.VILLAGE_OPS_KEY,
+    scheduleApiBaseUrl: runnerEnv.VILLAGE_SCHEDULE_API_URL || runnerEnv.VILLAGE2_API_URL,
+    scheduleApiKey: runnerEnv.VILLAGE_SCHEDULE_API_KEY || runnerEnv.VILLAGE2_API_KEY,
+    documentApiBaseUrl: runnerEnv.VILLAGE_DOCUMENT_API_URL || DEFAULT_VILLAGE_DOCUMENT_API_URL,
+    documentApiKey: runnerEnv.VILLAGE_DOCUMENT_API_KEY
+      || runnerEnv.VILLAGE_OPS_KEY
+      || runnerEnv.VILLAGE_SCHEDULE_API_KEY
+      || runnerEnv.VILLAGE2_API_KEY,
     ...(typeof runtime.fetchJson === 'function' ? { fetchJson: runtime.fetchJson } : {})
   };
 
@@ -304,7 +335,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, runt
   return result;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main().catch((error) => {
     console.error(error.stack || error.message || String(error));
     process.exit(1);

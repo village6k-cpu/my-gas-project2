@@ -21,11 +21,11 @@ already understood action; it does not replace business judgment.
 
 - The current user may authorize internal Village work in the current request.
 - An internal write approval does not authorize a customer-facing send.
-- Kakao, SMS, iMessage, email, or proactive/cross-channel Slack delivery needs
-  separate explicit approval for the exact recipient and content.
-- Final registration is the owner-confirmed narrow exception: it includes exactly
-  one registration-complete Alimtalk per trade. Correction, preview, and
-  `sendEstimate` never inherit this authorization.
+- Kakao, SMS, iMessage, email, or proactive/cross-channel Slack delivery needs an
+  explicit instruction for the exact recipient and content. The current request
+  can supply it after lookup; artifact validation never requires a second message.
+- Final registration is the owner-confirmed narrow exception: exactly one registration-complete
+  Alimtalk per trade; correction, preview, and `sendEstimate` never inherit it.
 - Preview, draft, lookup, calculation, and readback are not final registration
   or delivery.
 - Passwords, 2FA, CAPTCHA, device approval, and account recovery remain with
@@ -113,19 +113,20 @@ interprets business intent.
 
 ## Quotes and documents
 
-- Decide whether the request is an unregistered preview, pending-request quote,
-  or registered-trade document before choosing data and pricing rules.
-- Preserve customer source text when a requested field has no safer normalized
-  representation; do not silently omit it.
-- Recalculate totals from authoritative item prices, quantities, rental period,
-  explicit discounts, and approved overrides.
-- Preview and final delivery are separate. Generate or verify the artifact first,
-  then send only with exact approval and delivery readback.
-- Prefer an existing stable artifact/link when the requested correction does not
-  require regeneration.
+- Classify unregistered, pending/hybrid, or registered before pricing.
+- Infer customer-send authorization from the whole request and thread, not a
+  phrase allowlist. If one recipient and complete version resolve, a direct
+  delivery request is approval: validate and send in the same turn.
+- Use the official-quote workflow as the single entrypoint; load at most one
+  relevant reference, never overlapping skills or historical examples.
+- Preserve source text that has no safer normalized representation.
+- Recalculate from authoritative items, quantities, period, and discounts.
+- Draft/preview/check never authorizes contact. Ask once only if recipient,
+  period, cart, price, discount, or version remains materially ambiguous.
+- Prefer an existing stable artifact when regeneration is unnecessary.
 
-For the common fast preview path, open
-[manual Kakao single quote preview](references/manual-kakao-single-quote-preview.md).
+For routine quote work, load `village-official-quote-delivery` only. For an explicit
+preview-only manual Kakao request, see [manual Kakao single quote preview](references/manual-kakao-single-quote-preview.md).
 
 For registered multi-trade quote bundles, ad-hoc stacked discounts, or a question
 about an existing bundle total, open

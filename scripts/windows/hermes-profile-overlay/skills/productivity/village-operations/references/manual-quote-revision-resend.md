@@ -20,7 +20,7 @@ Use when staff replies in a thread after prior manual quote work with wording li
 3. Rebuild `manualData.items` by copying the prior top-level line items and applying the requested change.
    - Do not copy expanded zero-price components.
    - Do not re-infer the whole quote from memory if the previous session/thread has an explicit payload.
-4. Even if the user says `다시 보내자`, if the document content changed, create an approval-gated preview first:
+4. If document content changed, create and validate the official artifact before delivery. A direct `다시 보내자` instruction authorizes the validated revision in the same turn when no material ambiguity remains:
    - Use official template generation.
    - If only `sendEstimateManual` is exposed, use the no-send preview workaround: call it with blank/invalid phone so it returns `status:"ERROR"` / `연락처가 유효하지 않습니다.` plus `fileId` and no customer contact.
 5. Export and verify the generated sheet before reporting:

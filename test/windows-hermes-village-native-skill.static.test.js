@@ -97,6 +97,32 @@ test('Village operations is a compact substantive Hermes umbrella', () => {
   );
 });
 
+test('quote delivery authorization is semantic, same-turn, and single-path', () => {
+  const skill = loadSkill(operationsRoot);
+  const quoteSection = skill.body.match(/## Quotes and documents[\s\S]*?(?=\n## )/i)?.[0] || '';
+
+  assert.match(
+    quoteSection,
+    /whole (?:current )?(?:request|instruction|thread)[\s\S]{0,240}(?:authoriz|approval)[\s\S]{0,240}same[- ]turn/i,
+    'an explicit customer-send instruction must authorize delivery after internal validation in the same turn'
+  );
+  assert.match(
+    quoteSection,
+    /not[\s\S]{0,120}(?:keyword|phrase|allowlist|trigger)/i,
+    'authorization must remain an AI semantic judgment rather than a fixed phrase trigger'
+  );
+  assert.match(
+    quoteSection,
+    /single (?:entrypoint|workflow|skill|path)[\s\S]{0,260}(?:one|at most one)[\s\S]{0,160}reference/i,
+    'routine quote work must not bulk-load overlapping skill packages and historical references'
+  );
+  assert.doesNotMatch(
+    quoteSection,
+    /first pass[\s\S]{0,100}(?:no-send|preview)[\s\S]{0,180}(?:fresh|second|exact-version)[\s\S]{0,100}(?:approval|보내)/i,
+    'the canonical contract must not recreate the stale mandatory second-approval gate'
+  );
+});
+
 test('owner-managed Village operations learning stays outside the pinned package', () => {
   const skill = loadSkill(operationsRoot);
   const learning = skill.body.match(/## Learn as you work[\s\S]*$/i)?.[0] || '';

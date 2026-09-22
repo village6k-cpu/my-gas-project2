@@ -8,8 +8,9 @@ with the verified Windows CDP path from 2026-08-17.
 
 ## Decision rules
 
-1. Preview each trade with official GAS `previewQuote` first; customer send only after
-   explicit approval of that version (`보내` / `발송` / `승인`).
+1. Validate each trade with official GAS `previewQuote` first. If the current
+   instruction already authorizes delivery and the bundle resolves uniquely,
+   send the validated version in the same turn; otherwise keep it as preview-only.
 2. “최근 N건” = sort customer trades by checkout desc, take top N. Show tradeIds + VAT totals.
 3. Bare `보내` on a multi-trade preview = **one combined PDF once** to the customer Kakao room.
    Do **not** loop `sendEstimate`/Popbill Alimtalk unless staff says `거래별 알림톡`.

@@ -54,7 +54,9 @@ exists. Use the exact operation's `--help` or reference before opening source.
 Normal gateway, bridge, worker, restart, and watchdog paths validate the selected
 profile but do not import skill snapshots. `sync-hermes-profile-overlay.ps1` is
 reserved for an explicit migration/recovery after a verified backup and conflict
-review. The live profile owns its native skills and learning between imports.
+review. It fails closed unless `-ConfirmProfileSkillTreeReplacement` is supplied;
+use `-WhatIf` to inspect first. The live profile owns its native skills and
+learning between imports.
 
 ## Current information
 
