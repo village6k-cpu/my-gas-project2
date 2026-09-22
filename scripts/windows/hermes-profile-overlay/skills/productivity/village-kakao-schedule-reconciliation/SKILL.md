@@ -6,7 +6,7 @@ platforms: [windows]
 metadata:
   hermes:
     tags: [village, kakao, heybilli, reservations, reconciliation, audit]
-    related_skills: [village-staff-kakao-reservation-register, village-operations]
+    related_skills: [village-reservation-commitment-reasoning, village-staff-kakao-reservation-register, village-operations]
 ---
 
 # Village Kakao–Heybilli Schedule Reconciliation
@@ -25,6 +25,10 @@ Village reservation ledgers. Find both:
   stale after a later Kakao change.
 
 Do not equate “a row exists” with “the conversation was implemented correctly.”
+
+**REQUIRED SUB-SKILL:** Load `village-reservation-commitment-reasoning` before
+classifying reservation intent. Use its stateful conversation result here;
+keep this skill's evidence, authorization, and mutation boundaries unchanged.
 
 ## Decide the operating mode first
 

@@ -122,7 +122,8 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
       'village-confirm-request',
       'village-history-evidence',
       'village-kakao-schedule-reconciliation',
-      'village-operations'
+      'village-operations',
+      'village-reservation-commitment-reasoning'
     ]);
     assert.equal(
       fs.readFileSync(path.join(profileHome, '.no-bundled-skills'), 'utf8').trim(),
@@ -297,6 +298,7 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
       'village-confirm-request',
       'village-kakao-schedule-reconciliation',
       'village-operations',
+      'village-reservation-commitment-reasoning',
       'rpa-automation-operations'
     ]) {
       assert.equal(names.includes(required), true, `${required} must be active in the worker profile`);
@@ -392,6 +394,27 @@ test('profile sync protects owner-managed operating and reconciliation contracts
       'SKILL.md'
     );
     const canonicalReconciliation = fs.readFileSync(reconciliationPath, 'utf8');
+    assert.match(
+      canonicalReconciliation,
+      /REQUIRED SUB-SKILL:[^\r\n]*village-reservation-commitment-reasoning/i,
+      'schedule reconciliation must load the shared semantic commitment contract'
+    );
+    const registrationPath = path.join(
+      workerProfile,
+      'skills',
+      'productivity',
+      'village-staff-kakao-reservation-register',
+      'SKILL.md'
+    );
+    writeSkill(
+      workerProfile,
+      path.join('productivity', 'village-staff-kakao-reservation-register'),
+      'village-staff-kakao-reservation-register',
+      {
+        platforms: ['windows'],
+        body: '# Staff registration\n\nAGENT_BOOKING_LEARNING_MUST_SURVIVE\n'
+      }
+    );
     fs.appendFileSync(operationsPath, '\n## Learned rule\n\nSELF_IMPROVED_RULE_MUST_SURVIVE\n', 'utf8');
     fs.appendFileSync(capabilityPath, '\nAUTONOMOUS_LIFECYCLE_DRIFT_MUST_NOT_SURVIVE\n', 'utf8');
     fs.appendFileSync(
@@ -427,6 +450,13 @@ test('profile sync protects owner-managed operating and reconciliation contracts
           patch_count: 3,
           last_patched_at: new Date().toISOString()
         },
+        'village-staff-kakao-reservation-register': {
+          created_by: 'agent',
+          agent_created: true,
+          pinned: false,
+          patch_count: 111,
+          last_patched_at: new Date().toISOString()
+        },
         'customer-alias-memory': { created_by: 'agent', patch_count: 0 }
       }, null, 2),
       'utf8'
@@ -454,6 +484,25 @@ test('profile sync protects owner-managed operating and reconciliation contracts
       canonicalReconciliation,
       'the owner-managed reconciliation contract must win over incident-report self-learning'
     );
+    const registration = fs.readFileSync(registrationPath, 'utf8');
+    assert.match(
+      registration,
+      /AGENT_BOOKING_LEARNING_MUST_SURVIVE/,
+      'focused registration learning must survive the root parity import'
+    );
+    assert.match(
+      registration,
+      /REQUIRED SUB-SKILL:[^\r\n]*village-reservation-commitment-reasoning/i,
+      'focused registration must load the shared semantic commitment contract'
+    );
+    const commitmentPath = path.join(
+      workerProfile,
+      'skills',
+      'productivity',
+      'village-reservation-commitment-reasoning',
+      'SKILL.md'
+    );
+    assert.equal(fs.existsSync(commitmentPath), true, 'semantic commitment skill must be installed');
     assert.match(
       fs.readFileSync(path.join(workerProfile, 'skills', 'learned', 'customer-alias-memory', 'SKILL.md'), 'utf8'),
       /AGENT_CREATED_SKILL_MUST_SURVIVE/
@@ -471,6 +520,12 @@ test('profile sync protects owner-managed operating and reconciliation contracts
     assert.equal(usage['village-kakao-schedule-reconciliation'].created_by, null);
     assert.equal(usage['village-kakao-schedule-reconciliation'].agent_created, false);
     assert.equal(usage['village-kakao-schedule-reconciliation'].pinned, true);
+    assert.equal(usage['village-staff-kakao-reservation-register'].patch_count, 111);
+    assert.equal(usage['village-staff-kakao-reservation-register'].created_by, 'agent');
+    assert.equal(usage['village-staff-kakao-reservation-register'].pinned, false);
+    assert.equal(usage['village-reservation-commitment-reasoning'].created_by, null);
+    assert.equal(usage['village-reservation-commitment-reasoning'].agent_created, false);
+    assert.equal(usage['village-reservation-commitment-reasoning'].pinned, true);
     assert.equal(usage['customer-alias-memory'].created_by, 'agent');
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });

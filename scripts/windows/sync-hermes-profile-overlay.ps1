@@ -42,7 +42,8 @@ $rootExcludedSkills = @(
     'village-history-evidence',
     'village-runtime-router',
     'village-confirm-request',
-    'village-kakao-schedule-reconciliation'
+    'village-kakao-schedule-reconciliation',
+    'village-reservation-commitment-reasoning'
 )
 $retiredSkillNames = @(
     'apple-automation',
@@ -61,7 +62,8 @@ $ownerManagedSkillNames = @(
     'village-operations',
     'village-capability-development',
     'village-kakao-gateway-worker',
-    'village-kakao-schedule-reconciliation'
+    'village-kakao-schedule-reconciliation',
+    'village-reservation-commitment-reasoning'
 )
 $overlaySkillsRoot = Join-Path $PSScriptRoot 'hermes-profile-overlay\skills'
 $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -238,6 +240,37 @@ function Add-WindowsAdapter {
         $adapter = [IO.File]::ReadAllText($AdapterFile, [Text.Encoding]::UTF8).Trim()
         $content = $content.Insert($frontmatterEnd.Length, "`r`n$adapter`r`n`r`n")
     }
+    [IO.File]::WriteAllText($SkillFile, $content, $encoding)
+}
+
+function Ensure-RequiredSubSkill {
+    param(
+        [Parameter(Mandatory = $true)][string]$SkillFile,
+        [Parameter(Mandatory = $true)][string]$RequiredSkill,
+        [Parameter(Mandatory = $true)][string]$Purpose
+    )
+
+    if (-not (Test-Path -LiteralPath $SkillFile -PathType Leaf)) {
+        return
+    }
+    $content = [IO.File]::ReadAllText($SkillFile, [Text.Encoding]::UTF8)
+    $marker = '<!-- VILLAGE-REQUIRED-SUBSKILL:{0} -->' -f $RequiredSkill
+    if ($content.Contains($marker)) {
+        return
+    }
+    $frontmatterEnd = [regex]::Match($content, '(?s)^---\s*\r?\n.*?\r?\n---\s*\r?\n')
+    if (-not $frontmatterEnd.Success) {
+        throw "Cannot locate YAML frontmatter in '$SkillFile'."
+    }
+    $block = @"
+$marker
+## Required semantic contract
+
+**REQUIRED SUB-SKILL:** Load ``$RequiredSkill`` $Purpose. Preserve this
+skill's learned execution policy and authorization boundary; the shared skill
+only supplies the conversation-state classification.
+"@
+    $content = $content.Insert($frontmatterEnd.Length, "`r`n$($block.Trim())`r`n`r`n")
     [IO.File]::WriteAllText($SkillFile, $content, $encoding)
 }
 
@@ -970,6 +1003,12 @@ try {
     Assert-PackageCopy -Source $capabilityDevelopmentSource -Destination $capabilityDevelopmentDestination
     [void]$copiedNames.Add('village-capability-development')
 
+    $commitmentReasoningSource = Join-Path $overlaySkillsRoot 'productivity\village-reservation-commitment-reasoning'
+    $commitmentReasoningDestination = Join-Path $stagingRoot 'productivity\village-reservation-commitment-reasoning'
+    Copy-SkillPackage -Source $commitmentReasoningSource -Destination $commitmentReasoningDestination
+    Assert-PackageCopy -Source $commitmentReasoningSource -Destination $commitmentReasoningDestination
+    [void]$copiedNames.Add('village-reservation-commitment-reasoning')
+
     if ($ProfileScoped.IsPresent) {
         $gatewaySkillSource = Join-Path $overlaySkillsRoot 'productivity\village-kakao-gateway-worker'
         $gatewaySkillDestination = Join-Path $stagingRoot 'productivity\village-kakao-gateway-worker'
@@ -999,6 +1038,10 @@ try {
         -PreviousCanonicalHashes $previousCanonicalHashes `
         -RetiredNames $retiredSkillNames `
         -OwnerManagedNames $ownerManagedSkillNames
+    Ensure-RequiredSubSkill `
+        -SkillFile (Join-Path $stagingRoot 'productivity\village-staff-kakao-reservation-register\SKILL.md') `
+        -RequiredSkill 'village-reservation-commitment-reasoning' `
+        -Purpose 'before deciding whether a full Kakao thread is confirmed, quote-only, pending, or unknown'
 
     $rootNames = @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot | ForEach-Object { $_.name })
     $metadata = [pscustomobject]@{
@@ -1023,7 +1066,7 @@ try {
     if (@($rootNames | Select-Object -Unique).Count -ne $rootNames.Count) {
         throw 'Rebuilt Windows skill tree contains duplicate skill names.'
     }
-    foreach ($required in @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request', 'village-kakao-schedule-reconciliation', 'productivity-integrations')) {
+    foreach ($required in @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request', 'village-kakao-schedule-reconciliation', 'village-reservation-commitment-reasoning', 'productivity-integrations')) {
         if ($rootNames -notcontains $required) {
             throw "Rebuilt Windows skill tree is missing '$required'."
         }
