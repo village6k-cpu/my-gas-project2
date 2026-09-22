@@ -53,6 +53,10 @@ test('kakaoworker Gateway task plan is profile-scoped, clean-lineage, and disabl
   assert.equal(path.resolve(disabled.kakaoworker.pluginPath), path.resolve(path.join(hermesHome, 'profiles', 'kakaoworker', 'plugins', 'kakao_village')));
   assert.equal(disabled.root.taskName, 'Hermes_Gateway');
   assert.equal(disabled.root.mutated, false);
+  assert.equal(disabled.root.watchdogTaskName, 'Village-Hermes-Gateway-Lineage-Watchdog-Fast');
+  assert.equal(disabled.root.legacyWatchdogTaskName, 'Village-Hermes-Gateway-Lineage-Watchdog');
+  assert.equal(disabled.root.watchdogIntervalMinutes, 1);
+  assert.equal(disabled.root.watchdogReconcileEnabled, true);
   assert.equal(disabled.kakaoworker.legacyTaskPreserved, 'Hermes_Gateway_Kakaoworker');
 });
 

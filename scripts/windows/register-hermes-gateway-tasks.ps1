@@ -12,6 +12,7 @@ param(
     [string]$HermesHome = (Join-Path $env:LOCALAPPDATA 'hermes'),
     [string]$HermesPythonPath = '',
     [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$EnvFile,
+    [ValidateRange(1, 30)][int]$RootWatchdogIntervalMinutes = 1,
     [switch]$EnableKakaoworker,
     [switch]$PlanOnly
 )
@@ -49,6 +50,8 @@ foreach ($required in @($wrapperPs1, $launcherPs1, $psExe)) {
 
 $hiddenDir = Join-Path $env:LOCALAPPDATA 'Village\hidden-tasks'
 $watchVbs = Join-Path $hiddenDir 'Village-Hermes-Gateway-Lineage-Watchdog.vbs'
+$watchdogTaskName = 'Village-Hermes-Gateway-Lineage-Watchdog-Fast'
+$legacyWatchdogTaskName = 'Village-Hermes-Gateway-Lineage-Watchdog'
 $kakaoArguments = @(
     '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
     '-File', (Quote-TaskArgument -Value $launcherPs1),
@@ -63,7 +66,10 @@ $plan = [ordered]@{
     root = [ordered]@{
         taskName = 'Hermes_Gateway'
         mutated = $false
-        watchdogTaskName = 'Village-Hermes-Gateway-Lineage-Watchdog'
+        watchdogTaskName = $watchdogTaskName
+        legacyWatchdogTaskName = $legacyWatchdogTaskName
+        watchdogIntervalMinutes = $RootWatchdogIntervalMinutes
+        watchdogReconcileEnabled = $true
     }
     kakaoworker = [ordered]@{
         taskName = 'Hermes_Gateway_Kakaoworker_Native'
@@ -107,20 +113,17 @@ else {
     Disable-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker_Native' -ErrorAction Stop | Out-Null
 }
 
-$existingWatchdog = Get-ScheduledTask -TaskName 'Village-Hermes-Gateway-Lineage-Watchdog' -ErrorAction SilentlyContinue
-if ($null -eq $existingWatchdog) {
-    $watchAction = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('//B //Nologo "{0}"' -f $watchVbs)
-    $watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) `
-        -RepetitionInterval (New-TimeSpan -Minutes 30)
-    $watchSettings = New-ScheduledTaskSettingsSet `
-        -MultipleInstances IgnoreNew `
-        -StartWhenAvailable `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
-    Register-ScheduledTask -TaskName 'Village-Hermes-Gateway-Lineage-Watchdog' `
-        -Description 'Detect and heal the poisoned or dead root Hermes Slack gateway every 30 minutes' `
-        -Action $watchAction -Trigger $watchTrigger -Settings $watchSettings -ErrorAction Stop | Out-Null
-}
+$watchAction = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('//B //Nologo "{0}"' -f $watchVbs)
+$watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes $RootWatchdogIntervalMinutes)
+$watchSettings = New-ScheduledTaskSettingsSet `
+    -MultipleInstances IgnoreNew `
+    -StartWhenAvailable `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+Register-ScheduledTask -TaskName $watchdogTaskName `
+    -Description "Detect and heal the poisoned or dead root Hermes Slack gateway every $RootWatchdogIntervalMinutes minute(s)" `
+    -Action $watchAction -Trigger $watchTrigger -Settings $watchSettings -Force -ErrorAction Stop | Out-Null
 
 [pscustomobject]$plan | ConvertTo-Json -Depth 6 -Compress

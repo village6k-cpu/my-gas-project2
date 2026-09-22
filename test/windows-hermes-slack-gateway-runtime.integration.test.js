@@ -68,6 +68,12 @@ test('root Slack gateway stays independent while Kakao gets a disabled-by-defaul
   assert.match(register, /Register-ScheduledTask[\s\S]*-ErrorAction\s+Stop/i);
   assert.doesNotMatch(register, /RepetitionDuration\s+\(\[TimeSpan\]::MaxValue\)/i);
   assert.match(register, /-Target\s+root\s+-HealOnly/i);
+  assert.match(register, /RepetitionInterval\s+\(New-TimeSpan\s+-Minutes\s+\$RootWatchdogIntervalMinutes\)/i);
+  assert.match(
+    register,
+    /Register-ScheduledTask\s+-TaskName\s+\$watchdogTaskName[\s\S]*?-Force[\s\S]*?-ErrorAction\s+Stop/i
+  );
+  assert.doesNotMatch(register, /if\s*\(\$null\s+-eq\s+\$existingWatchdog\)/i);
   assert.match(restart, /if\s*\(\$Target\s+-eq\s+['"]all['"]\)\s*\{\s*\$targets\s*=\s*@\(['"]root['"]\)\s*\}/i);
   assert.match(restart, /profiles\\kakaoworker\\gateway\.pid/i);
   assert.match(restart, /--profile['"],?\s*['"]kakaoworker/i);
