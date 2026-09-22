@@ -102,6 +102,12 @@ test('sync preserves source ownership and merges usage history without granting 
     writeSkill(macHome, path.join('software-development', 'workflows'), 'software-development-workflows');
     writeSkill(macHome, path.join('creative', 'mac-hub-skill'), 'mac-hub-skill');
     writeSkill(macHome, path.join('productivity', 'village-operations'), 'village-operations', { platforms: ['macos'] });
+    writeSkill(
+      macHome,
+      path.join('productivity', 'village-kakao-schedule-reconciliation'),
+      'village-kakao-schedule-reconciliation',
+      { platforms: ['macos'] }
+    );
     writeSkill(macHome, path.join('village', 'village-brain-first'), 'village-brain-first', { platforms: ['macos'] });
     writeSkill(macHome, path.join('gaming', 'minecraft-modpack-server'), 'minecraft-modpack-server');
 

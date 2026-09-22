@@ -73,6 +73,15 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
       body: '# Village Operations\n\n## Existing reservation equipment additions\n\nMac business rules stay intact.\n',
       references: ['schedule.md', 'payments.md']
     });
+    writeSkill(
+      macHome,
+      path.join('productivity', 'village-kakao-schedule-reconciliation'),
+      'village-kakao-schedule-reconciliation',
+      {
+        platforms: ['macos'],
+        body: '# Schedule Reconciliation\n\nAudit current Kakao evidence against live schedules.\n'
+      }
+    );
     writeSkill(macHome, path.join('village', 'village-brain-first'), 'village-brain-first', {
       platforms: ['macos'],
       body: '# Village Brain-First Protocol\n\n## Customer lookup\n\n## Tax chief-of-staff mode\n\n## Recording owner decisions\n\n## Live-system escalation\n',
@@ -112,6 +121,7 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
       'village-capability-development',
       'village-confirm-request',
       'village-history-evidence',
+      'village-kakao-schedule-reconciliation',
       'village-operations'
     ]);
     assert.equal(
@@ -234,6 +244,15 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
       platforms: ['macos'],
       body: '# Village Operations\n\nFull operational reasoning.\n'
     });
+    writeSkill(
+      macHome,
+      path.join('productivity', 'village-kakao-schedule-reconciliation'),
+      'village-kakao-schedule-reconciliation',
+      {
+        platforms: ['macos'],
+        body: '# Schedule Reconciliation\n\nAudit current Kakao evidence against live schedules.\n'
+      }
+    );
     writeSkill(macHome, path.join('village', 'village-brain-first'), 'village-brain-first', {
       platforms: ['macos'],
       body: '# Village Brain-First Protocol\n\nFull business intelligence.\n'
@@ -276,6 +295,7 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
       'village-capability-development',
       'village-history-evidence',
       'village-confirm-request',
+      'village-kakao-schedule-reconciliation',
       'village-operations',
       'rpa-automation-operations'
     ]) {
@@ -304,7 +324,7 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
   }
 });
 
-test('profile sync protects the owner-managed umbrella while preserving focused agent learning', { skip: process.platform !== 'win32' }, () => {
+test('profile sync protects owner-managed operating and reconciliation contracts while preserving focused agent learning', { skip: process.platform !== 'win32' }, () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'village-hermes-learning-parity-'));
   const macHome = path.join(tempRoot, 'mac-home');
   const workerProfile = path.join(tempRoot, 'windows-home', 'profiles', 'kakaoworker');
@@ -317,6 +337,15 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
       platforms: ['macos'],
       body: '# Village Operations\n\nFull operational reasoning.\n'
     });
+    writeSkill(
+      macHome,
+      path.join('productivity', 'village-kakao-schedule-reconciliation'),
+      'village-kakao-schedule-reconciliation',
+      {
+        platforms: ['macos'],
+        body: '# Schedule Reconciliation\n\nAudit current Kakao evidence against live schedules.\n'
+      }
+    );
     writeSkill(macHome, path.join('village', 'village-brain-first'), 'village-brain-first', {
       platforms: ['macos'],
       body: '# Village Brain-First Protocol\n\nFull business intelligence.\n'
@@ -355,8 +384,21 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
       'SKILL.md'
     );
     const canonicalCapability = fs.readFileSync(capabilityPath, 'utf8');
+    const reconciliationPath = path.join(
+      workerProfile,
+      'skills',
+      'productivity',
+      'village-kakao-schedule-reconciliation',
+      'SKILL.md'
+    );
+    const canonicalReconciliation = fs.readFileSync(reconciliationPath, 'utf8');
     fs.appendFileSync(operationsPath, '\n## Learned rule\n\nSELF_IMPROVED_RULE_MUST_SURVIVE\n', 'utf8');
     fs.appendFileSync(capabilityPath, '\nAUTONOMOUS_LIFECYCLE_DRIFT_MUST_NOT_SURVIVE\n', 'utf8');
+    fs.appendFileSync(
+      reconciliationPath,
+      '\nINCIDENT_REPORT_SELF_LEARNING_MUST_NOT_SURVIVE\n',
+      'utf8'
+    );
     writeSkill(workerProfile, path.join('learned', 'customer-alias-memory'), 'customer-alias-memory', {
       platforms: ['windows'],
       body: '# Customer Alias Memory\n\nAGENT_CREATED_SKILL_MUST_SURVIVE\n'
@@ -376,6 +418,13 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
           agent_created: true,
           pinned: false,
           patch_count: 2,
+          last_patched_at: new Date().toISOString()
+        },
+        'village-kakao-schedule-reconciliation': {
+          created_by: 'agent',
+          agent_created: true,
+          pinned: false,
+          patch_count: 3,
           last_patched_at: new Date().toISOString()
         },
         'customer-alias-memory': { created_by: 'agent', patch_count: 0 }
@@ -400,6 +449,11 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
       canonicalCapability,
       'the native lifecycle contract must win over autonomous lifecycle drift'
     );
+    assert.equal(
+      fs.readFileSync(reconciliationPath, 'utf8'),
+      canonicalReconciliation,
+      'the owner-managed reconciliation contract must win over incident-report self-learning'
+    );
     assert.match(
       fs.readFileSync(path.join(workerProfile, 'skills', 'learned', 'customer-alias-memory', 'SKILL.md'), 'utf8'),
       /AGENT_CREATED_SKILL_MUST_SURVIVE/
@@ -413,6 +467,10 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
     assert.equal(usage['village-capability-development'].created_by, null);
     assert.equal(usage['village-capability-development'].agent_created, false);
     assert.equal(usage['village-capability-development'].pinned, true);
+    assert.equal(usage['village-kakao-schedule-reconciliation'].patch_count, 3);
+    assert.equal(usage['village-kakao-schedule-reconciliation'].created_by, null);
+    assert.equal(usage['village-kakao-schedule-reconciliation'].agent_created, false);
+    assert.equal(usage['village-kakao-schedule-reconciliation'].pinned, true);
     assert.equal(usage['customer-alias-memory'].created_by, 'agent');
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
