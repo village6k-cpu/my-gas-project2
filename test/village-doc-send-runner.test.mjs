@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   executeVillageDocumentCommand,
   executeVillageDocumentRequest,
+  main,
   planVillageDocumentCommand
 } from '../tools/village-doc-send/runner.mjs';
 
@@ -186,3 +187,171 @@ test('structured native document request rejects an unsupported tax mode before 
   assert.equal(calls, 0);
 });
 
+test('structured manual quote preview creates one official artifact without a customer send', async () => {
+  const calls = [];
+  const result = await executeVillageDocumentRequest({
+    document_type: 'quote',
+    mode: 'preview',
+    manual_data: {
+      고객명: '여찬영',
+      연락처: '010-1234-5678',
+      할인유형: '제휴',
+      대여기간: '2026-09-29 13:00 ~ 2026-10-03 시간 미정 (3회차)',
+      items: [
+        { 품목: 'FX3 풀세트', 수량: 1, 일수: 3, 단가: 100000 },
+        { 품목: '애플박스', 수량: 1, 일수: 3, 단가: 0 }
+      ]
+    }
+  }, {
+    documentApiBaseUrl: 'https://docs.example/exec',
+    documentApiKey: 'doc-key',
+    fetchJson: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return {
+        status: 'ERROR',
+        action: 'sendEstimateManual',
+        error: '연락처가 유효하지 않습니다.',
+        fileId: 'sheet-preview-1',
+        url: 'https://docs.google.com/spreadsheets/d/sheet-preview-1/edit'
+      };
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.preview, true);
+  assert.equal(result.sent, false);
+  assert.equal(result.response.fileId, 'sheet-preview-1');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    action: 'sendEstimateManual',
+    manualData: {
+      고객명: '여찬영',
+      연락처: '',
+      할인유형: '제휴',
+      대여기간: '2026-09-29 13:00 ~ 2026-10-03 시간 미정 (3회차)',
+      items: [
+        { 품목: 'FX3 풀세트', 수량: 1, 일수: 3, 단가: 100000 },
+        { 품목: '애플박스', 수량: 1, 일수: 3, 단가: 0 }
+      ]
+    },
+    key: 'doc-key'
+  });
+});
+
+test('structured manual quote send uses the authorized payload exactly once', async () => {
+  const calls = [];
+  const result = await executeVillageDocumentRequest({
+    document_type: 'quote',
+    mode: 'send',
+    manual_data: {
+      고객명: '여찬영',
+      연락처: '010-1234-5678',
+      할인유형: '제휴',
+      대여기간: '2026-09-29 13:00 ~ 2026-10-03 시간 미정 (3회차)',
+      items: [{ 품목: 'FX3 풀세트', 수량: 1, 일수: 3, 단가: 100000 }]
+    }
+  }, {
+    documentApiBaseUrl: 'https://docs.example/exec',
+    documentApiKey: 'doc-key',
+    fetchJson: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return {
+        status: 'OK',
+        action: 'sendEstimateManual',
+        message: '여찬영님에게 견적서 발송 완료!',
+        fileId: 'sheet-send-1'
+      };
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.preview, false);
+  assert.equal(result.sent, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    action: 'sendEstimateManual',
+    manualData: {
+      고객명: '여찬영',
+      연락처: '010-1234-5678',
+      할인유형: '제휴',
+      대여기간: '2026-09-29 13:00 ~ 2026-10-03 시간 미정 (3회차)',
+      items: [{ 품목: 'FX3 풀세트', 수량: 1, 일수: 3, 단가: 100000 }]
+    },
+    key: 'doc-key'
+  });
+});
+
+test('structured manual quote send rejects a missing phone before any customer call', async () => {
+  let calls = 0;
+  const result = await executeVillageDocumentRequest({
+    document_type: 'quote',
+    mode: 'send',
+    manual_data: {
+      고객명: '여찬영',
+      연락처: '',
+      대여기간: '2026-09-29 13:00 ~ 2026-10-03 시간 미정 (3회차)',
+      items: [{ 품목: 'FX3 풀세트', 수량: 1, 일수: 3, 단가: 100000 }]
+    }
+  }, {
+    documentApiBaseUrl: 'https://docs.example/exec',
+    documentApiKey: 'doc-key',
+    fetchJson: async () => { calls += 1; return { status: 'OK' }; }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'missing_manual_quote_phone');
+  assert.equal(calls, 0);
+});
+
+test('structured manual quote send does not claim delivery without an explicit OK receipt', async () => {
+  let calls = 0;
+  const result = await executeVillageDocumentRequest({
+    document_type: 'quote',
+    mode: 'send',
+    manual_data: {
+      고객명: '여찬영',
+      연락처: '010-1234-5678',
+      대여기간: '2026-09-29 13:00 ~ 2026-10-03 시간 미정 (3회차)',
+      items: [{ 품목: 'FX3 풀세트', 수량: 1, 일수: 3, 단가: 100000 }]
+    }
+  }, {
+    documentApiBaseUrl: 'https://docs.example/exec',
+    documentApiKey: 'doc-key',
+    fetchJson: async () => { calls += 1; return {}; }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.sent, false);
+  assert.equal(result.reason, 'document_api_error');
+  assert.equal(calls, 1);
+});
+
+test('CLI structured request routes one base64 payload through the manual quote executor', async () => {
+  const calls = [];
+  const request = {
+    document_type: 'quote',
+    mode: 'send',
+    manual_data: {
+      고객명: '여찬영',
+      연락처: '010-1234-5678',
+      대여기간: '2026-09-29 13:00 ~ 2026-10-03 시간 미정 (3회차)',
+      items: [{ 품목: 'FX3 풀세트', 수량: 1, 일수: 3, 단가: 100000 }]
+    }
+  };
+  const encoded = Buffer.from(JSON.stringify(request), 'utf8').toString('base64url');
+  const result = await main(['--request-base64', encoded], {
+    VILLAGE_DOCUMENT_API_URL: 'https://docs.example/exec',
+    VILLAGE_DOCUMENT_API_KEY: 'doc-key'
+  }, {
+    fetchJson: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { status: 'OK', action: 'sendEstimateManual', fileId: 'sheet-send-cli' };
+    },
+    log: () => {}
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.sent, true);
+  assert.equal(calls.length, 1);
+  assert.equal(JSON.parse(calls[0].options.body).manualData.고객명, '여찬영');
+});
