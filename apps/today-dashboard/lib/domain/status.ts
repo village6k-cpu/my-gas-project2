@@ -319,6 +319,84 @@ export function attentionBreakdown(trades: Trade[], date: string): Record<Attent
   return acc;
 }
 
+// 확인필요 화면의 클릭 필터. 기존 대표 사유(attentionReason)는 배지 합계를 정확히
+// 분해하기 위해 거래당 하나만 고르지만, 필터는 실제 해당 사유를 빠짐없이 찾도록
+// 중복을 허용한다. 특히 파손과 분실은 운영자가 따로 찾아볼 수 있어야 한다.
+export type AttentionFacet = "return_mismatch" | "damaged" | "lost" | "overdue" | "deposit" | "payment" | "risk";
+
+export const ATTENTION_FACET_LABEL: Record<AttentionFacet, string> = {
+  return_mismatch: "반납수량",
+  damaged: "파손",
+  lost: "분실",
+  overdue: "미마감",
+  deposit: "보증금",
+  payment: "결제",
+  risk: "위험",
+};
+
+export const ATTENTION_FACETS: AttentionFacet[] = ["lost", "damaged", "return_mismatch", "overdue", "deposit", "payment", "risk"];
+
+function attentionFacetMatches(t: Trade, date: string, facet: AttentionFacet): boolean {
+  const aggs = aggregateReturns(t);
+  if (facet === "return_mismatch") return t.returnDone && returnCompletionBlockers(t).length > 0;
+  if (facet === "damaged") return aggs.some((a) => a.count.damaged > 0);
+  if (facet === "lost") return aggs.some((a) => a.count.lost > 0);
+  if (facet === "overdue") return new Date(t.returnAt) < new Date(`${date}T00:00:00`) && !t.returnDone;
+  if (facet === "deposit") return !!t.depositStatus && /미|대기|예정/.test(t.depositStatus);
+  if (facet === "payment") return !!t.paymentWarning;
+  return t.riskWarnings.some((r) => {
+    const flagged = r.source === "cardCaution" ? r.severity === 3 : r.guidanceState === "발송권장";
+    if (!flagged) return false;
+    if (r.phase === "checkout") return !t.setupDone;
+    return !t.returnDone;
+  });
+}
+
+export interface AttentionInbox {
+  current: Trade[];
+  archived: Trade[];
+  currentTotal: number;
+  archivedTotal: number;
+  facetCounts: Record<AttentionFacet, number>;
+}
+
+/**
+ * 확인필요를 반납일 기준 '오늘 포함 최근 7일 + 향후'와 이전 누적으로 나눈다.
+ * selectedFacet은 두 구역에 함께 적용하되 원래 구역별 총계는 유지한다.
+ */
+export function buildAttentionInbox(
+  trades: Trade[],
+  date: string,
+  selectedFacet: AttentionFacet | null,
+  recentDays = 7,
+): AttentionInbox {
+  const all = tradesForTab(trades, date, "attention");
+  const facetCounts = Object.fromEntries(
+    ATTENTION_FACETS.map((facet) => [facet, all.filter((t) => attentionFacetMatches(t, date, facet)).length]),
+  ) as Record<AttentionFacet, number>;
+  const cutoff = addDays(date, -(Math.max(1, recentDays) - 1));
+  const currentAll: Trade[] = [];
+  const archivedAll: Trade[] = [];
+
+  for (const trade of all) {
+    const returnDate = new Date(trade.returnAt);
+    const returnYmd = Number.isNaN(returnDate.getTime()) ? null : ymd(returnDate);
+    (returnYmd && returnYmd < cutoff ? archivedAll : currentAll).push(trade);
+  }
+
+  currentAll.sort((a, b) => new Date(a.returnAt).getTime() - new Date(b.returnAt).getTime());
+  archivedAll.sort((a, b) => new Date(b.returnAt).getTime() - new Date(a.returnAt).getTime());
+  const applyFacet = (rows: Trade[]) => selectedFacet ? rows.filter((t) => attentionFacetMatches(t, date, selectedFacet)) : rows;
+
+  return {
+    current: applyFacet(currentAll),
+    archived: applyFacet(archivedAll),
+    currentTotal: currentAll.length,
+    archivedTotal: archivedAll.length,
+    facetCounts,
+  };
+}
+
 export function isCancelledTrade(t: Trade): boolean {
   return t.contractStatus === "취소";
 }

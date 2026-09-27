@@ -6,11 +6,14 @@ import { loadDay, repairSearchResults, useDashboard } from "@/lib/data/store";
 import {
   addDays,
   attentionBreakdown,
-  ATTENTION_REASON_LABEL,
-  type AttentionReason,
+  ATTENTION_FACETS,
+  ATTENTION_FACET_LABEL,
+  type AttentionFacet,
+  buildAttentionInbox,
   cardDone,
   formatDateLabel,
   searchTradeEvents,
+  shortDate,
   tabCounts,
   type TradeSearchEvent,
   timeBand,
@@ -37,6 +40,8 @@ export function TodayView() {
   const [tab, setTab] = useState<TabKey>("checkout");
   const [q, setQ] = useState("");
   const [showDone, setShowDone] = useState(false);
+  const [attentionFacet, setAttentionFacet] = useState<AttentionFacet | null>(null);
+  const [showAttentionArchive, setShowAttentionArchive] = useState(false);
   // 마감 조종석 — 오늘 정리 + 내일 준비 + 보고 복사
   const [closingOpen, setClosingOpen] = useState(false);
   const data = useDashboard();
@@ -67,6 +72,11 @@ export function TodayView() {
     [data.trades, date],
   );
 
+  const attentionInbox = useMemo(
+    () => buildAttentionInbox(data.trades, date || ymd(new Date()), attentionFacet),
+    [data.trades, date, attentionFacet],
+  );
+
   const searching = q.trim().length > 0;
   const searchEvents = useMemo<TradeSearchEvent[]>(() => (searching ? searchTradeEvents(data.trades, q) : []), [q, data.trades, searching]);
 
@@ -76,7 +86,10 @@ export function TodayView() {
     return () => clearTimeout(timer);
   }, [q, searching]);
 
-  const list = useMemo(() => tradesForTab(data.trades, date, tab), [data.trades, date, tab]);
+  const list = useMemo(
+    () => tab === "attention" ? attentionInbox.current : tradesForTab(data.trades, date, tab),
+    [data.trades, date, tab, attentionInbox.current],
+  );
 
   // 처리 완료 카드는 아래로 분리 (검색 모드에선 분리 안 함)
   const activeList = useMemo(() => (searching ? list : list.filter((t) => !cardDone(t, date, tab))), [searching, list, date, tab]);
@@ -193,8 +206,9 @@ export function TodayView() {
         <div className="flex items-stretch gap-1 px-3 pb-2">
           {TABS.map((t) => {
             const active = !searching && tab === t.key;
-            const count = counts[t.key];
             const isAttn = t.key === "attention";
+            // 이전 누적이 다시 심리적 병목이 되지 않도록 탭 배지는 지금 처리할 건만 센다.
+            const count = isAttn ? attentionInbox.currentTotal : counts[t.key];
             return (
               <button
                 key={t.key}
@@ -222,23 +236,46 @@ export function TodayView() {
 
       {/* 본문 */}
       <main className="flex-1 space-y-3 px-4 pb-24 pt-3">
-        {/* 확인필요 이유별 분해 — 이 숫자가 왜 이만큼인지 한눈에 (합계 = 확인필요 배지) */}
+        {/* 확인필요 새 출발: 최근 7일+향후만 전면에 두고, 사유 숫자는 실제 필터 버튼으로 쓴다. */}
         {!searching && tab === "attention" && counts.attention > 0 && attnBreakdown && (
           <div className="rounded-xl2 bg-white p-3 shadow-card ring-1 ring-line/70">
             <div className="flex items-baseline justify-between">
-              <span className="text-[13px] font-extrabold text-ink">확인필요 {counts.attention}건 · 이유별</span>
-              <span className="text-[11px] text-ink-faint">−30일~예정 포함</span>
+              <span className="text-[13px] font-extrabold text-ink">지금 확인할 건 {attentionInbox.currentTotal}건</span>
+              <span className="text-[11px] text-ink-faint">최근 7일 + 향후</span>
             </div>
             <div className="mt-2 flex flex-wrap gap-1.5">
-              {(Object.keys(attnBreakdown) as AttentionReason[])
-                .filter((k) => attnBreakdown[k] > 0)
-                .sort((a, b) => attnBreakdown[b] - attnBreakdown[a])
+              <button
+                type="button"
+                aria-pressed={attentionFacet === null}
+                onClick={() => setAttentionFacet(null)}
+                className={`tap inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-bold ring-1 ${
+                  attentionFacet === null ? "bg-brand-600 text-white ring-brand-600" : "bg-white text-ink-soft ring-line"
+                }`}
+              >
+                전체 <span className="tabular-nums">{counts.attention}</span>
+              </button>
+              {ATTENTION_FACETS
+                .filter((k) => attentionInbox.facetCounts[k] > 0)
+                .sort((a, b) => attentionInbox.facetCounts[b] - attentionInbox.facetCounts[a])
                 .map((k) => (
-                  <span key={k} className="inline-flex items-center gap-1 rounded-full bg-attention-bg px-2.5 py-1 text-[12px] font-bold text-attention-fg ring-1 ring-attention-ring">
-                    {ATTENTION_REASON_LABEL[k]} <span className="tabular-nums">{attnBreakdown[k]}</span>
-                  </span>
+                  <button
+                    type="button"
+                    key={k}
+                    aria-pressed={attentionFacet === k}
+                    onClick={() => setAttentionFacet((current) => current === k ? null : k)}
+                    className={`tap inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-bold ring-1 ${
+                      attentionFacet === k ? "bg-attention-fg text-white ring-attention-fg" : "bg-attention-bg text-attention-fg ring-attention-ring"
+                    }`}
+                  >
+                    {ATTENTION_FACET_LABEL[k]} <span className="tabular-nums">{attentionInbox.facetCounts[k]}</span>
+                  </button>
                 ))}
             </div>
+            {attentionFacet && (
+              <div className="mt-2 text-[11.5px] font-semibold text-ink-mute">
+                {ATTENTION_FACET_LABEL[attentionFacet]}만 표시 중 · 같은 건이 여러 사유에 함께 포함될 수 있어요.
+              </div>
+            )}
             {attnBreakdown.overdue > 0 && (
               <div className="mt-2 text-[11.5px] leading-snug text-ink-mute">
                 <b className="text-ink-soft">미마감 {attnBreakdown.overdue}건</b>은 반납일이 지났는데 앱에서 <b>반납완료</b>로 안 찍힌 건이에요. 실제로 반납된 거면 카드에서 반납완료 처리하면 이 숫자가 줄어듭니다.
@@ -255,9 +292,18 @@ export function TodayView() {
           </div>
         )}
 
-        {(searching ? searchGroups.length === 0 : groups.length === 0 && doneList.length === 0) && (
+        {(searching ? searchGroups.length === 0 : tab !== "attention" && groups.length === 0 && doneList.length === 0) && (
           <div className="rounded-xl2 bg-white py-16 text-center text-[14px] text-ink-faint shadow-card ring-1 ring-line/70">
             {searching ? "검색 결과가 없습니다" : "해당 항목이 없습니다"}
+          </div>
+        )}
+
+        {!searching && tab === "attention" && attentionInbox.current.length === 0 && (
+          <div className="rounded-xl2 bg-white py-12 text-center shadow-card ring-1 ring-line/70">
+            <div className="text-[14px] font-bold text-ink-soft">
+              {attentionFacet ? `${ATTENTION_FACET_LABEL[attentionFacet]}에 해당하는 지금 할 일이 없습니다` : "최근 7일과 향후 확인할 일이 없습니다"}
+            </div>
+            {attentionInbox.archivedTotal > 0 && <div className="mt-1 text-[12px] text-ink-faint">지난 건은 아래 이전 누적에서 볼 수 있어요.</div>}
           </div>
         )}
 
@@ -293,7 +339,19 @@ export function TodayView() {
                 })}
               </div>
             ))
-          : groups.map(([band, items]) => (
+          : tab === "attention"
+            ? attentionInbox.current.map((t, index) => (
+              <div key={t.tradeId} className="space-y-1.5">
+                <div className="pl-1 text-[11.5px] font-bold text-ink-faint">반납 {shortDate(t.returnAt)}</div>
+                <ScheduleCard
+                  trade={t}
+                  date={date}
+                  tab="attention"
+                  defaultOpen={index === 0}
+                />
+              </div>
+            ))
+            : groups.map(([band, items]) => (
               <div key={band} className="space-y-2.5">
                 <div className="flex items-center gap-2 pl-1 pt-1">
                   <span className="text-[12px] font-bold text-ink-mute">{band}</span>
@@ -314,6 +372,36 @@ export function TodayView() {
                 })}
               </div>
             ))}
+
+        {!searching && tab === "attention" && attentionInbox.archivedTotal > 0 && (
+          <div className="pt-1">
+            <button
+              type="button"
+              onClick={() => setShowAttentionArchive((shown) => !shown)}
+              className="tap flex w-full items-center gap-2 rounded-xl bg-line/25 px-3 py-2.5 ring-1 ring-line/70"
+            >
+              <span className="text-[13px] font-bold text-ink-soft">
+                이전 누적 {attentionFacet ? attentionInbox.archived.length : attentionInbox.archivedTotal}건
+              </span>
+              {attentionFacet && <span className="text-[11px] text-ink-faint">전체 {attentionInbox.archivedTotal}건</span>}
+              <ChevronRight className={`ml-auto h-4 w-4 text-ink-mute transition-transform ${showAttentionArchive ? "-rotate-90" : "rotate-90"}`} />
+            </button>
+            {showAttentionArchive && (
+              <div className="mt-2.5 space-y-2.5">
+                {attentionInbox.archived.length > 0 ? attentionInbox.archived.map((t) => (
+                  <div key={`${t.tradeId}-archive`} className="space-y-1.5">
+                    <div className="pl-1 text-[11.5px] font-bold text-ink-faint">반납 {shortDate(t.returnAt)}</div>
+                    <ScheduleCard trade={t} date={date} tab="attention" />
+                  </div>
+                )) : (
+                  <div className="rounded-xl bg-white py-8 text-center text-[13px] text-ink-faint ring-1 ring-line/70">
+                    {ATTENTION_FACET_LABEL[attentionFacet!]}에 해당하는 이전 누적이 없습니다
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* 완료 — 아래로 치움 (펼쳐서 되돌리기) */}
         {doneList.length > 0 && (
