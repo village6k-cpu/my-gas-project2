@@ -589,6 +589,55 @@ export function hermesPrompt(result, config) {
   ].join('\n');
 }
 
+const HERMES_SCAN_ENVELOPE_VERSION = 1;
+
+function canonicalizeForHash(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeForHash);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalizeForHash(value[key])]));
+  }
+  return value;
+}
+
+function hermesDecisionInput(result, config) {
+  return {
+    version: HERMES_SCAN_ENVELOPE_VERSION,
+    promptContract: hermesPrompt.toString(),
+    instructionContext: {
+      repoRoot: REPO_ROOT,
+      writeEnabled: config.writeEnabled === true,
+      backfillCutoffTs: Number(config.backfillCutoffTs || 0),
+    },
+    pending: result.pending || [],
+    stockQuestions: result.stockQuestions || [],
+    stockInvestigations: result.stockInvestigations || [],
+    stockCatalog: result.stockCatalog ?? null,
+    stockCatalogHash: result.stockCatalogHash ?? null,
+    stockSourceIssues: result.stockSourceIssues || [],
+  };
+}
+
+function hermesMaxPasses(result) {
+  if (result.pending?.length || result.stockQuestions?.length) return 1;
+  if (result.stockInvestigations?.some((item) => item?.status === 'ready')) return 2;
+  return result.stockInvestigations?.length ? 1 : 0;
+}
+
+export function hermesScanEnvelope(result, config) {
+  const prompt = hermesPrompt(result, config);
+  const maxPasses = hermesMaxPasses(result);
+  if (!prompt || maxPasses === 0) {
+    return {version: HERMES_SCAN_ENVELOPE_VERSION, prompt: '', fingerprint: '', maxPasses: 0};
+  }
+  const canonical = JSON.stringify(canonicalizeForHash(hermesDecisionInput(result, config)));
+  return {
+    version: HERMES_SCAN_ENVELOPE_VERSION,
+    prompt,
+    fingerprint: createHash('sha256').update(canonical).digest('hex'),
+    maxPasses,
+  };
+}
+
 async function scanChannel(config, visionBudget) {
   const records = await buildEventRecords(config);
   if (!records.length) return { pending: [], scanned: 0 };
@@ -649,6 +698,7 @@ async function scanCommand(config, args) {
     }
   }
   if (!succeeded && !result.stockInvestigations?.length && !result.stockQuestions?.length) throw new Error('모든 Slack 채널 수집 실패');
+  if (args.has('--hermes-envelope')) return hermesScanEnvelope(result, config);
   return args.has('--hermes') ? hermesPrompt(result, config) : result;
 }
 
