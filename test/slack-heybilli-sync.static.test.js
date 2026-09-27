@@ -48,7 +48,9 @@ assert(gas.includes('slackOpsOnsiteIdempotency_v1') && gas.includes('duplicate: 
 assert(sheetApi.includes('idempotencyKey:'), 'sheet API must forward the onsite idempotency key');
 assert(windowsRunner.includes('os.environ["AI_WORKER_LIVE"] = "0"') && windowsRunner.includes('os.environ["AI_WORKER_AUTO_SEND"] = "0"'), 'AX2 cron must keep the general AI worker switches fail-closed');
 assert(windowsRunner.includes('from hermes_cli.oneshot import run_oneshot'), 'Windows cron must avoid the Windows command-line prompt length limit');
-assert(windowsRunner.includes('trusted_rules = skill_path.read_text'), 'Windows cron must inject the trusted reconciliation skill explicitly');
+assert(windowsRunner.includes('trusted_rules_bytes = skill_path.read_bytes()') && windowsRunner.includes('trusted_rules = trusted_rules_bytes.decode("utf-8")'), 'Windows cron must inject and fingerprint the trusted reconciliation skill explicitly');
+assert(windowsRunner.includes('model_config_bytes = config_path.read_bytes()') && windowsRunner.includes('runtime_fingerprint('), 'Windows cron must wake again when the effective Hermes model configuration changes');
+assert(windowsRunner.includes('"scan", "--hermes-envelope"') && windowsRunner.includes('AiInvocationGate('), 'Windows cron must admit full-agent work through the durable duplicate gate');
 assert(windowsRunner.includes('encoding="utf-8"'), 'Windows cron must decode the Node Slack payload as UTF-8 instead of cp949');
 assert(windowsRunner.includes('from tools.vision_tools import vision_analyze_tool') && windowsRunner.includes('sys.argv[1:2] == ["--vision-json"]'), 'AX2 cron must reuse the installed Hermes image analyzer');
 assert(windowsRunner.includes('SLACK_HEYBILLI_VISION_BIN') && windowsRunner.includes('SLACK_HEYBILLI_PYTHON'), 'the Node worker must call back into the exact installed Hermes runtime');

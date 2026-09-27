@@ -13,6 +13,7 @@ import {
   findExistingAskReply,
   extractTradeIdFromConversation,
   groupOperationalMessages,
+  hermesScanEnvelope,
   inferPhase,
   inferPhaseFromConversation,
   isOperationalMessage,
@@ -25,6 +26,129 @@ import {
   slackImageFiles,
   sourceHashFor,
 } from '../tools/slack-heybilli-sync/slack-heybilli-sync.mjs';
+
+function hermesEnvelopeFixture(overrides = {}) {
+  return {
+    pending: [],
+    scanned: 12,
+    channelErrors: [],
+    stockQuestions: [],
+    stockInvestigations: [{
+      id: 'investigation-1',
+      sourceHash: 'source-v1',
+      status: 'ready',
+      name: 'Sony 24-70',
+      kinds: ['equipment'],
+      setNames: [],
+    }],
+    stockCatalog: {
+      equipment: [{
+        id: 'EQ-1',
+        name: 'SONY FE 24-70mm F2.8 GM II',
+        aliases: ['소니 이사칠공', '금계륵2'],
+        category: '렌즈',
+      }],
+      semanticScopes: [{
+        setName: 'FX6 촬영세트',
+        componentName: 'Sony 24-70',
+        sourceHash: 'scope-v1',
+      }],
+    },
+    stockCatalogHash: 'catalog-v1',
+    stockSourceIssues: [],
+    stockMirrors: [{ reportId: 'maintenance-only' }],
+    stockErrors: [],
+    ...overrides,
+  };
+}
+
+const hermesEnvelopeConfig = {
+  writeEnabled: true,
+  backfillCutoffTs: 123,
+};
+
+test('Hermes envelope keeps the full broad-association prompt while ignoring maintenance churn', () => {
+  const first = hermesScanEnvelope(hermesEnvelopeFixture(), hermesEnvelopeConfig);
+  const maintenanceOnly = hermesScanEnvelope(hermesEnvelopeFixture({
+    scanned: 999,
+    channelErrors: [{ channelId: 'C1', reason: 'temporary timeout' }],
+    stockMirrors: [{ reportId: 'different-maintenance-receipt' }],
+    stockErrors: [{ reportId: 'R1', error: 'temporary projection failure' }],
+    equipmentMirror: { retried: true },
+    stockQuestionDelivery: { delivered: 4 },
+  }), hermesEnvelopeConfig);
+
+  assert.equal(first.version, 1);
+  assert.equal(first.maxPasses, 2);
+  assert.match(first.fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(first.fingerprint, maintenanceOnly.fingerprint);
+  assert.match(first.prompt, /stockCatalog의 전체 장비·별칭·분류·세트와 대조/);
+  assert.match(first.prompt, /SONY FE 24-70mm F2\.8 GM II/);
+  assert.match(first.prompt, /금계륵2/);
+});
+
+test('Hermes envelope wakes again for any decision, catalog, instruction, or owner-answer change', () => {
+  const base = hermesScanEnvelope(hermesEnvelopeFixture(), hermesEnvelopeConfig);
+  const sourceChanged = hermesScanEnvelope(hermesEnvelopeFixture({
+    stockInvestigations: [{
+      ...hermesEnvelopeFixture().stockInvestigations[0],
+      sourceHash: 'source-v2',
+    }],
+  }), hermesEnvelopeConfig);
+  const catalogChanged = hermesScanEnvelope(hermesEnvelopeFixture({
+    stockCatalog: {
+      ...hermesEnvelopeFixture().stockCatalog,
+      equipment: [{
+        ...hermesEnvelopeFixture().stockCatalog.equipment[0],
+        aliases: ['소니 이사칠공', '금계륵2', '신규 현장 별칭'],
+      }],
+    },
+  }), hermesEnvelopeConfig);
+  const ownerAnswered = hermesScanEnvelope(hermesEnvelopeFixture({
+    stockQuestions: [{
+      reportId: 'R1',
+      sourceHash: 'reply-v1',
+      ownerReplies: [{ ts: '100.1', text: '총 3대, 수리 중 1대입니다' }],
+    }],
+  }), hermesEnvelopeConfig);
+  const dryRun = hermesScanEnvelope(hermesEnvelopeFixture(), {
+    ...hermesEnvelopeConfig,
+    writeEnabled: false,
+  });
+
+  assert.notEqual(base.fingerprint, sourceChanged.fingerprint);
+  assert.notEqual(base.fingerprint, catalogChanged.fingerprint);
+  assert.notEqual(base.fingerprint, ownerAnswered.fingerprint);
+  assert.notEqual(base.fingerprint, dryRun.fingerprint);
+});
+
+test('Hermes envelope gives only unresolved ready inventory one full second look', () => {
+  const waiting = hermesScanEnvelope(hermesEnvelopeFixture({
+    stockInvestigations: [{
+      ...hermesEnvelopeFixture().stockInvestigations[0],
+      status: 'waiting_owner',
+    }],
+  }), hermesEnvelopeConfig);
+  const pending = hermesScanEnvelope(hermesEnvelopeFixture({
+    pending: [{ event_id: 'event-1', sourceHash: 'event-v1' }],
+  }), hermesEnvelopeConfig);
+  const question = hermesScanEnvelope(hermesEnvelopeFixture({
+    stockQuestions: [{ reportId: 'R1', sourceHash: 'reply-v1' }],
+  }), hermesEnvelopeConfig);
+  const empty = hermesScanEnvelope(hermesEnvelopeFixture({
+    stockInvestigations: [],
+    stockCatalog: undefined,
+    stockCatalogHash: undefined,
+    stockSourceIssues: undefined,
+  }), hermesEnvelopeConfig);
+
+  assert.equal(waiting.maxPasses, 1);
+  assert.equal(pending.maxPasses, 1);
+  assert.equal(question.maxPasses, 1);
+  assert.equal(empty.maxPasses, 0);
+  assert.equal(empty.prompt, '');
+  assert.equal(empty.fingerprint, '');
+});
 
 test('tagged checkout/checkin messages yield phase and customer hints', () => {
   assert.equal(inferPhase('[반출] 장희광 감독님\n현장추가 매트박스 1'), 'checkout');
