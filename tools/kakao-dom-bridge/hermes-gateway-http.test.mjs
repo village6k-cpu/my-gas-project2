@@ -283,6 +283,10 @@ function makeChannel() {
           oldest_reserved_age_ms: 5678, last_success_at: '2026-08-20T23:59:00.000Z'
         },
         audit_projection: { pending: 2, conflict: 1, oldest_pending_age_ms: 4321 },
+        memory: {
+          resident_jobs: 3578, compacted_terminal_jobs: 3575,
+          resident_event_payload_jobs: 3, resident_local_context_jobs: 3
+        },
         token: 'must-not-leak', prompt: 'must-not-leak', local_context: { secret: true }
       };
     }
@@ -1898,6 +1902,10 @@ test('Gateway HTTP status exposes only gateway-safe queue health', async () => {
       },
       audit_projection: {
         pending: 2, conflict: 1, oldest_pending_age_ms: 4321
+      },
+      memory: {
+        resident_jobs: 3578, compacted_terminal_jobs: 3575,
+        resident_event_payload_jobs: 3, resident_local_context_jobs: 3
       }
     });
   } finally {

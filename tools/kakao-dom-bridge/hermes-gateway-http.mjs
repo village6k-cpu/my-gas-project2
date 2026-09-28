@@ -315,6 +315,7 @@ export function buildGatewayHealthReadback({
   const auditProjection = status?.audit_projection && typeof status.audit_projection === 'object'
     ? status.audit_projection
     : {};
+  const memory = status?.memory && typeof status.memory === 'object' ? status.memory : null;
   const oldestClaimAge = status?.oldest_lease_age_ms === null || status?.oldest_lease_age_ms === undefined
     ? null
     : Number(status.oldest_lease_age_ms);
@@ -365,7 +366,15 @@ export function buildGatewayHealthReadback({
         || auditProjection.oldest_pending_age_ms === undefined
         ? null
         : safeNonNegativeInteger(auditProjection.oldest_pending_age_ms)
-    }
+    },
+    ...(memory ? {
+      memory: {
+        resident_jobs: safeNonNegativeInteger(memory.resident_jobs),
+        compacted_terminal_jobs: safeNonNegativeInteger(memory.compacted_terminal_jobs),
+        resident_event_payload_jobs: safeNonNegativeInteger(memory.resident_event_payload_jobs),
+        resident_local_context_jobs: safeNonNegativeInteger(memory.resident_local_context_jobs)
+      }
+    } : {})
   };
 }
 
