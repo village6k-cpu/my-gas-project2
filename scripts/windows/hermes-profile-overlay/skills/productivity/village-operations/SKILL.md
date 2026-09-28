@@ -115,10 +115,18 @@ interprets business intent.
 
 - Decide whether the request is an unregistered preview, pending-request quote,
   or registered-trade document before choosing data and pricing rules.
+- For a routine name-only Kakao quote request on Windows, resolve the active
+  runtime root and run `node.exe "<active-runtime-root>/scripts/windows/village-kakao-room-inspect.mjs" --customer "<exact-name>"`
+  exactly once. Use its verified live evidence; do not search the filesystem for
+  alternate Kakao helpers or author a temporary CDP script.
 - Preserve customer source text when a requested field has no safer normalized
   representation; do not silently omit it.
 - Recalculate totals from authoritative item prices, quantities, rental period,
   explicit discounts, and approved overrides.
+- `학생30% + 소개5%` is the native official discount type `학생소개`, and
+  `사업자20% + 소개5%` is `사업자소개`. Use the official GAS preview/send
+  path for both. Never patch, redraw, render, or vision-check a local PDF to add
+  either supported discount.
 - Preview and final delivery are separate. Generate or verify the artifact first,
   then send only with exact approval and delivery readback.
 - Prefer an existing stable artifact/link when the requested correction does not
