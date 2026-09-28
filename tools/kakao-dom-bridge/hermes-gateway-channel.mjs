@@ -415,6 +415,26 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   };
   const fileFor = (jobId) => path.join(queueDirectory, digest(jobId) + '.json');
 
+  function residentJob(job, { startup = false } = {}) {
+    if (!TERMINAL_STATES.has(job?.state)
+      || (!startup && (job.audit_projection === null || job.audit_projection === undefined))) return job;
+    const { event: _event, local_context: _localContext, ...metadata } = job;
+    return metadata;
+  }
+
+  async function hydrateJob(job) {
+    if (!job || (Object.hasOwn(job, 'event') && Object.hasOwn(job, 'local_context'))) return job;
+    const hydrated = JSON.parse(await fs.readFile(fileFor(job.job_id), 'utf8'));
+    if (hydrated.job_id !== job.job_id) {
+      throw channelError('invalid_persisted_job', 'persisted Hermes Gateway job id changed');
+    }
+    return hydrated;
+  }
+
+  async function cloneHydrated(job) {
+    return clone(await hydrateJob(job));
+  }
+
   async function persist(nextJob) {
     const target = fileFor(nextJob.job_id);
     const temporary = target + '.' + process.pid + '.' + randomUUID() + '.tmp';
@@ -440,7 +460,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       validatePersistedApplication(job);
       validatePersistedFailureNotification(job);
       validatePersistedAuditProjection(job);
-      jobs.set(job.job_id, job);
+      jobs.set(job.job_id, residentJob(job, { startup: true }));
       queueOrder = Math.max(queueOrder, Number(job.queue_order) || 0);
     }
     initialized = true;
@@ -449,9 +469,10 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   }
 
   async function update(job, changes) {
-    const next = { ...job, ...clone(changes), updated_at: iso(currentTime()) };
+    const hydrated = await hydrateJob(job);
+    const next = { ...hydrated, ...clone(changes), updated_at: iso(currentTime()) };
     await persist(next);
-    jobs.set(next.job_id, next);
+    jobs.set(next.job_id, residentJob(next));
     return next;
   }
 
@@ -705,11 +726,11 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           if (existing.room_key !== normalized.room_key || existing.room_revision !== normalized.room_revision) {
             throw channelError('job_id_conflict', 'job_id is already bound to another room revision');
           }
-          return clone(existing);
+          return cloneHydrated(existing);
         }
         const latest = authoritativeJob(normalized.room_key);
         if (latest && normalized.room_revision < latest.room_revision) throw channelError('stale_room_revision', 'cannot enqueue an older room revision');
-        if (latest && normalized.room_revision === latest.room_revision) return clone(latest);
+        if (latest && normalized.room_revision === latest.room_revision) return cloneHydrated(latest);
         const nowMs = currentTime();
         const job = {
           schema: 'village-hermes-gateway-job/v1', ...normalized, state: 'ready', attempts: 0, queue_order: ++queueOrder,
@@ -802,7 +823,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const existing = job.tool_receipts.find((item) => item.receipt_id === receiptId);
         if (existing) {
           if (!sameResult(existing, receipt)) throw channelError('receipt_conflict', 'receipt_id already has another value');
-          return clone(job);
+          return cloneHydrated(job);
         }
         const reservation = job.tool_operation;
         if (!reservation) throw channelError('operation_fence_required', 'receipt has no durable tool operation reservation');
@@ -841,7 +862,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           throw channelError('confirmation_operation_unresolved', 'confirmation operation requires human review');
         }
         if (job.state === 'completed') {
-          if (sameResult(job.result, result)) return clone(job);
+          if (sameResult(job.result, result)) return cloneHydrated(job);
           throw channelError('completion_conflict', 'job already has another completion result');
         }
         if (job.state === 'superseded') throw channelError('stale_room_revision', 'superseded jobs cannot complete');
@@ -876,7 +897,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const job = jobs.get(requiredString(jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
         if (job.state !== 'completed' || job.application?.state !== 'pending') {
-          return { claimed: false, job: clone(job) };
+          return { claimed: false, job: await cloneHydrated(job) };
         }
         const applicationId = randomUUID();
         const claimedAt = iso(currentTime());
@@ -893,18 +914,18 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     },
 
     async listPendingApplications() {
-      return mutate(async () => [...jobs.values()]
+      return mutate(async () => Promise.all([...jobs.values()]
         .filter((job) => job.state === 'completed' && job.application?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
-        .map(clone));
+        .map(cloneHydrated)));
     },
 
     async listPendingApplicationFailureNotifications() {
-      return mutate(async () => [...jobs.values()]
+      return mutate(async () => Promise.all([...jobs.values()]
         .filter((job) => job.application?.state === 'failed'
           && job.application?.failure_notification?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
-        .map(clone));
+        .map(cloneHydrated)));
     },
 
     async beginApplication({ job_id: jobId, jobId: camelJobId, application_id: applicationId, applicationId: camelApplicationId } = {}) {
@@ -999,7 +1020,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         if (job.application?.state !== 'failed' || job.application.application_id !== suppliedId || !notification) {
           throw channelError('stale_application', 'application failure notification is no longer current');
         }
-        if (notification.state === 'delivered') return clone(job);
+        if (notification.state === 'delivered') return cloneHydrated(job);
         if (notification.state !== 'pending') {
           throw channelError('stale_application', 'application failure notification is no longer pending');
         }
@@ -1023,7 +1044,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         if (!job) throw channelError('unknown_job', 'job does not exist');
         assertEnvelope(job, outcome);
         const kind = requiredString(outcome?.outcome, 'outcome');
-        if (job.outcome && sameResult(job.outcome, outcome)) return clone(job);
+        if (job.outcome && sameResult(job.outcome, outcome)) return cloneHydrated(job);
         if (kind === 'no_final') {
           if (job.tool_operation && !exactReceiptForToolOperation(job)) {
             assertToolOperationLease(job, outcome);
@@ -1061,7 +1082,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           if (!sameResult(job.audit_projection.events, normalizedEvents)) {
             throw channelError('audit_projection_conflict', 'job already has different audit projection facts');
           }
-          return clone(job);
+          return cloneHydrated(job);
         }
         const createdAt = iso(currentTime());
         return clone(await update(job, {
@@ -1080,22 +1101,22 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     },
 
     async listPendingAuditProjections({ limit } = {}) {
-      return mutate(async () => [...jobs.values()]
+      return mutate(async () => Promise.all([...jobs.values()]
         .filter((job) => job.audit_projection?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
         .slice(0, boundedListLimit(limit))
-        .map(clone));
+        .map(cloneHydrated)));
     },
 
     async listAuditProjectionCandidates({ limit } = {}) {
-      return mutate(async () => [...jobs.values()]
+      return mutate(async () => Promise.all([...jobs.values()]
         .filter((job) => (job.audit_projection === undefined || job.audit_projection === null)
           && Boolean(exactReceiptForToolOperation(job)
             || unresolvedToolOperationForAudit(job)
             || exactReplyReadbackForAudit(job)))
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
         .slice(0, boundedListLimit(limit))
-        .map(clone));
+        .map(cloneHydrated)));
     },
 
     async markAuditProjectionDelivered({
@@ -1121,7 +1142,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           || inserted + existing !== projection.event_keys.length) {
           throw channelError('invalid_audit_projection', 'audit projection delivery result is invalid');
         }
-        if (projection.state === 'delivered') return clone(job);
+        if (projection.state === 'delivered') return cloneHydrated(job);
         if (projection.state !== 'pending') {
           throw channelError('stale_audit_projection', 'audit projection is no longer pending');
         }
@@ -1181,7 +1202,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         if (!job) throw channelError('unknown_job', 'job does not exist');
         const projection = job.audit_projection;
         exactProjectionKeys(projection, eventKeys ?? camelEventKeys);
-        if (projection.state === 'conflict') return clone(job);
+        if (projection.state === 'conflict') return cloneHydrated(job);
         if (projection.state !== 'pending') {
           throw channelError('stale_audit_projection', 'audit projection is no longer pending');
         }
@@ -1199,10 +1220,10 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
 
     async reapExpiredLeases() { return mutate(reapExpiredLeasesInternal); },
     async listPendingFailureNotifications() {
-      return mutate(async () => [...jobs.values()]
+      return mutate(async () => Promise.all([...jobs.values()]
         .filter((job) => job.failure_notification?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
-        .map(clone));
+        .map(cloneHydrated)));
     },
     async markFailureNotified({ job_id: jobId, jobId: camelJobId, audit = null } = {}) {
       return mutate(async () => {
@@ -1210,7 +1231,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         if (!job) throw channelError('unknown_job', 'job does not exist');
         const notification = job.failure_notification;
         if (!notification) throw channelError('stale_notification', 'Gateway failure notification is not pending');
-        if (notification.state === 'delivered') return clone(job);
+        if (notification.state === 'delivered') return cloneHydrated(job);
         if (notification.state !== 'pending') throw channelError('stale_notification', 'Gateway failure notification is not pending');
         return clone(await update(job, {
           failure_notification: {
@@ -1225,7 +1246,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     async get(jobId) {
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId, 'job_id'));
-        return job ? clone(job) : null;
+        return job ? cloneHydrated(job) : null;
       });
     },
     async status() {
@@ -1315,6 +1336,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
             }
           }
         }
+        const residentJobs = [...jobs.values()];
         return {
           counts,
           application_counts: applicationCounts,
@@ -1325,7 +1347,14 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           last_consumer_id: lastConsumerId,
           last_consumer_seen_at: lastConsumerSeenAt,
           registered_reservation_change: registeredReservationChange,
-          audit_projection: auditProjection
+          audit_projection: auditProjection,
+          memory: {
+            resident_jobs: residentJobs.length,
+            compacted_terminal_jobs: residentJobs.filter((job) => TERMINAL_STATES.has(job.state)
+              && !Object.hasOwn(job, 'event') && !Object.hasOwn(job, 'local_context')).length,
+            resident_event_payload_jobs: residentJobs.filter((job) => Object.hasOwn(job, 'event')).length,
+            resident_local_context_jobs: residentJobs.filter((job) => Object.hasOwn(job, 'local_context')).length
+          }
         };
       });
     }

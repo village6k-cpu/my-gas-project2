@@ -320,6 +320,66 @@ test('persists every job atomically under a SHA-256 name and recovers it after r
   });
 });
 
+test('terminal jobs keep full durable payloads on disk without retaining them in bridge memory', async () => {
+  await withChannel(async ({ directory, channel, clock }) => {
+    const largeText = 'x'.repeat(128 * 1024);
+    await channel.enqueue({
+      ...event('job-compact-memory', 'room-compact-memory', 1),
+      transcript: largeText
+    }, { localContext: { transcript: largeText } });
+    const claim = await channel.claim({ consumerId: 'gateway', waitMs: 0 });
+    await channel.complete({
+      job_id: claim.job_id,
+      room_key: claim.room_key,
+      room_revision: claim.room_revision,
+      lease_id: claim.lease_id,
+      final_text: '{}'
+    });
+
+    assert.deepEqual((await channel.status()).memory, {
+      resident_jobs: 1,
+      compacted_terminal_jobs: 0,
+      resident_event_payload_jobs: 1,
+      resident_local_context_jobs: 1
+    });
+    await channel.queueAuditProjection({
+      job_id: claim.job_id,
+      events: [automationAuditEvent({ job_id: claim.job_id })]
+    });
+
+    assert.deepEqual((await channel.status()).memory, {
+      resident_jobs: 1,
+      compacted_terminal_jobs: 1,
+      resident_event_payload_jobs: 0,
+      resident_local_context_jobs: 0
+    });
+
+    const hydrated = await channel.get(claim.job_id);
+    assert.equal(hydrated.event.transcript, largeText);
+    assert.equal(hydrated.local_context.transcript, largeText);
+
+    const queueDirectory = path.join(directory, 'hermes-gateway');
+    const [persistedName] = await readdir(queueDirectory);
+    const persisted = JSON.parse(await readFile(path.join(queueDirectory, persistedName), 'utf8'));
+    assert.equal(persisted.event.transcript, largeText);
+    assert.equal(persisted.local_context.transcript, largeText);
+
+    const restarted = createHermesGatewayChannel({
+      directory,
+      leaseMs: 1_000,
+      maxAttempts: 2,
+      now: () => clock.now
+    });
+    assert.deepEqual((await restarted.status()).memory, {
+      resident_jobs: 1,
+      compacted_terminal_jobs: 1,
+      resident_event_payload_jobs: 0,
+      resident_local_context_jobs: 0
+    });
+    assert.equal((await restarted.get(claim.job_id)).event.transcript, largeText);
+  });
+});
+
 test('queues one bounded immutable audit projection and exact retries are idempotent', async () => {
   await withChannel(async ({ channel }) => {
     const created = await channel.enqueue(event('job-audit-projection', 'room-audit-projection', 1));
