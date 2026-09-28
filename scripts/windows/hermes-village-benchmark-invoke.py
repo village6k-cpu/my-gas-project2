@@ -62,14 +62,23 @@ def write_ab_plan(args: argparse.Namespace) -> int:
         "max_turns": config.get("max_turns"),
         "disabled_toolsets": config.get("disabled_toolsets", []),
     }
-    if preserved_config != {
-        "provider": "xai-oauth",
-        "model": "grok-4.5",
-        "reasoning_effort": "xhigh",
-        "max_turns": 90,
-        "disabled_toolsets": ["computer_use"],
-    }:
-        raise ValueError("kakaoworker model/provider/reasoning/tool contract drifted")
+    required_text_fields = ("provider", "model", "reasoning_effort")
+    disabled_toolsets = preserved_config["disabled_toolsets"]
+    max_turns = preserved_config["max_turns"]
+    if (
+        any(
+            not isinstance(preserved_config[field], str)
+            or not preserved_config[field].strip()
+            for field in required_text_fields
+        )
+        or not isinstance(max_turns, int)
+        or isinstance(max_turns, bool)
+        or max_turns < 1
+        or not isinstance(disabled_toolsets, list)
+        or any(not isinstance(toolset, str) or not toolset.strip() for toolset in disabled_toolsets)
+        or "computer_use" not in disabled_toolsets
+    ):
+        raise ValueError("kakaoworker model/provider/reasoning/tool contract is invalid")
 
     invocation_count = args.warmup_count + args.sample_count
     invocations = []
