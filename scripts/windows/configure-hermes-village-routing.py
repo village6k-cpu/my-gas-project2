@@ -31,6 +31,15 @@ DEFAULT_ROOT_MODEL_CONTRACT = {
     "reasoning_effort": "max",
 }
 
+# Slack should stay final-answer-first. These progress acknowledgements are
+# display-only, but enabling them makes one long turn repeatedly replace the
+# visible reply with internal iteration state and feels stop-start to staff.
+ROOT_SLACK_DELIVERY_CONTRACT = {
+    "long_running_notifications": False,
+    "busy_ack_detail": False,
+    "busy_steer_ack_enabled": False,
+}
+
 
 def load_root_model_contract() -> dict:
     contract = dict(DEFAULT_ROOT_MODEL_CONTRACT)
@@ -121,6 +130,9 @@ def is_configured(config: object, contract: dict | None = None) -> bool:
     agent = config.get("agent")
     guardrails = config.get("tool_loop_guardrails")
     terminal = config.get("terminal")
+    display = config.get("display")
+    platforms = display.get("platforms") if isinstance(display, dict) else None
+    slack_display = platforms.get("slack") if isinstance(platforms, dict) else None
     return (
         isinstance(model, dict)
         and str(model.get("default", "")) == contract["model"]
@@ -130,6 +142,11 @@ def is_configured(config: object, contract: dict | None = None) -> bool:
         and agent.get("gateway_wall_timeout") == 1800
         and isinstance(guardrails, dict)
         and guardrails.get("hard_stop_enabled") is False
+        and isinstance(slack_display, dict)
+        and all(
+            slack_display.get(key) == value
+            for key, value in ROOT_SLACK_DELIVERY_CONTRACT.items()
+        )
         and not has_managed_router
         and prompts_are_clean(config["slack"].get("channel_prompts"))
         and isinstance(terminal, dict)
@@ -199,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     if not backup_path.exists():
         shutil.copy2(config_path, backup_path)
 
-    for key in ("model", "agent", "tool_loop_guardrails"):
+    for key in ("model", "agent", "tool_loop_guardrails", "display"):
         if key not in config or not isinstance(config[key], dict):
             config[key] = CommentedMap()
     config["model"]["default"] = contract["model"]
@@ -207,6 +224,17 @@ def main(argv: list[str] | None = None) -> int:
     config["agent"]["reasoning_effort"] = contract["reasoning_effort"]
     config["agent"]["gateway_wall_timeout"] = 1800
     config["tool_loop_guardrails"]["hard_stop_enabled"] = False
+
+    if "platforms" not in config["display"] or not isinstance(config["display"]["platforms"], dict):
+        config["display"]["platforms"] = CommentedMap()
+    if (
+        "slack" not in config["display"]["platforms"]
+        or not isinstance(config["display"]["platforms"]["slack"], dict)
+    ):
+        config["display"]["platforms"]["slack"] = CommentedMap()
+    slack_display = config["display"]["platforms"]["slack"]
+    for key, value in ROOT_SLACK_DELIVERY_CONTRACT.items():
+        slack_display[key] = value
 
     cleaned_bindings = remove_managed_bindings(config["slack"].get("channel_skill_bindings"))
     if cleaned_bindings:

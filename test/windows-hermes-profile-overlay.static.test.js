@@ -175,7 +175,7 @@ test('confirmation-request runner is execution-only and preserves full AI reason
   assert.doesNotMatch(source, /curl .*script\.google/i);
 });
 
-test('offline routing configuration applies the current model contract', { skip: process.platform !== 'win32' }, () => {
+test('offline routing configuration restores quiet Slack delivery without changing the model contract', { skip: process.platform !== 'win32' }, () => {
   const source = fs.readFileSync(routingConfigScriptPath, 'utf8');
   const contract = JSON.parse(fs.readFileSync(
     path.join(root, 'scripts', 'windows', 'hermes-model-contract.json'),
@@ -193,6 +193,15 @@ test('offline routing configuration applies the current model contract', { skip:
     '  gateway_wall_timeout: 30',
     'tool_loop_guardrails:',
     '  hard_stop_enabled: true',
+    'display:',
+    '  platforms:',
+    '    slack:',
+    '      streaming: false',
+    '      tool_progress: false',
+    '      interim_assistant_messages: false',
+    '      long_running_notifications: true',
+    '      busy_ack_detail: true',
+    '      busy_steer_ack_enabled: true',
     'slack:',
     '  channel_skill_bindings:',
     '    - id: C03F11EU0RE',
@@ -212,6 +221,14 @@ test('offline routing configuration applies the current model contract', { skip:
     const result = JSON.parse(applied.stdout.trim());
     assert.equal(result.model, contract.model);
     assert.equal(result.provider, contract.provider);
+
+    const appliedConfig = fs.readFileSync(configPath, 'utf8');
+    assert.ok(appliedConfig.includes(`  default: ${contract.model}`));
+    assert.ok(appliedConfig.includes(`  provider: ${contract.provider}`));
+    assert.ok(appliedConfig.includes(`  reasoning_effort: ${contract.reasoning_effort}`));
+    assert.match(appliedConfig, /^      long_running_notifications: false$/m);
+    assert.match(appliedConfig, /^      busy_ack_detail: false$/m);
+    assert.match(appliedConfig, /^      busy_steer_ack_enabled: false$/m);
 
     const checked = spawnSync(
       'python.exe',
