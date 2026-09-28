@@ -1130,6 +1130,67 @@ test('v2 P0 review round 1 store uses authoritative list and atomic delivery RPC
   });
 });
 
+test('P0 mutation responses project the known database-only work item fields', async () => {
+  const clientId = '77777777-7777-5777-8777-777777777777';
+  const claimedAt = '2026-09-01T06:00:00.000Z';
+  const claimExpiresAt = '2026-09-01T06:02:00.000Z';
+  const stableRow = workRow({
+    priority: 'p0',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'claimed', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: claimedAt, claim_expires_at: claimExpiresAt
+    } }
+  });
+  const databaseRow = {
+    ...stableRow,
+    source_event_keys: ['event-1'],
+    automation_state: 'needs_human',
+    resolution_kind: null,
+    resolution_evidence: null,
+    resolved_at: null,
+    resolved_by: null,
+    pending_action: null,
+    created_at: '2026-08-20T00:00:00.000Z',
+    updated_at: '2026-09-01T06:00:00.000Z'
+  };
+  const fetch = createFetch([
+    response({ data: { applied: true, row: databaseRow } })
+  ]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  const result = await store.claimP0Delivery({
+    id: WORK_ID, expectedVersion: 1, expectedGeneration: 0, generation: 1, attempt: 1,
+    clientMessageId: clientId, claimedAt, claimExpiresAt
+  });
+
+  assert.deepEqual(result, { applied: true, row: stableRow });
+});
+
+test('P0 mutation responses still reject arbitrary database fields', async () => {
+  const clientId = '77777777-7777-5777-8777-777777777777';
+  const claimedAt = '2026-09-01T06:00:00.000Z';
+  const claimExpiresAt = '2026-09-01T06:02:00.000Z';
+  const row = workRow({
+    priority: 'p0',
+    unexpected_database_field: 'must-not-pass',
+    payload: { requires_human_action: true, p0_delivery: {
+      status: 'claimed', generation: 1, attempt: 1, client_message_id: clientId,
+      claimed_at: claimedAt, claim_expires_at: claimExpiresAt
+    } }
+  });
+  const fetch = createFetch([response({ data: { applied: true, row } })]);
+  const store = createWorkOrchestratorStore({
+    supabaseUrl: 'https://supabase.example', serviceRoleKey, fetchImpl: fetch.fetchImpl
+  });
+
+  await assert.rejects(store.claimP0Delivery({
+    id: WORK_ID, expectedVersion: 1, expectedGeneration: 0, generation: 1, attempt: 1,
+    clientMessageId: clientId, claimedAt, claimExpiresAt
+  }), /response invalid/i);
+});
+
 test('v2 P0 review round 2 store claims reconciliation and settles with the exact rotated lease', async () => {
   const clientId = '77777777-7777-5777-8777-777777777777';
   const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';

@@ -62,14 +62,16 @@ def write_ab_plan(args: argparse.Namespace) -> int:
         "max_turns": config.get("max_turns"),
         "disabled_toolsets": config.get("disabled_toolsets", []),
     }
-    if preserved_config != {
-        "provider": "xai-oauth",
-        "model": "grok-4.5",
-        "reasoning_effort": "xhigh",
-        "max_turns": 90,
-        "disabled_toolsets": ["computer_use"],
-    }:
-        raise ValueError("kakaoworker model/provider/reasoning/tool contract drifted")
+    for key in ("provider", "model", "reasoning_effort"):
+        if not isinstance(preserved_config[key], str) or not preserved_config[key].strip():
+            raise ValueError(f"kakaoworker {key} contract must be a non-empty string")
+    if not isinstance(preserved_config["max_turns"], int) or preserved_config["max_turns"] < 1:
+        raise ValueError("kakaoworker max_turns contract must be a positive integer")
+    if not isinstance(preserved_config["disabled_toolsets"], list) or not all(
+        isinstance(item, str) and item.strip()
+        for item in preserved_config["disabled_toolsets"]
+    ):
+        raise ValueError("kakaoworker disabled_toolsets contract must be a string list")
 
     invocation_count = args.warmup_count + args.sample_count
     invocations = []

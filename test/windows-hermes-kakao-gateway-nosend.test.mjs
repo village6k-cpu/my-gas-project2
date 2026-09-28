@@ -51,6 +51,11 @@ function runHarness() {
 }
 
 function structuralEvidence(evidence) {
+  const byStableIdentity = (rows) => [...rows].sort((left, right) => {
+    const leftIdentity = `${left.lease_id || ''}\u0000${left.job_id || ''}`;
+    const rightIdentity = `${right.lease_id || ''}\u0000${right.job_id || ''}`;
+    return leftIdentity.localeCompare(rightIdentity);
+  });
   return {
     schema: evidence.schema,
     profile: evidence.profile,
@@ -60,7 +65,11 @@ function structuralEvidence(evidence) {
     sessions: evidence.sessions,
     turns: evidence.turns.map(({ elapsed_ms, ...turn }) => turn),
     confirmations: evidence.confirmations,
-    outcomes: evidence.outcomes,
+    outcomes: {
+      results: byStableIdentity(evidence.outcomes.results),
+      terminals: byStableIdentity(evidence.outcomes.terminals),
+      operations: evidence.outcomes.operations
+    },
     safety: evidence.safety,
     process_roles: evidence.processes.map(({ role, command }) => ({ role, command }))
   };

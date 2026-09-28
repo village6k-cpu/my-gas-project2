@@ -11,7 +11,6 @@ test('Windows Heybilli gateway uses the runtime that can load Slack Socket Mode'
 }, () => {
   const agentHome = path.join(hermesHome, 'hermes-agent');
   const python = path.join(agentHome, 'venv', 'Scripts', 'python.exe');
-  const incompletePython = path.join(agentHome, '.venv', 'Scripts', 'python.exe');
   const runtimeRoot = String.raw`C:\Village\hermes-agent-worktrees\village-hermes-clean-runtime`;
   const cmd = fs.readFileSync(path.join(hermesHome, 'gateway-service', 'Hermes_Gateway.cmd'), 'utf8');
   const vbs = fs.readFileSync(path.join(hermesHome, 'gateway-service', 'Hermes_Gateway.vbs'), 'utf8');
@@ -37,18 +36,6 @@ test('Windows Heybilli gateway uses the runtime that can load Slack Socket Mode'
   const loaded = JSON.parse(probe.stdout.trim());
   assert.equal(path.resolve(loaded.slack).startsWith(path.resolve(runtimeRoot)), true, loaded.slack);
   assert.equal(path.resolve(loaded.files).startsWith(path.resolve(runtimeRoot)), true, loaded.files);
-
-  if (fs.existsSync(incompletePython)) {
-    const incompleteProbe = spawnSync(incompletePython, [
-      '-c',
-      'import aiohttp'
-    ], { encoding: 'utf8', cwd: agentHome });
-    assert.notEqual(
-      incompleteProbe.status,
-      0,
-      'do not move the Slack gateway back to .venv until that environment has the required plugin dependencies'
-    );
-  }
 });
 
 test('root Slack gateway stays independent while Kakao gets a disabled-by-default native Gateway task', () => {

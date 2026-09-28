@@ -127,6 +127,10 @@ const ACTIONABLE_WORK_SELECT = [
   'last_activity_at', 'digest_inclusion_count', 'consecutive_unhandled_digests',
   'last_digest_at', 'next_reminder_at', 'version', 'payload'
 ].join(',');
+const P0_MUTATION_ROW_EXTRA_KEYS = [
+  'source_event_keys', 'automation_state', 'resolution_kind', 'resolution_evidence',
+  'resolved_at', 'resolved_by', 'pending_action', 'created_at', 'updated_at'
+];
 
 function invalidInput() {
   return new Error('Work Orchestrator Supabase input is invalid');
@@ -1292,6 +1296,14 @@ function p0WorkResponseRow(row) {
   return row;
 }
 
+function p0MutationResponseRow(row) {
+  const stableKeys = ACTIONABLE_WORK_SELECT.split(',');
+  if (exactKeys(row, stableKeys)) return p0WorkResponseRow(row);
+  if (!exactKeys(row, [...stableKeys, ...P0_MUTATION_ROW_EXTRA_KEYS])) throw responseInvalid();
+  const projected = Object.fromEntries(stableKeys.map((key) => [key, row[key]]));
+  return p0WorkResponseRow(projected);
+}
+
 function p0ResponseTimestamp(value) {
   const timestamp = responseTimestamp(value);
   if (!P0_ACKNOWLEDGEMENT_TIMESTAMP.test(timestamp)
@@ -1443,7 +1455,7 @@ function p0AppliedResponseRow(data) {
     if (data.row !== null) throw responseInvalid();
     return null;
   }
-  return p0WorkResponseRow(data.row);
+  return p0MutationResponseRow(data.row);
 }
 
 function p0ClaimResponse(data, input) {
@@ -1456,7 +1468,7 @@ function p0ClaimResponse(data, input) {
     || delivery.client_message_id !== input.clientMessageId
     || delivery.claimed_at !== input.claimedAt
     || delivery.claim_expires_at !== input.claimExpiresAt) throw responseInvalid();
-  return data;
+  return { ...data, row };
 }
 
 function p0ExpectedNextAt(input) {
@@ -1484,7 +1496,7 @@ function p0SettlementResponse(data, input) {
       || delivery.readback.message_ts !== input.messageTs
       || delivery.readback.confirmed_at !== input.recordedAt) throw responseInvalid();
   }
-  return data;
+  return { ...data, row };
 }
 
 function requiredText(value, maxLength) {
@@ -2121,7 +2133,7 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         if (data.row !== null) throw responseInvalid();
         return data;
       }
-      const row = p0WorkResponseRow(data.row);
+      const row = p0MutationResponseRow(data.row);
       const delivery = row.payload.p0_delivery;
       if (row.id !== normalized.id || row.version !== normalized.expectedVersion
         || delivery.status !== 'reconciling'
@@ -2132,7 +2144,7 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         || Date.parse(delivery.reconcile_expires_at) !== Date.parse(normalized.now) + normalized.leaseSeconds * 1000) {
         throw responseInvalid();
       }
-      return data;
+      return { ...data, row };
     },
     settleP0Delivery: async (input = {}) => {
       let normalized;
@@ -2176,12 +2188,12 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         if (data.row !== null) throw responseInvalid();
         return data;
       }
-      const row = p0WorkResponseRow(data.row);
+      const row = p0MutationResponseRow(data.row);
       const delivery = row.payload.p0_delivery;
       if (row.id !== normalized.id || !isRecord(delivery)
         || delivery.generation !== normalized.expectedGeneration
         || delivery.client_message_id !== normalized.clientMessageId) throw responseInvalid();
-      return data;
+      return { ...data, row };
     },
     listActionableWork: async (input = {}) => {
       let now;

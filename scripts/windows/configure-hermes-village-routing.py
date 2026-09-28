@@ -21,7 +21,7 @@ ROUTING_PROMPT_START = "[VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
 ROUTING_PROMPT_END = "[/VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
 
 # 모델/프로바이더 단일 소스: hermes-model-contract.json.
-# 파일이 없으면 확정 기본값(gpt-5.6-sol / openai-codex / max, 2026-08-11 사장님 승인)으로 동작한다.
+# 파일이 없으면 보수적인 내장 기본값으로 동작하며, 운영에서는 계약 파일 값을 사용한다.
 # 모델 교체는 계약 파일 수정 → 이 스크립트 재실행. default와 provider를 항상 함께
 # 기록해 provider만 남고 model만 되돌아가는 혼합 상태를 구조적으로 차단한다.
 MODEL_CONTRACT_PATH = Path(__file__).with_name("hermes-model-contract.json")
@@ -29,6 +29,20 @@ DEFAULT_ROOT_MODEL_CONTRACT = {
     "provider": "openai-codex",
     "model": "gpt-5.6-sol",
     "reasoning_effort": "max",
+}
+
+# AX2는 12 GB 메모리 호스트다. 하위 에이전트의 추론 범위와 반복 한도는
+# 그대로 두되, 대형 컨텍스트가 동시에 여러 개 뜨지 않도록 직렬 실행한다.
+ROOT_MAX_CONCURRENT_CHILDREN = 1
+
+# 내부 도구 호출/중간 문장은 계속 숨긴다. 대신 긴 작업의 생존 신호와
+# 사용자가 작업 중 다시 말했을 때의 구체적인 응답은 반드시 보이게 한다.
+ROOT_SLACK_DISPLAY_CONTRACT = {
+    "tool_progress": False,
+    "interim_assistant_messages": False,
+    "long_running_notifications": True,
+    "busy_ack_detail": True,
+    "busy_steer_ack_enabled": True,
 }
 
 
@@ -121,6 +135,10 @@ def is_configured(config: object, contract: dict | None = None) -> bool:
     agent = config.get("agent")
     guardrails = config.get("tool_loop_guardrails")
     terminal = config.get("terminal")
+    delegation = config.get("delegation")
+    display = config.get("display")
+    platforms = display.get("platforms") if isinstance(display, dict) else None
+    slack_display = platforms.get("slack") if isinstance(platforms, dict) else None
     return (
         isinstance(model, dict)
         and str(model.get("default", "")) == contract["model"]
@@ -130,6 +148,13 @@ def is_configured(config: object, contract: dict | None = None) -> bool:
         and agent.get("gateway_wall_timeout") == 1800
         and isinstance(guardrails, dict)
         and guardrails.get("hard_stop_enabled") is False
+        and isinstance(delegation, dict)
+        and delegation.get("max_concurrent_children") == ROOT_MAX_CONCURRENT_CHILDREN
+        and isinstance(slack_display, dict)
+        and all(
+            slack_display.get(key) == value
+            for key, value in ROOT_SLACK_DISPLAY_CONTRACT.items()
+        )
         and not has_managed_router
         and prompts_are_clean(config["slack"].get("channel_prompts"))
         and isinstance(terminal, dict)
@@ -199,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     if not backup_path.exists():
         shutil.copy2(config_path, backup_path)
 
-    for key in ("model", "agent", "tool_loop_guardrails"):
+    for key in ("model", "agent", "tool_loop_guardrails", "delegation", "display"):
         if key not in config or not isinstance(config[key], dict):
             config[key] = CommentedMap()
     config["model"]["default"] = contract["model"]
@@ -207,6 +232,18 @@ def main(argv: list[str] | None = None) -> int:
     config["agent"]["reasoning_effort"] = contract["reasoning_effort"]
     config["agent"]["gateway_wall_timeout"] = 1800
     config["tool_loop_guardrails"]["hard_stop_enabled"] = False
+    config["delegation"]["max_concurrent_children"] = ROOT_MAX_CONCURRENT_CHILDREN
+
+    if "platforms" not in config["display"] or not isinstance(config["display"]["platforms"], dict):
+        config["display"]["platforms"] = CommentedMap()
+    if (
+        "slack" not in config["display"]["platforms"]
+        or not isinstance(config["display"]["platforms"]["slack"], dict)
+    ):
+        config["display"]["platforms"]["slack"] = CommentedMap()
+    slack_display = config["display"]["platforms"]["slack"]
+    for key, value in ROOT_SLACK_DISPLAY_CONTRACT.items():
+        slack_display[key] = value
 
     cleaned_bindings = remove_managed_bindings(config["slack"].get("channel_skill_bindings"))
     if cleaned_bindings:

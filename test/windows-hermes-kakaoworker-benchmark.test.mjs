@@ -151,12 +151,13 @@ test('A/B benchmark plan has one warm-up plus 20 matched turns per transport', {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const plan = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
     assert.equal(plan.schema, 'village-kakao-hermes-benchmark-plan/v1');
+    const contract = JSON.parse(fs.readFileSync(modelContractPath, 'utf8'));
     assert.deepEqual(plan.config, {
-      provider: 'xai-oauth',
-      model: 'grok-4.5',
-      reasoning_effort: 'xhigh',
-      max_turns: 90,
-      disabled_toolsets: ['computer_use']
+      provider: contract.kakaoworker.provider,
+      model: contract.kakaoworker.model,
+      reasoning_effort: contract.kakaoworker.reasoning_effort,
+      max_turns: contract.kakaoworker.max_turns,
+      disabled_toolsets: contract.kakaoworker.disabled_toolsets
     });
     assert.deepEqual(plan.transports.map(({ name }) => name), ['baseline', 'gateway']);
     for (const transport of plan.transports) {
