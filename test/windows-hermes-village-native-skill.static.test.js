@@ -88,28 +88,43 @@ test('Village operations is a compact substantive Hermes umbrella', () => {
     /explicit JSON[\s\S]{0,180}AI|AI[\s\S]{0,180}explicit JSON/i,
     'the runner pointer must preserve AI judgment and describe only an execution boundary'
   );
-  assert.match(skill.body, /owner-managed[\s\S]{0,160}(?:root|contract)/i);
-  assert.match(skill.body, /focused[\s\S]{0,180}agent-managed[\s\S]{0,160}(?:skill|learning)/i);
-  assert.match(skill.body, /only when[\s\S]{0,120}direct reference/i);
+  assert.match(skill.body, /owner-managed[\s\S]{0,160}(?:root|contract|runtime policy)/i);
+  assert.match(skill.body, /all Village operational[\s\S]{0,180}owner-managed|owner-managed `village-\*`/i);
+  assert.match(
+    skill.body,
+    /zero incident-[\s\S]{0,220}at most one matching reference[\s\S]{0,180}authoritative live evidence[\s\S]{0,180}execution branch or exception/i
+  );
+  assert.match(
+    skill.body,
+    /one focused planning skill[\s\S]{0,180}one bounded mutating runner[\s\S]{0,180}read-only live reader/i
+  );
+  assert.match(
+    skill.body,
+    /common contract overrides[\s\S]{0,180}focused-skill[\s\S]{0,180}reference instruction/i
+  );
+  assert.match(
+    skill.body,
+    /common fast path[\s\S]{0,240}do not open a reference[\s\S]{0,180}live evidence[\s\S]{0,180}branch or exception[\s\S]{0,120}at most one/i
+  );
   assert.ok(
     fs.existsSync(path.join(operationsRoot, 'references', 'legacy-village-operations-2026-08-15.md')),
     'the lossless legacy entrypoint archive must remain recoverable outside the auto-loaded root'
   );
 });
 
-test('owner-managed Village operations learning stays outside the pinned package', () => {
+test('owner-managed Village learning stays evidence until reviewed promotion', () => {
   const skill = loadSkill(operationsRoot);
   const learning = skill.body.match(/## Learn as you work[\s\S]*$/i)?.[0] || '';
 
   assert.match(
     learning,
-    /do not autonomously patch[\s\S]{0,180}owner-managed package[\s\S]{0,180}(?:root|reference)/i,
+    /do not autonomously patch[\s\S]{0,180}owner-managed[\s\S]{0,180}(?:root|reference)/i,
     'Hermes must not autonomously patch either the root or references of the owner-managed package'
   );
   assert.match(
     learning,
-    /focused agent-managed skill[\s\S]{0,220}owner-reviewed promotion/i,
-    'new evidence must remain in a focused agent-managed skill until an owner-reviewed promotion'
+    /Village Brain\/history[\s\S]{0,220}owner-reviewed repository change/i,
+    'new evidence must remain historical evidence until an owner-reviewed repository promotion'
   );
   assert.doesNotMatch(
     learning,
@@ -394,11 +409,11 @@ test('registered-trade reference operationId is accepted by the runner', () => {
   }));
 });
 
-test('registered completion Alimtalk is the narrow owner-confirmed send exception', () => {
+test('registered completion messaging follows the selected approved runner', () => {
   const skill = loadSkill(operationsRoot);
   assert.match(
     skill.body,
-    /final registration[\s\S]{0,220}(?:one|once)[\s\S]{0,120}(?:Alimtalk|알림톡)/i
+    /final registration[\s\S]{0,220}(?:Alimtalk|알림톡)[\s\S]{0,180}runner[\s\S]{0,180}disables notification[\s\S]{0,80}send none/i
   );
   assert.match(
     skill.body,

@@ -920,7 +920,12 @@ $metadata = [pscustomobject]@{ bundled = 0; hub = 0; usage = 0 }
 try {
     [void](New-Item -ItemType Directory -Path $stagingRoot -Force -ErrorAction Stop)
     foreach ($package in $packages) {
-        if ($rootExcludedSkills -contains $package.name) {
+        # The Mac mirror is recovery evidence, not the Windows source of truth
+        # for Village business policy. Import generic skills from it, while
+        # rebuilding Village skills from the reviewed overlay plus the current
+        # Windows-owned catalog below.
+        if ($rootExcludedSkills -contains $package.name -or
+            $package.name.StartsWith('village-', [StringComparison]::OrdinalIgnoreCase)) {
             continue
         }
         $destination = Join-Path $stagingRoot $package.relative
@@ -995,6 +1000,37 @@ try {
         Assert-AiFirstProfileConfig -ProfileRoot $resolvedProfileHome
     }
 
+    # Keep every existing Windows Village capability, but adopt it as
+    # owner-managed policy. Reviewed overlay packages above always win by name;
+    # active-only focused skills survive unchanged. This prevents both loss of
+    # real operating knowledge and re-import of stale Mac-only incident skills.
+    $stagedSkillNames = @{}
+    foreach ($package in @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot)) {
+        $stagedSkillNames[$package.name] = $true
+    }
+    if (Test-Path -LiteralPath $skillsRoot -PathType Container) {
+        foreach ($package in @(Get-ActiveSkillPackages -SkillsRoot $skillsRoot)) {
+            if (-not $package.name.StartsWith('village-', [StringComparison]::OrdinalIgnoreCase) -or
+                $retiredSkillNames -contains $package.name -or
+                $stagedSkillNames.ContainsKey($package.name)) {
+                continue
+            }
+            $destination = Join-Path $stagingRoot $package.relative
+            Copy-SkillPackage -Source $package.directory -Destination $destination
+            Assert-PackageCopy -Source $package.directory -Destination $destination
+            $stagedSkillNames[$package.name] = $true
+            [void]$copiedNames.Add($package.name)
+        }
+    }
+
+    $ownerManagedRuntimeNames = @(
+        $ownerManagedSkillNames + @(
+            Get-ActiveSkillPackages -SkillsRoot $stagingRoot |
+                Where-Object { $_.name.StartsWith('village-', [StringComparison]::OrdinalIgnoreCase) } |
+                ForEach-Object { $_.name }
+        ) | Select-Object -Unique
+    )
+
     $canonicalHashes = Get-FileHashMap -Root $stagingRoot
     $previousCanonicalHashes = Read-PreviousCanonicalHashes -StatePath $parityStatePath
     if (Test-Path -LiteralPath $sourceHubDirectory -PathType Container) {
@@ -1006,7 +1042,7 @@ try {
         -CanonicalHashes $canonicalHashes `
         -PreviousCanonicalHashes $previousCanonicalHashes `
         -RetiredNames $retiredSkillNames `
-        -OwnerManagedNames $ownerManagedSkillNames
+        -OwnerManagedNames $ownerManagedRuntimeNames
 
     $rootNames = @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot | ForEach-Object { $_.name })
     $metadata = [pscustomobject]@{
@@ -1026,7 +1062,7 @@ try {
             -ActivePath (Join-Path $skillsRoot '.usage.json') `
             -TargetPath (Join-Path $stagingRoot '.usage.json') `
             -NameAliases $skillNameAliases `
-            -OwnerManagedNames $ownerManagedSkillNames
+            -OwnerManagedNames $ownerManagedRuntimeNames
     }
     if (@($rootNames | Select-Object -Unique).Count -ne $rootNames.Count) {
         throw 'Rebuilt Windows skill tree contains duplicate skill names.'
@@ -1138,6 +1174,7 @@ try {
         preservedFiles = @($preservation.files).Count
         metadata      = $metadata
         canonical     = @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request', 'village-staff-kakao-reservation-register')
+        ownerManaged  = @($ownerManagedRuntimeNames)
         profileScoped = @('rpa-automation-operations')
         excluded      = $rootExcludedSkills
         plugin        = $pluginSync

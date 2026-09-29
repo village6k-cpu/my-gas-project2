@@ -12,56 +12,54 @@ metadata:
 
 # Village Operations
 
-Use this skill when the owner or staff asks Hermes to inspect, prepare, change,
-or verify Village operational work. Hermes interprets the request and chooses
-the relevant evidence and tool. Deterministic code validates and executes an
-already understood action; it does not replace business judgment.
+Use this skill when the owner or staff asks Hermes to inspect, prepare, change, or verify Village operational work.
+Hermes interprets; deterministic code validates and executes an already understood action.
 
 ## Authority
 
 - The current user may authorize internal Village work in the current request.
 - An internal write approval does not authorize a customer-facing send.
-- Kakao, SMS, iMessage, email, or proactive/cross-channel Slack delivery needs
-  separate explicit approval for the exact recipient and content.
-- Final registration is the owner-confirmed narrow exception: it includes exactly
-  one registration-complete Alimtalk per trade. Correction, preview, and
-  `sendEstimate` never inherit this authorization.
-- Preview, draft, lookup, calculation, and readback are not final registration
-  or delivery.
-- Passwords, 2FA, CAPTCHA, device approval, and account recovery remain with
-  the user.
+- Kakao, SMS, iMessage, email, or proactive/cross-channel Slack delivery needs separate explicit approval for the exact recipient and content.
+- Final registration authorizes only the normal completion Alimtalk built into the selected approved runner. If that runner explicitly disables notification, send none. Correction, preview, and `sendEstimate` never inherit this authorization.
+- Preview, draft, lookup, calculation, and readback are not final registration or delivery.
+- Passwords, 2FA, CAPTCHA, device approval, and account recovery remain with the user.
 
 ## Source of truth
 
 Choose the narrowest authoritative live source; apply [supply rules](references/inventory-supply-policy.md) for inventory or existing reservations:
 
-1. Current reservation, schedule, price, payment, inventory, and customer state
-   comes from the matching Sheet/GAS/API read route and its readback.
-2. A visible Kakao or Slack message is evidence of what was said, not proof that
-   a Sheet write, document creation, or delivery succeeded.
-3. Village Brain supplies historical evidence, policy rationale, and strategy;
-   it does not override current live state.
-4. Local skill memory records reusable procedure and judgment, never a stale
-   customer-specific value.
+1. Current reservation, schedule, price, payment, inventory, and customer state comes from the matching Sheet/GAS/API read route and its readback.
+2. A visible Kakao or Slack message is evidence of what was said, not proof that a Sheet write, document creation, or delivery succeeded.
+3. Village Brain supplies historical evidence, policy rationale, and strategy; it does not override current live state.
+4. Local skill memory records reusable procedure and judgment, never a stale customer-specific value.
 5. The Mac mirror and backups are historical recovery inputs, not runtime truth.
 
 See [Windows runtime and sources](references/windows-runtime-and-sources.md). For Kakao reads, preserve the watcher-owned chat-list tab and use separate customer tabs: [Kakao room navigation](references/village-kakao-profile-safe-room-navigation.md).
 
 ## Interpret before execution
 
-- Read the whole request and preserve source dates/times, quantities, option
-  groupings, discounts, memo text, and whether the user asked to act or preview.
-- Resolve aliases contextually against the broad equipment/customer sources.
-  Do not replace interpretation with a growing keyword table.
-- If one plausible interpretation is materially safer and reversible, proceed
-  with it and state the assumption. If alternatives change money, equipment,
-  recipient, or schedule, ask one focused question.
-- Reuse an existing bounded operation when it expresses the understood action.
-  Do not inspect large implementations just to rediscover a documented command.
-- Never report success from a process, port, request acceptance, or tool exit
-  alone when authoritative readback is available.
+- Read the whole request and preserve source dates/times, quantities, option groupings, discounts, memo text, and whether the user asked to act or preview.
+- Resolve aliases contextually against broad equipment/customer sources; do not replace interpretation with a growing keyword table.
+- If one plausible interpretation is safer and reversible, state it and proceed. If alternatives change money, equipment, recipient, or schedule, ask one focused question.
+- Reuse an existing bounded operation when it expresses the action; do not inspect large implementations to rediscover a documented command.
+- Never report success from a process, port, request acceptance, or tool exit alone when authoritative readback is available.
 
 ## Shared execution contract
+
+### Routine operation shape
+
+A normal staff operation uses one focused planning skill and one bounded mutating runner, plus any required read-only live reader:
+1. Load this umbrella and exactly one focused skill that directly matches the requested business action. It may call a supporting skill's bounded command without loading that second skill.
+2. Start with zero incident-, customer-, or date-specific references.
+3. Use its documented live read and bounded runner; inspect `--help` only to confirm the documented invocation.
+4. Load at most one matching reference only after authoritative live evidence selects a named execution branch or exception.
+5. If no bounded runner can express the action, preserve evidence and report a `capability gap`.
+
+This common contract overrides any conflicting focused-skill or reference instruction about routine loading, source inspection, temporary scripts, or execution cardinality.
+
+`startwork.sh`, git, source searches/inspection, and ad-hoc scripts belong only
+to diagnosis/development—not routine operations. This limits tool churn without
+reducing reasoning, business interpretation, live verification, or readback.
 
 For an authorized mutation:
 
@@ -126,7 +124,7 @@ interprets business intent.
 - Prefer an existing stable artifact/link when the requested correction does not
   require regeneration.
 
-For the common fast path, open [manual Kakao single quote preview](references/manual-kakao-single-quote-preview.md); after approval use the [official GAS/Alimtalk path](references/quote-manual-send-alimtalk-workflow.md).
+For the common fast path, follow the focused quote skill's documented live-read → official preview → readback → approved-send contract. Do not open a reference until live evidence selects a named branch or exception; load at most one.
 
 For registered multi-trade quote bundles, ad-hoc stacked discounts, or a question
 about an existing bundle total, open
@@ -190,22 +188,19 @@ authority or issuance evidence.
 
 ## Find exceptional detail
 
-The preserved support library contains incident-specific procedures. Only when
-no direct reference above matches an exceptional task, open the
+The preserved support library contains incident-specific procedures. Only after
+authoritative live evidence selects a named branch or exception and no direct
+reference above matches it, open the
 [operational reference map](references/operational-reference-map.md), then read
-the one or two references that match. The complete former entrypoint remains in
+one matching reference. The complete former entrypoint remains in
 [the lossless legacy archive](references/legacy-village-operations-2026-08-15.md)
 for audits and rule-recovery, not routine task execution.
 
 ## Learn as you work
 
 - Record a reusable correction only after authoritative readback proves it.
-- Do not autonomously patch any file in this owner-managed package, including
-  this root or its references.
-- Record new reusable evidence in a focused agent-managed skill. Move it into
-  this package only through an owner-reviewed promotion.
+- Do not autonomously patch any owner-managed `village-*` package, root, or reference.
+- Record durable evidence in Village Brain/history first. Promote it into a skill only through an owner-reviewed repository change.
 - Do not encode one customer's name, one incident's transient state, or a guessed
   workaround as a universal rule.
-- Keep this owner-managed root pinned to stable cross-task contracts. Preserve
-  native usage and curator metadata for focused agent-managed skills so Hermes
-  can still improve and consolidate reusable capabilities over time.
+- Keep the Village catalog pinned while preserving usage counters. Hermes still reasons fully and may identify a capability gap; it must not silently turn that finding into live policy.

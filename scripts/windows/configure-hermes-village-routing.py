@@ -40,6 +40,13 @@ ROOT_SLACK_DELIVERY_CONTRACT = {
     "busy_steer_ack_enabled": False,
 }
 
+# Village operational skills are reviewed and promoted through the repository.
+# A restart or model/config re-application must not silently re-enable Hermes'
+# background skill patcher and turn incident residue back into runtime policy.
+ROOT_SKILL_GOVERNANCE_CONTRACT = {
+    "creation_nudge_interval": 0,
+}
+
 
 def load_root_model_contract() -> dict:
     contract = dict(DEFAULT_ROOT_MODEL_CONTRACT)
@@ -129,6 +136,7 @@ def is_configured(config: object, contract: dict | None = None) -> bool:
     model = config.get("model")
     agent = config.get("agent")
     guardrails = config.get("tool_loop_guardrails")
+    skills = config.get("skills")
     terminal = config.get("terminal")
     display = config.get("display")
     platforms = display.get("platforms") if isinstance(display, dict) else None
@@ -142,6 +150,11 @@ def is_configured(config: object, contract: dict | None = None) -> bool:
         and agent.get("gateway_wall_timeout") == 1800
         and isinstance(guardrails, dict)
         and guardrails.get("hard_stop_enabled") is False
+        and isinstance(skills, dict)
+        and all(
+            skills.get(key) == value
+            for key, value in ROOT_SKILL_GOVERNANCE_CONTRACT.items()
+        )
         and isinstance(slack_display, dict)
         and all(
             slack_display.get(key) == value
@@ -216,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     if not backup_path.exists():
         shutil.copy2(config_path, backup_path)
 
-    for key in ("model", "agent", "tool_loop_guardrails", "display"):
+    for key in ("model", "agent", "tool_loop_guardrails", "skills", "display"):
         if key not in config or not isinstance(config[key], dict):
             config[key] = CommentedMap()
     config["model"]["default"] = contract["model"]
@@ -224,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     config["agent"]["reasoning_effort"] = contract["reasoning_effort"]
     config["agent"]["gateway_wall_timeout"] = 1800
     config["tool_loop_guardrails"]["hard_stop_enabled"] = False
+    for key, value in ROOT_SKILL_GOVERNANCE_CONTRACT.items():
+        config["skills"][key] = value
 
     if "platforms" not in config["display"] or not isinstance(config["display"]["platforms"], dict):
         config["display"]["platforms"] = CommentedMap()
