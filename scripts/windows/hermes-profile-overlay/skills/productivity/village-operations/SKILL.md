@@ -13,7 +13,7 @@ metadata:
 # Village Operations
 
 Use this skill when the owner or staff asks Hermes to inspect, prepare, change, or verify Village operational work.
-Hermes interprets; deterministic code validates and executes an already understood action.
+Hermes interprets the request and chooses the relevant evidence and tool. Deterministic code validates and executes an already understood action; it does not replace business judgment.
 
 ## Authority
 
