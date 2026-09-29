@@ -193,6 +193,8 @@ test('offline routing configuration restores quiet Slack delivery without changi
     '  gateway_wall_timeout: 30',
     'tool_loop_guardrails:',
     '  hard_stop_enabled: true',
+    'skills:',
+    '  creation_nudge_interval: 10',
     'display:',
     '  platforms:',
     '    slack:',
@@ -229,6 +231,7 @@ test('offline routing configuration restores quiet Slack delivery without changi
     assert.match(appliedConfig, /^      long_running_notifications: false$/m);
     assert.match(appliedConfig, /^      busy_ack_detail: false$/m);
     assert.match(appliedConfig, /^      busy_steer_ack_enabled: false$/m);
+    assert.match(appliedConfig, /^  creation_nudge_interval: 0$/m);
 
     const checked = spawnSync(
       'python.exe',

@@ -344,7 +344,7 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
   }
 });
 
-test('profile sync protects the owner-managed umbrella while preserving focused agent learning', { skip: process.platform !== 'win32' }, () => {
+test('profile sync keeps the complete Windows Village catalog owner-managed', { skip: process.platform !== 'win32' }, () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'village-hermes-learning-parity-'));
   const macHome = path.join(tempRoot, 'mac-home');
   const workerProfile = path.join(tempRoot, 'windows-home', 'profiles', 'kakaoworker');
@@ -397,9 +397,17 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
     const canonicalCapability = fs.readFileSync(capabilityPath, 'utf8');
     fs.appendFileSync(operationsPath, '\n## Learned rule\n\nSELF_IMPROVED_RULE_MUST_SURVIVE\n', 'utf8');
     fs.appendFileSync(capabilityPath, '\nAUTONOMOUS_LIFECYCLE_DRIFT_MUST_NOT_SURVIVE\n', 'utf8');
+    writeSkill(workerProfile, path.join('productivity', 'village-tax-invoicing'), 'village-tax-invoicing', {
+      platforms: ['windows'],
+      body: '# Village Tax Invoicing\n\nACTIVE_OWNER_REVIEWED_VILLAGE_SKILL_MUST_SURVIVE\n'
+    });
     writeSkill(workerProfile, path.join('learned', 'customer-alias-memory'), 'customer-alias-memory', {
       platforms: ['windows'],
       body: '# Customer Alias Memory\n\nAGENT_CREATED_SKILL_MUST_SURVIVE\n'
+    });
+    writeSkill(macHome, path.join('productivity', 'village-mac-only-incidents'), 'village-mac-only-incidents', {
+      platforms: ['macos'],
+      body: '# Mac-only incident history\n\nMAC_RECOVERY_INPUT_MUST_NOT_BECOME_RUNTIME_POLICY\n'
     });
     fs.writeFileSync(
       path.join(workerProfile, 'skills', '.usage.json'),
@@ -416,6 +424,13 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
           agent_created: true,
           pinned: false,
           patch_count: 2,
+          last_patched_at: new Date().toISOString()
+        },
+        'village-tax-invoicing': {
+          created_by: 'agent',
+          agent_created: true,
+          pinned: false,
+          patch_count: 31,
           last_patched_at: new Date().toISOString()
         },
         'customer-alias-memory': { created_by: 'agent', patch_count: 0 }
@@ -444,6 +459,15 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
       fs.readFileSync(path.join(workerProfile, 'skills', 'learned', 'customer-alias-memory', 'SKILL.md'), 'utf8'),
       /AGENT_CREATED_SKILL_MUST_SURVIVE/
     );
+    assert.match(
+      fs.readFileSync(path.join(workerProfile, 'skills', 'productivity', 'village-tax-invoicing', 'SKILL.md'), 'utf8'),
+      /ACTIVE_OWNER_REVIEWED_VILLAGE_SKILL_MUST_SURVIVE/
+    );
+    assert.equal(
+      fs.existsSync(path.join(workerProfile, 'skills', 'productivity', 'village-mac-only-incidents', 'SKILL.md')),
+      false,
+      'a Mac-only incident skill must remain recovery evidence instead of entering the live Windows policy catalog'
+    );
     const usage = JSON.parse(fs.readFileSync(path.join(workerProfile, 'skills', '.usage.json'), 'utf8'));
     assert.equal(usage['village-operations'].patch_count, 1);
     assert.equal(usage['village-operations'].created_by, null);
@@ -453,6 +477,11 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
     assert.equal(usage['village-capability-development'].created_by, null);
     assert.equal(usage['village-capability-development'].agent_created, false);
     assert.equal(usage['village-capability-development'].pinned, true);
+    assert.equal(usage['village-tax-invoicing'].patch_count, 31);
+    assert.equal(usage['village-tax-invoicing'].created_by, null);
+    assert.equal(usage['village-tax-invoicing'].agent_created, false);
+    assert.equal(usage['village-tax-invoicing'].pinned, true);
+    assert.equal(usage['village-mac-only-incidents'], undefined);
     assert.equal(usage['customer-alias-memory'].created_by, 'agent');
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
