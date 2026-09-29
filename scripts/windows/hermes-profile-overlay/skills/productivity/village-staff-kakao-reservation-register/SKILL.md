@@ -1,6 +1,6 @@
 ---
 name: village-staff-kakao-reservation-register
-description: "Register a Village reservation from the customer's live Kakao conversation."
+description: "Register a Village reservation from live Kakao evidence."
 version: 2.0.0
 author: Village
 license: private
@@ -80,9 +80,9 @@ The runner fills live message text, room identity, revision, and evidence hash. 
 
 ## Exact-match fast path
 
-If one verified open RQ already matches the final Kakao cart and period exactly, use the documented `commit-registration` command. Do not enter the atomic replacement path merely because generated child rows exist; follow [generated component selection and readback](references/pending-rq-generated-component-selection-and-register-readback.md) when one deterministic child choice is the only remaining issue.
+If one verified open RQ already matches the final Kakao cart and period exactly, use the documented `commit-registration` command. Do not enter the atomic replacement path merely because generated child rows exist. When one generated child still needs an established deterministic choice, update that exact child by its set marker, read back the whole RQ, re-run availability, then register once.
 
-If a same-cart trade is already registered, this is a correction/readback task, not a second registration. If no RQ exists, use [name-only Kakao registration](references/name-only-kakao-register.md) and the focused `village-confirm-request` create/update commands before final registration.
+If a same-cart trade is already registered, this is a correction/readback task, not a second registration. If no RQ exists, use the focused `village-confirm-request` create/update commands before final registration. A room title and booking-form name may differ, so bind room evidence to the exact form identity and phone rather than assuming the room title is the Sheet customer name.
 
 ## Completion gate
 
@@ -97,10 +97,4 @@ For `commit-registration-live`, require all of:
 
 Then report trade ID, effective RQ, period, registered equipment, any explicit stock warning, and that no customer message was sent. Never claim completion from the old RQ alone because a changed plan may create a replacement effective RQ.
 
-## Focused references
-
-- Registration versus send authority: [registration authority and stock evidence](references/registration-authority-and-stock-evidence.md)
-- Selecting sufficient live evidence: [confirmed audit evidence quality](references/confirmed-audit-evidence-quality.md)
-- Room title versus booker identity: [room title versus booker form](references/room-title-vs-booker-form.md)
-
-Keep customer-specific facts out of this root skill. Preserve learned aliases and exceptional procedures in their focused references; do not expand the routine entrypoint into an incident log.
+Keep customer-specific facts out of this root skill. Hermes native background review may improve this focused package after the response; preserve its agent provenance so Curator can consolidate or archive stale learning instead of turning the routine entrypoint into an incident log.

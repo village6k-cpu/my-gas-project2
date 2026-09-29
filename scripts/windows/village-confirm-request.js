@@ -66,6 +66,7 @@ const REQUEST_FIELD_ALIASES = new Map(Object.entries({
   note: '비고',
   notes: '비고',
   memo: '비고',
+  메모: '비고',
   additionalRequest: '추가요청',
   additional_request: '추가요청',
   extraRequest: '추가요청'

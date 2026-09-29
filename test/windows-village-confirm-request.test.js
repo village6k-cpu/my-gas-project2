@@ -944,6 +944,7 @@ test('English alias fields (customerName, pickupDate, items, ...) are mapped to 
     timeSource: '5시~14시',
     customerName: '테스트 고객',
     phone: '010-1234-5678',
+    메모: '현장 전달 메모',
     items: [
       { name: '어퓨처 600C', quantity: '2' },
       { 이름: '고독스 라이트돔 90', qty: 1 }
@@ -957,6 +958,7 @@ test('English alias fields (customerName, pickupDate, items, ...) are mapped to 
     반납시간: '14:00',
     예약자명: '테스트 고객',
     연락처: '010-1234-5678',
+    비고: '현장 전달 메모',
     장비: [
       { 이름: '어퓨처 600C', 수량: 2 },
       { 이름: '고독스 라이트돔 90', 수량: 1 }

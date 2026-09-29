@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore Mac-style AI-first Hermes Slack behavior without exposing secrets."""
+"""Restore AI-first Hermes Slack behavior without exposing secrets."""
 
 from __future__ import annotations
 
@@ -39,14 +39,6 @@ ROOT_SLACK_DELIVERY_CONTRACT = {
     "busy_ack_detail": False,
     "busy_steer_ack_enabled": False,
 }
-
-# Village operational skills are reviewed and promoted through the repository.
-# A restart or model/config re-application must not silently re-enable Hermes'
-# background skill patcher and turn incident residue back into runtime policy.
-ROOT_SKILL_GOVERNANCE_CONTRACT = {
-    "creation_nudge_interval": 0,
-}
-
 
 def load_root_model_contract() -> dict:
     contract = dict(DEFAULT_ROOT_MODEL_CONTRACT)
@@ -150,10 +142,12 @@ def is_configured(config: object, contract: dict | None = None) -> bool:
         and agent.get("gateway_wall_timeout") == 1800
         and isinstance(guardrails, dict)
         and guardrails.get("hard_stop_enabled") is False
-        and isinstance(skills, dict)
-        and all(
-            skills.get(key) == value
-            for key, value in ROOT_SKILL_GOVERNANCE_CONTRACT.items()
+        and (
+            skills is None
+            or (
+                isinstance(skills, dict)
+                and "creation_nudge_interval" not in skills
+            )
         )
         and isinstance(slack_display, dict)
         and all(
@@ -181,7 +175,7 @@ def load_config(path: Path, yaml: YAML) -> CommentedMap:
 
 def atomic_write(path: Path, config: CommentedMap, yaml: YAML) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.mac-parity.", suffix=".tmp", dir=path.parent
+        prefix=f".{path.name}.ai-first.", suffix=".tmp", dir=path.parent
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
@@ -213,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = {
         "ok": configured,
-        "mode": "mac_style_ai_first",
+        "mode": "ai_first",
         "channels": len(ROUTER_CHANNELS),
         "model": contract["model"],
         "provider": contract["provider"],
@@ -225,11 +219,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({**result, "changed": False}))
         return 0
 
-    backup_path = config_path.with_name(f"{config_path.name}.before-mac-parity.backup")
+    backup_path = config_path.with_name(f"{config_path.name}.before-ai-first.backup")
     if not backup_path.exists():
         shutil.copy2(config_path, backup_path)
 
-    for key in ("model", "agent", "tool_loop_guardrails", "skills", "display"):
+    for key in ("model", "agent", "tool_loop_guardrails", "display"):
         if key not in config or not isinstance(config[key], dict):
             config[key] = CommentedMap()
     config["model"]["default"] = contract["model"]
@@ -237,8 +231,11 @@ def main(argv: list[str] | None = None) -> int:
     config["agent"]["reasoning_effort"] = contract["reasoning_effort"]
     config["agent"]["gateway_wall_timeout"] = 1800
     config["tool_loop_guardrails"]["hard_stop_enabled"] = False
-    for key, value in ROOT_SKILL_GOVERNANCE_CONTRACT.items():
-        config["skills"][key] = value
+    skills = config.get("skills")
+    if isinstance(skills, dict):
+        skills.pop("creation_nudge_interval", None)
+        if not skills:
+            config.pop("skills", None)
 
     if "platforms" not in config["display"] or not isinstance(config["display"]["platforms"], dict):
         config["display"]["platforms"] = CommentedMap()
@@ -277,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({
         "ok": verified,
         "changed": True,
-        "mode": "mac_style_ai_first",
+        "mode": "ai_first",
         "channels": len(ROUTER_CHANNELS),
         "model": contract["model"],
         "provider": contract["provider"],

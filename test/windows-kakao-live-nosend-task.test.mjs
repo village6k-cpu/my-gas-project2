@@ -221,7 +221,7 @@ test('full-live startup contract keeps customer replies and approval polling whi
       $env:WORK_ORCHESTRATOR_V2_RUNTIME_MODE = 'v2'
       $env:SLACK_ACTION_POLL_ENABLED = '0'
       $env:WORKER_CATCHUP_TIMEOUT_MS = '75000'
-      $env:HERMES_HOME = 'C:\\Village\\MacMiniMirror\\restored\\.hermes'
+      $env:HERMES_HOME = 'C:\\Users\\ssper\\AppData\\Local\\hermes'
       Set-KakaoLiveRuntimeEnvironment
       $value = [pscustomobject]@{ ok = $true; workOrchestrator = [pscustomobject]@{ ok = $true }; runtime = [pscustomobject]@{
         state = 'healthy'; cdpReady = $true; authenticated = $true; watcherReady = $true

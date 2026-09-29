@@ -32,7 +32,7 @@ Choose the narrowest authoritative live source; apply [supply rules](references/
 2. A visible Kakao or Slack message is evidence of what was said, not proof that a Sheet write, document creation, or delivery succeeded.
 3. Village Brain supplies historical evidence, policy rationale, and strategy; it does not override current live state.
 4. Local skill memory records reusable procedure and judgment, never a stale customer-specific value.
-5. The Mac mirror and backups are historical recovery inputs, not runtime truth.
+5. Retired migration snapshots are not runtime inputs or recovery sources.
 
 See [Windows runtime and sources](references/windows-runtime-and-sources.md). For Kakao reads, preserve the watcher-owned chat-list tab and use separate customer tabs: [Kakao room navigation](references/village-kakao-profile-safe-room-navigation.md).
 
@@ -48,18 +48,17 @@ See [Windows runtime and sources](references/windows-runtime-and-sources.md). Fo
 
 ### Routine operation shape
 
-A normal staff operation uses one focused planning skill and one bounded mutating runner, plus any required read-only live reader:
-1. Load this umbrella and exactly one focused skill that directly matches the requested business action. It may call a supporting skill's bounded command without loading that second skill.
-2. Start with zero incident-, customer-, or date-specific references.
-3. Use its documented live read and bounded runner; inspect `--help` only to confirm the documented invocation.
-4. Load at most one matching reference only after authoritative live evidence selects a named execution branch or exception.
-5. If no bounded runner can express the action, preserve evidence and report a `capability gap`.
+Use Hermes' native skill selection and self-improvement lifecycle. Start from the
+most relevant skill and expand only when the task's live evidence requires a
+distinct capability; there is no fixed skill-count router. Do not reload an
+unchanged skill or browse incident history merely because a documented command
+returned a recoverable error.
 
-This common contract overrides any conflicting focused-skill or reference instruction about routine loading, source inspection, temporary scripts, or execution cardinality.
-
-`startwork.sh`, git, source searches/inspection, and ad-hoc scripts belong only
-to diagnosis/development—not routine operations. This limits tool churn without
-reducing reasoning, business interpretation, live verification, or readback.
+Use documented live readers and bounded runners when they express the intended
+operation. Repository inspection, temporary scripts, and runtime patching are
+diagnosis/development work, not the default path for a familiar staff operation.
+If no existing capability can express the action safely, preserve the evidence
+and report a `capability gap` so Hermes can learn it through its native lifecycle.
 
 For an authorized mutation:
 
@@ -124,7 +123,7 @@ interprets business intent.
 - Prefer an existing stable artifact/link when the requested correction does not
   require regeneration.
 
-For the common fast path, follow the focused quote skill's documented live-read → official preview → readback → approved-send contract. Do not open a reference until live evidence selects a named branch or exception; load at most one.
+For the common fast path, follow the focused quote skill's documented live-read → official preview → readback → approved-send contract. Expand into supporting references only when live evidence selects a named branch or exception.
 
 For registered multi-trade quote bundles, ad-hoc stacked discounts, or a question
 about an existing bundle total, open
@@ -199,8 +198,8 @@ for audits and rule-recovery, not routine task execution.
 ## Learn as you work
 
 - Record a reusable correction only after authoritative readback proves it.
-- Do not autonomously patch any owner-managed `village-*` package, root, or reference.
-- Record durable evidence in Village Brain/history first. Promote it into a skill only through an owner-reviewed repository change.
+- Let Hermes' native background review create or improve curator-managed focused skills after the user response has completed.
+- Keep this owner-authored umbrella compact; put reusable operational learning in a focused skill rather than appending incident history here.
 - Do not encode one customer's name, one incident's transient state, or a guessed
   workaround as a universal rule.
-- Keep the Village catalog pinned while preserving usage counters. Hermes still reasons fully and may identify a capability gap; it must not silently turn that finding into live policy.
+- Preserve native provenance and Curator ownership so learned skills can improve, consolidate, stale, and archive through Hermes' normal lifecycle.

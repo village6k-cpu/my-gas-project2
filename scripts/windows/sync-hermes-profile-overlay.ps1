@@ -1,22 +1,18 @@
 <#
 .SYNOPSIS
-Explicit Hermes skill migration and recovery import.
+Promote reviewed Village owner packages into a live Hermes profile.
 
 .DESCRIPTION
-This command is not part of normal gateway, Kakao worker, bridge, restart, or
-watchdog startup. It stages and atomically replaces a selected profile's skill
-tree, so an operator must first create a verified backup and review the emitted
-preservation/conflict report. Run it only for a manual migration or explicit
-recovery; the live profile owns its native learning between imports.
+This command is not part of normal gateway, Kakao worker, bridge, restart,
+watchdog, recovery, or model-change startup. The selected live Windows profile
+is its only catalog input. It atomically promotes reviewed owner packages while
+preserving native agent-managed skills and their Curator provenance.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$ProfileHome,
-
-    [ValidateNotNullOrEmpty()]
-    [string]$MacHermesHome = 'C:\Village\MacMiniMirror\restored\.hermes',
 
     [switch]$ProfileScoped,
 
@@ -60,8 +56,9 @@ $skillNameAliases = @{
 $ownerManagedSkillNames = @(
     'village-operations',
     'village-capability-development',
-    'village-kakao-gateway-worker',
-    'village-staff-kakao-reservation-register'
+    'village-history-evidence',
+    'village-confirm-request',
+    'village-kakao-gateway-worker'
 )
 $overlaySkillsRoot = Join-Path $PSScriptRoot 'hermes-profile-overlay\skills'
 $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -194,6 +191,23 @@ function Copy-SkillPackage {
             $true
         )
     }
+}
+
+function Test-SkillReferenceIntegrity {
+    param([Parameter(Mandatory = $true)][string]$SkillDirectory)
+
+    $skillFile = Join-Path $SkillDirectory 'SKILL.md'
+    if (-not (Test-Path -LiteralPath $skillFile -PathType Leaf)) {
+        return $false
+    }
+    $content = [IO.File]::ReadAllText($skillFile, [Text.Encoding]::UTF8)
+    foreach ($match in [regex]::Matches($content, '\((references/[^)#\s]+)(?:#[^)]+)?\)')) {
+        $relative = $match.Groups[1].Value.Replace('/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath (Join-Path $SkillDirectory $relative) -PathType Leaf)) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Add-WindowsAdapter {
@@ -888,41 +902,24 @@ function Set-AiFirstProfileIdentity {
 }
 
 $resolvedProfileHome = (Resolve-Path -LiteralPath $ProfileHome -ErrorAction Stop).Path
-$resolvedMacHermesHome = (Resolve-Path -LiteralPath $MacHermesHome -ErrorAction Stop).Path
-$macSkillsRoot = (Resolve-Path -LiteralPath (Join-Path $resolvedMacHermesHome 'skills') -ErrorAction Stop).Path
 $adapterRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'hermes-profile-overlay\adapters') -ErrorAction Stop).Path
-$packages = @(Get-ActiveSkillPackages -SkillsRoot $macSkillsRoot)
-$macWorkerSkillsRoot = Join-Path $resolvedMacHermesHome 'profiles\kakaoworker\skills'
-$sourceUsagePath = Join-Path $macSkillsRoot '.usage.json'
-$sourceManifestPath = Join-Path $macSkillsRoot '.bundled_manifest'
-$sourceHubDirectory = Join-Path $macSkillsRoot '.hub'
-if ($ProfileScoped.IsPresent -and (Test-Path -LiteralPath $macWorkerSkillsRoot -PathType Container)) {
-    $workerUsagePath = Join-Path $macWorkerSkillsRoot '.usage.json'
-    if (Test-Path -LiteralPath $workerUsagePath -PathType Leaf) {
-        $sourceUsagePath = $workerUsagePath
-    }
-    $workerManifestPath = Join-Path $macWorkerSkillsRoot '.bundled_manifest'
-    if (Test-Path -LiteralPath $workerManifestPath -PathType Leaf) {
-        $sourceManifestPath = $workerManifestPath
-    }
-    $workerHubDirectory = Join-Path $macWorkerSkillsRoot '.hub'
-    if (Test-Path -LiteralPath $workerHubDirectory -PathType Container) {
-        $sourceHubDirectory = $workerHubDirectory
-    }
-}
-$sourceHubLockPath = Join-Path $sourceHubDirectory 'lock.json'
-
 $operationId = [Guid]::NewGuid().ToString('N')
 $skillsRoot = Join-Path $resolvedProfileHome 'skills'
-$parityStatePath = Join-Path $resolvedProfileHome '.village-skill-parity-state.json'
-$stagingRoot = Join-Path $resolvedProfileHome ('.skills.parity.{0}.tmp' -f $operationId)
-$previousRoot = Join-Path $resolvedProfileHome ('.skills.parity.{0}.bak' -f $operationId)
-$rpaSource = Join-Path $resolvedMacHermesHome 'profiles\kakaoworker\skills\devops\rpa-automation-operations'
-$rpaDestination = Join-Path $resolvedProfileHome 'profiles\kakaoworker\skills\devops\rpa-automation-operations'
-$rpaParent = Split-Path -Parent $rpaDestination
-$rpaTemporary = Join-Path $rpaParent ('.rpa.{0}.tmp' -f $operationId)
-$rpaPrevious = Join-Path $rpaParent ('.rpa.{0}.bak' -f $operationId)
+$packages = if (Test-Path -LiteralPath $skillsRoot -PathType Container) {
+    @(Get-ActiveSkillPackages -SkillsRoot $skillsRoot)
+}
+else {
+    @()
+}
+$sourceUsagePath = Join-Path $skillsRoot '.usage.json'
+$sourceManifestPath = Join-Path $skillsRoot '.bundled_manifest'
+$sourceHubDirectory = Join-Path $skillsRoot '.hub'
+$sourceHubLockPath = Join-Path $sourceHubDirectory 'lock.json'
+$overlayStatePath = Join-Path $resolvedProfileHome '.village-skill-overlay-state.json'
+$stagingRoot = Join-Path $resolvedProfileHome ('.skills.overlay.{0}.tmp' -f $operationId)
+$previousRoot = Join-Path $resolvedProfileHome ('.skills.overlay.{0}.bak' -f $operationId)
 $copiedNames = New-Object System.Collections.ArrayList
+$repairedSkillNames = New-Object System.Collections.ArrayList
 $canonicalHashes = @{}
 $preservation = [pscustomobject]@{ files = @(); skills = @() }
 $metadata = [pscustomobject]@{ bundled = 0; hub = 0; usage = 0 }
@@ -930,12 +927,8 @@ $metadata = [pscustomobject]@{ bundled = 0; hub = 0; usage = 0 }
 try {
     [void](New-Item -ItemType Directory -Path $stagingRoot -Force -ErrorAction Stop)
     foreach ($package in $packages) {
-        # The Mac mirror is recovery evidence, not the Windows source of truth
-        # for Village business policy. Import generic skills from it, while
-        # rebuilding Village skills from the reviewed overlay plus the current
-        # Windows-owned catalog below.
-        if ($rootExcludedSkills -contains $package.name -or
-            $package.name.StartsWith('village-', [StringComparison]::OrdinalIgnoreCase)) {
+        if ($retiredSkillNames -contains $package.name -or
+            $ownerManagedSkillNames -contains $package.name) {
             continue
         }
         $destination = Join-Path $stagingRoot $package.relative
@@ -947,51 +940,51 @@ try {
     foreach ($port in @(
         [pscustomobject]@{
             name = 'village-operations'
-            source = Join-Path $macSkillsRoot 'productivity\village-operations'
             destination = Join-Path $stagingRoot 'productivity\village-operations'
             overlay = Join-Path $overlaySkillsRoot 'productivity\village-operations'
         },
         [pscustomobject]@{
-            # Keep the historical folder path for lossless Mac import while the
-            # SKILL.md frontmatter exposes the corrected native catalog name.
             name = 'village-history-evidence'
-            source = Join-Path $macSkillsRoot 'village\village-brain-first'
             destination = Join-Path $stagingRoot 'village\village-brain-first'
             overlay = Join-Path $overlaySkillsRoot 'village\village-brain-first'
         },
         [pscustomobject]@{
-            # Keep the Mac package's focused operational references, but pin the
-            # compact Windows entrypoint and atomic live-registration reference.
-            name = 'village-staff-kakao-reservation-register'
-            source = Join-Path $macSkillsRoot 'productivity\village-staff-kakao-reservation-register'
-            destination = Join-Path $stagingRoot 'productivity\village-staff-kakao-reservation-register'
-            overlay = Join-Path $overlaySkillsRoot 'productivity\village-staff-kakao-reservation-register'
-            sourceOptional = $true
+            name = 'village-confirm-request'
+            destination = Join-Path $stagingRoot 'productivity\village-confirm-request'
+            overlay = Join-Path $overlaySkillsRoot 'productivity\village-confirm-request'
+        },
+        [pscustomobject]@{
+            name = 'village-capability-development'
+            destination = Join-Path $stagingRoot 'productivity\village-capability-development'
+            overlay = Join-Path $overlaySkillsRoot 'productivity\village-capability-development'
         }
     )) {
-        if (Test-Path -LiteralPath (Join-Path $port.source 'SKILL.md') -PathType Leaf) {
-            Copy-SkillPackage -Source $port.source -Destination $port.destination
-            Assert-PackageCopy -Source $port.source -Destination $port.destination -IgnoreRootSkill
-        }
-        elseif (-not ($port.PSObject.Properties.Name -contains 'sourceOptional' -and $port.sourceOptional)) {
-            throw "Canonical skill source is missing '$($port.source)'."
-        }
         Copy-SkillPackage -Source $port.overlay -Destination $port.destination
         Assert-PackageCopy -Source $port.overlay -Destination $port.destination
         [void]$copiedNames.Add($port.name)
     }
 
-    $confirmRequestSource = Join-Path $overlaySkillsRoot 'productivity\village-confirm-request'
-    $confirmRequestDestination = Join-Path $stagingRoot 'productivity\village-confirm-request'
-    Copy-SkillPackage -Source $confirmRequestSource -Destination $confirmRequestDestination
-    Assert-PackageCopy -Source $confirmRequestSource -Destination $confirmRequestDestination
-    [void]$copiedNames.Add('village-confirm-request')
-
-    $capabilityDevelopmentSource = Join-Path $overlaySkillsRoot 'productivity\village-capability-development'
-    $capabilityDevelopmentDestination = Join-Path $stagingRoot 'productivity\village-capability-development'
-    Copy-SkillPackage -Source $capabilityDevelopmentSource -Destination $capabilityDevelopmentDestination
-    Assert-PackageCopy -Source $capabilityDevelopmentSource -Destination $capabilityDevelopmentDestination
-    [void]$copiedNames.Add('village-capability-development')
+    $registrationName = 'village-staff-kakao-reservation-register'
+    $stagedSkillPackages = @{}
+    foreach ($package in @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot)) {
+        $stagedSkillPackages[$package.name] = $package
+    }
+    $registrationIsHealthy = $stagedSkillPackages.ContainsKey($registrationName) -and
+        (Test-SkillReferenceIntegrity -SkillDirectory $stagedSkillPackages[$registrationName].directory)
+    if (-not $registrationIsHealthy) {
+        $registrationSource = Join-Path $overlaySkillsRoot 'productivity\village-staff-kakao-reservation-register'
+        $registrationDestination = Join-Path $stagingRoot 'productivity\village-staff-kakao-reservation-register'
+        if ($stagedSkillPackages.ContainsKey($registrationName)) {
+            Remove-DirectoryTree -Path $stagedSkillPackages[$registrationName].directory
+            [void]$repairedSkillNames.Add($registrationName)
+        }
+        Copy-SkillPackage -Source $registrationSource -Destination $registrationDestination
+        Assert-PackageCopy -Source $registrationSource -Destination $registrationDestination
+        if (-not (Test-SkillReferenceIntegrity -SkillDirectory $registrationDestination)) {
+            throw "Reviewed registration seed has missing references: '$registrationDestination'."
+        }
+        [void]$copiedNames.Add($registrationName)
+    }
 
     if ($ProfileScoped.IsPresent) {
         $gatewaySkillSource = Join-Path $overlaySkillsRoot 'productivity\village-kakao-gateway-worker'
@@ -999,50 +992,20 @@ try {
         Copy-SkillPackage -Source $gatewaySkillSource -Destination $gatewaySkillDestination
         Assert-PackageCopy -Source $gatewaySkillSource -Destination $gatewaySkillDestination
         [void]$copiedNames.Add('village-kakao-gateway-worker')
-        if (-not (Test-Path -LiteralPath (Join-Path $rpaSource 'SKILL.md') -PathType Leaf)) {
-            throw "Profile-scoped parity source is missing '$rpaSource'."
-        }
         $profileRpaDestination = Join-Path $stagingRoot 'devops\rpa-automation-operations'
-        Copy-SkillPackage -Source $rpaSource -Destination $profileRpaDestination
+        if (-not (Test-Path -LiteralPath (Join-Path $profileRpaDestination 'SKILL.md') -PathType Leaf)) {
+            throw "Profile-scoped live catalog is missing '$profileRpaDestination'."
+        }
         Add-WindowsAdapter -SkillFile (Join-Path $profileRpaDestination 'SKILL.md') -AdapterFile (Join-Path $adapterRoot 'rpa-automation-operations.md')
-        Assert-PackageCopy -Source $rpaSource -Destination $profileRpaDestination -IgnoreRootSkill
         [void]$copiedNames.Add('rpa-automation-operations')
         Assert-AiFirstProfileConfig -ProfileRoot $resolvedProfileHome
     }
 
-    # Keep every existing Windows Village capability, but adopt it as
-    # owner-managed policy. Reviewed overlay packages above always win by name;
-    # active-only focused skills survive unchanged. This prevents both loss of
-    # real operating knowledge and re-import of stale Mac-only incident skills.
-    $stagedSkillNames = @{}
-    foreach ($package in @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot)) {
-        $stagedSkillNames[$package.name] = $true
-    }
-    if (Test-Path -LiteralPath $skillsRoot -PathType Container) {
-        foreach ($package in @(Get-ActiveSkillPackages -SkillsRoot $skillsRoot)) {
-            if (-not $package.name.StartsWith('village-', [StringComparison]::OrdinalIgnoreCase) -or
-                $retiredSkillNames -contains $package.name -or
-                $stagedSkillNames.ContainsKey($package.name)) {
-                continue
-            }
-            $destination = Join-Path $stagingRoot $package.relative
-            Copy-SkillPackage -Source $package.directory -Destination $destination
-            Assert-PackageCopy -Source $package.directory -Destination $destination
-            $stagedSkillNames[$package.name] = $true
-            [void]$copiedNames.Add($package.name)
-        }
-    }
-
-    $ownerManagedRuntimeNames = @(
-        $ownerManagedSkillNames + @(
-            Get-ActiveSkillPackages -SkillsRoot $stagingRoot |
-                Where-Object { $_.name.StartsWith('village-', [StringComparison]::OrdinalIgnoreCase) } |
-                ForEach-Object { $_.name }
-        ) | Select-Object -Unique
-    )
+    $rootNamesForOwnership = @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot | ForEach-Object { $_.name })
+    $ownerManagedRuntimeNames = @($ownerManagedSkillNames | Where-Object { $rootNamesForOwnership -contains $_ })
 
     $canonicalHashes = Get-FileHashMap -Root $stagingRoot
-    $previousCanonicalHashes = Read-PreviousCanonicalHashes -StatePath $parityStatePath
+    $previousCanonicalHashes = Read-PreviousCanonicalHashes -StatePath $overlayStatePath
     if (Test-Path -LiteralPath $sourceHubDirectory -PathType Container) {
         Copy-SkillPackage -Source $sourceHubDirectory -Destination (Join-Path $stagingRoot '.hub')
     }
@@ -1052,7 +1015,7 @@ try {
         -CanonicalHashes $canonicalHashes `
         -PreviousCanonicalHashes $previousCanonicalHashes `
         -RetiredNames $retiredSkillNames `
-        -OwnerManagedNames $ownerManagedRuntimeNames
+        -OwnerManagedNames @($ownerManagedRuntimeNames + @($repairedSkillNames))
 
     $rootNames = @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot | ForEach-Object { $_.name })
     $metadata = [pscustomobject]@{
@@ -1091,8 +1054,13 @@ try {
             throw "Rebuilt Windows skill tree still exposes retired '$forbidden'."
         }
     }
+    foreach ($package in @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot)) {
+        if (-not (Test-SkillReferenceIntegrity -SkillDirectory $package.directory)) {
+            throw "Rebuilt Windows skill '$($package.name)' has a missing root reference."
+        }
+    }
 
-    if ($PSCmdlet.ShouldProcess($skillsRoot, 'Atomically replace the active Hermes skill tree with Mac parity build')) {
+    if ($PSCmdlet.ShouldProcess($skillsRoot, 'Atomically promote reviewed owner packages while preserving the active native catalog')) {
         if (Test-Path -LiteralPath $skillsRoot) {
             [IO.Directory]::Move($skillsRoot, $previousRoot)
         }
@@ -1108,50 +1076,10 @@ try {
         if (Test-Path -LiteralPath $previousRoot) {
             Remove-DirectoryTree -Path $previousRoot
         }
-        [IO.File]::WriteAllText(
-            (Join-Path $resolvedProfileHome '.no-bundled-skills'),
-            "mac-parity-curated`n",
-            $encoding
-        )
         if ($ProfileScoped.IsPresent) {
             Set-AiFirstProfileIdentity -ProfileRoot $resolvedProfileHome
         }
-        Write-CanonicalHashState -StatePath $parityStatePath -CanonicalHashes $canonicalHashes
-    }
-
-    if (-not $ProfileScoped.IsPresent -and (Test-Path -LiteralPath (Join-Path $rpaSource 'SKILL.md') -PathType Leaf)) {
-        [void](New-Item -ItemType Directory -Path $rpaParent -Force -ErrorAction Stop)
-        Copy-SkillPackage -Source $rpaSource -Destination $rpaTemporary
-        Add-WindowsAdapter -SkillFile (Join-Path $rpaTemporary 'SKILL.md') -AdapterFile (Join-Path $adapterRoot 'rpa-automation-operations.md')
-        Assert-PackageCopy -Source $rpaSource -Destination $rpaTemporary -IgnoreRootSkill
-        if ($PSCmdlet.ShouldProcess($rpaDestination, 'Deploy canonical RPA skill to the kakaoworker profile only')) {
-            if (Test-Path -LiteralPath $rpaDestination) {
-                [IO.Directory]::Move($rpaDestination, $rpaPrevious)
-            }
-            try {
-                [IO.Directory]::Move($rpaTemporary, $rpaDestination)
-                [IO.File]::WriteAllText(
-                    (Join-Path (Join-Path $resolvedProfileHome 'profiles\kakaoworker') '.no-bundled-skills'),
-                    "mac-parity-curated`n",
-                    $encoding
-                )
-            }
-            catch {
-                if (Test-Path -LiteralPath $rpaDestination) {
-                    Remove-DirectoryTree -Path $rpaDestination
-                }
-                if ((Test-Path -LiteralPath $rpaPrevious) -and -not (Test-Path -LiteralPath $rpaDestination)) {
-                    [IO.Directory]::Move($rpaPrevious, $rpaDestination)
-                }
-                throw
-            }
-            if (Test-Path -LiteralPath $rpaPrevious) {
-                Remove-DirectoryTree -Path $rpaPrevious
-            }
-        }
-        elseif (Test-Path -LiteralPath $rpaTemporary) {
-            Remove-DirectoryTree -Path $rpaTemporary
-        }
+        Write-CanonicalHashState -StatePath $overlayStatePath -CanonicalHashes $canonicalHashes
     }
 
     $pluginSync = $null
@@ -1178,7 +1106,7 @@ try {
     [pscustomobject]@{
         ok            = $true
         scope         = if ($ProfileScoped.IsPresent) { 'worker-profile' } else { 'hermes-home' }
-        macActive     = $packages.Count
+        activeSource  = $packages.Count
         rootActive    = $rootNames.Count
         copied        = @($copiedNames).Count
         preservedSkills = @($preservation.skills)
@@ -1186,6 +1114,7 @@ try {
         metadata      = $metadata
         canonical     = @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request', 'village-staff-kakao-reservation-register')
         ownerManaged  = @($ownerManagedRuntimeNames)
+        repaired      = @($repairedSkillNames)
         profileScoped = @('rpa-automation-operations')
         excluded      = $rootExcludedSkills
         plugin        = $pluginSync
@@ -1201,17 +1130,6 @@ finally {
         }
         elseif (Test-Path -LiteralPath $previousRoot) {
             Remove-DirectoryTree -Path $previousRoot
-        }
-    }
-    if (Test-Path -LiteralPath $rpaTemporary) {
-        Remove-DirectoryTree -Path $rpaTemporary
-    }
-    if (Test-Path -LiteralPath $rpaPrevious) {
-        if (-not (Test-Path -LiteralPath $rpaDestination)) {
-            [IO.Directory]::Move($rpaPrevious, $rpaDestination)
-        }
-        elseif (Test-Path -LiteralPath $rpaPrevious) {
-            Remove-DirectoryTree -Path $rpaPrevious
         }
     }
 }

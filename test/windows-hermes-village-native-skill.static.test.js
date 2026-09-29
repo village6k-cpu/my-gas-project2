@@ -10,6 +10,7 @@ const root = path.resolve(__dirname, '..');
 const overlayRoot = path.join(root, 'scripts', 'windows', 'hermes-profile-overlay', 'skills');
 const operationsRoot = path.join(overlayRoot, 'productivity', 'village-operations');
 const confirmRequestRoot = path.join(overlayRoot, 'productivity', 'village-confirm-request');
+const registrationRoot = path.join(overlayRoot, 'productivity', 'village-staff-kakao-reservation-register');
 const capabilityRoot = path.join(overlayRoot, 'productivity', 'village-capability-development');
 const brainRoot = path.join(overlayRoot, 'village', 'village-brain-first');
 const syncScript = fs.readFileSync(
@@ -88,23 +89,22 @@ test('Village operations is a compact substantive Hermes umbrella', () => {
     /explicit JSON[\s\S]{0,180}AI|AI[\s\S]{0,180}explicit JSON/i,
     'the runner pointer must preserve AI judgment and describe only an execution boundary'
   );
-  assert.match(skill.body, /owner-managed[\s\S]{0,160}(?:root|contract|runtime policy)/i);
-  assert.match(skill.body, /all Village operational[\s\S]{0,180}owner-managed|owner-managed `village-\*`/i);
   assert.match(
     skill.body,
-    /zero incident-[\s\S]{0,220}at most one matching reference[\s\S]{0,180}authoritative live evidence[\s\S]{0,180}execution branch or exception/i
+    /native skill selection[\s\S]{0,260}no fixed skill-count router/i
+  );
+  assert.doesNotMatch(
+    skill.body,
+    /exactly one focused skill/i,
+    'the business skill must not replace Hermes native reasoning with a fixed skill-count router'
   );
   assert.match(
     skill.body,
-    /one focused planning skill[\s\S]{0,180}one bounded mutating runner[\s\S]{0,180}read-only live reader/i
+    /Do not reload an\s+unchanged skill/i
   );
   assert.match(
     skill.body,
-    /common contract overrides[\s\S]{0,180}focused-skill[\s\S]{0,180}reference instruction/i
-  );
-  assert.match(
-    skill.body,
-    /common fast path[\s\S]{0,240}do not open a reference[\s\S]{0,180}live evidence[\s\S]{0,180}branch or exception[\s\S]{0,120}at most one/i
+    /common fast path[\s\S]{0,300}Expand into supporting references[\s\S]{0,200}live evidence/i
   );
   assert.ok(
     fs.existsSync(path.join(operationsRoot, 'references', 'legacy-village-operations-2026-08-15.md')),
@@ -112,24 +112,22 @@ test('Village operations is a compact substantive Hermes umbrella', () => {
   );
 });
 
-test('owner-managed Village learning stays evidence until reviewed promotion', () => {
+test('Village learning uses native background review and Curator lifecycle', () => {
   const skill = loadSkill(operationsRoot);
   const learning = skill.body.match(/## Learn as you work[\s\S]*$/i)?.[0] || '';
 
   assert.match(
     learning,
-    /do not autonomously patch[\s\S]{0,180}owner-managed[\s\S]{0,180}(?:root|reference)/i,
-    'Hermes must not autonomously patch either the root or references of the owner-managed package'
+    /native background review[\s\S]{0,220}(?:create|improve)[\s\S]{0,160}curator-managed focused skills/i
   );
   assert.match(
     learning,
-    /Village Brain\/history[\s\S]{0,220}owner-reviewed repository change/i,
-    'new evidence must remain historical evidence until an owner-reviewed repository promotion'
+    /native provenance[\s\S]{0,180}Curator ownership[\s\S]{0,220}(?:improve|consolidate|archive)/i
   );
   assert.doesNotMatch(
     learning,
-    /patch the narrowest relevant reference/i,
-    'the owner-managed package must not retain an autonomous reference-patching instruction'
+    /do not autonomously patch|owner-managed `village-\*`/i,
+    'the Village contract must not disable Hermes native learning globally'
   );
 });
 
@@ -268,6 +266,15 @@ test('confirmation-request execution skill pins bare Korean hours to Village lit
   assert.match(skill.body, /24시|24:00/i);
   assert.match(skill.body, /must never override[\s\S]{0,160}plausible overnight default/i);
   assert.match(skill.body, /Never add 12 hours[\s\S]{0,180}guessed time[\s\S]{0,120}owner/i);
+});
+
+test('registration fast path is compact and every linked reference exists', () => {
+  const skill = loadSkill(registrationRoot);
+  assertNativeEnvelope(skill);
+  assert.match(skill.body, /commit-registration-live/);
+  assert.match(skill.body, /authoritative readback/i);
+  assert.doesNotMatch(skill.body, /startwork\.sh/i);
+  assert.match(skill.body, /do not create an ad-hoc script or temporary script/i);
 });
 
 test('registered-trade command resolves one centrally documented active runtime root', () => {

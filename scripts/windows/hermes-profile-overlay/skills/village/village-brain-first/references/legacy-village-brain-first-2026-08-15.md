@@ -21,7 +21,7 @@ This package is the complete Mac `village-brain-first` protocol with its referen
 - Brain vault: `C:\Village\VILLAGE_Brain`
 - Compiled context: `C:\Village\VILLAGE_Brain\Ops\brain-context-latest.md`
 - Authoritative Windows execution tree: `C:\Village\my-gas-project2-worktrees\ax2-hermes-final`
-- Mac source mirror for historical reference only: `C:\Village\my-gas-project2`
+- Original migration source: retired; never use it as a runtime or recovery input.
 - Brain compiler: `C:\Village\village-ai`
 - Kakao/Windows runtime: the authoritative Windows execution tree above
 

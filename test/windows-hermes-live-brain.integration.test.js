@@ -22,8 +22,7 @@ const expectedRootSkills = [
 const forbiddenRootSkills = [
   'village-runtime-router',
   'village-operations-windows',
-  'rpa-automation-operations-windows',
-  'google-workspace'
+  'rpa-automation-operations-windows'
 ];
 
 function readSelectedEnv(filePath, names) {
@@ -82,20 +81,25 @@ test('live root Hermes has the canonical native skill packages and scoped RPA pr
     true,
     'RPA must remain profile-scoped'
   );
-  assert.equal(fs.readFileSync(path.join(hermesHome, '.no-bundled-skills'), 'utf8').trim(), 'mac-parity-curated');
+  assert.equal(
+    fs.existsSync(path.join(hermesHome, '.no-bundled-skills')),
+    false,
+    'the native bundled catalog must stay enabled'
+  );
 });
 
-test('live root Hermes keeps Mac-style model freedom without injected runtime routing', { skip: !runLiveChecks }, () => {
+test('live root Hermes keeps native model freedom without injected runtime routing', { skip: !runLiveChecks }, () => {
   const config = fs.readFileSync(path.join(hermesHome, 'config.yaml'), 'utf8');
   assert.match(config, new RegExp(`default:\\s*${escapeRegExp(modelContract.root.model)}`));
   assert.match(config, new RegExp(`provider:\\s*${escapeRegExp(modelContract.root.provider)}`));
   assert.match(config, new RegExp(`reasoning_effort:\\s*${escapeRegExp(modelContract.root.reasoning_effort)}`));
   assert.match(config, /gateway_wall_timeout:\s*1800/);
   assert.match(config, /hard_stop_enabled:\s*false/);
+  assert.doesNotMatch(config, /creation_nudge_interval:/);
   assert.equal(
     /\$HOME\/village-ops|owner-journal-remote\.jsonl|\bappend\b/i.test(config),
     false,
-    'channel prompt must not retain the Mac path or a Brain write exception'
+    'channel prompt must not retain a retired migration path or a Brain write exception'
   );
   assert.doesNotMatch(config, /VILLAGE_WINDOWS_RUNTIME_ROUTER_V1/);
   assert.doesNotMatch(config, /id:\s*C0B6ZJZ2XU3[\s\S]{0,160}village-runtime-router/);
@@ -125,7 +129,7 @@ test('live confirmation path preserves AI judgment and uses the runner only for 
   assert.doesNotMatch(runnerSkill, /Do not run self-improvement/i);
 });
 
-test('live Slack hides internal tool progress like the Mac gateway did', { skip: !runLiveChecks }, () => {
+test('live Slack hides internal tool progress without changing native reasoning', { skip: !runLiveChecks }, () => {
   const config = fs.readFileSync(path.join(hermesHome, 'config.yaml'), 'utf8');
   assert.match(
     config,

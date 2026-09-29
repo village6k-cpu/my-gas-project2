@@ -5,7 +5,7 @@
 - Brain compiler: `C:/Village/village-ai`
 - Active operational source: `C:/Village/runtimes/my-gas-project2-production`
 - Development source: `C:/Village/my-gas-project2` on clean `main`
-- Mac mirror: `C:/Village/MacMiniMirror/restored` (historical evidence only)
+- Retired migration snapshots are not runtime inputs or recovery sources.
 
 Hermes terminal uses Git Bash. Use `/c/Village/...` only with POSIX path
 consumers such as `test`, `cat`, and `ls`. `rg` resolves to Windows `rg.exe`, so

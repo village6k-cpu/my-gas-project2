@@ -10,7 +10,7 @@ Use this reference only when an operation needs an exact Windows path or command
 - Compiled Brain context: `C:/Village/VILLAGE_Brain/Ops/brain-context-latest.md`
 - Brain compiler and business jobs: `C:/Village/village-ai`
 - Gary Tan GBrain home: `%USERPROFILE%/.gbrain`
-- Mac mirror: `C:/Village/MacMiniMirror/restored` (historical input only)
+- Retired migration snapshots: excluded from all runtime and recovery inputs.
 - Root Hermes home: `%LOCALAPPDATA%/hermes`
 - Kakao worker profile: `%LOCALAPPDATA%/hermes/profiles/kakaoworker`
 
@@ -51,10 +51,11 @@ exists. Use the exact operation's `--help` or reference before opening source.
 
 ## Startup ownership
 
-Normal gateway, bridge, worker, restart, and watchdog paths validate the selected
-profile but do not import skill snapshots. `sync-hermes-profile-overlay.ps1` is
-reserved for an explicit migration/recovery after a verified backup and conflict
-review. The live profile owns its native skills and learning between imports.
+Normal gateway, bridge, worker, restart, watchdog, recovery, and model-change
+paths never import retired migration snapshots. `sync-hermes-profile-overlay.ps1`
+uses the selected live Windows profile as its only catalog input and promotes
+reviewed owner packages without replacing agent-managed learning. The live
+profile owns its native skill and Curator lifecycle.
 
 ## Current information
 

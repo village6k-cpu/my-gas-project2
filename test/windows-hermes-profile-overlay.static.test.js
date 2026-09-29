@@ -231,7 +231,11 @@ test('offline routing configuration restores quiet Slack delivery without changi
     assert.match(appliedConfig, /^      long_running_notifications: false$/m);
     assert.match(appliedConfig, /^      busy_ack_detail: false$/m);
     assert.match(appliedConfig, /^      busy_steer_ack_enabled: false$/m);
-    assert.match(appliedConfig, /^  creation_nudge_interval: 0$/m);
+    assert.doesNotMatch(
+      appliedConfig,
+      /^  creation_nudge_interval:/m,
+      'Village routing must leave Hermes native skill-review cadence at its upstream default'
+    );
 
     const checked = spawnSync(
       'python.exe',
@@ -240,6 +244,28 @@ test('offline routing configuration restores quiet Slack delivery without changi
     );
     assert.equal(checked.status, 0, checked.stderr || checked.stdout);
     assert.equal(JSON.parse(checked.stdout.trim()).ok, true);
+
+    fs.writeFileSync(
+      configPath,
+      appliedConfig.replace('display:', 'skills:\n  creation_nudge_interval: 0\ndisplay:'),
+      'utf8'
+    );
+    const restoredNativeCadence = spawnSync(
+      'python.exe',
+      [routingConfigScriptPath, '--config', configPath],
+      { encoding: 'utf8' }
+    );
+    assert.equal(
+      restoredNativeCadence.status,
+      0,
+      restoredNativeCadence.stderr || restoredNativeCadence.stdout
+    );
+    assert.equal(JSON.parse(restoredNativeCadence.stdout.trim()).changed, true);
+    assert.doesNotMatch(
+      fs.readFileSync(configPath, 'utf8'),
+      /^  creation_nudge_interval:/m,
+      'an otherwise configured profile must still remove the old native-learning override'
+    );
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -346,17 +372,18 @@ test('the active worker profile owns its learned skills across every bridge star
   assert.ok(profileHomeIndex < bridgeStartIndex, 'the worker profile must be resolved before bridge launch');
   assert.doesNotMatch(startScript, /sync-hermes-profile-overlay\.ps1|-ProfileScoped/);
   assert.match(paritySyncScript, /\[switch\]\$ProfileScoped/);
-  assert.match(paritySyncScript, /manual migration|explicit recovery/i);
+  assert.match(paritySyncScript, /selected live Windows profile/i);
 });
 
-test('RPA profile deployment keeps a rollback copy until replacement succeeds', () => {
-  assert.match(paritySyncScript, /\$rpaPrevious\s*=/);
+test('profile overlay keeps one atomic rollback boundary without cross-profile deployment', () => {
+  assert.match(paritySyncScript, /\$previousRoot\s*=/);
   assert.match(
     paritySyncScript,
-    /\[IO\.Directory\]::Move\(\$rpaDestination,\s*\$rpaPrevious\)/
+    /\[IO\.Directory\]::Move\(\$skillsRoot,\s*\$previousRoot\)/
   );
   assert.match(
     paritySyncScript,
-    /catch\s*\{[\s\S]*?\[IO\.Directory\]::Move\(\$rpaPrevious,\s*\$rpaDestination\)[\s\S]*?throw/
+    /catch\s*\{[\s\S]*?\[IO\.Directory\]::Move\(\$previousRoot,\s*\$skillsRoot\)[\s\S]*?throw/
   );
+  assert.doesNotMatch(paritySyncScript, /\$rpaDestination|\$rpaPrevious/);
 });
