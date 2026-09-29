@@ -548,6 +548,7 @@ function Merge-UsageMetadata {
         [string]$SourcePath,
         [string]$ActivePath,
         [Parameter(Mandatory = $true)][string]$TargetPath,
+        [Parameter(Mandatory = $true)][string[]]$ActiveNames,
         [hashtable]$NameAliases = @{},
         [string[]]$OwnerManagedNames = @()
     )
@@ -610,6 +611,15 @@ function Merge-UsageMetadata {
         $ownerRecord['agent_created'] = $false
         $ownerRecord['pinned'] = $true
         $mergedRecords[$ownerName] = $ownerRecord
+    }
+    $activeNameSet = @{}
+    foreach ($activeName in $ActiveNames) {
+        $activeNameSet[$activeName] = $true
+    }
+    foreach ($name in @($mergedRecords.Keys)) {
+        if (-not $activeNameSet.ContainsKey($name)) {
+            $mergedRecords.Remove($name)
+        }
     }
     [IO.File]::WriteAllText(
         $TargetPath,
@@ -1061,6 +1071,7 @@ try {
             -SourcePath $sourceUsagePath `
             -ActivePath (Join-Path $skillsRoot '.usage.json') `
             -TargetPath (Join-Path $stagingRoot '.usage.json') `
+            -ActiveNames $rootNames `
             -NameAliases $skillNameAliases `
             -OwnerManagedNames $ownerManagedRuntimeNames
     }
