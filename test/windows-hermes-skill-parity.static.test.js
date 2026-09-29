@@ -433,6 +433,12 @@ test('profile sync keeps the complete Windows Village catalog owner-managed', { 
           patch_count: 31,
           last_patched_at: new Date().toISOString()
         },
+        'village-runtime-router': {
+          created_by: 'agent',
+          agent_created: true,
+          pinned: false,
+          patch_count: 99
+        },
         'customer-alias-memory': { created_by: 'agent', patch_count: 0 }
       }, null, 2),
       'utf8'
@@ -482,6 +488,7 @@ test('profile sync keeps the complete Windows Village catalog owner-managed', { 
     assert.equal(usage['village-tax-invoicing'].agent_created, false);
     assert.equal(usage['village-tax-invoicing'].pinned, true);
     assert.equal(usage['village-mac-only-incidents'], undefined);
+    assert.equal(usage['village-runtime-router'], undefined);
     assert.equal(usage['customer-alias-memory'].created_by, 'agent');
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
