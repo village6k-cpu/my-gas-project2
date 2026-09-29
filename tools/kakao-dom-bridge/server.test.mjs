@@ -4779,6 +4779,92 @@ test('room revisions continue after the durable Gateway revision when the bridge
   assert.equal(newer.revision, 9);
 });
 
+test('a replayed event hash cannot supersede the later accepted room turn', async () => {
+  const roomKey = 'chat:replayed-event-hash-regression';
+  const scheduled = [];
+  const dependencies = {
+    appendNdjson() {},
+    writeSupabaseEvent: async () => ({ ok: true }),
+    scheduleDebouncedJob: (event) => scheduled.push(structuredClone(event)),
+    shadowRuntime: { enabled: false },
+    immediateRuntime: { enabled: false }
+  };
+  const question = {
+    source: 'kakao_channel_manager_dom',
+    status: 'pending_ai_review',
+    reason: 'mutation',
+    roomKey,
+    customerName: '재현 고객',
+    previewText: '재현 고객 그럼 대체 장비 2대 가능할까요? 오후 5:01',
+    eventHash: 'replayed-event-question',
+    detectedAt: '2026-09-29T00:01:06.783Z'
+  };
+  const accepted = {
+    ...question,
+    previewText: '재현 고객 네, 그렇게 준비해드리겠습니다. 오후 5:01',
+    eventHash: 'replayed-event-accepted',
+    detectedAt: '2026-09-29T00:01:20.122Z'
+  };
+  const thanks = {
+    ...question,
+    previewText: '재현 고객 넵 감사합니다! 오후 5:02',
+    eventHash: 'replayed-event-thanks',
+    detectedAt: '2026-09-29T00:01:35.103Z'
+  };
+
+  await postShadowEvent(question, dependencies);
+  await postShadowEvent(accepted, dependencies);
+  await postShadowEvent(thanks, dependencies);
+  const replay = await postShadowEvent(question, dependencies);
+
+  assert.equal(replay.status, 202);
+  assert.deepEqual(scheduled.map((event) => event.roomRevision), [1, 2, 3, 3]);
+  assert.equal(scheduled.at(-1).eventHash, 'replayed-event-question');
+});
+
+test('a genuinely new event after a replay still advances and queues the room', async () => {
+  const roomKey = 'chat:new-event-after-replay-regression';
+  const scheduled = [];
+  const dependencies = {
+    appendNdjson() {},
+    writeSupabaseEvent: async () => ({ ok: true }),
+    scheduleDebouncedJob: (event) => scheduled.push(structuredClone(event)),
+    shadowRuntime: { enabled: false },
+    immediateRuntime: { enabled: false }
+  };
+  const first = {
+    source: 'kakao_channel_manager_dom',
+    status: 'pending_ai_review',
+    reason: 'mutation',
+    roomKey,
+    customerName: '후속 고객',
+    previewText: '후속 고객 예약 진행 부탁드립니다. 오후 5:01',
+    eventHash: 'new-after-replay-first',
+    detectedAt: '2026-09-29T00:01:06.783Z'
+  };
+  const accepted = {
+    ...first,
+    previewText: '후속 고객 네, 준비해드리겠습니다. 오후 5:02',
+    eventHash: 'new-after-replay-accepted',
+    detectedAt: '2026-09-29T00:02:06.783Z'
+  };
+  const newer = {
+    ...first,
+    previewText: '후속 고객 수량 한 대 추가해주세요. 오후 5:03',
+    eventHash: 'new-after-replay-newer',
+    detectedAt: '2026-09-29T00:03:06.783Z'
+  };
+
+  await postShadowEvent(first, dependencies);
+  await postShadowEvent(accepted, dependencies);
+  await postShadowEvent(first, dependencies);
+  const response = await postShadowEvent(newer, dependencies);
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(scheduled.map((event) => event.roomRevision), [1, 2, 2, 3]);
+  assert.equal(scheduled.at(-1).eventHash, 'new-after-replay-newer');
+});
+
 test('immediate notification ignores heartbeat, diagnostic, container, non-message, ignored-room, and stale events', async () => {
   const calls = [];
   const shadowRuntime = { recordAccepted: () => calls.push('shadow') };
