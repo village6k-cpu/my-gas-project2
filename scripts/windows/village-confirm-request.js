@@ -997,8 +997,8 @@ function parseCliArgs(args) {
   if (command === '--help' || command === '-h' || command === 'help') {
     return { command: 'help', envFile: DEFAULT_ENV_FILE, inputFile: null };
   }
-  if (command !== 'resolve' && command !== 'create' && command !== 'create-batch' && command !== 'update' && command !== 'reconcile' && command !== 'commit-registration') {
-    throw new Error('Command must be resolve, create, create-batch, update, reconcile, or commit-registration');
+  if (command !== 'resolve' && command !== 'create' && command !== 'create-batch' && command !== 'update' && command !== 'reconcile' && command !== 'commit-registration' && command !== 'commit-registration-snapshot' && command !== 'commit-registration-live') {
+    throw new Error('Command must be resolve, create, create-batch, update, reconcile, commit-registration, commit-registration-snapshot, or commit-registration-live');
   }
   const options = { command, envFile: DEFAULT_ENV_FILE, inputFile: null };
   for (let index = 1; index < args.length; index += 1) {
@@ -1018,11 +1018,156 @@ function parseJsonInput(source) {
   return JSON.parse(String(source ?? '').replace(/^\uFEFF/, ''));
 }
 
+async function commitSnapshotRegistration({ config, input, runInput } = {}) {
+  let runner = runInput;
+  if (typeof runner !== 'function') {
+    const module = await import('../../tools/ai-browser-worker/staff-confirmed-registration.mjs');
+    runner = module.runVillageConfirmedRegistrationInput;
+  }
+  if (typeof runner !== 'function') {
+    throw new Error('Validated snapshot registration runner is unavailable');
+  }
+  return runner(input, { config });
+}
+
+function exactSelectedEvidence(messages, ids, label) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error(`${label} must contain selected Kakao evidence message IDs`);
+  }
+  const byId = new Map((Array.isArray(messages) ? messages : []).map((message) => [
+    String(message?.message_id || '').trim(),
+    message
+  ]));
+  const selected = ids.map((id) => byId.get(String(id || '').trim()));
+  const missing = ids.filter((id, index) => !selected[index]);
+  if (missing.length) {
+    throw new Error(`Selected Kakao evidence is missing: ${missing.join(', ')}`);
+  }
+  return selected.map((message) => String(message.text || '').trim()).join('\n');
+}
+
+function kakaoRoomKeyFromUrl(value) {
+  const match = String(value || '').match(/\/chats\/([^/?#]+)/i);
+  if (!match) throw new Error('Live Kakao room URL does not contain a room key');
+  return `chat:${decodeURIComponent(match[1])}`;
+}
+
+async function commitLiveRegistration({
+  config,
+  input,
+  inspectRoom,
+  createSnapshot,
+  runInput
+} = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Live registration input must be an object');
+  }
+  const allowed = new Set(['customerName', 'roomTitle', 'registration', 'operationId']);
+  const unsupported = Object.keys(input).filter((name) => !allowed.has(name));
+  if (unsupported.length) {
+    throw new Error(`Unsupported live registration input field(s): ${unsupported.join(', ')}`);
+  }
+  const customerName = String(input.customerName || '').trim();
+  const roomTitle = String(input.roomTitle || '').trim();
+  if (!customerName && !roomTitle) throw new Error('customerName or roomTitle is required');
+  if (!input.registration || typeof input.registration !== 'object' || Array.isArray(input.registration)) {
+    throw new Error('registration must be an object');
+  }
+  const operationId = String(input.operationId || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)) {
+    throw new Error('operationId must be a canonical UUID v4');
+  }
+
+  let inspect = inspectRoom;
+  if (typeof inspect !== 'function') {
+    ({ inspectKakaoRoom: inspect } = await import('./village-kakao-room-inspect.mjs'));
+  }
+  let snapshotFactory = createSnapshot;
+  if (typeof snapshotFactory !== 'function') {
+    ({ createImmutableKakaoRoomSnapshot: snapshotFactory } = await import('../../tools/ai-browser-worker/worker.mjs'));
+  }
+  const inspected = await inspect({ customerName, roomTitle });
+  if (inspected?.ok !== true || inspected?.evidence?.hintMatched !== true) {
+    throw new Error(`Live Kakao room verification failed: ${inspected?.status || inspected?.reason || 'unverified room'}`);
+  }
+  const roomKey = kakaoRoomKeyFromUrl(inspected?.target?.url);
+  const roomRevision = 1;
+  const job = {
+    jobId: `manual-registration-${operationId}`,
+    roomKey,
+    roomRevision,
+    customerName: customerName || roomTitle
+  };
+  const evidence = inspected.evidence || {};
+  const navigationContext = {
+    status: inspected.status,
+    via_devtools: true,
+    already_open: inspected.alreadyOpen === true,
+    opened_by_devtools_search: inspected.openedBySearch === true,
+    conversation_target: inspected.target,
+    conversation_evidence: {
+      source: evidence.source,
+      title: evidence.title,
+      hint_matched: evidence.hintMatched === true,
+      hints: [customerName || roomTitle],
+      visible_static_text_tail: evidence.visibleText,
+      messages: (Array.isArray(evidence.messages) ? evidence.messages : []).map((message) => ({
+        message_id: message.messageId,
+        role: message.role,
+        order: message.order,
+        text: message.text
+      }))
+    }
+  };
+  const roomSnapshot = snapshotFactory({ job, navigationContext });
+  if (!roomSnapshot || roomSnapshot.schema !== 'kakao-room-snapshot/v1') {
+    throw new Error('Live Kakao capture did not produce an immutable room snapshot');
+  }
+  const source = input.registration.source_evidence;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    throw new Error('registration.source_evidence must select Kakao evidence message IDs');
+  }
+  const snapshotMessages = roomSnapshot.navigation?.conversation_evidence?.messages || [];
+  const registration = {
+    ...input.registration,
+    source_evidence: {
+      ...source,
+      customer_request: exactSelectedEvidence(
+        snapshotMessages,
+        source.customer_message_ids,
+        'source_evidence.customer_message_ids'
+      ),
+      staff_confirmation: exactSelectedEvidence(
+        snapshotMessages,
+        source.staff_message_ids,
+        'source_evidence.staff_message_ids'
+      ),
+      conversation_revision: roomSnapshot.roomRevision,
+      conversation_evidence_hash: roomSnapshot.evidenceHash
+    }
+  };
+  return commitSnapshotRegistration({
+    config,
+    input: {
+      job: {
+        job_id: roomSnapshot.jobId,
+        room_key: roomSnapshot.roomKey,
+        room_revision: roomSnapshot.roomRevision
+      },
+      roomRevision: roomSnapshot.roomRevision,
+      roomSnapshot,
+      registration,
+      operationId
+    },
+    runInput
+  });
+}
+
 async function main() {
   const options = parseCliArgs(process.argv.slice(2));
   if (options.command === 'help') {
     process.stdout.write(
-      'Usage: village-confirm-request.js <resolve|create|create-batch|update|reconcile|commit-registration> [--input-file PATH] [--env-file PATH]\n'
+      'Usage: village-confirm-request.js <resolve|create|create-batch|update|reconcile|commit-registration|commit-registration-snapshot|commit-registration-live> [--input-file PATH] [--env-file PATH]\n'
       + '  resolve      {"queries":["장비 검색어", ...]} — 목록 시트에서 정확한 장비명 후보 조회 (읽기 전용)\n'
       + '  create       {"반출일","반출시간","반납일","반납시간","시간원문","예약자명","장비":[{"이름","수량"}], ...} — 확인요청 1건 생성+검증\n'
       + '  create-batch {"requests":[<create payload>, ...]} — 여러 스케줄 그룹을 한 번에 생성+검증\n'
@@ -1031,6 +1176,8 @@ async function main() {
       + '  reconcile    {"reqID":"RQ-..."} 또는 {"예약자명":"이름","반출일":"YYYY-MM-DD"?} — 쓰기 성공 여부가\n'
       + '               불확실할 때(uncertainWrite) 시트 실제 상태를 읽어 판정 (읽기 전용, 재삽입 아님)\n'
       + '  commit-registration {"registration":{...}} — 직원이 확정한 exact pending RQ를 1회 등록+권위 readback\n'
+      + '  commit-registration-snapshot {"job", "roomRevision", "roomSnapshot", "registration", "operationId"} — 불변 카카오 스냅샷 검증+등록+권위 readback\n'
+      + '  commit-registration-live {"customerName", "registration", "operationId"} — 라이브 카카오 캡처+근거결합+등록+권위 readback\n'
       + '  영문 별칭(customerName→예약자명, phone→연락처, pickupDate→반출일, items→장비, name/quantity 등)은 자동 매핑됨.\n'
     );
     return;
@@ -1061,6 +1208,10 @@ async function main() {
       registration: input.registration || input,
       operationId: input.operation_id || input.operationId
     });
+  } else if (options.command === 'commit-registration-snapshot') {
+    result = await commitSnapshotRegistration({ config, input });
+  } else if (options.command === 'commit-registration-live') {
+    result = await commitLiveRegistration({ config, input });
   } else {
     result = await createConfirmationRequest({
       config,
@@ -1082,6 +1233,8 @@ module.exports = {
   normalizeConfirmationRequest,
   normalizeConfirmedReservationCommit,
   commitConfirmedReservation,
+  commitSnapshotRegistration,
+  commitLiveRegistration,
   reconcileConfirmationRequest,
   parseCliArgs,
   parseJsonInput,

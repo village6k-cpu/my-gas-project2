@@ -10,6 +10,8 @@ const {
   normalizeConfirmationRequest,
   normalizeConfirmedReservationCommit,
   commitConfirmedReservation,
+  commitSnapshotRegistration,
+  commitLiveRegistration,
   reconcileConfirmationRequest,
   parseCliArgs,
   parseJsonInput,
@@ -81,6 +83,179 @@ function confirmedRegistrationFixture(overrides = {}) {
 
 test('the CLI exposes one explicit staff-authorized pending registration command', () => {
   assert.equal(parseCliArgs(['commit-registration']).command, 'commit-registration');
+});
+
+test('the CLI exposes one immutable-snapshot registration command for the validated runner', () => {
+  assert.equal(
+    parseCliArgs(['commit-registration-snapshot', '--input-file', 'registration.json']).command,
+    'commit-registration-snapshot'
+  );
+});
+
+test('the CLI exposes one live Kakao registration command without source-code assembly', () => {
+  assert.equal(
+    parseCliArgs(['commit-registration-live', '--input-file', 'registration.json']).command,
+    'commit-registration-live'
+  );
+});
+
+test('the immutable-snapshot CLI delegates one trusted payload to the official validated runner', async () => {
+  assert.equal(typeof commitSnapshotRegistration, 'function');
+  const input = {
+    job: { job_id: 'cli-fastpath', room_key: 'chat:cli-fastpath', room_revision: 9 },
+    roomRevision: 9,
+    roomSnapshot: { roomKey: 'chat:cli-fastpath', roomRevision: 9 },
+    registration: confirmedRegistrationFixture(),
+    operationId: '11111111-2222-4333-8444-555555555555'
+  };
+  const calls = [];
+  const receipt = await commitSnapshotRegistration({
+    config,
+    input,
+    runInput: async (received, options) => {
+      calls.push({ received, options });
+      return { status: 'ok', receipt_id: 'cli-receipt' };
+    }
+  });
+
+  assert.deepEqual(receipt, { status: 'ok', receipt_id: 'cli-receipt' });
+  assert.deepEqual(calls, [{ received: input, options: { config } }]);
+});
+
+test('the live registration CLI captures the room and binds selected evidence before one execution', async () => {
+  assert.equal(typeof commitLiveRegistration, 'function');
+  const { createImmutableKakaoRoomSnapshot } = await import('../tools/ai-browser-worker/worker.mjs');
+  const { validateStaffConfirmedRegistration } = await import('../tools/ai-browser-worker/staff-confirmed-registration.mjs');
+  const registration = confirmedRegistrationFixture();
+  registration.source_evidence = {
+    customer_message_ids: ['customer-live-1'],
+    staff_message_ids: ['staff-live-2'],
+    post_confirmation_review: {
+      message_ids: ['customer-live-3'],
+      reservation_unchanged: true,
+      reason: 'The final acknowledgement does not change the booking.'
+    }
+  };
+  const input = {
+    customerName: '라이브 고객',
+    operationId: '11111111-2222-4333-8444-555555555555',
+    registration
+  };
+  const calls = [];
+
+  const receipt = await commitLiveRegistration({
+    config,
+    input,
+    inspectRoom: async (query) => {
+      calls.push({ inspect: query });
+      return {
+        ok: true,
+        status: 'opened_target_chat',
+        openedBySearch: true,
+        target: { url: 'https://business.kakao.com/space/1/channel/1/chats/live-room' },
+        evidence: {
+          source: 'live_dom',
+          hintMatched: true,
+          title: '라이브 고객 - 빌리지',
+          visibleText: '최종 고객 요청 직원 가능 확답 네 감사합니다',
+          messages: [
+            { messageId: 'customer-live-1', role: 'customer', order: 1, text: '최종 고객 요청' },
+            { messageId: 'staff-live-2', role: 'staff', order: 2, text: '직원 가능 확답' },
+            { messageId: 'customer-live-3', role: 'customer', order: 3, text: '네 감사합니다' }
+          ]
+        }
+      };
+    },
+    createSnapshot: ({ job, navigationContext }) => {
+      calls.push({ snapshot: { job, navigationContext } });
+      return createImmutableKakaoRoomSnapshot({ job, navigationContext });
+    },
+    runInput: async (payload, options) => {
+      calls.push({ run: { payload, options } });
+      return { status: 'ok', trade_id: '260929-999' };
+    }
+  });
+
+  assert.deepEqual(receipt, { status: 'ok', trade_id: '260929-999' });
+  assert.deepEqual(calls[0], { inspect: { customerName: '라이브 고객', roomTitle: '' } });
+  assert.equal(calls.filter((entry) => entry.run).length, 1);
+  const executed = calls.find((entry) => entry.run).run;
+  assert.equal(executed.payload.job.room_key, 'chat:live-room');
+  assert.equal(executed.payload.roomRevision, 1);
+  assert.equal(executed.payload.roomSnapshot.schema, 'kakao-room-snapshot/v1');
+  assert.equal(executed.payload.registration.source_evidence.customer_request, '최종 고객 요청');
+  assert.equal(executed.payload.registration.source_evidence.staff_confirmation, '직원 가능 확답');
+  assert.equal(executed.payload.registration.source_evidence.conversation_revision, 1);
+  assert.equal(
+    executed.payload.registration.source_evidence.conversation_evidence_hash,
+    executed.payload.roomSnapshot.evidenceHash
+  );
+  assert.deepEqual(
+    validateStaffConfirmedRegistration(executed.payload.registration, {
+      roomRevision: executed.payload.roomRevision,
+      roomSnapshot: executed.payload.roomSnapshot
+    }),
+    { valid: true, errors: [] }
+  );
+  assert.deepEqual(executed.options, { config });
+});
+
+test('the live registration CLI fails closed when selected evidence is absent', async () => {
+  let executions = 0;
+  await assert.rejects(
+    () => commitLiveRegistration({
+      config,
+      input: {
+        customerName: '증거 누락 고객',
+        operationId: '11111111-2222-4333-8444-555555555555',
+        registration: {
+          ...confirmedRegistrationFixture(),
+          source_evidence: {
+            customer_message_ids: ['missing-customer'],
+            staff_message_ids: ['staff-live-2']
+          }
+        }
+      },
+      inspectRoom: async () => ({
+        ok: true,
+        status: 'opened_target_chat',
+        target: { url: 'https://business.kakao.com/chats/live-room' },
+        evidence: { hintMatched: true, messages: [] }
+      }),
+      createSnapshot: () => ({
+        schema: 'kakao-room-snapshot/v1',
+        jobId: 'manual-registration-test',
+        roomKey: 'chat:live-room',
+        roomRevision: 1,
+        evidenceHash: 'c'.repeat(64),
+        navigation: { conversation_evidence: { messages: [] } }
+      }),
+      runInput: async () => {
+        executions += 1;
+      }
+    }),
+    /selected Kakao evidence.*missing-customer/i
+  );
+  assert.equal(executions, 0);
+});
+
+test('the live registration CLI rejects an unstable operation ID before opening Kakao', async () => {
+  let inspections = 0;
+  await assert.rejects(
+    () => commitLiveRegistration({
+      config,
+      input: {
+        customerName: '식별자 오류 고객',
+        operationId: 'generate-another-id',
+        registration: confirmedRegistrationFixture()
+      },
+      inspectRoom: async () => {
+        inspections += 1;
+      }
+    }),
+    /operationId.*UUID v4/i
+  );
+  assert.equal(inspections, 0);
 });
 
 test('reviewed later conversation crosses the real registration transport without leaking bridge-only evidence to GAS', async () => {
@@ -285,6 +460,92 @@ test('confirmed registration never retries a rejected or uncertain GAS mutation'
     (error) => error.uncertainWrite === true && error.stage === 'confirmed_registration'
   );
   assert.equal(calls, 1);
+});
+
+test('one-shot snapshot registration uses the validated runner without generated executable code', async () => {
+  const module = await import('../tools/ai-browser-worker/staff-confirmed-registration.mjs');
+  assert.equal(typeof module.runVillageConfirmedRegistrationInput, 'function');
+
+  const registration = confirmedRegistrationFixture();
+  const roomSnapshot = {
+    roomKey: 'chat:staff-confirmed-fastpath',
+    roomRevision: 9,
+    evidenceHash: registration.source_evidence.conversation_evidence_hash,
+    navigation: {
+      conversation_evidence: {
+        title: '테스트 고객',
+        hint_matched: true,
+        visible_static_text_tail: 'bounded customer request evidence\ncontrolled staff confirmation evidence',
+        messages: [
+          { message_id: 'customer-message-1', role: 'customer', text: registration.source_evidence.customer_request },
+          { message_id: 'staff-message-2', role: 'staff', text: registration.source_evidence.staff_confirmation }
+        ]
+      }
+    }
+  };
+  const payload = {
+    job: {
+      job_id: 'staff-confirmed-fastpath',
+      room_key: roomSnapshot.roomKey,
+      room_revision: roomSnapshot.roomRevision
+    },
+    roomRevision: roomSnapshot.roomRevision,
+    roomSnapshot,
+    registration,
+    operationId: '11111111-2222-4333-8444-555555555555'
+  };
+  const calls = [];
+  const receipt = await module.runVillageConfirmedRegistrationInput(payload, {
+    config,
+    executeCommit: async (request, options) => {
+      calls.push({ request, options });
+      return { status: 'ok', receipt_id: 'receipt-fastpath' };
+    }
+  });
+
+  assert.deepEqual(receipt, { status: 'ok', receipt_id: 'receipt-fastpath' });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    request: {
+      config,
+      job: payload.job,
+      roomRevision: payload.roomRevision,
+      registration
+    },
+    options: {
+      roomSnapshot,
+      operationFence: { operation_id: payload.operationId }
+    }
+  });
+});
+
+test('one-shot snapshot registration rejects injected runtime config and unstable operation IDs before execution', async () => {
+  const module = await import('../tools/ai-browser-worker/staff-confirmed-registration.mjs');
+  const base = {
+    job: { job_id: 'fastpath-guard', room_key: 'chat:fastpath-guard', room_revision: 9 },
+    roomRevision: 9,
+    roomSnapshot: { roomKey: 'chat:fastpath-guard', roomRevision: 9 },
+    registration: confirmedRegistrationFixture(),
+    operationId: '11111111-2222-4333-8444-555555555555'
+  };
+  let executions = 0;
+  const options = {
+    config,
+    executeCommit: async () => {
+      executions += 1;
+      return { status: 'ok' };
+    }
+  };
+
+  await assert.rejects(
+    () => module.runVillageConfirmedRegistrationInput({ ...base, config: { VILLAGE2_API_KEY: 'leak' } }, options),
+    /unsupported.*config/i
+  );
+  await assert.rejects(
+    () => module.runVillageConfirmedRegistrationInput({ ...base, operationId: 'new-on-every-retry' }, options),
+    /operationId.*UUID v4/i
+  );
+  assert.equal(executions, 0);
 });
 
 test('Windows UTF-8 BOM input is accepted at the CLI boundary', () => {

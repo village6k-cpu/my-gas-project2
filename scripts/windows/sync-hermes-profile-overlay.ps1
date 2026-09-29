@@ -41,7 +41,8 @@ $rootExcludedSkills = @(
     'village-brain-first',
     'village-history-evidence',
     'village-runtime-router',
-    'village-confirm-request'
+    'village-confirm-request',
+    'village-staff-kakao-reservation-register'
 )
 $retiredSkillNames = @(
     'apple-automation',
@@ -59,7 +60,8 @@ $skillNameAliases = @{
 $ownerManagedSkillNames = @(
     'village-operations',
     'village-capability-development',
-    'village-kakao-gateway-worker'
+    'village-kakao-gateway-worker',
+    'village-staff-kakao-reservation-register'
 )
 $overlaySkillsRoot = Join-Path $PSScriptRoot 'hermes-profile-overlay\skills'
 $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -941,10 +943,24 @@ try {
             source = Join-Path $macSkillsRoot 'village\village-brain-first'
             destination = Join-Path $stagingRoot 'village\village-brain-first'
             overlay = Join-Path $overlaySkillsRoot 'village\village-brain-first'
+        },
+        [pscustomobject]@{
+            # Keep the Mac package's focused operational references, but pin the
+            # compact Windows entrypoint and atomic live-registration reference.
+            name = 'village-staff-kakao-reservation-register'
+            source = Join-Path $macSkillsRoot 'productivity\village-staff-kakao-reservation-register'
+            destination = Join-Path $stagingRoot 'productivity\village-staff-kakao-reservation-register'
+            overlay = Join-Path $overlaySkillsRoot 'productivity\village-staff-kakao-reservation-register'
+            sourceOptional = $true
         }
     )) {
-        Copy-SkillPackage -Source $port.source -Destination $port.destination
-        Assert-PackageCopy -Source $port.source -Destination $port.destination -IgnoreRootSkill
+        if (Test-Path -LiteralPath (Join-Path $port.source 'SKILL.md') -PathType Leaf) {
+            Copy-SkillPackage -Source $port.source -Destination $port.destination
+            Assert-PackageCopy -Source $port.source -Destination $port.destination -IgnoreRootSkill
+        }
+        elseif (-not ($port.PSObject.Properties.Name -contains 'sourceOptional' -and $port.sourceOptional)) {
+            throw "Canonical skill source is missing '$($port.source)'."
+        }
         Copy-SkillPackage -Source $port.overlay -Destination $port.destination
         Assert-PackageCopy -Source $port.overlay -Destination $port.destination
         [void]$copiedNames.Add($port.name)
@@ -1015,7 +1031,7 @@ try {
     if (@($rootNames | Select-Object -Unique).Count -ne $rootNames.Count) {
         throw 'Rebuilt Windows skill tree contains duplicate skill names.'
     }
-    foreach ($required in @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request', 'productivity-integrations')) {
+    foreach ($required in @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request', 'village-staff-kakao-reservation-register', 'productivity-integrations')) {
         if ($rootNames -notcontains $required) {
             throw "Rebuilt Windows skill tree is missing '$required'."
         }
@@ -1121,7 +1137,7 @@ try {
         preservedSkills = @($preservation.skills)
         preservedFiles = @($preservation.files).Count
         metadata      = $metadata
-        canonical     = @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request')
+        canonical     = @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request', 'village-staff-kakao-reservation-register')
         profileScoped = @('rpa-automation-operations')
         excluded      = $rootExcludedSkills
         plugin        = $pluginSync

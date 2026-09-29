@@ -73,6 +73,16 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
       body: '# Village Operations\n\n## Existing reservation equipment additions\n\nMac business rules stay intact.\n',
       references: ['schedule.md', 'payments.md']
     });
+    writeSkill(
+      macHome,
+      path.join('productivity', 'village-staff-kakao-reservation-register'),
+      'village-staff-kakao-reservation-register',
+      {
+        platforms: ['macos'],
+        body: '# Village Staff Kakao Reservation Register\n\nUse the immutable Kakao snapshot.\n',
+        references: ['existing-rq-atomic-register-from-immutable-kakao-snapshot.md']
+      }
+    );
     writeSkill(macHome, path.join('village', 'village-brain-first'), 'village-brain-first', {
       platforms: ['macos'],
       body: '# Village Brain-First Protocol\n\n## Customer lookup\n\n## Tax chief-of-staff mode\n\n## Recording owner decisions\n\n## Live-system escalation\n',
@@ -112,7 +122,8 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
       'village-capability-development',
       'village-confirm-request',
       'village-history-evidence',
-      'village-operations'
+      'village-operations',
+      'village-staff-kakao-reservation-register'
     ]);
     assert.equal(
       fs.readFileSync(path.join(profileHome, '.no-bundled-skills'), 'utf8').trim(),
@@ -193,6 +204,35 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
     assert.match(confirmRequest, /^name:\s*village-confirm-request$/m);
     assert.match(confirmRequest, /^platforms:\s*\[windows\]$/m);
     assert.match(confirmRequest, /village-confirm-request\.js/);
+
+    const registrationRoot = path.join(
+      profileHome,
+      'skills',
+      'productivity',
+      'village-staff-kakao-reservation-register'
+    );
+    const registrationSkill = fs.readFileSync(path.join(registrationRoot, 'SKILL.md'), 'utf8');
+    assert.match(registrationSkill, /commit-registration-live/);
+    assert.match(registrationSkill, /one official execution path/i);
+    assert.match(registrationSkill, /do not create (?:an? )?(?:ad-hoc|temporary) script/i);
+    assert.doesNotMatch(registrationSkill, /startwork\.sh/i);
+    assert.ok(
+      Buffer.byteLength(registrationSkill, 'utf8') <= 8000,
+      'the routine registration entrypoint must stay compact'
+    );
+    const atomicRegistrationReference = path.join(
+      registrationRoot,
+      'references',
+      'existing-rq-atomic-register-from-immutable-kakao-snapshot.md'
+    );
+    assert.equal(
+      fs.existsSync(atomicRegistrationReference),
+      true
+    );
+    const atomicRegistration = fs.readFileSync(atomicRegistrationReference, 'utf8');
+    assert.match(atomicRegistration, /commit-registration-live/);
+    assert.doesNotMatch(atomicRegistration, /startwork\.sh/i);
+    assert.doesNotMatch(atomicRegistration, /executeVillageConfirmedReservationCommit/);
 
     const rpaRoot = path.join(
       profileHome,

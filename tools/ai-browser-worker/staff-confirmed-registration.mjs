@@ -26,6 +26,9 @@ const SET_COMPONENT_SELECTION_FIELDS = new Set(['set_item', 'component_item', 's
 const SET_COMPONENT_BASELINE_FIELDS = new Set(['set_item', 'component_item', 'quantity']);
 const REQUEST_ID = /^RQ-\d{6}-\d{3}$/;
 const DISCOUNT_TYPES = new Set(['일반', '학생', '개인사업자/프리랜서', '단골', '제휴']);
+const REGISTRATION_INPUT_FIELDS = new Set([
+  'job', 'roomRevision', 'roomSnapshot', 'registration', 'operationId'
+]);
 
 function objectErrors(value, allowed, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return [`${label} must be an object`];
@@ -628,4 +631,31 @@ export async function executeVillageConfirmedReservationCommit(request = {}, opt
       )
     });
   }
+}
+
+export async function runVillageConfirmedRegistrationInput(input = {}, options = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Registration input must be an object');
+  }
+  const unsupported = Object.keys(input).filter((name) => !REGISTRATION_INPUT_FIELDS.has(name));
+  if (unsupported.length) {
+    throw new Error(`Unsupported registration input field(s): ${unsupported.join(', ')}`);
+  }
+  if (!options.config || typeof options.config !== 'object' || Array.isArray(options.config)) {
+    throw new Error('Trusted runtime config is required');
+  }
+  const operationId = normalizedText(input.operationId).toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)) {
+    throw new Error('operationId must be a canonical UUID v4');
+  }
+  const executeCommit = options.executeCommit || executeVillageConfirmedReservationCommit;
+  return executeCommit({
+    config: options.config,
+    job: input.job,
+    roomRevision: input.roomRevision,
+    registration: input.registration
+  }, {
+    roomSnapshot: input.roomSnapshot,
+    operationFence: { operation_id: operationId }
+  });
 }
