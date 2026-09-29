@@ -4105,22 +4105,50 @@ export function semanticRoomEventIdentity(event = {}) {
   return [preview, displayTime].filter(Boolean).join('\n');
 }
 
-export function registerAcceptedRoomEvent(versions, roomKey, semanticIdentity, durableRevision = 0) {
+const ROOM_EVENT_HASH_HISTORY_LIMIT = 256;
+
+function roomEventHashIdentity(value = '') {
+  const normalized = String(value || '').trim();
+  return normalized ? sha256(`village-room-event:${normalized}`) : '';
+}
+
+export function registerAcceptedRoomEvent(
+  versions,
+  roomKey,
+  semanticIdentity,
+  durableRevision = 0,
+  eventHash = ''
+) {
   if (!(versions instanceof Map)) throw new TypeError('versions must be a Map');
   const key = String(roomKey || '').trim();
   const identity = String(semanticIdentity || '').trim();
   if (!key || !identity) throw new Error('roomKey and semanticIdentity are required');
   const previous = versions.get(key) || { revision: 0, semanticIdentity: '' };
-  if (previous.semanticIdentity === identity) {
-    const synchronizedRevision = Math.max(Number(previous.revision || 0), Number(durableRevision || 0));
+  const recentEventHashes = previous.recentEventHashes instanceof Set
+    ? new Set(previous.recentEventHashes)
+    : new Set();
+  const eventHashIdentity = roomEventHashIdentity(eventHash);
+  const synchronizedRevision = Math.max(Number(previous.revision || 0), Number(durableRevision || 0));
+  if (eventHashIdentity && recentEventHashes.has(eventHashIdentity)) {
     if (synchronizedRevision !== previous.revision) {
-      versions.set(key, { revision: synchronizedRevision, semanticIdentity: identity });
+      versions.set(key, { ...previous, revision: synchronizedRevision, recentEventHashes });
     }
+    return { roomKey: key, revision: synchronizedRevision, changed: false, duplicate: true };
+  }
+  if (eventHashIdentity) {
+    recentEventHashes.add(eventHashIdentity);
+    while (recentEventHashes.size > ROOM_EVENT_HASH_HISTORY_LIMIT) {
+      recentEventHashes.delete(recentEventHashes.values().next().value);
+    }
+  }
+  if (previous.semanticIdentity === identity) {
+    versions.set(key, { revision: synchronizedRevision, semanticIdentity: identity, recentEventHashes });
     return { roomKey: key, revision: synchronizedRevision, changed: false };
   }
   const next = {
-    revision: Math.max(Number(previous.revision || 0), Number(durableRevision || 0)) + 1,
-    semanticIdentity: identity
+    revision: synchronizedRevision + 1,
+    semanticIdentity: identity,
+    recentEventHashes
   };
   versions.set(key, next);
   return { roomKey: key, revision: next.revision, changed: true };
@@ -6558,7 +6586,8 @@ export async function handleEvent(req, res, dependencies = {}) {
     state.roomVersions,
     acceptedRoomKey,
     acceptedIdentity,
-    durableRoomRevision
+    durableRoomRevision,
+    event.eventHash
   );
   event.roomRevision = roomVersion.revision;
   dependencies.onRoomRevisionAccepted?.(event, roomVersion);
