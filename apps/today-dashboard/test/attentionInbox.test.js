@@ -30,6 +30,9 @@ const status = loadTypeScriptModule("apps/today-dashboard/lib/domain/status.ts")
 function trade({
   id,
   returnDate,
+  customerName = `고객 ${id}`,
+  customerPhone = "010-0000-0000",
+  equipmentName = "테스트 장비",
   damaged = 0,
   lost = 0,
   paymentWarning = true,
@@ -38,8 +41,8 @@ function trade({
   const expected = Math.max(1, damaged + lost);
   return {
     tradeId: id,
-    customerName: `고객 ${id}`,
-    customerPhone: "010-0000-0000",
+    customerName,
+    customerPhone,
     checkoutAt: `${returnDate}T09:00:00+09:00`,
     returnAt: `${returnDate}T18:00:00+09:00`,
     contractStatus: cancelled ? "취소" : "반납완료",
@@ -49,7 +52,7 @@ function trade({
     equipments: [
       {
         scheduleId: `${id}-EQ`,
-        name: "테스트 장비",
+        name: equipmentName,
         qty: expected,
         takenQty: expected,
         checkoutState: "taken",
@@ -114,4 +117,53 @@ test("파손과 분실은 별도 필터로 세고 해당 거래만 남긴다", (
   assert.deepEqual(lostOnly.archived.map((row) => row.tradeId), ["both"]);
   assert.equal(lostOnly.currentTotal, 3, "필터를 눌러도 지금 할 일의 원래 숫자는 유지해야 합니다");
   assert.equal(lostOnly.archivedTotal, 1, "필터를 눌러도 이전 누적의 원래 숫자는 유지해야 합니다");
+});
+
+test("확인필요 전용 검색은 고객·연락처·거래ID·장비를 찾고 사유 필터와 함께 적용한다", () => {
+  const rows = [
+    trade({
+      id: "TR-SONY-001",
+      returnDate: "2026-09-30",
+      customerName: "김영희",
+      customerPhone: "010-1234-5678",
+      equipmentName: "Sony FX3",
+      damaged: 1,
+      paymentWarning: false,
+    }),
+    trade({
+      id: "TR-CANON-002",
+      returnDate: "2026-09-20",
+      customerName: "박민수",
+      customerPhone: "010-9999-0000",
+      equipmentName: "Canon R5C",
+      damaged: 1,
+      paymentWarning: false,
+    }),
+    trade({
+      id: "TR-SONY-003",
+      returnDate: "2026-09-29",
+      customerName: "이서준",
+      customerPhone: "010-5555-1212",
+      equipmentName: "Sony 24-70 GM",
+      lost: 1,
+      paymentWarning: false,
+    }),
+  ];
+
+  const byCustomer = status.buildAttentionInbox(rows, "2026-09-30", null, 7, "김영희");
+  assert.deepEqual(byCustomer.current.map((row) => row.tradeId), ["TR-SONY-001"]);
+  assert.deepEqual(byCustomer.archived, []);
+
+  const byPhoneWithoutHyphens = status.buildAttentionInbox(rows, "2026-09-30", null, 7, "01099990000");
+  assert.deepEqual(byPhoneWithoutHyphens.current, []);
+  assert.deepEqual(byPhoneWithoutHyphens.archived.map((row) => row.tradeId), ["TR-CANON-002"]);
+
+  const byEquipmentAndDamage = status.buildAttentionInbox(rows, "2026-09-30", "damaged", 7, "sony");
+  assert.deepEqual(byEquipmentAndDamage.current.map((row) => row.tradeId), ["TR-SONY-001"]);
+  assert.deepEqual(byEquipmentAndDamage.archived, []);
+
+  const byTradeId = status.buildAttentionInbox(rows, "2026-09-30", null, 7, "canon-002");
+  assert.deepEqual(byTradeId.archived.map((row) => row.tradeId), ["TR-CANON-002"]);
+  assert.equal(byTradeId.currentTotal, 2, "검색 중에도 지금 확인할 건의 원래 총계는 유지해야 합니다");
+  assert.equal(byTradeId.archivedTotal, 1, "검색 중에도 이전 누적의 원래 총계는 유지해야 합니다");
 });

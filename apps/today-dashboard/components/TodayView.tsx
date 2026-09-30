@@ -39,6 +39,7 @@ export function TodayView() {
   const [date, setDate] = useState("");
   const [tab, setTab] = useState<TabKey>("checkout");
   const [q, setQ] = useState("");
+  const [attentionQuery, setAttentionQuery] = useState("");
   const [showDone, setShowDone] = useState(false);
   const [attentionFacet, setAttentionFacet] = useState<AttentionFacet | null>(null);
   const [showAttentionArchive, setShowAttentionArchive] = useState(false);
@@ -59,6 +60,7 @@ export function TodayView() {
     setDate(d);
     loadDay(d);
     setQ("");
+    setAttentionQuery("");
   };
 
   const counts = useMemo(
@@ -73,11 +75,12 @@ export function TodayView() {
   );
 
   const attentionInbox = useMemo(
-    () => buildAttentionInbox(data.trades, date || ymd(new Date()), attentionFacet),
-    [data.trades, date, attentionFacet],
+    () => buildAttentionInbox(data.trades, date || ymd(new Date()), attentionFacet, 7, attentionQuery),
+    [data.trades, date, attentionFacet, attentionQuery],
   );
 
   const searching = q.trim().length > 0;
+  const attentionSearching = attentionQuery.trim().length > 0;
   const searchEvents = useMemo<TradeSearchEvent[]>(() => (searching ? searchTradeEvents(data.trades, q) : []), [q, data.trades, searching]);
 
   useEffect(() => {
@@ -85,6 +88,10 @@ export function TodayView() {
     const timer = setTimeout(() => repairSearchResults(q), 350);
     return () => clearTimeout(timer);
   }, [q, searching]);
+
+  useEffect(() => {
+    if (attentionSearching) setShowAttentionArchive(true);
+  }, [attentionSearching]);
 
   const list = useMemo(
     () => tab === "attention" ? attentionInbox.current : tradesForTab(data.trades, date, tab),
@@ -186,21 +193,23 @@ export function TodayView() {
           )}
         </div>
 
-        {/* 검색 */}
-        <div className="px-4 pb-2.5 pt-2">
-          <div className="flex items-center gap-2 rounded-xl bg-white ring-1 ring-line/60 px-3 py-2">
-            <Search className="h-4 w-4 text-ink-faint" />
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="이름·연락처·장비·거래ID 전체 검색"
-              className="flex-1 bg-transparent text-[13.5px] text-ink outline-none placeholder:text-ink-faint"
-            />
-            {q && (
-              <button onClick={() => setQ("")} className="text-ink-faint">✕</button>
-            )}
+        {/* 전체 검색 — 확인필요 탭은 아래의 전용 검색을 사용한다. */}
+        {tab !== "attention" && (
+          <div className="px-4 pb-2.5 pt-2">
+            <div className="flex items-center gap-2 rounded-xl bg-white ring-1 ring-line/60 px-3 py-2">
+              <Search className="h-4 w-4 text-ink-faint" />
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="이름·연락처·장비·거래ID 전체 검색"
+                className="flex-1 bg-transparent text-[13.5px] text-ink outline-none placeholder:text-ink-faint"
+              />
+              {q && (
+                <button type="button" onClick={() => setQ("")} className="text-ink-faint" aria-label="전체 검색어 지우기">✕</button>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* 오늘일정 내부 필터 (반출/반납/전체/확인필요) — 세그먼트 */}
         <div className="flex items-stretch gap-1 px-3 pb-2">
@@ -243,6 +252,26 @@ export function TodayView() {
               <span className="text-[13px] font-extrabold text-ink">지금 확인할 건 {attentionInbox.currentTotal}건</span>
               <span className="text-[11px] text-ink-faint">최근 7일 + 향후</span>
             </div>
+            <div className="mt-2 flex items-center gap-2 rounded-xl bg-paper/70 px-3 py-2 ring-1 ring-line/70">
+              <Search className="h-4 w-4 shrink-0 text-ink-faint" />
+              <input
+                value={attentionQuery}
+                onChange={(event) => setAttentionQuery(event.target.value)}
+                aria-label="확인필요 검색"
+                placeholder="확인필요 검색: 이름·연락처·거래ID·장비"
+                className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-faint"
+              />
+              {attentionQuery && (
+                <button
+                  type="button"
+                  onClick={() => setAttentionQuery("")}
+                  className="tap text-ink-faint"
+                  aria-label="확인필요 검색어 지우기"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
             <div className="mt-2 flex flex-wrap gap-1.5">
               <button
                 type="button"
@@ -276,6 +305,12 @@ export function TodayView() {
                 {ATTENTION_FACET_LABEL[attentionFacet]}만 표시 중 · 같은 건이 여러 사유에 함께 포함될 수 있어요.
               </div>
             )}
+            {attentionSearching && (
+              <div className="mt-2 text-[11.5px] font-semibold text-ink-mute">
+                “{attentionQuery.trim()}” 검색 결과 {attentionInbox.current.length + attentionInbox.archived.length}건
+                <span className="font-normal text-ink-faint"> · 지금 {attentionInbox.current.length} · 이전 {attentionInbox.archived.length}</span>
+              </div>
+            )}
             {attnBreakdown.overdue > 0 && (
               <div className="mt-2 text-[11.5px] leading-snug text-ink-mute">
                 <b className="text-ink-soft">미마감 {attnBreakdown.overdue}건</b>은 반납일이 지났는데 앱에서 <b>반납완료</b>로 안 찍힌 건이에요. 실제로 반납된 거면 카드에서 반납완료 처리하면 이 숫자가 줄어듭니다.
@@ -301,9 +336,15 @@ export function TodayView() {
         {!searching && tab === "attention" && attentionInbox.current.length === 0 && (
           <div className="rounded-xl2 bg-white py-12 text-center shadow-card ring-1 ring-line/70">
             <div className="text-[14px] font-bold text-ink-soft">
-              {attentionFacet ? `${ATTENTION_FACET_LABEL[attentionFacet]}에 해당하는 지금 할 일이 없습니다` : "최근 7일과 향후 확인할 일이 없습니다"}
+              {attentionSearching
+                ? `“${attentionQuery.trim()}” 검색 결과가 지금 확인할 건에는 없습니다`
+                : attentionFacet
+                  ? `${ATTENTION_FACET_LABEL[attentionFacet]}에 해당하는 지금 할 일이 없습니다`
+                  : "최근 7일과 향후 확인할 일이 없습니다"}
             </div>
-            {attentionInbox.archivedTotal > 0 && <div className="mt-1 text-[12px] text-ink-faint">지난 건은 아래 이전 누적에서 볼 수 있어요.</div>}
+            {attentionSearching && attentionInbox.archived.length > 0
+              ? <div className="mt-1 text-[12px] text-ink-faint">이전 누적 {attentionInbox.archived.length}건을 아래에 표시했어요.</div>
+              : attentionInbox.archivedTotal > 0 && <div className="mt-1 text-[12px] text-ink-faint">지난 건은 아래 이전 누적에서 볼 수 있어요.</div>}
           </div>
         )}
 
@@ -381,9 +422,9 @@ export function TodayView() {
               className="tap flex w-full items-center gap-2 rounded-xl bg-line/25 px-3 py-2.5 ring-1 ring-line/70"
             >
               <span className="text-[13px] font-bold text-ink-soft">
-                이전 누적 {attentionFacet ? attentionInbox.archived.length : attentionInbox.archivedTotal}건
+                이전 누적 {attentionFacet || attentionSearching ? attentionInbox.archived.length : attentionInbox.archivedTotal}건
               </span>
-              {attentionFacet && <span className="text-[11px] text-ink-faint">전체 {attentionInbox.archivedTotal}건</span>}
+              {(attentionFacet || attentionSearching) && <span className="text-[11px] text-ink-faint">전체 {attentionInbox.archivedTotal}건</span>}
               <ChevronRight className={`ml-auto h-4 w-4 text-ink-mute transition-transform ${showAttentionArchive ? "-rotate-90" : "rotate-90"}`} />
             </button>
             {showAttentionArchive && (
@@ -395,7 +436,9 @@ export function TodayView() {
                   </div>
                 )) : (
                   <div className="rounded-xl bg-white py-8 text-center text-[13px] text-ink-faint ring-1 ring-line/70">
-                    {ATTENTION_FACET_LABEL[attentionFacet!]}에 해당하는 이전 누적이 없습니다
+                    {attentionSearching
+                      ? `“${attentionQuery.trim()}” 검색 결과가 이전 누적에 없습니다`
+                      : `${ATTENTION_FACET_LABEL[attentionFacet!]}에 해당하는 이전 누적이 없습니다`}
                   </div>
                 )}
               </div>

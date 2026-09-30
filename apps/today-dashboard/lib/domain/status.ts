@@ -352,6 +352,24 @@ function attentionFacetMatches(t: Trade, date: string, facet: AttentionFacet): b
   });
 }
 
+function attentionSearchMatches(t: Trade, query: string): boolean {
+  const terms = query.trim().toLocaleLowerCase("ko-KR").split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+
+  const fields = [
+    t.customerName,
+    t.customerPhone,
+    t.tradeId,
+    ...t.equipments.map((equipment) => equipment.name),
+  ].map((value) => String(value ?? "").toLocaleLowerCase("ko-KR"));
+
+  return terms.every((term) => {
+    if (fields.some((field) => field.includes(term))) return true;
+    const digits = term.replace(/\D/g, "");
+    return digits.length > 0 && fields.some((field) => field.replace(/\D/g, "").includes(digits));
+  });
+}
+
 export interface AttentionInbox {
   current: Trade[];
   archived: Trade[];
@@ -362,13 +380,14 @@ export interface AttentionInbox {
 
 /**
  * 확인필요를 반납일 기준 '오늘 포함 최근 7일 + 향후'와 이전 누적으로 나눈다.
- * selectedFacet은 두 구역에 함께 적용하되 원래 구역별 총계는 유지한다.
+ * selectedFacet과 query는 두 구역에 함께 적용하되 원래 구역별 총계는 유지한다.
  */
 export function buildAttentionInbox(
   trades: Trade[],
   date: string,
   selectedFacet: AttentionFacet | null,
   recentDays = 7,
+  query = "",
 ): AttentionInbox {
   const all = tradesForTab(trades, date, "attention");
   const facetCounts = Object.fromEntries(
@@ -386,11 +405,14 @@ export function buildAttentionInbox(
 
   currentAll.sort((a, b) => new Date(a.returnAt).getTime() - new Date(b.returnAt).getTime());
   archivedAll.sort((a, b) => new Date(b.returnAt).getTime() - new Date(a.returnAt).getTime());
-  const applyFacet = (rows: Trade[]) => selectedFacet ? rows.filter((t) => attentionFacetMatches(t, date, selectedFacet)) : rows;
+  const applyFilters = (rows: Trade[]) => rows.filter((trade) => {
+    if (selectedFacet && !attentionFacetMatches(trade, date, selectedFacet)) return false;
+    return attentionSearchMatches(trade, query);
+  });
 
   return {
-    current: applyFacet(currentAll),
-    archived: applyFacet(archivedAll),
+    current: applyFilters(currentAll),
+    archived: applyFilters(archivedAll),
     currentTotal: currentAll.length,
     archivedTotal: archivedAll.length,
     facetCounts,
