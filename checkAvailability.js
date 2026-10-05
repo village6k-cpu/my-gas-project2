@@ -8785,6 +8785,7 @@ function dashboardAddedItemsFromRows_(rows) {
       isHeader: isHeader,
       isSet: isHeader && !!setNamesWithComponents[name || setName],
       isComponent: !!setName && !isHeader,
+      supplyNote: String((row && row[10]) || ''),
       checkedCheckout: false,
       checkedCheckin: false
     };
@@ -9013,6 +9014,11 @@ function dashboardAddEquipments(tid, entries, options) {
   if (!tid || addEntries.length === 0) return { error: "tid와 장비명 필수" };
 
   options = options || {};
+  var externalSupplyQty = Number(options.externalSupplyQty == null ? 0 : options.externalSupplyQty);
+  if (typeof options.externalSupplyQty === 'boolean' || !Number.isInteger(externalSupplyQty) || externalSupplyQty < 0 ||
+      (externalSupplyQty > 0 && (addEntries.length !== 1 || externalSupplyQty > addEntries[0].qty))) {
+    return { error: '외부 지원 수량은 추가할 한 품목의 총 수량 이내 정수여야 합니다' };
+  }
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
   var profile = options.profile === true || options.profile === 1 || options.profile === "1" || options.profile === "true";
   var directRegenerate =
@@ -9203,6 +9209,7 @@ function dashboardAddEquipments(tid, entries, options) {
     markProfile_('set_lookup');
     var rowSpecs = [];
     var availabilityItems = [];
+    var externalSupplyItems = [];
     addEntries.forEach(function(entry) {
       var components = (setLookup.components[entry.name] || []).filter(function(c) {
         var name = String(c.name || "").trim();
@@ -9215,7 +9222,12 @@ function dashboardAddEquipments(tid, entries, options) {
         price: forceZeroPrice ? 0 : (setLookup.prices[entry.name] || 0),
         isSetMasterItem: !!(setLookup.items && setLookup.items[entry.name])
       });
-      availabilityItems = availabilityItems.concat(buildAvailabilityItems_(entry.name, entry.qty, components));
+      if (entry.qty > externalSupplyQty) {
+        availabilityItems = availabilityItems.concat(buildAvailabilityItems_(entry.name, entry.qty - externalSupplyQty, components));
+      }
+      if (externalSupplyQty > 0) {
+        externalSupplyItems = externalSupplyItems.concat(buildAvailabilityItems_(entry.name, externalSupplyQty, components));
+      }
     });
 
     var equipMeta = buildDashboardEquipmentMeta_(equipSheet);
@@ -9269,6 +9281,11 @@ function dashboardAddEquipments(tid, entries, options) {
           scheduleData
         );
     markProfile_('availability_check');
+    if (externalSupplyItems.length) {
+      availability.allocations = (availability.allocations || []).concat(externalSupplyItems.map(function(item) {
+        return { requestedName: item.name, name: item.name, qty: item.qty, source: 'external', supplier: '직원 확인 외부 지원' };
+      }));
+    }
     // Staff approval accepts customer demand; it does not repair invalid supply
     // records or manufacture stock. Preserve the calculated plan and warnings.
     var invalidSupply = (availability.conflicts || []).some(function(conflict) {
@@ -9431,12 +9448,15 @@ function dashboardOnsiteRequestFingerprint_(tid, entries, options) {
   var normalized = normalizeDashboardAddEntries_(entries).map(function(entry) {
     return { name: String(entry.name || '').trim(), qty: Number(entry.qty || 0) || 1 };
   });
-  var payload = JSON.stringify({
+  var request = {
     tid: String(tid || '').trim(),
     entries: normalized,
     settlementStatus: String(options && options.settlementStatus || 'pending').trim(),
     rawNames: !(options && (options.rawNames === false || options.rawNames === 0 || options.rawNames === '0'))
-  });
+  };
+  // Keep legacy fingerprints unchanged when no external supply was selected.
+  if (options && options.externalSupplyQty) request.externalSupplyQty = Number(options.externalSupplyQty);
+  var payload = JSON.stringify(request);
   return Utilities.base64EncodeWebSafe(
     Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, payload)
   ).replace(/=+$/g, '').slice(0, 24);
@@ -9463,7 +9483,8 @@ function reserveDashboardOnsiteRowsUnderLock_(idempotencyHash, tid, fingerprint,
       name: name,
       qty: Number(row[4] || 0) || 1,
       isHeader: !setName || setName === name,
-      isComponent: !!setName && setName !== name
+      isComponent: !!setName && setName !== name,
+      supplyNote: String(row[10] || '')
     };
   });
   claim.at = Date.now();
@@ -9478,7 +9499,7 @@ function inspectDashboardOnsiteReservation_(tid, reservedRows) {
   if (!sheet || !reservedRows || !reservedRows.length || sheet.getLastRow() < 2) return result;
   var wanted = {};
   reservedRows.forEach(function(row) { wanted[String(row.scheduleId || '').trim()] = row; });
-  var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).getValues();
+  var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 11).getValues();
   values.forEach(function(row, index) {
     var sid = String(row[0] || '').trim();
     var expected = wanted[sid];
@@ -9487,7 +9508,8 @@ function inspectDashboardOnsiteReservation_(tid, reservedRows) {
     var matches = String(row[1] || '').trim() === tid &&
       String(row[2] || '').trim() === String(expected.setName || '').trim() &&
       String(row[3] || '').trim() === String(expected.name || '').trim() &&
-      (Number(row[4] || 0) || 1) === (Number(expected.qty || 0) || 1);
+      (Number(row[4] || 0) || 1) === (Number(expected.qty || 0) || 1) &&
+      (expected.supplyNote === undefined || String(row[10] || '') === expected.supplyNote);
     if (!matches) result.mismatch = true;
     else {
       result.matchingRows.push(index + 2);
@@ -9531,11 +9553,11 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
       if (!Array.isArray(idemRows)) idemRows = [];
       var existingIdem = idemRows.filter(function(row) { return row && row.k === idemHash; })[0];
       if (existingIdem) {
+        if ((existingIdem.tid && existingIdem.tid !== String(tid || '').trim()) ||
+            (existingIdem.f && existingIdem.f !== onsiteFingerprint)) {
+          return { error: '같은 현장추가 중복방지 키에 다른 요청 내용이 들어왔습니다.' };
+        }
         if (existingIdem.state !== 'done') {
-          if ((existingIdem.tid && existingIdem.tid !== String(tid || '').trim()) ||
-              (existingIdem.f && existingIdem.f !== onsiteFingerprint)) {
-            return { error: '같은 현장추가 중복방지 키에 다른 요청 내용이 들어왔습니다.' };
-          }
           var pendingAge = Date.now() - Number(existingIdem.at || 0);
           var reservedRows = Array.isArray(existingIdem.reservedRows) ? existingIdem.reservedRows : [];
           if (reservedRows.length) {
@@ -9628,6 +9650,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
       rawNames: options.rawNames,
       directRegenerate: options.directRegenerate || options.regenerateNow,
       forceZeroPrice: !isPaid,
+      externalSupplyQty: options.externalSupplyQty,
       lockAlreadyHeld: !!idemLock,
       idempotencyReservation: idemHash ? { hash: idemHash, fingerprint: onsiteFingerprint } : null
     });

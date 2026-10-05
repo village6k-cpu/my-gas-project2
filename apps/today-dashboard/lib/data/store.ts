@@ -4073,6 +4073,7 @@ type GasOnsiteItem = {
   setName?: string;
   isHeader?: boolean;
   isComponent?: boolean;
+  supplyNote?: string;
 };
 
 function mapGasOnsiteItems_(
@@ -4090,6 +4091,7 @@ function mapGasOnsiteItems_(
       setName: item.setName || undefined,
       isSetHeader: item.isHeader || undefined,
       isComponent: item.isComponent || undefined,
+      supplyNote: item.supplyNote || undefined,
       category: categoryOf(name) ?? undefined,
       offCatalog: offByName.get(name) || undefined,
       emphasize: ONSITE_EMPH.test(name) || undefined,
@@ -4119,7 +4121,7 @@ function applyGasOnsiteItems_(
   }), false);
 }
 
-export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settlement: Settlement) {
+export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settlement: Settlement, externalSupplyQty = 0) {
   if (!isSupabase) {
     addOnsiteItemsLocal(tradeId, entries, settlement);
     return;
@@ -4131,7 +4133,7 @@ export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], se
   // 세트 구성품은 백엔드가 세트마스터로 다시 전개하므로 대표행/단품만 전송(중복 방지)
   const payload = entries.filter((e) => !e.isComponent).map((e) => ({ name: e.name, qty: e.qty }));
   if (payload.length === 0) return;
-  const onsiteMutation = getOnsiteIdempotencyKey(JSON.stringify({ tradeId, payload, settlement }));
+  const onsiteMutation = getOnsiteIdempotencyKey(JSON.stringify({ tradeId, payload, settlement, ...(externalSupplyQty > 0 ? { externalSupplyQty } : {}) }));
   if (activeTradeTransitions.has(tradeId) || hasTradePending(tradeId)) {
     throw new Error("이 거래의 다른 변경을 저장 중입니다. 잠시 후 다시 시도해주세요");
   }
@@ -4145,6 +4147,7 @@ export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], se
     entries: JSON.stringify(payload),
     rawNames: true,
     settlement_status: settlement,
+    externalSupplyQty,
     actorName: "오늘 일정 웹앱",
     idempotencyKey: onsiteMutation.id,
     directRegenerate: false,

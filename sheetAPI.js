@@ -812,6 +812,7 @@ function handleRequestCore_(e) {
           params.entries || postBody.entries || params.items || postBody.items,
           {
             dryRun: params.dryRun || postBody.dryRun,
+            externalSupplyQty: params.externalSupplyQty !== undefined ? params.externalSupplyQty : postBody.externalSupplyQty,
             rawNames: params.rawNames || postBody.rawNames || params.raw_names || postBody.raw_names,
             settlementStatus: params.settlementStatus || postBody.settlementStatus || params.settlement_status || postBody.settlement_status,
             actorName: params.actorName || postBody.actorName || params.actor_name || postBody.actor_name,
