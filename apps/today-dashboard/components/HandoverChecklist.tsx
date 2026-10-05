@@ -264,6 +264,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
   const [picked, setPicked] = useState<EquipmentCatalogItem | null>(null);
   const [qty, setQty] = useState(1);
   const [settlement, setSettlement] = useState<Settlement>("무상");
+  const [externalSupplyQty, setExternalSupplyQty] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -296,9 +297,8 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
     setSubmitting(true);
     setError(null);
     try {
-      // 유상은 스케줄상세/계약서로 승격, 무상은 반출 카드 운영 원장에만 기록.
-      // 유상 가용 불가 등 실패 시 에러를 던지므로 닫지 않고 표시한다.
-      await addOnsiteItems(tradeId, entries, settlement);
+      // 무상/유상 모두 원장에 기록하고, 외부 지원 수량만 자체 재고 검사에서 제외한다.
+      await addOnsiteItems(tradeId, entries, settlement, Math.min(externalSupplyQty, isSet ? 1 : qty));
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : "현장 추가 실패");
@@ -313,7 +313,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
         <input
           autoFocus
           value={picked ? picked.name : q}
-          onChange={(e) => { setPicked(null); setQ(e.target.value); }}
+          onChange={(e) => { setPicked(null); setQ(e.target.value); setExternalSupplyQty(0); }}
           placeholder="품목·세트 검색 (목록에서 선택 · 없으면 자유입력)"
           className="w-full rounded-lg border border-line bg-white px-3 py-2 text-[13.5px] outline-none focus:border-brand-500"
         />
@@ -321,13 +321,13 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
           <div className="mt-1 flex items-center gap-1.5 text-[11.5px]">
             <span className="rounded bg-brand-100 px-1.5 py-0.5 font-bold text-brand-700">{picked.category === "세트" ? "세트" : coarseGroup(picked.category)}</span>
             <span className="text-ink-mute">{isSet ? "세트 — 구성품 자동 전개 · 재고 연동" : "재고 연동됨"}</span>
-            <button onClick={() => { setPicked(null); setQ(""); }} className="ml-auto text-ink-faint">변경</button>
+            <button onClick={() => { setPicked(null); setQ(""); setExternalSupplyQty(0); }} className="ml-auto text-ink-faint">변경</button>
           </div>
         )}
         {showList && (
           <div className="mt-1 max-h-44 overflow-y-auto rounded-lg ring-1 ring-line">
             {matches.map((m) => (
-              <button key={m.name} onClick={() => { setPicked(m); setQ(m.name); }} className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]">
+              <button key={m.name} onClick={() => { setPicked(m); setQ(m.name); setExternalSupplyQty(0); }} className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]">
                 <span className="flex-1 text-[13px] text-ink">{m.name}</span>
                 <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-line/40 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
               </button>
@@ -343,6 +343,22 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
         )}
       </div>
 
+      <div className="space-y-1.5 rounded-lg bg-paper p-2 text-[12px]">
+        <label className="flex items-center gap-2 font-semibold text-ink-soft">
+          <input type="checkbox" checked={externalSupplyQty > 0} disabled={submitting}
+            onChange={(e) => { setExternalSupplyQty(e.target.checked ? 1 : 0); setError(null); }} />
+          외부 지원 포함
+        </label>
+        {externalSupplyQty > 0 && <>
+          <div className="flex items-center justify-between gap-2 text-ink-soft">
+            <span>확보한 외부 지원 {isSet ? "세트" : "수량"}</span>
+            <Stepper value={Math.min(externalSupplyQty, isSet ? 1 : qty)} min={1} max={isSet ? 1 : qty} onChange={setExternalSupplyQty} />
+          </div>
+          <p className="text-ink-mute">총 {isSet ? 1 : qty}개 중 외부 지원 {Math.min(externalSupplyQty, isSet ? 1 : qty)}개 · 나머지만 자체 재고 확인</p>
+          {isSet && <p className="text-ink-mute">세트 구성품 전체를 외부 지원으로 기록합니다.</p>}
+        </>}
+      </div>
+
       {error && (
         <div className="rounded-lg bg-attention-bg px-2.5 py-1.5 text-[12px] font-semibold leading-snug text-attention-fg ring-1 ring-attention-ring">
           {error}
@@ -350,7 +366,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
       )}
 
       <div className="flex items-center gap-2">
-        {!isSet && <Stepper value={qty} onChange={setQty} />}
+        {!isSet && <Stepper value={qty} min={1} onChange={(v) => { setQty(v); setExternalSupplyQty((n) => Math.min(n, v)); }} />}
         <div className="flex gap-1">
           {(["무상", "유상"] as Settlement[]).map((s) => (
             <button key={s} onClick={() => setSettlement(s)} className={`tap rounded-md px-2.5 py-1 text-[12px] font-bold ${settlement === s ? "bg-brand-600 text-white" : "text-ink-mute ring-1 ring-line"}`}>{s}</button>

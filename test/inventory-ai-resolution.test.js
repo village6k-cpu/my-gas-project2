@@ -3,7 +3,12 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
-function env(){const c={Utilities:{formatDate:d=>d.toISOString()}};vm.createContext(c);for(const name of ['inventorySupply.js','inventoryRisk.js','inventoryRiskMonitor.js','inventorySemanticReview.js','preRegistrationStockAlerts.js','inventoryStockIntake.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'..',name),'utf8'),c);return c;}
+// Keep the October booking fixtures in the future regardless of the machine clock.
+class FixtureDate extends Date {
+ constructor(...args){super(...(args.length ? args : ['2026-09-14T00:00:00+09:00']));}
+ static now(){return new Date('2026-09-14T00:00:00+09:00').getTime();}
+}
+function env(){const c={Date:FixtureDate,Utilities:{formatDate:d=>d.toISOString()}};vm.createContext(c);for(const name of ['inventorySupply.js','inventoryRisk.js','inventoryRiskMonitor.js','inventorySemanticReview.js','preRegistrationStockAlerts.js','inventoryStockIntake.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'..',name),'utf8'),c);return c;}
 const period={start:'2026-10-01T09:00:00+09:00',end:'2026-10-02T09:00:00+09:00'};
 const item=(x={})=>({id:'EQ-1',name:'스크림 세트',stock:3,maintenance:0,status:'정상',aliases:[],...x});
 const row=(x={})=>({id:'s1',tradeId:'t1',name:'스크림세트',setName:'스크림세트',quantity:1,status:'대기',...period,...x});
