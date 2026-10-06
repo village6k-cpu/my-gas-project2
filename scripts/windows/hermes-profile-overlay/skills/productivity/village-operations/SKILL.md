@@ -101,6 +101,8 @@ repeat a possibly completed write or send.
 
 See [registered trade date and item changes](references/registered-trade-date-change-remove-item.md)
 for the bounded correction path.
+See [selected set components and custom daily pricing](references/registered-trade-selected-set-components.md)
+when staff approves a subset of one catalog set with an exact daily unit price.
 
 For one authorized registered-trade correction, resolve the active runtime root
 from [Windows runtime and sources](references/windows-runtime-and-sources.md),

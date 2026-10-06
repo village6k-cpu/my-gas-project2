@@ -1050,6 +1050,171 @@ test('actual batch/set GAS add allocates unique monotonic suffixes 100 and 101',
   assert.deepEqual(Array.from(plannedRowWidths), [13, 13]);
 });
 
+test('actual GAS add plans only the approved catalog components at the approved daily unit price', () => {
+  const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
+  const body = section(gas, 'function dashboardAddEquipments(', '\nvar DASHBOARD_ONSITE_IDEM_PROP_');
+  const tradeId = '261005-001';
+  const privateToken = {};
+  const sched = {
+    getLastRow: () => 2,
+    getRange: () => ({
+      getDisplayValues: () => [[
+        '2026-10-06', '02:00', '2026-10-08', '03:00', '', '', '', '테스트 고객',
+      ]],
+    }),
+  };
+  const ss = {
+    getSheetByName(name) {
+      if (name === '스케줄상세') return sched;
+      if (name === '장비마스터' || name === '세트마스터') return {};
+      return null;
+    },
+  };
+  const context = {
+    Date, JSON, Math, Object, Array, String, Number, RegExp, Error,
+    REGISTERED_STAFF_DEMAND_TOKEN_: privateToken,
+    normalizeDashboardAddEntries_: (entries) => entries.map((entry) => ({ name: entry.name, qty: entry.qty })),
+    SpreadsheetApp: { getActiveSpreadsheet: () => ss },
+    findDashboardRowsByValue_: () => [2],
+    readDashboardScheduleRows_: () => [[`${tradeId}-02`]],
+    parseDT: () => new Date('2026-10-06T02:00:00+09:00'),
+    buildDashboardSetLookup_: () => ({
+      items: { '소니 BURANO 베이직세트': true },
+      prices: { '소니 BURANO 베이직세트': 200000 },
+      components: {
+        '소니 BURANO 베이직세트': [
+          { name: '소니 BURANO 바디(풀케이지)', qty: 1 },
+          { name: '셔틀러 비디오 20', qty: 1 },
+          { name: '소니 CF-B 1920', qty: 1 },
+          { name: 'V마운트 배터리(SWIT)', qty: 4 },
+        ],
+      },
+    }),
+    buildAvailabilityItems_: (name, qty, components) => [
+      { name, qty },
+      ...components.map((component) => ({ name: component.name, qty: component.qty * qty })),
+    ],
+    buildDashboardEquipmentMeta_: () => ({ equipment: {} }),
+    mergeAvailabilityItems_: (items) => items,
+    dashboardAddedItemsFromRows_: (rows) => rows.map((row) => ({
+      scheduleId: row[0], setName: row[2], name: row[3], qty: row[4], unitPrice: row[11],
+      isComponent: !!row[2] && row[2] !== row[3],
+    })),
+  };
+  vm.runInNewContext(`${section(gas, 'function requireSetMasterPrice_(', '\nfunction buildDashboardEquipmentMeta_')}\n${body}\nthis.addMany = dashboardAddEquipments;`, context);
+
+  const approved = [{
+    name: '소니 BURANO 베이직세트', qty: 1,
+    expectedCatalogUnitPrice: 200000, unitPrice: 150000,
+    pricingBasis: 'daily_unit_price',
+    selectedComponents: [
+      { name: '소니 BURANO 바디(풀케이지)', qty: 1 },
+      { name: '소니 CF-B 1920', qty: 1 },
+      { name: 'V마운트 배터리(SWIT)', qty: 4 },
+    ],
+  }];
+  const result = context.addMany(tradeId, approved, {
+    dryRun: true, rawNames: true, lockAlreadyHeld: true,
+    deferContractRegeneration: true, staffApprovalToken: privateToken,
+    availabilityPreflighted: true,
+  });
+
+  assert.equal(result.success, true, result.error);
+  assert.deepEqual(Array.from(result.plannedItems, (row) => [row.name, row.qty, row.unitPrice]), [
+    ['소니 BURANO 베이직세트', 1, 150000],
+    ['소니 BURANO 바디(풀케이지)', 1, 0],
+    ['소니 CF-B 1920', 1, 0],
+    ['V마운트 배터리(SWIT)', 4, 0],
+  ]);
+
+  const stalePrice = context.addMany(tradeId, [{ ...approved[0], expectedCatalogUnitPrice: 250000 }], {
+    dryRun: true, rawNames: true, lockAlreadyHeld: true,
+    deferContractRegeneration: true, staffApprovalToken: privateToken,
+    availabilityPreflighted: true,
+  });
+  assert.match(stalePrice.error, /catalog|단가|price/i);
+
+  const unknownComponent = context.addMany(tradeId, [{ ...approved[0], selectedComponents: [
+    ...approved[0].selectedComponents,
+    { name: '카탈로그에 없는 모니터', qty: 1 },
+  ] }], {
+    dryRun: true, rawNames: true, lockAlreadyHeld: true,
+    deferContractRegeneration: true, staffApprovalToken: privateToken,
+    availabilityPreflighted: true,
+  });
+  assert.match(unknownComponent.error, /component|구성품|catalog/i);
+});
+
+test('authoritative custom-set verification fences the exact unit price and regenerated ledger amount', () => {
+  const baselineRows = [{
+    scheduleId: '261005-001-01', setName: '에코플로우 델타2 맥스',
+    name: '에코플로우 델타2 맥스', qty: 1, unitPrice: 60000, isComponent: false,
+  }];
+  const { verifyActual, baseline } = harness({ baselineRows });
+  baseline.contract = {
+    startDate: '2026-10-05', startTime: '23:00',
+    endDate: '2026-10-08', endTime: '06:00', rounds: 3, status: '예약',
+  };
+  baseline.schedule.periods = ['2026-10-05|23:00|2026-10-08|06:00'];
+  const setName = '소니 BURANO 베이직세트';
+  const correction = {
+    tradeId: '261005-001', operationId: 'custom-set-proof', sourceRequestId: null,
+    expectedPeriod: { ...baseline.contract },
+    dateChange: {
+      newStartDate: '2026-10-06', newEndDate: '2026-10-08',
+      startTime: '02:00', endTime: '03:00', allowConflicts: false,
+    },
+    remove: [],
+    add: [{
+      name: setName, qty: 1, expectedCatalogUnitPrice: 200000, unitPrice: 150000,
+      pricingBasis: 'daily_unit_price',
+      selectedComponents: [
+        { name: '소니 BURANO 바디(풀케이지)', qty: 1 },
+        { name: 'V마운트 배터리(SWIT)', qty: 4 },
+      ],
+    }],
+  };
+  const added = [
+    { scheduleId: '261005-001-03', setName, name: setName, qty: 1, unitPrice: 150000, isComponent: false },
+    { scheduleId: '261005-001-04', setName, name: '소니 BURANO 바디(풀케이지)', qty: 1, unitPrice: 0, isComponent: true },
+    { scheduleId: '261005-001-05', setName, name: 'V마운트 배터리(SWIT)', qty: 4, unitPrice: 0, isComponent: true },
+  ];
+  const finalState = {
+    contract: {
+      startDate: '2026-10-06', startTime: '02:00',
+      endDate: '2026-10-08', endTime: '03:00', rounds: 2, status: '예약',
+    },
+    schedule: {
+      periods: ['2026-10-06|02:00|2026-10-08|03:00'],
+      rows: [...baselineRows, ...added],
+      topLevelQuantities: { '에코플로우 델타2 맥스': 1, [setName]: 1 },
+    },
+    ledger: {
+      rows: 1, startDate: '2026-10-06', amount: 420000,
+      contractLink: 'https://docs.example/custom-contract',
+      links: ['https://docs.example/custom-contract'],
+    },
+  };
+  const regeneration = {
+    success: true, fileId: 'custom-contract', url: finalState.ledger.contractLink,
+    finalAmount: 420000, linkUpdate: { success: true },
+  };
+  const operationResults = {
+    removalPlan: { scheduleIds: [] },
+    addPlan: { plannedItems: added },
+    add: { addedItems: added },
+  };
+
+  assert.equal(verifyActual(baseline, finalState, correction, regeneration, operationResults), finalState);
+  assert.throws(() => verifyActual(
+    baseline,
+    { ...finalState, ledger: { ...finalState.ledger, amount: 410000 } },
+    correction,
+    regeneration,
+    operationResults,
+  ), /amount|금액|ledger/i);
+});
+
 test('actual historical GAS add preserves returned state and delegates no checkout baseline projection', () => {
   const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
   const body = section(gas, 'function dashboardAddEquipments(', '\nvar DASHBOARD_ONSITE_IDEM_PROP_');

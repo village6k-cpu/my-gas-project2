@@ -126,6 +126,7 @@ function harness({
     },
     Utilities: { formatDate: () => '260907' },
     _normalizeConfirmRequestSchedule_: (request) => ({ ...request }),
+    getDashboardEquipNameList_: () => ['새 장비'],
     _resolveConfirmRequestPlannedEquipmentName_: (name) => String(name),
     _resolveStaffConfirmedPendingRequestFence_: () => {
       fenceCalls += 1;

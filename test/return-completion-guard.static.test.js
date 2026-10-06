@@ -323,7 +323,7 @@ test('품목 추가는 완료를 재오픈해 기준선에 합치고, 삭제는 
     gas.indexOf('function dashboardRecordOnsiteAddon'),
     gas.indexOf('\nfunction dashboardUpdateEquipmentQty', gas.indexOf('function dashboardRecordOnsiteAddon')),
   );
-  assert.match(onsiteGas, /forceZeroPrice:\s*!isPaid/);
+  assert.match(onsiteGas, /forceZeroPrice:\s*isFree/);
 });
 
 test('GAS 완료 API는 로컬 정본과 revision을 확정하고 앱 서버 CAS가 Supabase 순서를 보장한다', () => {
