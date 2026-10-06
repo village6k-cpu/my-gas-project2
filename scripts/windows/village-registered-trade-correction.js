@@ -134,16 +134,20 @@ function normalizeExpectedPeriod(value) {
 
 function normalizeStaffApproval(value) {
   if (value === undefined) return null;
-  const fields = new Set(['source', 'conversationRevision', 'customerRequest', 'staffConfirmation']);
+  const fields = new Set(['source', 'sourceMessageId', 'conversationRevision', 'customerRequest', 'staffConfirmation']);
+  const slackSource = value?.source === 'slack_staff_confirmed';
   if (!value || typeof value !== 'object' || Array.isArray(value)
       || Object.keys(value).some(field => !fields.has(field))
-      || value.source !== 'kakao_staff_confirmed'
+      || (value.source !== 'kakao_staff_confirmed' && !slackSource)
       || typeof value.customerRequest !== 'string' || typeof value.staffConfirmation !== 'string'
-      || !Number.isSafeInteger(value.conversationRevision) || value.conversationRevision < 1) {
+      || !Number.isSafeInteger(value.conversationRevision) || value.conversationRevision < 1
+      || (slackSource && (typeof value.sourceMessageId !== 'string'
+        || !/^\d{10}\.\d{6}$/.test(value.sourceMessageId)))) {
     throw new Error('staffApproval requires exact Kakao staff confirmation evidence');
   }
   return {
     source: value.source,
+    ...(slackSource ? { sourceMessageId: value.sourceMessageId } : {}),
     conversationRevision: value.conversationRevision,
     customerRequest: requiredText(value.customerRequest, 'staffApproval.customerRequest', 2000),
     staffConfirmation: requiredText(value.staffConfirmation, 'staffApproval.staffConfirmation', 2000)
@@ -236,7 +240,9 @@ function normalizeCorrectionInput(input) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       throw new Error(`add[${index}] must be an object`);
     }
-    const allowed = new Set(['name', 'qty']);
+    const allowed = new Set([
+      'name', 'qty', 'expectedCatalogUnitPrice', 'unitPrice', 'pricingBasis', 'selectedComponents'
+    ]);
     for (const field of Object.keys(entry)) {
       if (!allowed.has(field)) throw new Error(`Unsupported or forbidden add field: ${field}`);
     }
@@ -244,7 +250,47 @@ function normalizeCorrectionInput(input) {
     if (!Number.isSafeInteger(qty) || qty < 1 || qty > 99) {
       throw new Error(`add[${index}].qty must be an integer from 1 to 99`);
     }
-    return { name: requiredText(entry.name, `add[${index}].name`, 160), qty };
+    const normalizedAdd = { name: requiredText(entry.name, `add[${index}].name`, 160), qty };
+    const customFields = ['expectedCatalogUnitPrice', 'unitPrice', 'pricingBasis', 'selectedComponents'];
+    const hasCustomField = customFields.some(field => Object.hasOwn(entry, field));
+    if (!hasCustomField) return normalizedAdd;
+    if (!customFields.every(field => Object.hasOwn(entry, field))) {
+      throw new Error(`add[${index}] custom set fields must be supplied together`);
+    }
+    if (!Number.isSafeInteger(entry.expectedCatalogUnitPrice) || entry.expectedCatalogUnitPrice < 0) {
+      throw new Error(`add[${index}].expectedCatalogUnitPrice must be a non-negative integer`);
+    }
+    if (!Number.isSafeInteger(entry.unitPrice) || entry.unitPrice < 0) {
+      throw new Error(`add[${index}].unitPrice must be a non-negative integer`);
+    }
+    if (entry.pricingBasis !== 'daily_unit_price') {
+      throw new Error(`add[${index}].pricingBasis must be daily_unit_price`);
+    }
+    if (!Array.isArray(entry.selectedComponents)
+        || entry.selectedComponents.length < 1 || entry.selectedComponents.length > 40) {
+      throw new Error(`add[${index}].selectedComponents must contain 1-40 exact components`);
+    }
+    const seenComponents = new Set();
+    const selectedComponents = entry.selectedComponents.map((component, componentIndex) => {
+      if (!component || typeof component !== 'object' || Array.isArray(component)
+          || Object.keys(component).some(field => field !== 'name' && field !== 'qty')) {
+        throw new Error(`add[${index}].selectedComponents[${componentIndex}] is invalid`);
+      }
+      const name = requiredText(component.name, `add[${index}].selectedComponents[${componentIndex}].name`, 160);
+      if (seenComponents.has(name)) throw new Error(`add[${index}] duplicate selected component: ${name}`);
+      if (!Number.isSafeInteger(component.qty) || component.qty < 1 || component.qty > 99) {
+        throw new Error(`add[${index}].selectedComponents[${componentIndex}].qty must be an integer from 1 to 99`);
+      }
+      seenComponents.add(name);
+      return { name, qty: component.qty };
+    });
+    return {
+      ...normalizedAdd,
+      expectedCatalogUnitPrice: entry.expectedCatalogUnitPrice,
+      unitPrice: entry.unitPrice,
+      pricingBasis: entry.pricingBasis,
+      selectedComponents,
+    };
   });
 
   const normalized = {
@@ -272,6 +318,10 @@ function normalizeCorrectionInput(input) {
     if (remove.some(entry => entry.expectedQty === undefined)) {
       throw new Error('staffApproval requires exact removal expectedQty');
     }
+  }
+  const hasCustomSetAdd = add.some(entry => Array.isArray(entry.selectedComponents));
+  if (hasCustomSetAdd && (!normalized.staffApproval || !normalized.expectedPeriod || normalized.sendEstimate)) {
+    throw new Error('custom set additions require staffApproval and expectedPeriod without customer send');
   }
   if (!normalized.dateChange && remove.length === 0 && add.length === 0 && !normalized.sendEstimate && !priceChanges.length) {
     throw new Error('At least one correction or send must be requested');
@@ -411,6 +461,37 @@ function verifyPriceCorrectionReadback(normalized, payload) {
   return true;
 }
 
+function verifyCustomSetAddReadback(normalized, payload) {
+  const customAdds = normalized.add.filter(entry => Array.isArray(entry.selectedComponents));
+  if (!customAdds.length) return true;
+  const beforeRows = payload.authoritativeReadback?.before?.schedule?.rows;
+  const afterRows = payload.readback?.schedule?.rows;
+  const regeneration = payload.contractRegeneration;
+  const ledgerAmount = payload.readback?.ledger?.amount;
+  if (!Array.isArray(beforeRows) || !Array.isArray(afterRows)
+      || !Number.isSafeInteger(regeneration?.finalAmount) || regeneration.finalAmount < 0
+      || !Number.isSafeInteger(ledgerAmount) || ledgerAmount !== regeneration.finalAmount) return false;
+  const beforeIds = new Set(beforeRows.map(row => String(row.scheduleId || '').trim()));
+  for (const custom of customAdds) {
+    const added = afterRows.filter(row => !beforeIds.has(String(row.scheduleId || '').trim())
+      && String(row.setName || '').trim() === custom.name);
+    const headers = added.filter(row => row.isComponent === false && String(row.name || '').trim() === custom.name);
+    if (headers.length !== 1 || Number(headers[0].qty) !== custom.qty
+        || Number(headers[0].unitPrice) !== custom.unitPrice) return false;
+    const components = added.filter(row => row.isComponent === true);
+    if (components.length !== custom.selectedComponents.length) return false;
+    const seen = new Set();
+    for (const selected of custom.selectedComponents) {
+      const matches = components.filter(row => String(row.name || '').trim() === selected.name);
+      if (matches.length !== 1 || seen.has(selected.name)
+          || Number(matches[0].qty) !== selected.qty * custom.qty
+          || Number(matches[0].unitPrice) !== 0) return false;
+      seen.add(selected.name);
+    }
+  }
+  return true;
+}
+
 async function runRegisteredTradeCorrection({
   config,
   input,
@@ -491,6 +572,7 @@ async function runRegisteredTradeCorrection({
       || !validRegeneration
       || !validRequestFinalization
       || !verifyPriceCorrectionReadback(normalized, correctionPayload)
+      || !verifyCustomSetAddReadback(normalized, correctionPayload)
       || correctionPayload.customerNotificationSent !== false
     ) {
       throw new CorrectionStageError(

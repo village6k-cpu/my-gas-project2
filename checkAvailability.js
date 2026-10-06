@@ -8785,6 +8785,7 @@ function dashboardAddedItemsFromRows_(rows) {
       name: name,
       qty: qty,
       quantity: qty,
+      unitPrice: Number((row && row[11]) || 0) || 0,
       setName: setName,
       isHeader: isHeader,
       isSet: isHeader && !!setNamesWithComponents[name || setName],
@@ -9014,6 +9015,7 @@ function isDashboardTradeCheckoutStarted_(ss, tid) {
 
 function dashboardAddEquipments(tid, entries, options) {
   tid = String(tid || "").trim();
+  var rawAddEntries = Array.isArray(entries) ? entries.slice() : [];
   var addEntries = normalizeDashboardAddEntries_(entries);
   if (!tid || addEntries.length === 0) return { error: "tid와 장비명 필수" };
 
@@ -9056,6 +9058,30 @@ function dashboardAddEquipments(tid, entries, options) {
   if (options.staffApprovalToken && !staffApprovedDemand) {
     return { error: '직원 승인 수요 반영은 검증된 등록변경 작업에서만 허용됩니다.', code: 'FORBIDDEN' };
   }
+  var customSetEntries = {};
+  var customSetInputError = '';
+  rawAddEntries.forEach(function(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
+    var customFields = ['expectedCatalogUnitPrice', 'unitPrice', 'pricingBasis', 'selectedComponents'];
+    var hasCustomField = customFields.some(function(field) {
+      return Object.prototype.hasOwnProperty.call(entry, field);
+    });
+    if (!hasCustomField) return;
+    var name = String(entry.name || '').trim();
+    if (!staffApprovedDemand) {
+      customSetInputError = '맞춤 세트 구성·단가는 검증된 직원 승인 등록변경 작업에서만 허용됩니다.';
+      return;
+    }
+    if (!name || customSetEntries[name] || entry.pricingBasis !== 'daily_unit_price' ||
+        !Number.isSafeInteger(entry.expectedCatalogUnitPrice) || entry.expectedCatalogUnitPrice < 0 ||
+        !Number.isSafeInteger(entry.unitPrice) || entry.unitPrice < 0 ||
+        !Array.isArray(entry.selectedComponents) || !entry.selectedComponents.length) {
+      customSetInputError = '맞춤 세트 구성·단가 입력이 올바르지 않습니다.';
+      return;
+    }
+    customSetEntries[name] = entry;
+  });
+  if (customSetInputError) return { error: customSetInputError, code: 'INVALID_CUSTOM_SET' };
   var requireExactCatalog = options.requireExactCatalog === true;
   var availabilityPreflighted = options.availabilityPreflighted === true && lockAlreadyHeld &&
     (typeof inventorySupplyPlan_ !== "function" || !!options.supplyPlan);
@@ -9216,15 +9242,43 @@ function dashboardAddEquipments(tid, entries, options) {
     var externalSupplyItems = [];
     try {
     addEntries.forEach(function(entry) {
-      var components = (setLookup.components[entry.name] || []).filter(function(c) {
+      var catalogComponents = (setLookup.components[entry.name] || []).filter(function(c) {
         var name = String(c.name || "").trim();
         return name !== "" && name !== entry.name;
       });
+      var components = catalogComponents;
+      var price = forceZeroPrice ? 0 : requireSetMasterPrice_(entry.name, setLookup);
+      var customSet = customSetEntries[entry.name];
+      if (customSet) {
+        if (!(setLookup.items && setLookup.items[entry.name]) || !catalogComponents.length) {
+          throw new Error('세트마스터에 없는 맞춤 세트입니다: ' + entry.name);
+        }
+        var catalogPrice = Number(setLookup.prices[entry.name] || 0);
+        if (catalogPrice !== customSet.expectedCatalogUnitPrice) {
+          throw new Error('세트마스터 단가가 승인 기준과 달라졌습니다: ' + entry.name);
+        }
+        var catalogByName = {};
+        catalogComponents.forEach(function(component) {
+          catalogByName[String(component.name || '').trim()] = Number(component.qty || 1) || 1;
+        });
+        var selectedSeen = {};
+        components = customSet.selectedComponents.map(function(component) {
+          var selectedName = String(component && component.name || '').trim();
+          var selectedQty = Number(component && component.qty);
+          if (!selectedName || selectedSeen[selectedName] || !Number.isSafeInteger(selectedQty) || selectedQty < 1 ||
+              catalogByName[selectedName] !== selectedQty) {
+            throw new Error('세트마스터 구성품과 일치하지 않습니다: ' + selectedName);
+          }
+          selectedSeen[selectedName] = true;
+          return { name: selectedName, qty: selectedQty };
+        });
+        price = customSet.unitPrice;
+      }
       rowSpecs.push({
         name: entry.name,
         qty: entry.qty,
         components: components,
-        price: forceZeroPrice ? 0 : requireSetMasterPrice_(entry.name, setLookup),
+        price: price,
         isSetMasterItem: !!(setLookup.items && setLookup.items[entry.name])
       });
       if (entry.qty > externalSupplyQty) {
@@ -20332,15 +20386,51 @@ function normalizeRegisteredTradeCorrection_(args) {
   if (args.add !== undefined && !Array.isArray(args.add)) throw new Error('add는 배열이어야 합니다');
   var add = (Array.isArray(args.add) ? args.add : []).map(function(entry) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('add 항목은 객체여야 합니다');
+    var addAllowed = {
+      name: true, qty: true, expectedCatalogUnitPrice: true, unitPrice: true,
+      pricingBasis: true, selectedComponents: true
+    };
     Object.keys(entry).forEach(function(key) {
-      if (key !== 'name' && key !== 'qty') throw new Error('지원하지 않는 add 필드: ' + key);
+      if (!addAllowed[key]) throw new Error('지원하지 않는 add 필드: ' + key);
     });
     var name = String(entry.name || '').trim();
     if (!name || name.length > 160) throw new Error('add 장비명 형식이 올바르지 않습니다');
     if (typeof entry.qty !== 'number' || !Number.isInteger(entry.qty) || entry.qty < 1 || entry.qty > 99) {
       throw new Error('add qty는 1~99 정수여야 합니다');
     }
-    return { name: name, qty: entry.qty };
+    var normalizedAdd = { name: name, qty: entry.qty };
+    var customFields = ['expectedCatalogUnitPrice', 'unitPrice', 'pricingBasis', 'selectedComponents'];
+    var hasCustomField = customFields.some(function(field) {
+      return Object.prototype.hasOwnProperty.call(entry, field);
+    });
+    if (!hasCustomField) return normalizedAdd;
+    if (!customFields.every(function(field) { return Object.prototype.hasOwnProperty.call(entry, field); })) {
+      throw new Error('맞춤 세트 필드는 모두 함께 지정해야 합니다');
+    }
+    if (!Number.isSafeInteger(entry.expectedCatalogUnitPrice) || entry.expectedCatalogUnitPrice < 0 ||
+        !Number.isSafeInteger(entry.unitPrice) || entry.unitPrice < 0 ||
+        entry.pricingBasis !== 'daily_unit_price' || !Array.isArray(entry.selectedComponents) ||
+        !entry.selectedComponents.length || entry.selectedComponents.length > 40) {
+      throw new Error('맞춤 세트 구성·단가 형식이 올바르지 않습니다');
+    }
+    var selectedSeen = {};
+    normalizedAdd.expectedCatalogUnitPrice = entry.expectedCatalogUnitPrice;
+    normalizedAdd.unitPrice = entry.unitPrice;
+    normalizedAdd.pricingBasis = entry.pricingBasis;
+    normalizedAdd.selectedComponents = entry.selectedComponents.map(function(component) {
+      if (!component || typeof component !== 'object' || Array.isArray(component) ||
+          Object.keys(component).some(function(key) { return key !== 'name' && key !== 'qty'; })) {
+        throw new Error('맞춤 세트 구성품 형식이 올바르지 않습니다');
+      }
+      var componentName = String(component.name || '').trim();
+      if (!componentName || componentName.length > 160 || selectedSeen[componentName] ||
+          !Number.isSafeInteger(component.qty) || component.qty < 1 || component.qty > 99) {
+        throw new Error('맞춤 세트 구성품 이름·수량이 올바르지 않습니다');
+      }
+      selectedSeen[componentName] = true;
+      return { name: componentName, qty: component.qty };
+    });
+    return normalizedAdd;
   });
   if (add.length > 100) throw new Error('add는 최대 100개입니다');
   var priceChanges = normalizeRegisteredTradePriceChanges_(args.priceChanges, tradeId);
@@ -20351,13 +20441,15 @@ function normalizeRegisteredTradeCorrection_(args) {
   var staffApproval = null;
   if (args.staffApproval !== undefined) {
     var approval = args.staffApproval;
-    var approvalFields = { source: true, conversationRevision: true, customerRequest: true, staffConfirmation: true };
+    var approvalFields = { source: true, sourceMessageId: true, conversationRevision: true, customerRequest: true, staffConfirmation: true };
+    var slackSource = approval && approval.source === 'slack_staff_confirmed';
     if (!approval || typeof approval !== 'object' || Array.isArray(approval) ||
         Object.keys(approval).some(function(key) { return !approvalFields[key]; }) ||
-        approval.source !== 'kakao_staff_confirmed' ||
+        (approval.source !== 'kakao_staff_confirmed' && !slackSource) ||
         !Number.isSafeInteger(approval.conversationRevision) || approval.conversationRevision < 1 ||
         typeof approval.customerRequest !== 'string' || !approval.customerRequest.trim() || approval.customerRequest.length > 2000 ||
-        typeof approval.staffConfirmation !== 'string' || !approval.staffConfirmation.trim() || approval.staffConfirmation.length > 2000) {
+        typeof approval.staffConfirmation !== 'string' || !approval.staffConfirmation.trim() || approval.staffConfirmation.length > 2000 ||
+        (slackSource && (typeof approval.sourceMessageId !== 'string' || !/^\d{10}\.\d{6}$/.test(approval.sourceMessageId)))) {
       throw new Error('staffApproval에 정확한 카카오 직원 승인 근거가 필요합니다');
     }
     if (!expectedPeriod) throw new Error('staffApproval requires expectedPeriod');
@@ -20368,9 +20460,14 @@ function normalizeRegisteredTradeCorrection_(args) {
       source: approval.source, conversationRevision: approval.conversationRevision,
       customerRequest: approval.customerRequest.trim(), staffConfirmation: approval.staffConfirmation.trim()
     };
+    if (slackSource) staffApproval.sourceMessageId = approval.sourceMessageId;
   }
   if (priceChanges.length && (!staffApproval || !expectedPeriod || dateChange || remove.length || add.length || sourceRequestId)) {
     throw new Error('priceChanges requires staffApproval and expectedPeriod, and must be price-only');
+  }
+  var hasCustomSetAdd = add.some(function(entry) { return Array.isArray(entry.selectedComponents); });
+  if (hasCustomSetAdd && (!staffApproval || !expectedPeriod)) {
+    throw new Error('맞춤 세트 구성·단가는 정확한 직원 승인과 기존 기간 기준선이 필요합니다');
   }
   var normalized = {
     tradeId: tradeId,
@@ -20688,7 +20785,14 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
     var qty = Number(scheduleRaw[si][4] || scheduleDisplay[si][4] || 1) || 1;
     var isComponent = !!setName && setName !== name;
     var scheduleId = String(scheduleDisplay[si][0] || scheduleRaw[si][0] || '').trim();
-    rows.push({ scheduleId: scheduleId, setName: setName, name: name, qty: qty, isComponent: isComponent });
+    rows.push({
+      scheduleId: scheduleId,
+      setName: setName,
+      name: name,
+      qty: qty,
+      unitPrice: Number(scheduleRaw[si][11] || scheduleDisplay[si][11] || 0) || 0,
+      isComponent: isComponent
+    });
     if (!isComponent) topLevelQuantities[name] = (topLevelQuantities[name] || 0) + qty;
     periods[[
       registeredTradeCorrectionDate_(scheduleRaw[si][5], scheduleDisplay[si][5]),
@@ -20711,16 +20815,18 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
   if (!ledgerUrl) throw new Error('개고생2_URL 속성이 없습니다');
   var ledgerSheet = SpreadsheetApp.openByUrl(ledgerUrl).getSheetByName('거래내역');
   if (!ledgerSheet || ledgerSheet.getLastRow() < 2) throw new Error('거래내역 원장을 찾을 수 없습니다');
-  var ledgerRaw = ledgerSheet.getRange(2, 1, ledgerSheet.getLastRow() - 1, 5).getValues();
-  var ledgerDisplay = ledgerSheet.getRange(2, 1, ledgerSheet.getLastRow() - 1, 5).getDisplayValues();
+  var ledgerRaw = ledgerSheet.getRange(2, 1, ledgerSheet.getLastRow() - 1, 9).getValues();
+  var ledgerDisplay = ledgerSheet.getRange(2, 1, ledgerSheet.getLastRow() - 1, 9).getDisplayValues();
   var ledgerRows = 0;
   var ledgerDates = {};
   var ledgerLinks = {};
+  var ledgerAmount = null;
   for (var li = 0; li < ledgerRaw.length; li++) {
     if (String(ledgerRaw[li][4] || '').trim() !== tradeId) continue;
     ledgerRows++;
     ledgerDates[registeredTradeCorrectionDate_(ledgerRaw[li][0], ledgerDisplay[li][0])] = true;
     ledgerLinks[String(ledgerRaw[li][2] || '').trim()] = true;
+    ledgerAmount = Number.isSafeInteger(ledgerRaw[li][8]) && ledgerRaw[li][8] >= 0 ? ledgerRaw[li][8] : null;
   }
   var dateKeys = Object.keys(ledgerDates);
   var linkKeys = Object.keys(ledgerLinks);
@@ -20729,6 +20835,7 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
     schedule: { rows: rows, periods: Object.keys(periods), topLevelQuantities: topLevelQuantities },
     ledger: {
       rows: ledgerRows,
+      amount: ledgerRows === 1 ? ledgerAmount : null,
       startDate: dateKeys.length === 1 ? dateKeys[0] : '',
       dates: dateKeys,
       contractLink: linkKeys.length === 1 ? linkKeys[0] : '',
@@ -20939,7 +21046,8 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
           String(row.scheduleId || '').trim(),
           String(row.setName || '').trim(),
           String(row.name || '').trim(),
-          Number(row.qty || row.quantity) || 1
+          Number(row.qty || row.quantity) || 1,
+          Number(row.unitPrice) || 0
         ].join('|');
       }).sort();
     }
@@ -20962,21 +21070,28 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
     var expectedRows = (baseline.schedule.rows || []).filter(function(row) {
       return !removedPlannedIdMap[String(row.scheduleId || '').trim()];
     }).map(function(row) {
-      return { scheduleId: row.scheduleId, setName: row.setName, name: row.name, qty: Number(row.qty) || 1 };
+      return {
+        scheduleId: row.scheduleId, setName: row.setName, name: row.name,
+        qty: Number(row.qty) || 1, unitPrice: Number(row.unitPrice) || 0
+      };
     });
     plannedAddedItems.forEach(function(row) {
       expectedRows.push({
         scheduleId: String(row.scheduleId || '').trim(),
         setName: String(row.setName || '').trim(),
         name: String(row.name || '').trim(),
-        qty: Number(row.qty || row.quantity) || 1
+        qty: Number(row.qty || row.quantity) || 1,
+        unitPrice: Number(row.unitPrice) || 0
       });
     });
 
     function rowMultiset_(rows) {
       var counts = {};
       (rows || []).forEach(function(row) {
-        var key = [String(row.setName || '').trim(), String(row.name || '').trim(), Number(row.qty) || 1].join('|');
+        var key = [
+          String(row.setName || '').trim(), String(row.name || '').trim(),
+          Number(row.qty) || 1, Number(row.unitPrice) || 0
+        ].join('|');
         counts[key] = (counts[key] || 0) + 1;
       });
       return Object.keys(counts).sort().map(function(key) { return key + '=' + counts[key]; });
@@ -20995,7 +21110,8 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
       var actualAdded = finalRowsById[String(added.scheduleId || '').trim()];
       if (!actualAdded || String(actualAdded.setName || '').trim() !== String(added.setName || '').trim() ||
           String(actualAdded.name || '').trim() !== String(added.name || '').trim() ||
-          (Number(actualAdded.qty) || 1) !== (Number(added.qty || added.quantity) || 1)) {
+          (Number(actualAdded.qty) || 1) !== (Number(added.qty || added.quantity) || 1) ||
+          (Number(actualAdded.unitPrice) || 0) !== (Number(added.unitPrice) || 0)) {
         throw new Error('final readback added row identity mismatch: ' + String(added.scheduleId || ''));
       }
     });
@@ -21008,6 +21124,13 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
   if (!regeneration || regeneration.success !== true || !regeneration.url || !regeneration.fileId ||
       !regeneration.linkUpdate || regeneration.linkUpdate.success !== true) {
     throw new Error('final readback 계약서 재생성 검증 실패');
+  }
+  var customSetAdds = (correction.add || []).filter(function(entry) {
+    return Array.isArray(entry.selectedComponents);
+  });
+  if (customSetAdds.length && (!Number.isSafeInteger(regeneration.finalAmount) || regeneration.finalAmount < 0 ||
+      !Number.isSafeInteger(finalState.ledger.amount) || finalState.ledger.amount !== regeneration.finalAmount)) {
+    throw new Error('final readback 계약서/원장 금액 불일치');
   }
   if (finalState.ledger.rows < 1 || finalState.ledger.startDate !== expectedPeriod.startDate ||
       finalState.ledger.links.length !== 1 || finalState.ledger.contractLink !== regeneration.url) {

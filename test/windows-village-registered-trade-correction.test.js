@@ -130,6 +130,96 @@ const fullInput = {
   sendEstimate: true,
 };
 
+const customSetInput = {
+  tradeId: '261005-001',
+  operationId: '4b6e0a4d-1b78-44af-88fb-99049ca7818c',
+  expectedPeriod: {
+    startDate: '2026-10-05', startTime: '23:00',
+    endDate: '2026-10-08', endTime: '06:00',
+  },
+  dateChange: {
+    newStartDate: '2026-10-06', newEndDate: '2026-10-08',
+    startTime: '02:00', endTime: '03:00', allowConflicts: false,
+  },
+  staffApproval: {
+    source: 'slack_staff_confirmed',
+    sourceMessageId: '1791327159.238971',
+    conversationRevision: 40,
+    customerRequest: '부라노를 라이트한 셋업으로 부탁드리고 배터리 같은 필수품은 포함해 주세요.',
+    staffConfirmation: '1일 15만원',
+  },
+  add: [{
+    name: '소니 BURANO 베이직세트',
+    qty: 1,
+    expectedCatalogUnitPrice: 200000,
+    unitPrice: 150000,
+    pricingBasis: 'daily_unit_price',
+    selectedComponents: [
+      { name: '소니 BURANO 바디(풀케이지)', qty: 1 },
+      { name: '소니 CF-B 1920', qty: 1 },
+      { name: '소니 CF-B 960', qty: 2 },
+      { name: '소니 CF-B 리더기', qty: 1 },
+      { name: 'V마운트 배터리(SWIT)', qty: 4 },
+      { name: 'V마운트 배터리 충전기(SWIT)', qty: 1 },
+    ],
+  }],
+  sendEstimate: false,
+};
+
+function customSetCorrectedPayload() {
+  const before = {
+    contract: { ...customSetInput.expectedPeriod, rounds: 3, status: '예약' },
+    schedule: {
+      periods: ['2026-10-05|23:00|2026-10-08|06:00'],
+      rows: [{
+        scheduleId: '261005-001-01', setName: '에코플로우 델타2 맥스',
+        name: '에코플로우 델타2 맥스', qty: 1, unitPrice: 60000, isComponent: false,
+      }],
+      topLevelQuantities: { '에코플로우 델타2 맥스': 1 },
+    },
+    ledger: null,
+  };
+  const setName = customSetInput.add[0].name;
+  const after = {
+    contract: {
+      startDate: '2026-10-06', startTime: '02:00',
+      endDate: '2026-10-08', endTime: '03:00', rounds: 2, status: '예약',
+    },
+    schedule: {
+      periods: ['2026-10-06|02:00|2026-10-08|03:00'],
+      rows: [
+        before.schedule.rows[0],
+        { scheduleId: '261005-001-03', setName, name: setName, qty: 1, unitPrice: 150000, isComponent: false },
+        ...customSetInput.add[0].selectedComponents.map((component, index) => ({
+          scheduleId: `261005-001-${String(index + 4).padStart(2, '0')}`,
+          setName, name: component.name, qty: component.qty, unitPrice: 0, isComponent: true,
+        })),
+      ],
+      topLevelQuantities: { '에코플로우 델타2 맥스': 1, [setName]: 1 },
+    },
+    ledger: {
+      rows: 1, startDate: '2026-10-06', amount: 420000,
+      contractLink: 'https://docs.google.com/spreadsheets/d/custom-contract/edit',
+      links: ['https://docs.google.com/spreadsheets/d/custom-contract/edit'],
+    },
+  };
+  return {
+    success: true,
+    status: 'CORRECTED',
+    tradeId: customSetInput.tradeId,
+    operationId: customSetInput.operationId,
+    stages: ['scheduleChangeDates', 'scheduleAddEquips', 'regenerateContract'],
+    contractRegeneration: {
+      success: true, fileId: 'custom-contract',
+      url: 'https://docs.google.com/spreadsheets/d/custom-contract/edit',
+      finalAmount: 420000, linkUpdate: { success: true },
+    },
+    readback: after,
+    authoritativeReadback: { before, after },
+    customerNotificationSent: false,
+  };
+}
+
 test('normalizes an exact baseline period and removal quantity', () => {
   const normalized = normalizeCorrectionInput({
     tradeId: '260824-008',
@@ -508,4 +598,62 @@ test('staff approval requires complete authority and exact removal quantities', 
   assert.throws(() => normalizeCorrectionInput({ ...fullInput, staffApproval: { ...approval, allowAny: true } }), /staffApproval/);
   assert.throws(() => normalizeCorrectionInput({ ...fullInput, staffApproval: { ...approval, staffConfirmation: ' ' } }), /staffApproval/);
   assert.throws(() => normalizeCorrectionInput({ ...fullInput, staffApproval: { ...approval, customerRequest: 123 } }), /staffApproval/);
+});
+
+test('normalizes an exact catalog-backed custom set and preserves Slack approval evidence', () => {
+  const normalized = normalizeCorrectionInput(customSetInput);
+
+  assert.deepEqual(normalized.staffApproval, customSetInput.staffApproval);
+  assert.deepEqual(normalized.add, customSetInput.add);
+  assert.equal(normalized.add[0].pricingBasis, 'daily_unit_price');
+  assert.equal(normalized.add[0].unitPrice, 150000);
+});
+
+test('custom set additions require exact staff evidence, catalog price CAS, daily pricing, and selected components', () => {
+  const invalid = [
+    { ...customSetInput, staffApproval: undefined },
+    { ...customSetInput, expectedPeriod: undefined },
+    { ...customSetInput, sendEstimate: true },
+    { ...customSetInput, staffApproval: { ...customSetInput.staffApproval, sourceMessageId: '' } },
+    { ...customSetInput, add: [{ ...customSetInput.add[0], expectedCatalogUnitPrice: '200000' }] },
+    { ...customSetInput, add: [{ ...customSetInput.add[0], unitPrice: -1 }] },
+    { ...customSetInput, add: [{ ...customSetInput.add[0], pricingBasis: 'whole_period' }] },
+    { ...customSetInput, add: [{ ...customSetInput.add[0], selectedComponents: [] }] },
+    { ...customSetInput, add: [{ ...customSetInput.add[0], selectedComponents: [
+      customSetInput.add[0].selectedComponents[0],
+      customSetInput.add[0].selectedComponents[0],
+    ] }] },
+  ];
+
+  for (const value of invalid) {
+    assert.throws(() => normalizeCorrectionInput(value), /staff|expectedPeriod|send|catalog|price|component/i);
+  }
+});
+
+test('custom set completion requires exact new header price and selected component readback', async () => {
+  const payload = customSetCorrectedPayload();
+  const run = (value) => runRegisteredTradeCorrection({
+    config,
+    input: customSetInput,
+    fetchImpl: async () => response(value),
+    timeoutMs: 1_000,
+  });
+
+  const result = await run(payload);
+  assert.equal(result.verified, true);
+  assert.equal(result.send.attempted, false);
+
+  for (const corrupt of [
+    (value) => { value.readback.schedule.rows[1].unitPrice = 200000; },
+    (value) => { value.readback.schedule.rows.splice(2, 1); },
+    (value) => { value.readback.schedule.rows.push({
+      scheduleId: '261005-001-99', setName: customSetInput.add[0].name,
+      name: '셔틀러 비디오 20', qty: 1, unitPrice: 0, isComponent: true,
+    }); },
+  ]) {
+    const broken = JSON.parse(JSON.stringify(payload));
+    corrupt(broken);
+    broken.authoritativeReadback.after = JSON.parse(JSON.stringify(broken.readback));
+    await assert.rejects(run(broken), /readback/i);
+  }
 });

@@ -371,6 +371,35 @@ test('registered-trade references expose only the atomic correction boundary', (
   }
 });
 
+test('registered-trade guidance exposes catalog-backed partial sets with approved daily pricing', () => {
+  const skill = loadSkill(operationsRoot);
+  const referencePath = path.join(
+    operationsRoot,
+    'references',
+    'registered-trade-selected-set-components.md'
+  );
+
+  assert.match(
+    skill.body,
+    /selected set components[\s\S]{0,220}registered-trade-selected-set-components\.md/i
+  );
+  assert.ok(fs.existsSync(referencePath), 'missing selected-set correction reference');
+  const reference = fs.readFileSync(referencePath, 'utf8');
+  for (const required of [
+    /expectedCatalogUnitPrice/,
+    /unitPrice/,
+    /pricingBasis[\s\S]{0,80}daily_unit_price/,
+    /selectedComponents/,
+    /slack_staff_confirmed/,
+    /sourceMessageId/,
+    /sendEstimate[\s\S]{0,40}false/,
+    /unknown|미등록/i,
+    /authoritative readback|권위.*재조회/i
+  ]) {
+    assert.match(reference, required);
+  }
+});
+
 test('registered-trade reference JSON uses the runner date field contract', () => {
   const source = fs.readFileSync(
     path.join(
