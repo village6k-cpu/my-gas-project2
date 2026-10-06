@@ -86,7 +86,7 @@ function supaDeleteTrade_(tid) {
 
 /**
  * 계약 취소용 — 거래 기록은 남기고 일정 점유(schedule_items)만 제거한 뒤 상태를 취소로 남긴다.
- * 계약마스터 취소와 같은 요청 안에서 실행해 1분 동기화 전에도 앱 재고 점유가 즉시 사라지게 한다.
+ * 취소 정리 워커와 1분 dirty 동기화가 함께 사용하는 멱등 투영이다.
  */
 function supaCancelTrade_(tid) {
   tid = String(tid || '').trim();
@@ -1193,6 +1193,20 @@ function flushDirtyToSupabase() {
 
   var ok = true;
   try {
+    // 취소는 일반 구조 upsert로 복구되지 않는다. contract_status는 평소 앱/GAS
+    // 명령이 소유하고 누락 품목 삭제도 별도 경로라, 취소 워커가 지연되면 dirty만
+    // 성공 처리되어 앱에 예약/점유가 남았다. 원본에서 명시적으로 취소된 거래만
+    // 같은 취소 투영을 재시도하고, 실패하면 dirty를 보존한다.
+    var cancelledTradeIds = built.cancelledTradeIds || [];
+    if (cancelledTradeIds.length) {
+      var cancellationAuthority = supaGetCheckoutAuthorityStates_(cancelledTradeIds);
+      cancelledTradeIds.forEach(function(tid) {
+        var authority = cancellationAuthority.states && cancellationAuthority.states[tid];
+        if (!cancellationAuthority.ok || !authority || authority.started) { ok = false; return; }
+        var cancelled = supaCancelTrade_(tid);
+        if (!cancelled || !cancelled.ok) ok = false;
+      });
+    }
     if (built.trades.length) {
       // note_checkin은 앱이 정본 — 앱이 쓴 노트를 시트 returnMemo가 덮어쓰지 않게 한다
       supaDropOverwritingNotes_(cfg, built.trades);
@@ -1397,7 +1411,13 @@ function buildSupabaseTrades_(tids) {
   }
 
   var trades = [], items = [];
+  var cancelledTradeIds = Object.keys(master).filter(function(tid) {
+    return master[tid].status === '취소';
+  });
   for (var tid2 in dates) {
+    // 취소 원본이 stale timeline/dashboard보다 우선한다. 옛 캐시의 장비를
+    // fallback으로 되살리지 않고 전용 취소 투영에 맡긴다.
+    if (cancelledTradeIds.indexOf(tid2) >= 0) continue;
     var d = detail[tid2] || null;
     var m = master[tid2] || {};
     var startISO = new Date(dates[tid2].start).toISOString();
@@ -1450,6 +1470,7 @@ function buildSupabaseTrades_(tids) {
 
   // 취소/과거 등 timeline에 더는 없는 거래 — 계약마스터 기준으로 상태 반영 (조용한 유실 방지)
   for (var wTid in want) {
+    if (cancelledTradeIds.indexOf(wTid) >= 0) continue;
     if (dates[wTid]) continue;
     var wm = master[wTid];
     if (!wm || !wm.startISO || !wm.endISO) continue; // 계약마스터에도 없으면 보류
@@ -1463,7 +1484,7 @@ function buildSupabaseTrades_(tids) {
     trades.push(cancelled);
   }
 
-  return { trades: trades, items: items };
+  return { trades: trades, items: items, cancelledTradeIds: cancelledTradeIds };
 }
 
 /** payload 키 구성이 같은 행끼리 묶어 upsert — PostgREST는 배치 내 키 불일치를 거부하므로.

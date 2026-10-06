@@ -16,7 +16,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const TRADE = '260810-003';
 const OTHER = '260810-002';
 
-function harness({ dashboardHasTrade, sheetRows, dashboardThrows = false }) {
+function harness({ dashboardHasTrade, sheetRows, dashboardThrows = false, contractStatus = '예약' }) {
   const source = read('supabaseSync.js');
   const from = source.indexOf('function buildSupabaseTrades_');
   const to = source.indexOf('\n/** payload 키 구성이 같은 행끼리 묶어 upsert');
@@ -72,7 +72,7 @@ function harness({ dashboardHasTrade, sheetRows, dashboardThrows = false }) {
             return {
               getLastRow: () => 2,
               getRange: () => ({
-                getValues: () => [[TRADE, '조용준', '', '', new Date(start), '', new Date(end), '', 3, '예약', '학생']],
+                getValues: () => [[TRADE, '조용준', '', '', new Date(start), '', new Date(end), '', 3, contractStatus, '학생']],
                 getDisplayValues: () => [[TRADE, '조용준', '', '', '2026-08-12', '16:00', '2026-08-15', '16:00', '3', '예약', '학생']],
               }),
             };
@@ -155,4 +155,18 @@ test('checkout_state는 여전히 flush가 건드리지 않는다', () => {
     assert.ok(!('checkout_state' in it),
       '1분 dirty worker의 오래된 snapshot이 최신 체크를 되돌리면 안 된다');
   }
+});
+
+test('원본 계약이 취소되면 stale timeline과 dashboard가 예약을 다시 투영하지 않는다', () => {
+  const ctx = harness({ dashboardHasTrade: true, sheetRows: [], contractStatus: '취소' });
+  const out = ctx.build([TRADE, OTHER]);
+  assert.deepEqual(Array.from(out.cancelledTradeIds || []), [TRADE]);
+  assert.ok(!out.trades.some((row) => row.trade_id === TRADE));
+  assert.ok(!out.items.some((row) => row.trade_id === TRADE));
+  assert.ok(out.trades.some((row) => row.trade_id === OTHER));
+});
+
+test('일반 예약은 취소 투영 대상에 포함되지 않는다', () => {
+  const ctx = harness({ dashboardHasTrade: true, sheetRows: SHEET_ROWS });
+  assert.deepEqual(Array.from(ctx.build([TRADE]).cancelledTradeIds || []), []);
 });
