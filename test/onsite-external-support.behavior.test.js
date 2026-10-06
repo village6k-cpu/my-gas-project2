@@ -93,7 +93,7 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
     normalizeDashboardMutationId_: value => value || '',
     isDashboardTradeCheckoutStarted_: () => false,
     invalidateDashboardReturnInspectionForTrade_: () => ({ success: true }),
-    buildDashboardSetLookup_: () => ({ items: {}, prices: {}, components: {} }),
+    buildDashboardSetLookup_: () => ({ items: {'Scarce light':true,'Existing light':true}, prices: {'Scarce light':7000,'Existing light':5000}, components: {} }),
     buildDashboardEquipmentMeta_: () => ({ equipment: {
       'Scarce light': { total, maintenance: 0 }, 'Existing light': { total: 5, maintenance: 0 }
     }, categories: { 'Light category': true } }),
@@ -113,6 +113,7 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
   const addEnd = source.indexOf('\nvar DASHBOARD_ONSITE_IDEM_PROP_', addStart);
   vm.runInNewContext(supplySource + '\n' + [
     functionSource('buildAvailabilityItems_'),
+    functionSource('requireSetMasterPrice_'),
     functionSource('mergeAvailabilityItems_'),
     functionSource('checkAvailabilityForAddCached_'),
     functionSource('planRegisteredTradeInventory_'),
@@ -170,13 +171,17 @@ test('an external set allocates its components and preserves the catalog price',
 });
 
 test('onsite paid and free dry-run paths carry external quantity into physical supply without writes', () => {
-  for (const settlementStatus of ['유상', '무상']) {
+  for (const settlementStatus of ['유상', '무상', 'pending']) {
     const h = gasHarness();
     h.context.buildDashboardSetLookup_ = () => ({items:{'Scarce light':true},prices:{'Scarce light':25000},components:{}});
     vm.runInNewContext('var DASHBOARD_ONSITE_IDEM_PROP_="onsite";\n' + functionSource('dashboardRecordOnsiteAddon') + '\n' + functionSource('dashboardAddedItemsFromRows_'), h.context);
+    const add = h.context.dashboardAddEquipments;
+    let forceZero;
+    h.context.dashboardAddEquipments = (tid, entries, options) => { forceZero=options.forceZeroPrice; return add(tid, entries, options); };
     const result = h.context.dashboardRecordOnsiteAddon(TRADE,[{name:'Scarce light',qty:2}],
       {dryRun:true,rawNames:true,externalSupplyQty:1,settlementStatus});
     assert.equal(result.success,true,result.error);
+    assert.equal(forceZero,settlementStatus === '무상');
     assert.match(result.plannedItems[0].supplyNote,/\[외부조달\].*1대/);
     assert.equal(result.supplyPlan.allocations.find(a=>a.source==='external').qty,1);
     assert.equal(h.schedule.writes,0);

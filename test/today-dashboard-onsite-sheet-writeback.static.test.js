@@ -103,9 +103,9 @@ const onsiteBackendFn = logic.slice(
   logic.indexOf('\nfunction dashboardUpdateEquipmentQty', logic.indexOf('function dashboardRecordOnsiteAddon')),
 );
 assert(
-  /var isPaid = settlementStatus === '유상'[\s\S]*dashboardAddEquipments\(tid, entries, \{[\s\S]*forceZeroPrice:\s*!isPaid/.test(onsiteBackendFn) &&
+  /var isFree = settlementStatus === '무상'[\s\S]*dashboardAddEquipments\(tid, entries, \{[\s\S]*forceZeroPrice:\s*isFree/.test(onsiteBackendFn) &&
     /price:\s*forceZeroPrice \? 0 :/.test(logic),
-  'free/unsettled on-site additions must still enter the physical schedule but carry zero price'
+  'only explicit free additions carry zero price; unsettled additions use the master rate'
 );
 assert(
   /rawNames: params\.rawNames \|\| postBody\.rawNames/.test(api),

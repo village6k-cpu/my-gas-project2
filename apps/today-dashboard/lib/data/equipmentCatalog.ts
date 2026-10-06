@@ -12,6 +12,7 @@ export interface EquipmentCatalogComponent {
 
 export interface EquipmentCatalogItem extends CatalogItem {
   components?: EquipmentCatalogComponent[];
+  unitPrice?: number;
   source: "sheet-master";
 }
 
@@ -31,6 +32,7 @@ interface RawCatalog {
   components?: unknown;
   items?: unknown;
   stocks?: unknown;
+  prices?: unknown;
 }
 
 const EMPTY_STATE: EquipmentCatalogState = {
@@ -45,6 +47,9 @@ const EMPTY_STATE: EquipmentCatalogState = {
 
 let state = EMPTY_STATE;
 let inflight: Promise<EquipmentCatalogState> | null = null;
+let loadedAt = 0;
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
+const CATALOG_TTL_MS = 60_000;
 const listeners = new Set<() => void>();
 
 // 최초 로드 실패(GAS 콜드스타트 타임아웃 등)가 세션 전체를 빈 카탈로그로 고착시키지 않도록
@@ -64,7 +69,7 @@ function emit() {
 }
 
 function normalizeName(value: unknown): string {
-  return String(value ?? "").trim().replace(/\s+/g, " ");
+  return String(value ?? "").trim();
 }
 
 function searchKey(value: string): string {
@@ -143,16 +148,13 @@ function buildItems(raw: RawCatalog): EquipmentCatalogState {
     });
   });
 
-  Object.values(components).forEach((rows) => {
-    rows.forEach((row) => {
-      if (byName.has(row.name)) return;
-      byName.set(row.name, {
-        name: row.name,
-        category: inferCategory(row.name, false),
-        source: "sheet-master",
-      });
+  // B열 구성품은 세트 설명에만 사용한다. 독립 상품 선택과 가격은 A/G열에서 온다.
+  if (raw.prices && typeof raw.prices === "object") {
+    Object.entries(raw.prices as Record<string, unknown>).forEach(([name, price]) => {
+      const item = byName.get(normalizeName(name));
+      if (item && typeof price === "number" && Number.isSafeInteger(price) && price >= 0) item.unitPrice = price;
     });
-  });
+  }
 
   const items = Array.from(byName.values());
   const stocks: Record<string, number> = {};
@@ -183,12 +185,13 @@ function readCatalogPayload(payload: unknown): RawCatalog {
     components: catalog.components,
     items: catalog.items,
     stocks: catalog.stocks,
+    prices: catalog.prices,
   };
 }
 
 export async function loadEquipmentCatalog(): Promise<EquipmentCatalogState> {
   // ready는 성공 시에만 true — 실패 상태는 여기서 단락되지 않고 아래 재시도 판정으로 간다.
-  if (state.ready) return state;
+  if (state.ready && Date.now() - loadedAt < CATALOG_TTL_MS) return state;
   if (inflight) return inflight;
   if (state.error) {
     // 실패 후: 자동 재시도는 최대 5회, 각 재시도 사이엔 지수 백오프 쿨다운(5s→10s→…→2m).
@@ -205,6 +208,7 @@ export async function loadEquipmentCatalog(): Promise<EquipmentCatalogState> {
       if (!response.ok) throw new Error(`GAS ${response.status}`);
       const json = await response.json();
       state = buildItems(readCatalogPayload(json));
+      loadedAt = Date.now();
       failCount = 0;
       lastFailedAt = 0;
       emit();
@@ -233,14 +237,19 @@ export async function loadEquipmentCatalog(): Promise<EquipmentCatalogState> {
 export function retryEquipmentCatalog(): Promise<EquipmentCatalogState> {
   failCount = 0;
   lastFailedAt = 0;
+  loadedAt = 0;
   return loadEquipmentCatalog();
 }
 
 function subscribe(listener: () => void) {
   listeners.add(listener);
   void loadEquipmentCatalog();
+  if (!refreshTimer) refreshTimer = setInterval(() => {
+    if (typeof document === "undefined" || document.visibilityState === "visible") void loadEquipmentCatalog();
+  }, CATALOG_TTL_MS);
   return () => {
     listeners.delete(listener);
+    if (!listeners.size && refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
   };
 }
 

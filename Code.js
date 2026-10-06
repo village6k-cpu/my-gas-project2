@@ -248,7 +248,7 @@ function queueScheduleDetailContractRegensForEdit_(sheet, range, oldValue) {
 function onEditInstallable(e) {
   if (!e || !e.source) return;
 
-  const sheet = e.source.getActiveSheet();
+  const sheet = e.range && typeof e.range.getSheet === 'function' ? e.range.getSheet() : e.source.getActiveSheet();
   const col = e.range.getColumn();
   const row = e.range.getRow();
   const editRowCount = e.range.getNumRows ? e.range.getNumRows() : 1;
@@ -342,6 +342,11 @@ function onEditInstallable(e) {
     } catch (err) {
       Logger.log("스케줄상세 세트 펼침 실패: " + err.message);
     }
+  }
+
+  // D열에서 상품을 바꾸면 이전 상품의 단가를 이어받지 않는다. 구성품의 실물 변경은 0원이다.
+  if (sheet.getName() === '스케줄상세' && col === 4 && row >= 2) {
+    syncScheduleEditedProductPrice_(e.source, sheet, row, editRowCount === 1 ? e.oldValue : undefined);
   }
 
   // 스케줄상세 수정 시 계약서 재생성 (디바운스) — 거래ID/품목/수량/일시/단가(B~I, L)
@@ -447,10 +452,28 @@ function onEditInstallable(e) {
   }
 
   // 세트마스터 수정(가격/장비) → 계약서 템플릿 마스터 동기화 (디바운스, 백그라운드)
-  if (sheet.getName() === "세트마스터" && row >= 2) {
+  if (sheet.getName() === "세트마스터" && row + editRowCount - 1 >= 2) {
+    SET_MASTER_SCAN_ = null;
+    if (col === 1) refreshEquipmentList(true);
     try { scheduleTemplateMasterSync_(); }
     catch (err) { Logger.log("템플릿 마스터 동기화 예약 실패: " + err.message); }
   }
+}
+
+function syncScheduleEditedProductPrice_(ss, sheet, row, previousName) {
+  var values = sheet.getRange(row, 3, 1, 2).getValues()[0];
+  var setName = String(values[0] || '').trim(), name = String(values[1] || '').trim();
+  if (!name) return;
+  if (setName && setName !== name && setName !== String(previousName || '').trim()) return;
+  var price = findSetPrice(name, ss.getSheetByName('세트마스터'));
+  if (setName && setName !== name) {
+    var tradeId = String(sheet.getRange(row, 2).getValue() || '').trim();
+    if (tradeId) findDashboardRowsByValue_(sheet, 2, sheet.getLastRow(), tradeId).forEach(function(childRow) {
+      if (childRow !== row && String(sheet.getRange(childRow, 3).getValue() || '').trim() === setName) sheet.getRange(childRow, 3).setValue(name);
+    });
+  }
+  sheet.getRange(row, 12).setValue(price);
+  if (setName && setName !== name) sheet.getRange(row, 3).setValue(name);
 }
 
 /**
@@ -935,7 +958,7 @@ function autoExpandSetInSchedule(ss, sheet, row, 세트명) {
     if (!currentD) sheet.getRange(row, 4).setValue(세트명);
     // 수량은 항상 숫자 1 (계약서 수식에서 수량×일수×단가 계산되므로 텍스트 '1세트' 쓰면 #VALUE 오류)
     if (!sheet.getRange(row, 5).getValue()) sheet.getRange(row, 5).setValue(1);
-    if (!sheet.getRange(row, 12).getValue()) sheet.getRange(row, 12).setValue(price);
+    if (!currentD || currentD === 세트명) sheet.getRange(row, 12).setValue(price);
 
     // 이미 같은 세트의 구성품 행이 아래에 있으면 중복 생성 방지 체크
     var lastRow = sheet.getLastRow();
@@ -1005,7 +1028,7 @@ function autoExpandSetInSchedule(ss, sheet, row, 세트명) {
     // === 단품 ===
     if (!currentD) sheet.getRange(row, 4).setValue(세트명);
     if (!sheet.getRange(row, 5).getValue()) sheet.getRange(row, 5).setValue(1);
-    if (!sheet.getRange(row, 12).getValue() && price) sheet.getRange(row, 12).setValue(price);
+    if (!currentD || currentD === 세트명) sheet.getRange(row, 12).setValue(price);
     sheet.getRange(row, 11).clearContent().setBackground(null);
 
     // 그룹 배경 상속

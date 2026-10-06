@@ -1419,18 +1419,18 @@ function syncTemplateMasterFromSetMaster() {
   for (var i = 0; i < data.length; i++) {
     var name = String(data[i][0] || "").trim();
     var sub = String(data[i][1] || "").trim();
-    var price = data[i][6];
+    var price = parseSetMasterPrice_(data[i][6]);
 
     if (!name) continue;
 
     if (!sub) {
       // 개별 장비 (B열 빈칸)
-      if (price && Number(price) > 0) {
+      if (price !== null) {
         priceMap[name] = Number(price);
       }
     } else {
       // 세트 상품 (B열에 구성장비 있음) — 첫 행의 단가만 사용
-      if (!seenSets[name] && price && Number(price) > 0) {
+      if (!seenSets[name] && price !== null) {
         priceMap[name] = Number(price);
         seenSets[name] = true;
       }

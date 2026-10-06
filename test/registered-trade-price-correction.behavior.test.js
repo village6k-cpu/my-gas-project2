@@ -50,6 +50,7 @@ function harness(options = {}) {
       flush() { calls.flushes++; }
     },
     isDashboardTradeCheckoutStarted_: () => options.checkoutStarted === true,
+    findSetPrice: () => options.catalogPrice === undefined ? 80000 : options.catalogPrice,
     activeDashboardReturnProjectionLease_: () => null,
     invalidateContractSheetScan_() {},
     findTemplateRows: () => ({ itemStart: 10, itemRows: 2 }),
@@ -94,6 +95,25 @@ test('staff-approved price-only correction writes one exact L cell and verifies 
   assert.equal(result.authoritativeReadback.after.schedule.rows[0].unitPrice,80000);
   assert.equal(result.priceReadback.contractItems[0].unitPrice,80000);
   assert.ok(!h.props.has('registeredTradePriceMutation_'+input.tradeId));
+});
+
+test('catalog repair derives the rate from master and repairs only an exact zero-priced top-level row',()=>{
+  const h=harness(); h.schedule.data[1][11]=0;
+  const args={tradeId:input.tradeId,operationId:'catalog-repair-test-001',expectedPeriod:copy(input.expectedPeriod),
+    priceChanges:[{scheduleId:input.priceChanges[0].scheduleId,expectedName:'XEEN CF 세트',expectedQty:1,expectedUnitPrice:0}]};
+  const result=h.context.repairRegisteredTradeCatalogPrices(args);
+  assert.equal(result.success,true,result.error); assert.equal(h.schedule.data[1][11],80000);
+  assert.equal(h.schedule.data[2][11],0); assert.equal(h.calls.regenerations,1);
+  assert.equal(result.priceReadback.contractAmount,result.priceReadback.ledgerAmount);
+  assert.throws(()=>h.context.repairRegisteredTradeCatalogPrices({...args,priceChanges:[{...args.priceChanges[0],unitPrice:1}]}));
+  assert.throws(()=>h.context.repairRegisteredTradeCatalogPrices({...args,priceChanges:[{...args.priceChanges[0],expectedUnitPrice:10000}]}));
+});
+
+test('catalog repair cannot turn a component into a billable product',()=>{
+  const h=harness();
+  const result=h.context.repairRegisteredTradeCatalogPrices({tradeId:input.tradeId,operationId:'catalog-repair-component',expectedPeriod:copy(input.expectedPeriod),
+    priceChanges:[{scheduleId:'260914-002-15',expectedName:'XEEN CF 24mm',expectedQty:1,expectedUnitPrice:0}]});
+  assert.equal(result.noMutationPerformed,true); assert.equal(h.calls.writes.length,0);
 });
 
 test('same operation verifies stored terminal result without reapplying or regenerating; changed payload cannot reuse receipt',()=>{

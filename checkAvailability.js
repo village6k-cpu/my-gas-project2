@@ -8216,13 +8216,7 @@ function _fmtDateForApi_(raw, display) {
 function resolveEquipmentName_(input, ss) {
   var raw = String(input || '').trim();
   if (!raw) return raw;
-  var names = [];
-  var listSheet = ss.getSheetByName("목록");
-  if (listSheet && listSheet.getLastRow() >= 2) {
-    names = listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues()
-      .map(function(r) { return String(r[0] || '').trim(); })
-      .filter(function(v) { return !!v; });
-  }
+  var names = getDashboardEquipNameList_(ss);
   return names.length ? fuzzyMatchEquipName(raw, names) : raw;
 }
 
@@ -8394,13 +8388,7 @@ function getDashboardCachedJson_(key, seconds, builder) {
 }
 
 function getDashboardEquipNameList_(ss) {
-  return getDashboardCachedJson_("dashboardEquipNameList_v1", 300, function() {
-    var listSheet = ss.getSheetByName("목록");
-    if (!listSheet || listSheet.getLastRow() < 2) return [];
-    return listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues()
-      .map(function(row) { return String(row[0] || "").trim(); })
-      .filter(function(name) { return !!name; });
-  });
+  return Object.keys(buildDashboardSetLookup_(ss.getSheetByName("세트마스터")).items).sort();
 }
 
 function getDashboardEquipmentCatalog_(ss) {
@@ -8418,18 +8406,17 @@ function getDashboardEquipmentCatalog_(ss) {
 }
 
 function buildDashboardSetLookup_(setSheet) {
-  return getDashboardCachedJson_("dashboardSetLookup_v2", 300, function() {
-    var lookup = { components: {}, prices: {}, items: {} };
-    if (!setSheet || setSheet.getLastRow() < 2) return lookup;
-
-    var lastCol = Math.max(setSheet.getLastColumn(), 7);
-    var data = setSheet.getRange(2, 1, setSheet.getLastRow() - 1, lastCol).getValues();
+    // 실행 간 가격 캐시를 사용하지 않는다. 등록 시 항상 현재 정본 A/G열을 읽는다.
+    var lookup = { components: {}, prices: {}, items: {}, priceErrors: {} };
+    var data = getSetMasterRows_(setSheet);
     data.forEach(function(row) {
       var setName = String(row[0] || "").trim();
       if (!setName) return;
       lookup.items[setName] = true;
-      if (row[6] !== "" && row[6] !== null && lookup.prices[setName] === undefined) {
-        lookup.prices[setName] = row[6];
+      if (row[6] !== "" && row[6] !== null && row[6] !== undefined && lookup.prices[setName] === undefined) {
+        var price = parseSetMasterPrice_(row[6]);
+        if (price === null) lookup.priceErrors[setName] = '단가 형식 오류';
+        else lookup.prices[setName] = price;
       }
 
       var componentName = String(row[1] || "").trim();
@@ -8443,7 +8430,24 @@ function buildDashboardSetLookup_(setSheet) {
       });
     });
     return lookup;
-  });
+}
+
+function parseSetMasterPrice_(value) {
+  if (typeof value === 'string') {
+    var text = value.trim();
+    if (!/^(?:\d+|\d{1,3}(?:,\d{3})+)$/.test(text)) return null;
+    value = Number(text.replace(/,/g, ''));
+  }
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function requireSetMasterPrice_(name, lookup) {
+  name = String(name || '').trim();
+  if (!lookup.items[name]) throw new Error('세트마스터 A열에 없는 상품: ' + name);
+  if ((lookup.priceErrors && lookup.priceErrors[name]) || lookup.prices[name] === undefined) {
+    throw new Error('세트마스터 G열 단가를 확인하세요: ' + name);
+  }
+  return lookup.prices[name];
 }
 
 function buildDashboardEquipmentMeta_(equipSheet) {
@@ -9210,6 +9214,7 @@ function dashboardAddEquipments(tid, entries, options) {
     var rowSpecs = [];
     var availabilityItems = [];
     var externalSupplyItems = [];
+    try {
     addEntries.forEach(function(entry) {
       var components = (setLookup.components[entry.name] || []).filter(function(c) {
         var name = String(c.name || "").trim();
@@ -9219,7 +9224,7 @@ function dashboardAddEquipments(tid, entries, options) {
         name: entry.name,
         qty: entry.qty,
         components: components,
-        price: forceZeroPrice ? 0 : (setLookup.prices[entry.name] || 0),
+        price: forceZeroPrice ? 0 : requireSetMasterPrice_(entry.name, setLookup),
         isSetMasterItem: !!(setLookup.items && setLookup.items[entry.name])
       });
       if (entry.qty > externalSupplyQty) {
@@ -9229,6 +9234,9 @@ function dashboardAddEquipments(tid, entries, options) {
         externalSupplyItems = externalSupplyItems.concat(buildAvailabilityItems_(entry.name, externalSupplyQty, components));
       }
     });
+    } catch (priceError) {
+      return attachProfile_({ error: priceError.message, code: 'INVALID_CATALOG_PRICE', noMutationPerformed: true });
+    }
 
     var equipMeta = buildDashboardEquipmentMeta_(equipSheet);
     markProfile_('equipment_meta');
@@ -9644,12 +9652,12 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
       idemClaimed = true;
     }
     var settlementStatus = String(options.settlementStatus || 'pending').trim();
-    var isPaid = settlementStatus === '유상' || settlementStatus.toLowerCase() === 'paid';
+    var isFree = settlementStatus === '무상' || settlementStatus.toLowerCase() === 'free';
     addResult = dashboardAddEquipments(tid, entries, {
       dryRun: options.dryRun,
       rawNames: options.rawNames,
       directRegenerate: options.directRegenerate || options.regenerateNow,
-      forceZeroPrice: !isPaid,
+      forceZeroPrice: isFree,
       externalSupplyQty: options.externalSupplyQty,
       lockAlreadyHeld: !!idemLock,
       idempotencyReservation: idemHash ? { hash: idemHash, fingerprint: onsiteFingerprint } : null
@@ -10040,6 +10048,9 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
       return { success: true, unchanged: true, equipName: newName, message: "변경 없음" };
     }
 
+    var replacementPrice = (!setName || setName === oldName)
+      ? findSetPrice(newName, ss.getSheetByName('세트마스터')) : 0;
+
     var startDT = parseDT(display[5], display[6]);
     var endDT = parseDT(display[7], display[8]);
     if (!startDT || !endDT) return { error: "반출/반납 일시를 읽지 못했습니다" };
@@ -10096,6 +10107,7 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
       if (invalidated && invalidated.error) return invalidated;
       structureProjectionQueued = !!(invalidated && invalidated.projectionPending);
       sched.getRange(targetRow, 4).setValue(newName);
+      sched.getRange(targetRow, 12).setValue(replacementPrice);
       if(replacementSupplyNote!==undefined)sched.getRange(targetRow,11).setValue(replacementSupplyNote);
       if (setName === oldName) sched.getRange(targetRow, 3).setValue(newName);
       updatedItems.forEach(function(item) {
@@ -12405,14 +12417,7 @@ function _insertAndCheckRequest(req) {
   var confirmedRegistrationBootstrap = req.staff_confirmed_registration_bootstrap === true;
 
   // 장비명 매칭: 목록에서 가장 유사한 이름 찾기
-  var equipNames = [];
-  try {
-    var listSheet = ss.getSheetByName("목록");
-    if (listSheet && listSheet.getLastRow() >= 2) {
-      equipNames = listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1)
-        .getValues().flat().filter(function(v) { return v; }).map(String);
-    }
-  } catch(e) {}
+  var equipNames = getDashboardEquipNameList_(ss);
 
   var preservePlannedNames = req.장비명원문보존 === true;
   var aiModelCandidates = req.장비모델후보
@@ -16794,6 +16799,13 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       allData, reqID, mergeTargetTID, mergeTargetScheduleRows
     );
 
+  // 모든 유상 상품의 단가를 먼저 검증한다. 누락 단가로 계약만 일부 등록하지 않는다.
+  var registrationPrices = {};
+  mergeSchedulePlan.writeSourceIndexes.forEach(function(i) {
+    if (String(allData[i][8] || '') !== '세트' && String(allData[i][16] || '').indexOf('[세트]') === 0) return;
+    registrationPrices[i] = findSetPrice(allData[i][5], setSheet);
+  });
+
   if (hasTransferredConfirmedLock) {
     var noReplayMarker = "⚠️ 자동등록 처리중(재실행 금지) [" + confirmedReservationOperationId + "]";
     for (var nri = 0; nri < allData.length; nri++) {
@@ -16942,7 +16954,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
 
       if (String(결과) === "세트") {
         // ── 세트 헤더: C=세트명, D=세트명, L=세트단가 (세트마스터 G열 기준) ──
-        const 세트단가 = findSetPrice(장비명, setSheet);
+        const 세트단가 = registrationPrices[i];
         schedCount++;
         const setSchedID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
         const setRow = writeBaseRow + schedCount;
@@ -16972,7 +16984,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
 
       } else {
         // ── 단독 품목: 우리 시스템에서는 세트명이 사용자-facing 장비명이다. C=장비명, D=장비명. ──
-        const 단가 = findSetPrice(장비명, setSheet);
+        const 단가 = registrationPrices[i];
         schedCount++;
         const schedID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
         const newRow = writeBaseRow + schedCount;
@@ -18131,15 +18143,7 @@ function findEquipment(name, equipSheet) {
  * - 개별 장비: A열=장비명, B열=빈칸인 행의 G열 단가 사용
  */
 function findSetPrice(name, setSheet) {
-  if (!setSheet) return 0;
-  const data = getSetMasterRows_(setSheet);
-  for (let i = 0; i < data.length; i++) {
-    if (String(data[i][0]).trim() === String(name).trim()) {
-      // 세트 상품: 첫 행에 단가 / 개별 장비: 해당 행에 단가
-      if (data[i][6]) return data[i][6];
-    }
-  }
-  return 0;
+  return requireSetMasterPrice_(name, buildDashboardSetLookup_(setSheet));
 }
 
 function isSetMasterName(name, setSheet) {
@@ -21144,6 +21148,13 @@ function correctRegisteredTradePrices_(correction) {
     Object.keys(correction.expectedPeriod).forEach(function(key) { if (baseline.contract[key] !== correction.expectedPeriod[key]) throw new Error('price correction baseline period mismatch'); });
     if (isDashboardTradeCheckoutStarted_(SpreadsheetApp.getActiveSpreadsheet(), correction.tradeId)) throw new Error('price correction cannot change an active checkout');
     var snapshot = readRegisteredTradePriceSnapshot_(correction.tradeId), expected = JSON.parse(JSON.stringify(snapshot));
+    if (correction.catalogPriceRepair === true) {
+      SET_MASTER_SCAN_ = null;
+      var liveSetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('세트마스터');
+      correction.priceChanges.forEach(function(change) {
+        if (findSetPrice(change.expectedName, liveSetSheet) !== change.unitPrice) throw new Error('세트마스터 단가가 변경되었습니다. 다시 확인하세요');
+      });
+    }
     readRegisteredTradePriceLedger_(correction.tradeId);
     correction.priceChanges.forEach(function(change) {
       var row = expected.schedule.filter(function(row) { return row.cells[0] === change.scheduleId; })[0];
@@ -21188,6 +21199,29 @@ function correctRegisteredTradePrices_(correction) {
     if (!held && ownsLease) held = lock.tryLock(1500);
     if (held) { if (ownsLease) clearDashboardMutationLease_(props, leaseKey, correction.operationId); lock.releaseLock(); }
   }
+}
+
+/** 내부 운영용: 정확히 지정된 0원 상품만 정본 단가로 복구한다. 임의 단가는 받지 않는다. */
+function repairRegisteredTradeCatalogPrices(args) {
+  args = args || {};
+  var allowed = { tradeId: true, operationId: true, expectedPeriod: true, priceChanges: true };
+  if (Object.keys(args).some(function(key) { return !allowed[key]; })) throw new Error('지원하지 않는 정본 단가 복구 필드');
+  var tradeId = String(args.tradeId || '').trim(), operationId = String(args.operationId || '').trim();
+  if (!/^\d{6}-\d{3}$/.test(tradeId) || !/^[A-Za-z0-9_.:-]{8,113}$/.test(operationId)) throw new Error('거래ID/operationId 형식 오류');
+  var period = args.expectedPeriod, periodFields = ['startDate', 'startTime', 'endDate', 'endTime'];
+  if (!period || Object.keys(period).length !== 4 || periodFields.some(function(key) { return typeof period[key] !== 'string'; }) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(period.startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(period.endDate) ||
+      !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(period.startTime) || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(period.endTime)) throw new Error('정확한 변경 전 기간이 필요합니다');
+  if (!Array.isArray(args.priceChanges) || !args.priceChanges.length || args.priceChanges.length > 10) throw new Error('복구할 정확한 상품 행이 필요합니다');
+  var setSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('세트마스터');
+  var changes = args.priceChanges.map(function(row) {
+    var fields = { scheduleId: true, expectedName: true, expectedQty: true, expectedUnitPrice: true };
+    if (!row || Object.keys(row).some(function(key) { return !fields[key]; }) || row.expectedUnitPrice !== 0) throw new Error('0원 기준선만 정본 단가로 복구할 수 있습니다');
+    return { scheduleId: row.scheduleId, expectedName: row.expectedName, expectedQty: row.expectedQty,
+      expectedUnitPrice: 0, unitPrice: findSetPrice(row.expectedName, setSheet) };
+  });
+  return correctRegisteredTradePrices_({ tradeId: tradeId, operationId: operationId, expectedPeriod: period,
+    priceChanges: normalizeRegisteredTradePriceChanges_(changes, tradeId), catalogPriceRepair: true });
 }
 
 function correctRegisteredTrade(args) {

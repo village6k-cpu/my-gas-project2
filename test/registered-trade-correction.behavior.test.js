@@ -1032,7 +1032,7 @@ test('actual batch/set GAS add allocates unique monotonic suffixes 100 and 101',
       }));
     },
   };
-  vm.runInNewContext(`${body}\nthis.addMany = dashboardAddEquipments;`, context);
+  vm.runInNewContext(`${section(gas, 'function requireSetMasterPrice_(', '\nfunction buildDashboardEquipmentMeta_')}\n${body}\nthis.addMany = dashboardAddEquipments;`, context);
 
   const result = context.addMany(tradeId, [{ name: 'Cinema Set', qty: 1 }], {
     dryRun: true,
@@ -1091,7 +1091,7 @@ test('actual historical GAS add preserves returned state and delegates no checko
     findDashboardRowsByValue_: () => [2],
     readDashboardScheduleRows_: () => [[`${tradeId}-11`]],
     parseDT: () => new Date('2026-08-17T00:00:00Z'),
-    buildDashboardSetLookup_: () => ({ items: {}, prices: {}, components: {} }),
+    buildDashboardSetLookup_: () => ({ items: { 'BURANO 8K': true }, prices: { 'BURANO 8K': 60000 }, components: {} }),
     buildAvailabilityItems_: (name, qty) => [{ name, qty }],
     buildDashboardEquipmentMeta_: () => ({ equipment: { 'BURANO 8K': true } }),
     mergeAvailabilityItems_: (items) => items,
@@ -1106,7 +1106,7 @@ test('actual historical GAS add preserves returned state and delegates no checko
     invalidateDashboardCache() {},
     invalidateTimelineCache() {},
   };
-  vm.runInNewContext(`${body}\nthis.addMany = dashboardAddEquipments;`, context);
+  vm.runInNewContext(`${section(gas, 'function requireSetMasterPrice_(', '\nfunction buildDashboardEquipmentMeta_')}\n${body}\nthis.addMany = dashboardAddEquipments;`, context);
 
   const result = context.addMany(tradeId, [{ name: 'BURANO 8K', qty: 1 }], {
     lockAlreadyHeld: true,

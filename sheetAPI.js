@@ -1575,6 +1575,7 @@ function runFunction(funcName, params) {
     "recoverPartiallyRegisteredRequests",
     "finalizeRegisteredTradeSourceRequestRecovery",
     "repairMissingTradeLedgerRow",
+    "repairRegisteredTradeCatalogPrices",
     "autoClearRequests",
     "setupAutoClearTrigger",
     "deleteRequest",
@@ -1822,6 +1823,11 @@ function runFunction(funcName, params) {
       var repairArgs = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
       var repairResult = repairMissingTradeLedgerRow(repairArgs || {});
       return { success: !!repairResult.success, function: funcName, result: repairResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "repairRegisteredTradeCatalogPrices") {
+      var priceRepairArgs = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : {};
+      var priceRepairResult = repairRegisteredTradeCatalogPrices(priceRepairArgs);
+      return { success: priceRepairResult.success === true, function: funcName, result: priceRepairResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "finalizeRegisteredTradeSourceRequestRecovery") {
       var sourceRequestRecoveryArgs = params.args

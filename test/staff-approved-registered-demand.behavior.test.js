@@ -93,7 +93,7 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
     normalizeDashboardMutationId_: value => value || '',
     isDashboardTradeCheckoutStarted_: () => false,
     invalidateDashboardReturnInspectionForTrade_: () => ({ success: true }),
-    buildDashboardSetLookup_: () => ({ items: {}, prices: {}, components: {} }),
+    buildDashboardSetLookup_: () => ({ items: {'Scarce light':true,'Existing light':true}, prices: {'Scarce light':7000,'Existing light':5000}, components: {} }),
     buildDashboardEquipmentMeta_: () => ({ equipment: {
       'Scarce light': { total, maintenance: 0 }, 'Existing light': { total: 5, maintenance: 0 }
     }, categories: { 'Light category': true } }),
@@ -113,6 +113,7 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
   const addEnd = source.indexOf('\nvar DASHBOARD_ONSITE_IDEM_PROP_', addStart);
   vm.runInNewContext(supplySource + '\n' + [
     functionSource('buildAvailabilityItems_'),
+    functionSource('requireSetMasterPrice_'),
     functionSource('mergeAvailabilityItems_'),
     functionSource('checkAvailabilityForAddCached_'),
     functionSource('planRegisteredTradeInventory_'),
@@ -140,16 +141,14 @@ test('approved add records the full shortage demand while retaining the real ava
   assert.equal(h.equipment.writes, 0);
 });
 
-test('approved add preserves a raw unmapped request and a model-category request without inventing supply', () => {
+test('approved demand cannot silently register unmapped or unpriced products for free', () => {
   for (const name of ['Unmapped approved light', 'Light category']) {
     const h = gasHarness();
     const result = h.context.dashboardAddEquipments(TRADE, [{ name, qty: 2 }],
       { ...h.options, rawNames: true, requireExactCatalog: true });
-    assert.equal(result.success, true, name);
-    assert.equal(h.schedule.rows[2][3], name);
-    assert.equal(h.schedule.rows[2][4], 2);
-    assert.equal(h.schedule.rows[2][10], '');
-    assert.ok(result.warnings.some(issue => issue.equipment === name));
+    assert.notEqual(result.success, true, name);
+    assert.match(result.error, /세트마스터/);
+    assert.equal(h.schedule.writes, 0);
     assert.equal(h.equipment.writes, 0);
   }
 });
