@@ -21360,11 +21360,13 @@ function correctRegisteredTrade(args) {
       : { ok: false, error: 'Supabase 반출 권한 상태 조회 함수 없음', items: [] };
   }
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(1500)) {
+  if (!lock.tryLock(30000)) {
     return {
       success: false,
       code: 'BUSY',
       retryable: false,
+      noMutationPerformed: true,
+      customerNotificationSent: false,
       error: '다른 변경 작업이 진행 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.'
     };
   }

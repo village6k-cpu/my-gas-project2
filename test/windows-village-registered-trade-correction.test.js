@@ -419,6 +419,7 @@ test('BUSY is attempted once, sends nothing, and is never automatically retried'
         success: false,
         code: 'BUSY',
         retryable: false,
+        noMutationPerformed: true,
         error: '다른 변경 작업이 진행 중입니다',
       },
     },
@@ -431,6 +432,7 @@ test('BUSY is attempted once, sends nothing, and is never automatically retried'
     (error) => {
       assert.equal(error.stage, 'scheduleCorrectRegisteredTrade');
       assert.equal(error.outcomeUnknown, false);
+      assert.equal(error.details.noMutationPerformed, true);
       return true;
     },
   );

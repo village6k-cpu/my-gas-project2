@@ -78,7 +78,7 @@ function harness({
   );
 
   const calls = {
-    preflight: [], mutate: [], lockTries: 0, lockReleases: 0,
+    preflight: [], mutate: [], lockTries: 0, lockWaits: [], lockReleases: 0,
     regenerations: 0, notifications: 0, lockHeldDuringRegeneration: null, triggerLockStates: [], reads: 0,
     removeEntries: [], staffDemandTokens: [],
     durableCheckoutReads: 0, historicalProjectionCalls: [],
@@ -184,8 +184,9 @@ function harness({
     },
     LockService: {
       getScriptLock: () => ({
-        tryLock() {
+        tryLock(waitMs) {
           calls.lockTries += 1;
+          calls.lockWaits.push(waitMs);
           if (!lockAvailable) return false;
           lockHeld = true;
           return true;
@@ -621,14 +622,16 @@ test('source RQ recovery rejects a stale full schedule fingerprint before touchi
   assert.equal(calls.regenerations, 0);
 });
 
-test('BUSY is terminal for this invocation and never spins or mutates', () => {
+test('BUSY waits for ordinary write contention and proves no mutation before failing closed', () => {
   const { context, calls } = harness({ lockAvailable: false });
   const result = context.correct(input);
 
   assert.equal(result.success, false);
   assert.equal(result.code, 'BUSY');
   assert.equal(result.retryable, false);
+  assert.equal(result.noMutationPerformed, true);
   assert.equal(calls.lockTries, 1);
+  assert.deepEqual(calls.lockWaits, [30_000]);
   assert.deepEqual(calls.mutate, []);
   assert.equal(calls.regenerations, 0);
 });
