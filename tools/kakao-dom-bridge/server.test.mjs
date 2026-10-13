@@ -852,6 +852,39 @@ test('initial scan ingress remains conservative for CLI and rows without a visib
   }), { action: 'continue', event: ordinary });
 });
 
+test('Gateway startup reconciles a recent read staff reply instead of losing its seeded row', () => {
+  const event = {
+    reason: 'initial_scan', roomKey: 'chat:read-staff-reply', unreadCount: 0,
+    previewText: '중요 테스트 고객 장비 1개 추가해드리겠습니다 오후 4:10'
+  };
+  const result = classifyInitialScanIngress(event, {
+    processInitialScan: false, hermesTransport: 'gateway',
+    now: new Date('2026-10-13T07:12:00Z')
+  });
+  assert.equal(result.action, 'queue');
+  assert.equal(result.event.reason, 'startup_catchup');
+  assert.equal(result.event.recoveryOnly, true);
+  assert.equal(result.event.roomKey, event.roomKey);
+});
+
+test('read startup catch-up excludes old, date-only, future, UI-noise and legacy-CLI rows', () => {
+  const now = new Date('2026-10-13T07:12:00Z');
+  for (const previewText of [
+    '중요 고객 장비 추가 오후 3:00',
+    '중요 고객 장비 추가 10월 13일',
+    '중요 고객 장비 추가 오후 4:20',
+    '저장하기 오후 4:10'
+  ]) {
+    assert.equal(classifyInitialScanIngress({
+      reason: 'initial_scan', roomKey: 'chat:read-old', unreadCount: 0, previewText
+    }, { processInitialScan: false, hermesTransport: 'gateway', now }).action, 'ignore', previewText);
+  }
+  assert.equal(classifyInitialScanIngress({
+    reason: 'initial_scan', roomKey: 'chat:read-cli', unreadCount: 0,
+    previewText: '중요 고객 장비 추가 오후 4:10'
+  }, { processInitialScan: true, hermesTransport: 'cli', now }).action, 'ignore');
+});
+
 test('missing Kakao conversation evidence gets exactly one durable retry before human review', () => {
   const error = new Error('conversation body not rendered');
   error.code = 'kakao_conversation_evidence_unavailable';
