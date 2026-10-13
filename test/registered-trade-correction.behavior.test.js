@@ -431,6 +431,23 @@ test('a replacement available only after exact target allocation exclusion prefl
   assert.equal(result.success, true);
 });
 
+test('approved pricing-pending correction verifies the reservation without generating a partial-price contract', () => {
+  const state = successState();
+  state.schedule.rows[0].pricingPending = true;
+  const { context, calls } = harness({ finalState: state, useRealVerification: true });
+  const result = context.correct({ ...input, staffApproval: {
+    source: 'kakao_staff_confirmed', conversationRevision: 4,
+    customerRequest: '장비 교체 부탁드립니다', staffConfirmation: '네 확정했습니다'
+  }});
+  assert.equal(result.success, true, result.error);
+  assert.equal(calls.regenerations, 0);
+  assert.equal(result.contractRegeneration.success, false);
+  assert.equal(result.contractRegeneration.deferred, true);
+  assert.equal(result.contractRegeneration.reason, 'pricing_pending');
+  assert.deepEqual(Array.from(result.contractRegeneration.pendingScheduleIds), ['260813-005-12']);
+  assert.equal(calls.notifications, 0);
+});
+
 test('component quantity change is typed blocked in locked preflight with zero writes', () => {
   const componentRows = [
     { scheduleId: '260813-005-01', setName: 'Cinema Set', name: 'Cinema Set', qty: 1, isComponent: false },

@@ -104,7 +104,8 @@ const onsiteBackendFn = logic.slice(
 );
 assert(
   /var isFree = settlementStatus === '무상'[\s\S]*dashboardAddEquipments\(tid, entries, \{[\s\S]*forceZeroPrice:\s*isFree/.test(onsiteBackendFn) &&
-    /var price = forceZeroPrice \? 0 : requireSetMasterPrice_/.test(logic) &&
+    /var priceResolution = forceZeroPrice \? \{ unitPrice: 0, pricingPending: false \}/.test(logic) &&
+    /resolveStaffApprovedRegistrationPrice_\(entry.name, setLookup, staffApprovedDemand\)/.test(logic) &&
     /price:\s*price/.test(logic),
   'only explicit free additions carry zero price; unsettled additions use the master rate'
 );

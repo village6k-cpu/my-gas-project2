@@ -166,6 +166,35 @@ const customSetInput = {
   sendEstimate: false,
 };
 
+test('authoritative pending prices verify a booked correction but never send a partial estimate', async () => {
+  const pending = correctedPayload({ contractRegeneration: {
+    success: false, deferred: true, reason: 'pricing_pending', pendingScheduleIds: ['260810-003-12']
+  }});
+  pending.readback.schedule.rows[0].pricingPending = true;
+  pending.readback.schedule.rows[0].unitPrice = 0;
+  const {fetchImpl, calls} = createFetchFixture({responseByAction: {scheduleCorrectRegisteredTrade: pending}});
+  const result = await runRegisteredTradeCorrection({ config, input: {...fullInput, staffApproval: {
+    source: 'kakao_staff_confirmed', conversationRevision: 4,
+    customerRequest: '장비 추가 부탁드립니다', staffConfirmation: '네 추가하겠습니다'
+  }}, fetchImpl });
+  assert.equal(result.ok, true);
+  assert.equal(result.verified, true);
+  assert.equal(result.contractRegeneration.success, false);
+  assert.equal(result.contractRegeneration.deferred, true);
+  assert.equal(result.send.attempted, false);
+  assert.equal(result.send.reason, 'pricing_pending');
+  assert.equal(calls.length, 1);
+});
+
+test('a deferred contract without exact pending-price schedule proof is rejected', async () => {
+  const pending = correctedPayload({ contractRegeneration: {
+    success: false, deferred: true, reason: 'pricing_pending', pendingScheduleIds: ['260810-003-12']
+  }});
+  const {fetchImpl} = createFetchFixture({responseByAction: {scheduleCorrectRegisteredTrade: pending}});
+  await assert.rejects(runRegisteredTradeCorrection({config, input: {...fullInput, sendEstimate: false}, fetchImpl}),
+    /incomplete or mismatched/);
+});
+
 function customSetCorrectedPayload() {
   const before = {
     contract: { ...customSetInput.expectedPeriod, rounds: 3, status: '예약' },
