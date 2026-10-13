@@ -579,7 +579,7 @@ export async function executeVillageConfirmedReservationCommit(request = {}, opt
   if (typeof runner !== 'function') throw new Error('commitConfirmedReservation is unavailable');
   try {
     await assertCurrentClaim();
-    const result = await runner({ config, registration, operationId });
+    const result = await runner({ config, registration, operationId, beforeAttempt: assertCurrentClaim });
     const replacedIds = Array.isArray(result?.replaced_request_ids) ? result.replaced_request_ids : [];
     const authoritativeAppliedStages = Array.isArray(result?.applied_stages)
       ? result.applied_stages.map(normalizedText).filter(Boolean).slice(0, 20)

@@ -438,7 +438,9 @@ test('confirmed registration makes one bounded GAS operation call and returns au
   }
 
   assert.equal(calls.length, 1);
-  assert.deepEqual(timeoutRequests, [240_000], 'GAS must finish before the plugin 250s transport deadline');
+  assert.equal(timeoutRequests.length, 1);
+  assert.ok(timeoutRequests[0] > 0 && timeoutRequests[0] <= 240_000,
+    'GAS must finish within the shared deadline before the plugin 250s transport deadline');
   assert.ok(calls[0].options.signal);
   assert.deepEqual(result, authoritative);
 });
@@ -460,6 +462,105 @@ test('confirmed registration never retries a rejected or uncertain GAS mutation'
     (error) => error.uncertainWrite === true && error.stage === 'confirmed_registration'
   );
   assert.equal(calls, 1);
+});
+
+function zeroWriteBusyResult() {
+  return {
+    schema: 'village-confirmed-reservation-commit-result/v1', success: false, status: 'blocked',
+    request_id: null, effective_request_id: null, replaced_request_ids: [], trade_id: null,
+    applied_stages: [], authoritative: null, attempted_stage: 'preflight',
+    error: { type: 'registration_busy', message: 'Registration lock is occupied' },
+    customerNotificationAttempted: false, customerNotificationSent: false
+  };
+}
+
+test('confirmed registration waits through proven zero-write lock contention with the same fenced request', async () => {
+  const posted = [];
+  let checks = 0;
+  let waits = 0;
+  const result = await commitConfirmedReservation({
+    config, registration: confirmedRegistrationFixture(),
+    operationId: '11111111-2222-4333-8444-555555555555',
+    beforeAttempt: async () => { checks += 1; },
+    waitImpl: async () => { waits += 1; },
+    fetchImpl: async (_url, options) => {
+      posted.push(options.body);
+      return response({ result: posted.length === 1 ? zeroWriteBusyResult() : { success: true, trade_id: '260906-001' } });
+    }
+  });
+  assert.equal(result.success, true);
+  assert.equal(posted.length, 2);
+  assert.equal(posted[0], posted[1], 'the exact operation ID and plan must not change');
+  assert.equal(checks, 2, 'the current claim must be revalidated before every attempt');
+  assert.equal(waits, 1);
+});
+
+test('confirmed registration bounds repeated zero-write contention instead of looping indefinitely', async () => {
+  let calls = 0;
+  const result = await commitConfirmedReservation({
+    config, registration: confirmedRegistrationFixture(),
+    operationId: '11111111-2222-4333-8444-555555555555', waitImpl: async () => {},
+    fetchImpl: async () => { calls += 1; return response({ result: zeroWriteBusyResult() }); }
+  });
+  assert.equal(result.status, 'blocked');
+  assert.equal(calls, 3);
+});
+
+test('confirmed registration never replays busy responses with incomplete or partial-write evidence', async () => {
+  for (const changed of [
+    { applied_stages: ['pending_request_bootstrap'] }, { attempted_stage: 'registration' },
+    { request_id: 'RQ-260906-001' }, { effective_request_id: 'RQ-260906-001' }, { trade_id: '260906-001' },
+    { authoritative: {} }, { applied_stages: undefined }, { replaced_request_ids: undefined },
+    { customerNotificationAttempted: true }, { customerNotificationSent: undefined },
+    { error: { type: 'commit_uncertain' } }
+  ]) {
+    let calls = 0;
+    await commitConfirmedReservation({
+      config, registration: confirmedRegistrationFixture(),
+      operationId: '11111111-2222-4333-8444-555555555555', waitImpl: async () => {},
+      fetchImpl: async () => { calls += 1; return response({ result: { ...zeroWriteBusyResult(), ...changed } }); }
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test('confirmed registration stops before another mutation if its claim expires after zero-write contention', async () => {
+  let calls = 0;
+  let checks = 0;
+  await assert.rejects(() => commitConfirmedReservation({
+    config, registration: confirmedRegistrationFixture(),
+    operationId: '11111111-2222-4333-8444-555555555555', waitImpl: async () => {},
+    beforeAttempt: async () => { if (++checks === 2) throw new Error('claim expired'); },
+    fetchImpl: async () => { calls += 1; return response({ result: zeroWriteBusyResult() }); }
+  }), /claim expired/);
+  assert.equal(calls, 1);
+});
+
+test('confirmed registration does not start another HTTP call after its shared deadline expires during lock wait', async (t) => {
+  let now = 10_000;
+  t.mock.method(Date, 'now', () => now);
+  let calls = 0;
+  const result = await commitConfirmedReservation({
+    config, registration: confirmedRegistrationFixture(), timeoutMs: 10_000,
+    operationId: '11111111-2222-4333-8444-555555555555',
+    waitImpl: async () => { now = 20_001; },
+    fetchImpl: async () => { calls += 1; return response({ result: zeroWriteBusyResult() }); }
+  });
+  assert.equal(result.status, 'blocked');
+  assert.equal(calls, 1);
+});
+
+test('confirmed registration does not start its first mutation if claim validation exhausts the deadline', async (t) => {
+  let now = 10_000;
+  t.mock.method(Date, 'now', () => now);
+  let calls = 0;
+  await assert.rejects(() => commitConfirmedReservation({
+    config, registration: confirmedRegistrationFixture(), timeoutMs: 10_000,
+    operationId: '11111111-2222-4333-8444-555555555555',
+    beforeAttempt: async () => { now = 20_001; },
+    fetchImpl: async () => { calls += 1; return response({ result: zeroWriteBusyResult() }); }
+  }), /deadline expired before mutation/);
+  assert.equal(calls, 0);
 });
 
 test('one-shot snapshot registration uses the validated runner without generated executable code', async () => {

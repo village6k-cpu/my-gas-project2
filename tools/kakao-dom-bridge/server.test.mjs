@@ -867,10 +867,21 @@ test('Gateway startup reconciles a recent read staff reply instead of losing its
   assert.equal(result.event.roomKey, event.roomKey);
 });
 
-test('read startup catch-up excludes old, date-only, future, UI-noise and legacy-CLI rows', () => {
+test('Gateway startup recovers read staff replies older than the live polling window after downtime', () => {
+  for (const hermesTransport of ['gateway', 'gateway_no_send']) {
+    const result = classifyInitialScanIngress({
+      reason: 'initial_scan', roomKey: 'chat:approved-during-downtime', unreadCount: 0,
+      previewText: '중요 확정 고객 확정 해드리겠습니다 오후 4:11'
+    }, { processInitialScan: false, hermesTransport, now: new Date('2026-10-13T08:44:00Z') });
+    assert.equal(result.action, 'queue');
+    assert.equal(result.event.recoveryOnly, true);
+    assert.equal(result.event.reason, 'startup_catchup');
+  }
+});
+
+test('read startup catch-up excludes date-only, future, UI-noise and legacy-CLI rows', () => {
   const now = new Date('2026-10-13T07:12:00Z');
   for (const previewText of [
-    '중요 고객 장비 추가 오후 3:00',
     '중요 고객 장비 추가 10월 13일',
     '중요 고객 장비 추가 오후 4:20',
     '저장하기 오후 4:10'
@@ -883,6 +894,19 @@ test('read startup catch-up excludes old, date-only, future, UI-noise and legacy
     reason: 'initial_scan', roomKey: 'chat:read-cli', unreadCount: 0,
     previewText: '중요 고객 장비 추가 오후 4:10'
   }, { processInitialScan: true, hermesTransport: 'cli', now }).action, 'ignore');
+});
+
+test('read startup catch-up never mistakes message-body clocks or midnight future clocks for current display times', () => {
+  for (const [previewText, now] of [
+    ['중요 고객 내일 오전 10:00 예약 확정 10월 12일', new Date('2026-10-13T08:44:00Z')],
+    ['중요 고객 확정 해드리겠습니다 오후 11:55', new Date('2026-10-13T15:05:00Z')],
+    ['중요 고객 오전 10:00에 픽업 부탁드립니다', new Date('2026-10-13T08:44:00Z')],
+    ['중요 고객 확정 해드리겠습니다 오후 0:77', new Date('2026-10-13T08:44:00Z')]
+  ]) {
+    assert.equal(classifyInitialScanIngress({
+      reason: 'initial_scan', roomKey: 'chat:read-history-or-future', unreadCount: 0, previewText
+    }, { processInitialScan: false, hermesTransport: 'gateway', now }).action, 'ignore');
+  }
 });
 
 test('missing Kakao conversation evidence gets exactly one durable retry before human review', () => {
@@ -1471,6 +1495,7 @@ test('server confirmed reservation executor asserts the lease and maps one authe
   };
   const runnerCalls = [];
   let leaseChecks = 0;
+  const assertCurrentClaim = async () => { leaseChecks += 1; };
   const operationFence = { operation_id: 'confirmed-registration-operation-1' };
   const executor = createGatewayConfirmedReservationCommitExecutor({
     getConfig: () => ({
@@ -1479,6 +1504,7 @@ test('server confirmed reservation executor asserts the lease and maps one authe
     }),
     commitConfirmedReservation: async (input) => {
       runnerCalls.push(input);
+      await input.beforeAttempt();
       return structuredClone(authoritative);
     },
     randomUUID: () => 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
@@ -1489,16 +1515,17 @@ test('server confirmed reservation executor asserts the lease and maps one authe
     job_id: 'confirmed-job-1', room_key: 'confirmed-room-1', room_revision: 9,
     lease_id: 'confirmed-lease-1', registration
   }, {
-    assertCurrentClaim: async () => { leaseChecks += 1; }, operationFence, roomSnapshot
+    assertCurrentClaim, operationFence, roomSnapshot
   });
-  assert.equal(leaseChecks, 1);
+  assert.equal(leaseChecks, 2);
   assert.deepEqual(runnerCalls, [{
     config: {
       VILLAGE2_API_URL: 'https://script.google.com/macros/s/internal-only/exec',
       VILLAGE2_API_KEY: 'internal-key'
     },
     registration,
-    operationId: operationFence.operation_id
+    operationId: operationFence.operation_id,
+    beforeAttempt: assertCurrentClaim
   }]);
   assert.deepEqual(receipt, {
     schema: 'village-confirmed-reservation-commit-receipt/v1',

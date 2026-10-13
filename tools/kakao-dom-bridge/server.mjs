@@ -3649,9 +3649,18 @@ export function classifyInitialScanIngress(event = {}, {
   if (event?.reason !== 'initial_scan') return { action: 'continue', event };
   const gatewayEnabled = ['gateway', 'gateway_no_send'].includes(resolveHermesTransport(hermesTransport));
   // Staff can read and approve a room before a watcher starts/reconnects.
-  // Offer only recent live-clock read rows for authoritative AI reconciliation;
-  // a date-only or historical read row must never become startup work.
-  if (!hasUnreadCount(event) && (!gatewayEnabled || !isLiveTopRowPreview(event.previewText, now))) {
+  // Startup is recovery, not live polling: downtime can exceed the 20-minute
+  // polling window. Kakao's clock-only row is today's row. Do not wrap a future
+  // clock back into yesterday, or enqueue date-only history/UI chrome.
+  const preview = String(event.previewText || '');
+  const displayClock = /(?:오전|오후)\s*(?:0?[1-9]|1[0-2]):[0-5]\d\s*$/.exec(preview);
+  const previewMinutes = displayClock === null ? null : parseKoreanPreviewTimeMinutes(displayClock[0]);
+  const readAgeMinutes = previewMinutes === null ? null
+    : (now.getHours() * 60) + now.getMinutes() - previewMinutes;
+  const recoverableReadClock = !isActionChromePreview(preview) && !hasDatedPreview(preview)
+    && (/(?:방금|몇\s*분\s*전)\s*$/.test(preview) || (readAgeMinutes !== null
+      && readAgeMinutes >= -1 && readAgeMinutes <= CONFIG.readBackstopLookbackHours * 60));
+  if (!hasUnreadCount(event) && (!gatewayEnabled || !recoverableReadClock)) {
     return { action: 'ignore', reason: 'initial_scan_without_unread' };
   }
   if (!gatewayEnabled && !processInitialScan) return { action: 'ignore', reason: 'initial_scan_disabled' };

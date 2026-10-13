@@ -79,9 +79,9 @@ export async function inspectKakaoRoom(input = {}, dependencies = {}) {
     openedBySearch: navigation.opened_by_devtools_search === true,
     alreadyOpen: navigation.already_open === true,
     target: {
-      id: cleanText(navigation.target?.id),
-      title: cleanText(navigation.target?.title),
-      url: cleanText(navigation.target?.url)
+      id: cleanText((navigation.conversation_target || navigation.target)?.id),
+      title: cleanText((navigation.conversation_target || navigation.target)?.title),
+      url: cleanText((navigation.conversation_target || navigation.target)?.url)
     },
     evidence: compactEvidence(evidence)
   };
