@@ -332,7 +332,9 @@
 
   function scanInitialUnread() {
     for (const { row, text } of chatRowCandidates().slice(0, 250)) {
-      if (hasUnreadSignal(row, text)) inspectElement(row, 'initial_scan');
+      // The bridge bounds read-room catch-up to recent live-clock previews.
+      // Reading/replying is not proof that the approved schedule was applied.
+      inspectElement(row, 'initial_scan');
     }
   }
 

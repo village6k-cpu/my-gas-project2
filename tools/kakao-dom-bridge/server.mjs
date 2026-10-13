@@ -3643,11 +3643,17 @@ export function hasUnreadCount(event = {}) {
 
 export function classifyInitialScanIngress(event = {}, {
   processInitialScan = true,
-  hermesTransport = 'cli'
+  hermesTransport = 'cli',
+  now = new Date()
 } = {}) {
   if (event?.reason !== 'initial_scan') return { action: 'continue', event };
-  if (!hasUnreadCount(event)) return { action: 'ignore', reason: 'initial_scan_without_unread' };
   const gatewayEnabled = ['gateway', 'gateway_no_send'].includes(resolveHermesTransport(hermesTransport));
+  // Staff can read and approve a room before a watcher starts/reconnects.
+  // Offer only recent live-clock read rows for authoritative AI reconciliation;
+  // a date-only or historical read row must never become startup work.
+  if (!hasUnreadCount(event) && (!gatewayEnabled || !isLiveTopRowPreview(event.previewText, now))) {
+    return { action: 'ignore', reason: 'initial_scan_without_unread' };
+  }
   if (!gatewayEnabled && !processInitialScan) return { action: 'ignore', reason: 'initial_scan_disabled' };
   return {
     action: 'queue',
