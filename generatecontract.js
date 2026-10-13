@@ -140,6 +140,9 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
     // A:스케줄ID, B:거래ID, C:세트명, D:장비명, E:수량, ..., L:단가(col12)
     schedData.forEach(row => {
       if (row[1] === 거래ID) {
+        if (hasPendingSchedulePrice_(row)) {
+          throw new Error('단가확인필요: 예약은 등록되어 있으나 가격 확정 전 계약서 생성은 보류합니다 — ' + row[3]);
+        }
         items.push({
           세트명: row[2] || "",
           장비명: row[3] || "",

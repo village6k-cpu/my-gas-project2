@@ -75,6 +75,8 @@ function harness(options = {}) {
   };
   const source=fs.readFileSync(path.resolve(__dirname,'../checkAvailability.js'),'utf8').replace(/\r\n/g,'\n');
   vm.createContext(context);
+  const pendingStart = source.indexOf('function hasPendingSchedulePrice_(');
+  if (pendingStart >= 0) vm.runInContext(source.slice(pendingStart, source.indexOf('\nfunction ', pendingStart + 1)), context);
   vm.runInContext(source.slice(source.indexOf('function readDashboardMutationLease_'),source.indexOf('var DASHBOARD_STRUCTURE_QUEUE_PREFIX_')),context);
   vm.runInContext(source.slice(source.indexOf('function normalizeRegisteredTradeCorrection_'),source.indexOf('\nfunction changeRegisteredTradeDates')),context);
   // Date/time parser implementation lives outside this extracted unit.
@@ -95,6 +97,29 @@ test('staff-approved price-only correction writes one exact L cell and verifies 
   assert.equal(result.authoritativeReadback.after.schedule.rows[0].unitPrice,80000);
   assert.equal(result.priceReadback.contractItems[0].unitPrice,80000);
   assert.ok(!h.props.has('registeredTradePriceMutation_'+input.tradeId));
+});
+
+test('approved blank pending price can be finalized through the exact existing price correction',()=>{
+  const h=harness(), value=copy(input);
+  h.schedule.data[1][10]='[단가확인필요]\n직원 메모';
+  h.schedule.data[1][11]='';
+  value.priceChanges[0].expectedUnitPrice=0;
+  const result=h.run(value);
+  assert.equal(result.success,true,result.error);
+  assert.equal(h.schedule.data[1][11],80000);
+  assert.equal(h.schedule.data[1][10],'[단가확인필요]\n직원 메모');
+  assert.equal(result.readback.schedule.rows[0].pricingPending,undefined);
+});
+
+test('explicitly approved free price resolves a blank pending price but a true zero-price no-op is rejected',()=>{
+  const h=harness(), value=copy(input);
+  h.schedule.data[1][10]='[단가확인필요]';
+  h.schedule.data[1][11]='';
+  value.priceChanges[0].expectedUnitPrice=0;
+  value.priceChanges[0].unitPrice=0;
+  assert.equal(h.run(value).success,true);
+  const other=copy(value);other.operationId='f4133d99-7142-4d5a-a90e-bc471f9c9d74';
+  assert.equal(h.run(other).noMutationPerformed,true);
 });
 
 test('catalog repair derives the rate from master and repairs only an exact zero-priced top-level row',()=>{

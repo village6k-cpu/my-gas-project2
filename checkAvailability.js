@@ -8450,6 +8450,24 @@ function requireSetMasterPrice_(name, lookup) {
   return lookup.prices[name];
 }
 
+// 직원 확정은 예약 수요 승인이다. 가격 미확정을 예약 거절이나 무료로 바꾸지 않는다.
+function resolveStaffApprovedRegistrationPrice_(name, lookup, staffApproved) {
+  try {
+    return { unitPrice: requireSetMasterPrice_(name, lookup), pricingPending: false };
+  } catch (error) {
+    if (staffApproved !== true) throw error;
+    return { unitPrice: '', pricingPending: true, warning: {
+      kind: 'pricing_pending', equipment: String(name || '').trim(),
+      message: '[단가확인필요] ' + error.message
+    } };
+  }
+}
+
+function hasPendingSchedulePrice_(row) {
+  return /^\[단가확인필요\]/m.test(String(row && row[10] || '')) &&
+    (row[11] === '' || row[11] === null || row[11] === undefined);
+}
+
 function buildDashboardEquipmentMeta_(equipSheet) {
   return getDashboardCachedJson_("dashboardEquipmentMeta_v2", 120, function() {
     var meta = { equipment: {}, categories: {} };
@@ -9238,6 +9256,7 @@ function dashboardAddEquipments(tid, entries, options) {
     var setLookup = buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
     markProfile_('set_lookup');
     var rowSpecs = [];
+    var pricingWarnings = [];
     var availabilityItems = [];
     var externalSupplyItems = [];
     try {
@@ -9247,7 +9266,10 @@ function dashboardAddEquipments(tid, entries, options) {
         return name !== "" && name !== entry.name;
       });
       var components = catalogComponents;
-      var price = forceZeroPrice ? 0 : requireSetMasterPrice_(entry.name, setLookup);
+      var priceResolution = forceZeroPrice ? { unitPrice: 0, pricingPending: false }
+        : resolveStaffApprovedRegistrationPrice_(entry.name, setLookup, staffApprovedDemand);
+      var price = priceResolution.unitPrice;
+      if (priceResolution.pricingPending) pricingWarnings.push(priceResolution.warning);
       var customSet = customSetEntries[entry.name];
       if (customSet) {
         if (!(setLookup.items && setLookup.items[entry.name]) || !catalogComponents.length) {
@@ -9279,6 +9301,7 @@ function dashboardAddEquipments(tid, entries, options) {
         qty: entry.qty,
         components: components,
         price: price,
+        pricingPending: priceResolution.pricingPending,
         isSetMasterItem: !!(setLookup.items && setLookup.items[entry.name])
       });
       if (entry.qty > externalSupplyQty) {
@@ -9360,7 +9383,7 @@ function dashboardAddEquipments(tid, entries, options) {
       });
     }
 
-    var supplyWarnings = (availability.warnings || []).slice();
+    var supplyWarnings = (availability.warnings || []).slice().concat(pricingWarnings);
     if (staffApprovedDemand) {
       supplyWarnings = supplyWarnings.concat((availability.conflicts || []).map(function(conflict) {
         return Object.assign({}, conflict, { kind: 'staff_approved_supply_issue' });
@@ -9373,7 +9396,7 @@ function dashboardAddEquipments(tid, entries, options) {
         newRows.push([
           tid + "-" + String(maxN).padStart(2, "0"),
           tid, spec.name, spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
-          "대기", "", spec.price, 예약자명
+          "대기", spec.pricingPending ? "[단가확인필요]" : "", spec.price, 예약자명
         ]);
         spec.components.forEach(function(component) {
           maxN++;
@@ -9389,7 +9412,7 @@ function dashboardAddEquipments(tid, entries, options) {
         newRows.push([
           tid + "-" + String(maxN).padStart(2, "0"),
           tid, setMasterName, spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
-          "대기", "", spec.price, 예약자명
+          "대기", spec.pricingPending ? "[단가확인필요]" : "", spec.price, 예약자명
         ]);
       }
     });
@@ -16396,7 +16419,7 @@ function commitConfirmedReservation(args) {
     if (confirmedResult && confirmedResult.success === true) {
       appliedStages.push("authoritative_readback");
       confirmedResult.applied_stages = appliedStages.slice();
-      confirmedResult.inventory_review = { status: "queued", catalog_issues: catalogReviewIssues || [] };
+      confirmedResult.inventory_review = { status: "queued", catalog_issues: (catalogReviewIssues || []).concat(registrationOutcome.pricingIssues || []) };
     }
     return confirmedResult;
   } catch (error) {
@@ -16853,11 +16876,19 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       allData, reqID, mergeTargetTID, mergeTargetScheduleRows
     );
 
-  // 모든 유상 상품의 단가를 먼저 검증한다. 누락 단가로 계약만 일부 등록하지 않는다.
+  // 모든 유상 상품의 단가를 확인한다. 직원 확정의 미확정 가격은 예약과 분리해 후속 확인한다.
   var registrationPrices = {};
+  var registrationPriceIssues = [];
+  var registrationPriceNotes = {};
+  var registrationPriceLookup = buildDashboardSetLookup_(setSheet);
   mergeSchedulePlan.writeSourceIndexes.forEach(function(i) {
     if (String(allData[i][8] || '') !== '세트' && String(allData[i][16] || '').indexOf('[세트]') === 0) return;
-    registrationPrices[i] = findSetPrice(allData[i][5], setSheet);
+    var priceResolution = resolveStaffApprovedRegistrationPrice_(allData[i][5], registrationPriceLookup, directRegisterApproved);
+    registrationPrices[i] = priceResolution.unitPrice;
+    if (priceResolution.pricingPending) {
+      registrationPriceIssues.push(priceResolution.warning);
+      registrationPriceNotes[i] = '[단가확인필요]';
+    }
   });
 
   if (hasTransferredConfirmedLock) {
@@ -16948,6 +16979,9 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     if(registrationSupplyPlan.ok)inventorySupplyApplyRows_(supplyRows,registrationSupplyPlan);
     supplyRows.forEach(function(r,i){registrationSupplyNotes[mergeSchedulePlan.writeSourceIndexes[i]]=r[10];});
   }
+  Object.keys(registrationPriceNotes).forEach(function(i) {
+    registrationSupplyNotes[i] = registrationPriceNotes[i] + (registrationSupplyNotes[i] ? '\n' + registrationSupplyNotes[i] : '');
+  });
     if (!mergeMode) {
   // ── 계약마스터에 등록 (A~L, 12열) — K=할인유형, L=비고 ──
   const newContractRow = contractLastRow + 1;
@@ -17128,7 +17162,9 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     reqID: reqID,
     tradeID: 거래ID,
     customerNotificationAttempted: !suppressCustomerNotification,
-    customerNotificationSent: false
+    customerNotificationSent: false,
+    pricingPending: registrationPriceIssues.length > 0,
+    pricingIssues: registrationPriceIssues
   };
 
   if (directRegisterApproved) queuePreRegistrationStockCheck_(reqID,{includeRegistered:true,forceQueue:true});
@@ -20793,6 +20829,7 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
       unitPrice: Number(scheduleRaw[si][11] || scheduleDisplay[si][11] || 0) || 0,
       isComponent: isComponent
     });
+    if (hasPendingSchedulePrice_(scheduleRaw[si])) rows[rows.length - 1].pricingPending = true;
     if (!isComponent) topLevelQuantities[name] = (topLevelQuantities[name] || 0) + qty;
     periods[[
       registeredTradeCorrectionDate_(scheduleRaw[si][5], scheduleDisplay[si][5]),
@@ -21121,6 +21158,17 @@ function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction,
   (((operationResults || {}).removalPlan || {}).scheduleIds || []).forEach(function(scheduleId) {
     if (finalIds[scheduleId]) throw new Error('final readback 제거 스케줄ID가 남아 있습니다: ' + scheduleId);
   });
+  if (regeneration && regeneration.deferred === true) {
+    var pendingIds = (finalState.schedule.rows || []).filter(function(row) {
+      return row.pricingPending === true;
+    }).map(function(row) { return row.scheduleId; }).sort();
+    if (!correction.staffApproval || regeneration.success !== false || regeneration.reason !== 'pricing_pending' ||
+        !pendingIds.length || JSON.stringify(pendingIds) !== JSON.stringify((regeneration.pendingScheduleIds || []).slice().sort()) ||
+        !finalState.ledger || finalState.ledger.rows < 1 || finalState.ledger.startDate !== expectedPeriod.startDate) {
+      throw new Error('final readback 단가 확인 보류 증거 불일치');
+    }
+    return finalState;
+  }
   if (!regeneration || regeneration.success !== true || !regeneration.url || !regeneration.fileId ||
       !regeneration.linkUpdate || regeneration.linkUpdate.success !== true) {
     throw new Error('final readback 계약서 재생성 검증 실패');
@@ -21153,7 +21201,7 @@ function normalizeRegisteredTradePriceChanges_(value, tradeId) {
     ['expectedUnitPrice', 'unitPrice'].forEach(function(key) {
       if (!Number.isSafeInteger(entry[key]) || entry[key] < 0) throw new Error('invalid priceChanges ' + key);
     });
-    if (entry.expectedUnitPrice === entry.unitPrice) throw new Error('priceChanges must change the unit price');
+    if (entry.expectedUnitPrice === entry.unitPrice && entry.unitPrice !== 0) throw new Error('priceChanges must change the unit price');
     seen[id] = true;
     return { scheduleId: id, expectedName: name.trim(), expectedQty: entry.expectedQty, expectedUnitPrice: entry.expectedUnitPrice, unitPrice: entry.unitPrice };
   });
@@ -21281,7 +21329,11 @@ function correctRegisteredTradePrices_(correction) {
     readRegisteredTradePriceLedger_(correction.tradeId);
     correction.priceChanges.forEach(function(change) {
       var row = expected.schedule.filter(function(row) { return row.cells[0] === change.scheduleId; })[0];
-      if (!row || String(row.cells[3] || '').trim() !== change.expectedName || row.cells[4] !== change.expectedQty || row.cells[11] !== change.expectedUnitPrice || (row.cells[2] && row.cells[2] !== row.cells[3])) throw new Error('price correction exact top-level row preflight mismatch: ' + change.scheduleId);
+      var pendingBlank = row && hasPendingSchedulePrice_(row.cells) && change.expectedUnitPrice === 0;
+      if (!row || String(row.cells[3] || '').trim() !== change.expectedName || row.cells[4] !== change.expectedQty ||
+          (row.cells[11] !== change.expectedUnitPrice && !pendingBlank) ||
+          (change.unitPrice === change.expectedUnitPrice && !pendingBlank) ||
+          (row.cells[2] && row.cells[2] !== row.cells[3])) throw new Error('price correction exact top-level row preflight mismatch: ' + change.scheduleId);
       row.cells[11] = change.unitPrice;
     });
     receipt = { version: 1, tradeId: correction.tradeId, requestDigest: digest, phase: 'claimed', beforeContract: baseline.contract,
@@ -21678,12 +21730,20 @@ function correctRegisteredTrade(args) {
   var regeneration = null;
   attemptedStage = 'regenerateContract';
   try {
-    regeneration = regenerateContractById(correction.tradeId, undefined, { strictLedgerLink: true });
-    assertRegisteredTradeCorrectionStage_('regenerateContract', regeneration);
+    var pricingState = readRegisteredTradeCorrectionState_(correction.tradeId);
+    var pendingPriceIds = (pricingState.schedule.rows || []).filter(function(row) {
+      return row.pricingPending === true;
+    }).map(function(row) { return row.scheduleId; });
+    if (correction.staffApproval && pendingPriceIds.length) {
+      regeneration = { success: false, deferred: true, reason: 'pricing_pending', pendingScheduleIds: pendingPriceIds };
+    } else {
+      regeneration = regenerateContractById(correction.tradeId, undefined, { strictLedgerLink: true });
+      assertRegisteredTradeCorrectionStage_('regenerateContract', regeneration);
+    }
   } catch (regenerationError) {
     return partialResult_(regenerationError);
   }
-  stages.push('regenerateContract');
+  stages.push(regeneration.deferred === true ? 'pricingReviewPending' : 'regenerateContract');
   attemptedStage = '';
   var verifiedState = null;
   var requestFinalization = null;

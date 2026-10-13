@@ -168,7 +168,7 @@ function normalizePriceChanges(value, tradeId) {
     ['expectedUnitPrice', 'unitPrice'].forEach(function(key) {
       if (!Number.isSafeInteger(entry[key]) || entry[key] < 0) throw new Error('invalid priceChanges ' + key);
     });
-    if (entry.expectedUnitPrice === entry.unitPrice) throw new Error('priceChanges must change the unit price');
+    if (entry.expectedUnitPrice === entry.unitPrice && entry.unitPrice !== 0) throw new Error('priceChanges must change the unit price');
     seen[id] = true;
     return { scheduleId: id, expectedName: name.trim(), expectedQty: entry.expectedQty, expectedUnitPrice: entry.expectedUnitPrice, unitPrice: entry.unitPrice };
   });
@@ -551,10 +551,20 @@ async function runRegisteredTradeCorrection({
       && authoritativeReadback.after.schedule
       && authoritativeReadback.after.ledger
       && JSON.stringify(authoritativeReadback.after) === JSON.stringify(correctionPayload.readback);
-    const validRegeneration = correctionPayload.contractRegeneration
+    const pricingProof = correctionPayload.contractRegeneration;
+    const pendingPriceIds = (correctionPayload.readback?.schedule?.rows || [])
+      .filter(row => row.pricingPending === true && row.unitPrice === 0 && Number(row.qty) > 0)
+      .map(row => row.scheduleId).sort();
+    const validPricingDeferral = !!normalized.staffApproval && pricingProof?.success === false
+      && pricingProof.deferred === true && pricingProof.reason === 'pricing_pending'
+      && pendingPriceIds.length > 0 && new Set(pendingPriceIds).size === pendingPriceIds.length
+      && pendingPriceIds.every(id => typeof id === 'string' && id.startsWith(normalized.tradeId + '-'))
+      && JSON.stringify(pendingPriceIds) === JSON.stringify(
+        Array.isArray(pricingProof.pendingScheduleIds) ? [...pricingProof.pendingScheduleIds].sort() : []);
+    const validRegeneration = validPricingDeferral || (correctionPayload.contractRegeneration
       && correctionPayload.contractRegeneration.success === true
       && correctionPayload.contractRegeneration.url
-      && correctionPayload.contractRegeneration.fileId;
+      && correctionPayload.contractRegeneration.fileId);
     const requestFinalization = correctionPayload.requestFinalization;
     const validRequestFinalization = !normalized.sourceRequestId || (
       requestFinalization
@@ -588,7 +598,9 @@ async function runRegisteredTradeCorrection({
   }
 
   let send = { attempted: false, accepted: false };
-  if (normalized.sendEstimate) {
+  const pricingPending = correctionPayload?.contractRegeneration?.deferred === true;
+  if (pricingPending) send.reason = 'pricing_pending';
+  if (normalized.sendEstimate && !pricingPending) {
     const sendPayload = await postAction({
       config,
       fetchImpl,
@@ -620,7 +632,8 @@ async function runRegisteredTradeCorrection({
     appliedStages,
     contractRegeneration: correctionPayload?.contractRegeneration
       ? {
-          success: true,
+          success: correctionPayload.contractRegeneration.success === true,
+          ...(pricingPending ? {deferred: true, reason: 'pricing_pending', pendingScheduleIds: correctionPayload.contractRegeneration.pendingScheduleIds} : {}),
           url: String(correctionPayload.contractRegeneration.url || correctionPayload.contractRegeneration.contractUrl || ''),
           fileId: String(correctionPayload.contractRegeneration.fileId || '')
         }

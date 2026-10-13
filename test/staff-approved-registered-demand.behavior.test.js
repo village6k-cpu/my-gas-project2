@@ -114,6 +114,7 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
   vm.runInNewContext(supplySource + '\n' + [
     functionSource('buildAvailabilityItems_'),
     functionSource('requireSetMasterPrice_'),
+    ...(source.includes('function resolveStaffApprovedRegistrationPrice_(') ? [functionSource('resolveStaffApprovedRegistrationPrice_')] : []),
     functionSource('mergeAvailabilityItems_'),
     functionSource('checkAvailabilityForAddCached_'),
     functionSource('planRegisteredTradeInventory_'),
@@ -141,14 +142,17 @@ test('approved add records the full shortage demand while retaining the real ava
   assert.equal(h.equipment.writes, 0);
 });
 
-test('approved demand cannot silently register unmapped or unpriced products for free', () => {
+test('staff-approved unmapped demand is registered verbatim with an unresolved price, not made free', () => {
   for (const name of ['Unmapped approved light', 'Light category']) {
     const h = gasHarness();
     const result = h.context.dashboardAddEquipments(TRADE, [{ name, qty: 2 }],
       { ...h.options, rawNames: true, requireExactCatalog: true });
-    assert.notEqual(result.success, true, name);
-    assert.match(result.error, /세트마스터/);
-    assert.equal(h.schedule.writes, 0);
+    assert.equal(result.success, true, name);
+    assert.equal(h.schedule.rows[2][3], name);
+    assert.equal(h.schedule.rows[2][4], 2);
+    assert.equal(h.schedule.rows[2][11], '');
+    assert.match(h.schedule.rows[2][10], /\[단가확인필요\]/);
+    assert.ok(result.warnings.some(issue => issue.kind === 'pricing_pending' && issue.equipment === name));
     assert.equal(h.equipment.writes, 0);
   }
 });

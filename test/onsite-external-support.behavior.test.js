@@ -114,6 +114,7 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
   vm.runInNewContext(supplySource + '\n' + [
     functionSource('buildAvailabilityItems_'),
     functionSource('requireSetMasterPrice_'),
+    functionSource('resolveStaffApprovedRegistrationPrice_'),
     functionSource('mergeAvailabilityItems_'),
     functionSource('checkAvailabilityForAddCached_'),
     functionSource('planRegisteredTradeInventory_'),
