@@ -584,11 +584,24 @@ function normalizeConfirmedReservationCommit(value) {
   };
 }
 
+function isProvenZeroWriteRegistrationBusy(result) {
+  return result?.schema === 'village-confirmed-reservation-commit-result/v1'
+    && result.success === false && result.status === 'blocked'
+    && result.attempted_stage === 'preflight' && result.error?.type === 'registration_busy'
+    && Array.isArray(result.applied_stages) && result.applied_stages.length === 0
+    && Array.isArray(result.replaced_request_ids) && result.replaced_request_ids.length === 0
+    && result.authoritative === null && result.request_id === null
+    && result.effective_request_id === null && result.trade_id === null
+    && result.customerNotificationAttempted === false && result.customerNotificationSent === false;
+}
+
 async function commitConfirmedReservation({
   config,
   registration,
   operationId,
   fetchImpl = globalThis.fetch,
+  beforeAttempt = async () => {},
+  waitImpl = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   // Leave the same 10s transport buffer used by registered corrections:
   // GAS must stop before the plugin's 250s HTTP read deadline.
   timeoutMs = 240_000
@@ -600,19 +613,38 @@ async function commitConfirmedReservation({
   }
   const normalized = normalizeConfirmedReservationCommit(registration);
   const request = buildConfirmedReservationCommitRequest(config, normalized, normalizedOperationId);
-  try {
-    const payload = await fetchJson(
-      fetchImpl,
-      request,
-      timeoutMs,
-      `Confirmed reservation registration for ${normalized.request_id}`
-    );
-    if (!payload.result || typeof payload.result !== 'object' || Array.isArray(payload.result)) {
-      throw new Error(`Confirmed reservation registration returned no authoritative result for ${normalized.request_id}`);
+  const deadline = Date.now() + timeoutMs;
+  let lastBusyResult;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    // Revalidate the lease/room before each zero-write lock-wait continuation.
+    // GAS rechecks the exact pending and registered baselines under its lock.
+    await beforeAttempt();
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      if (lastBusyResult) return lastBusyResult;
+      throw new Error('Confirmed registration deadline expired before mutation');
     }
-    return payload.result;
-  } catch (error) {
-    throw markUncertainWrite(error, normalized.request_id, 'confirmed_registration');
+    let result;
+    try {
+      const payload = await fetchJson(
+        fetchImpl,
+        request,
+        remainingMs,
+        `Confirmed reservation registration for ${normalized.request_id}`
+      );
+      if (!payload.result || typeof payload.result !== 'object' || Array.isArray(payload.result)) {
+        throw new Error(`Confirmed reservation registration returned no authoritative result for ${normalized.request_id}`);
+      }
+      result = payload.result;
+    } catch (error) {
+      // A timeout, malformed response or partial write is never replayable.
+      throw markUncertainWrite(error, normalized.request_id, 'confirmed_registration');
+    }
+    if (!isProvenZeroWriteRegistrationBusy(result) || attempt === 2 || deadline - Date.now() <= 5000) {
+      return result;
+    }
+    lastBusyResult = result;
+    await waitImpl(5000);
   }
 }
 

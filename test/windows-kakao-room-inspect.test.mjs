@@ -3,6 +3,20 @@ import test from 'node:test';
 
 import { inspectKakaoRoom } from '../scripts/windows/village-kakao-room-inspect.mjs';
 
+test('room inspection preserves the actual worker conversation_target for registration', async () => {
+  const result = await inspectKakaoRoom({ customerName: '확정 고객' }, {
+    ensureList: async () => ({ status: 'existing_list' }),
+    openChat: async () => ({
+      status: 'opened_target_chat',
+      conversation_target: { id: 'live-123', title: '확정 고객', url: 'https://center-pf.kakao.com/chats/123' },
+      conversation_evidence: { hint_matched: true, title: '확정 고객', messages: [] }
+    })
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.target.id, 'live-123');
+  assert.equal(result.target.url, 'https://center-pf.kakao.com/chats/123');
+});
+
 test('room inspection uses one bounded navigation call and returns live evidence', async () => {
   const calls = [];
   const result = await inspectKakaoRoom({ customerName: '희정' }, {
