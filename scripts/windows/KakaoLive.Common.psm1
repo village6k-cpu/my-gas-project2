@@ -414,6 +414,46 @@ function Test-KakaoGatewayWatchdogHealth {
     )
 }
 
+function Wait-KakaoBridgeStartupHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Process,
+        [ValidateRange(1, 300)]
+        [int]$TimeoutSeconds = 90,
+        [scriptblock]$ReadHealth = {
+            param([int]$ProbeTimeoutSeconds)
+            Invoke-RestMethod -Uri 'http://127.0.0.1:8787/health' -TimeoutSec $ProbeTimeoutSeconds
+        },
+        [scriptblock]$UtcNow = { [DateTime]::UtcNow },
+        [scriptblock]$Delay = { param([int]$Milliseconds) Start-Sleep -Milliseconds $Milliseconds }
+    )
+
+    $deadline = (& $UtcNow).AddSeconds($TimeoutSeconds)
+    while (-not $Process.HasExited) {
+        $remainingSeconds = ($deadline - (& $UtcNow)).TotalSeconds
+        # TimeoutSec is an integer; zero is unbounded, and rounding up could
+        # start a probe beyond the remaining deadline.
+        if ($remainingSeconds -lt 1) { break }
+        $probeTimeout = [int][Math]::Min(8, [Math]::Floor($remainingSeconds))
+        try {
+            $health = & $ReadHealth $probeTimeout
+            if ($null -ne $health) {
+                if ((& $UtcNow) -le $deadline) { return $health }
+                break
+            }
+        }
+        catch {
+            # A cold start or slow health read is not proof that the daemon failed.
+        }
+        $remainingMilliseconds = [Math]::Floor(($deadline - (& $UtcNow)).TotalMilliseconds)
+        if (-not $Process.HasExited -and $remainingMilliseconds -gt 0) {
+            & $Delay ([int][Math]::Min(250, $remainingMilliseconds))
+        }
+    }
+    return $null
+}
+
 function Test-KakaoLiveBridgeContract {
     [CmdletBinding()]
     param(
@@ -757,6 +797,7 @@ Export-ModuleMember -Function @(
     'Assert-KakaoLiveV2CutoverContract',
     'Set-KakaoLiveRuntimeEnvironment',
     'Test-KakaoLiveBridgeContract',
+    'Wait-KakaoBridgeStartupHealth',
     'Get-KakaoLiveRuntimeState',
     'Test-KakaoLiveRuntimeProbe',
     'Test-KakaoLiveHealth',

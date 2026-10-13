@@ -311,13 +311,7 @@ $newProcess = Start-Process -FilePath $executable -ArgumentList $commandMarker `
     -WorkingDirectory $bridgeDirectory -WindowStyle Hidden -PassThru
 
 try {
-    $deadline = [DateTime]::UtcNow.AddSeconds(20)
-    $post = $null
-    do {
-        Start-Sleep -Milliseconds 250
-        try { $post = Invoke-RestMethod -Uri 'http://127.0.0.1:8787/health' -TimeoutSec 2 }
-        catch { $post = $null }
-    } while ($null -eq $post -and [DateTime]::UtcNow -lt $deadline -and -not $newProcess.HasExited)
+    $post = Wait-KakaoBridgeStartupHealth -Process $newProcess
 
     if ($null -eq $post -or -not (Test-KakaoLiveBridgeContract -Health $post -RequireInvariantHealth $false)) {
         throw 'Restarted bridge did not satisfy the full-live contract.'
