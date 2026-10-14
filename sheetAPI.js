@@ -716,7 +716,8 @@ function handleRequestCore_(e) {
       case "repairTradeProjection":
         return jsonResponse(repairDashboardTradeProjection_(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId,
-          params.removedScheduleIds || postBody.removedScheduleIds
+          params.removedScheduleIds || postBody.removedScheduleIds,
+          params.statusOnly === true || params.statusOnly === 'true' || postBody.statusOnly === true
         ));
 
       case "getTradeDiscountState":
