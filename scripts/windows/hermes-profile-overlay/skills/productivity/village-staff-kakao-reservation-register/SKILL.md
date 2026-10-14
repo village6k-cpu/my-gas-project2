@@ -37,7 +37,7 @@ For normal operations, do not run repository sync/start scripts, inspect runner 
 1. Inspect the exact customer room and read the whole relevant continuation, not only the first booking block. Distinguish customer requests from staff confirmations and later changes.
 2. Read the matching open RQ, existing registered trade, live schedule, catalog/set masters, customer data, and inventory evidence needed to decide the current plan.
 3. Resolve aliases contextually. Preserve every accepted add, removal, quantity, set/component choice, discount, contact, and exact period. Ask only when remaining ambiguity materially changes money, equipment, recipient, or schedule.
-4. Compare the final plan with authoritative state, then choose exactly one execution path below.
+4. Compare the final plan with authoritative state, then choose exactly one execution path below. For raw demand and cross-channel IDs use [the demand and evidence boundary](references/live-evidence-id-and-unresolved-alias-boundary.md).
 5. Use one UUID v4 as `operationId`. If the outcome is uncertain, keep that UUID and reconcile; never generate a new ID and replay the write.
 6. Report success only from authoritative readback, not from a process exit, accepted request, Slack status, or stale receipt.
 

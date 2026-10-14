@@ -9,7 +9,7 @@ Read the whole relevant live conversation plus the current RQ, contract, schedul
 - `expected_before`: current top-level RQ rows only;
 - `expected_set_components`: every current child row marked as a set component;
 - `expected_period`: exact current RQ period;
-- `desired_after`: final staff-accepted cart in canonical catalog/set names;
+- `desired_after`: complete final staff-accepted cart, using exact resolved identities or the accepted raw names when catalog mapping is missing; keep quantity and model/options intact. Record catalog/supply/pending-price work separately, never as a prerequisite to preserving approved demand;
 - `desired_period`: final accepted booking period;
 - `set_component_selections`: only explicit or established deterministic component choices;
 - `source_evidence.customer_message_ids` and `staff_message_ids`: live message IDs proving the request, acceptance, later changes, and staff confirmation.
