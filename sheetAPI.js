@@ -1652,6 +1652,7 @@ function runFunction(funcName, params) {
     "getGuideDoorAccessStatus",
     "diagGuideAlimtalkSchedule",
     "markGuideAlimtalkSent",
+    "repairFailedGuideAlimtalk",
     "repairTradeContractStatus",
     "cleanupOldTradeProps",
     "auditScriptProperties",
@@ -1809,6 +1810,11 @@ function runFunction(funcName, params) {
       }
       var dgResult = diagGuideAlimtalkSchedule(dgArgs || {});
       return { success: !dgResult.error, function: funcName, result: dgResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "repairFailedGuideAlimtalk") {
+      var failedGuideArgs = typeof params.args === "string" ? JSON.parse(params.args) : (params.args || {});
+      var failedGuideResult = repairFailedGuideAlimtalk(failedGuideArgs);
+      return { success: true, function: funcName, result: failedGuideResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "markGuideAlimtalkSent") {
       var mgArgs = params.args;

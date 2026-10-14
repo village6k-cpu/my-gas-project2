@@ -18937,6 +18937,7 @@ function _getPopbillToken(forceRefresh) {
  */
 function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns, options) {
   options = options || {};
+  var receiverPhone = normalizeAlimtalkReceiver_(receiver);
   var props = PropertiesService.getScriptProperties();
   var senderNum = props.getProperty('POPBILL_SENDER_NUM');
   var altSendType = Object.prototype.hasOwnProperty.call(options, 'altSendType') ? String(options.altSendType) : 'A';
@@ -18946,7 +18947,7 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns,
   var url = 'https://popbill.linkhub.co.kr/ATS';
 
   var msgObj = {
-    rcv: receiver.replace(/-/g, ''),
+    rcv: receiverPhone,
     rcvnm: receiverName
   };
   if (vars) {
@@ -18984,6 +18985,56 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns,
   }
   return JSON.parse(response.getContentText());
 
+}
+
+// 숫자로 저장된 휴대폰의 선행 0과 국제번호를 발송 직전에 복구한다.
+function normalizeAlimtalkReceiver_(value) {
+  var digits = String(value == null ? '' : value).replace(/[^0-9]/g, '');
+  if (digits.indexOf('82') === 0) digits = '0' + digits.slice(2);
+  if (/^1[016789]\d{7,8}$/.test(digits)) digits = '0' + digits;
+  if (!/^01[016789]\d{7,8}$/.test(digits)) throw new Error('알림톡 수신 전화번호 형식 오류');
+  return digits;
+}
+
+// 실제 실패 접수번호가 같은 고객·템플릿·발송 시각에 연결될 때만 재시도를 허용한다.
+// 이 함수는 발송하지 않는다. 다음 정상 자동 실행이 원래 발송 조건을 다시 확인한다.
+function repairFailedGuideAlimtalk(args) {
+  args = args || {};
+  var tid = String(args.tradeId || '').trim();
+  var kind = String(args.kind || '');
+  var receipt = String(args.receiptNum || '');
+  if (!/^\d{6}-\d{3}$/.test(tid) || !/^\d{18}$/.test(receipt) || ['checkout', 'checkin'].indexOf(kind) < 0) {
+    throw new Error('거래ID, 반출/반납 구분, 실패 접수번호 필요');
+  }
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
+  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues().filter(function(row) { return String(row[0]).trim() === tid; });
+  if (rows.length !== 1) throw new Error('복구 대상 계약이 정확히 1개여야 합니다');
+  var customer = rows[0];
+  var phone = normalizeAlimtalkReceiver_(customer[2]);
+  var response = UrlFetchApp.fetch('https://popbill.linkhub.co.kr/KakaoTalk/' + receipt,
+    { headers: { Authorization: 'Bearer ' + _getPopbillToken() }, muteHttpExceptions: true });
+  if (response.getResponseCode() !== 200) throw new Error('팝빌 실패 접수번호 조회 실패');
+  var info = JSON.parse(response.getContentText());
+  var expected = kind === 'checkout' ? ['026090001186', '026060000711'] : ['026090001187', '026040000904'];
+  if (expected.indexOf(String(info.templateCode)) < 0 || !info.msgs || info.msgs.length !== 1) throw new Error('안내 템플릿/수신자 불일치');
+  var message = info.msgs[0];
+  var rawPhone = String(message.receiveNum || '').replace(/[^0-9]/g, '');
+  if (Number(message.state) !== 3 || Number(message.result) !== 624 || normalizeAlimtalkReceiver_(rawPhone) !== phone
+      || rawPhone === phone || String(message.receiveName).trim() !== String(customer[1]).trim()
+      || /^(0|000|100)$/.test(String(message.altResult || ''))) throw new Error('전화번호 선행 0 실패의 복구 조건 불일치');
+  var props = PropertiesService.getScriptProperties();
+  var sent = _getGuideSentData_(props);
+  var flag = (kind === 'checkout' ? 'out_' : 'in_') + tid;
+  if (!sent[flag]) return { success: true, reset: false, tradeId: tid };
+  var flagTime = String(sent[flag]).replace(/[^0-9]/g, '');
+  var sendTime = String(message.sendDT || '');
+  function asTime(value) { return new Date(value.slice(0, 4) + '-' + value.slice(4, 6) + '-' + value.slice(6, 8)
+    + 'T' + value.slice(8, 10) + ':' + value.slice(10, 12) + ':00+09:00').getTime(); }
+  if (!/^\d{12}$/.test(flagTime) || !/^\d{14}$/.test(sendTime)
+      || Math.abs(asTime(flagTime) - asTime(sendTime)) > 5 * 60 * 1000) throw new Error('실패 접수번호와 발송 기록 시각 불일치');
+  delete sent[flag];
+  props.setProperty('GUIDE_SENT_V2', JSON.stringify(sent));
+  return { success: true, reset: true, tradeId: tid, kind: kind };
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
