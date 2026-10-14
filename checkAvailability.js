@@ -2651,6 +2651,12 @@ function dashboardTradeMutationLeaseError_(props, tid, ownKind, ownToken) {
   if (auxiliaryLease && !(ownKind === 'aux' && String(auxiliaryLease.token || '') === String(ownToken || ''))) {
     return { error: '같은 거래의 결제·증빙 변경을 처리 중입니다.', code: 'BUSY', retryable: true };
   }
+  // 큐 대기 자체가 아니라 정확한 제외 HTTP 직전부터 완료까지의 거래별 claim이다.
+  // 전역 잠금 없이도 삭제 ID의 재사용/반출 체크가 마지막 검증과 경합하지 않게 한다.
+  var removalProjectionLease = activeDashboardMutationLease_(props, 'dashboardRemovalProjectionInFlight_' + tid);
+  if (removalProjectionLease) {
+    return { error: '같은 거래의 장비 제외를 저장 중입니다.', code: 'BUSY', retryable: true };
+  }
   // 구조 투영은 Sheet 변경을 막는 권한 전이가 아니라 revision 큐로 합쳐지는 비동기 복제다.
   // Supabase 장애/backoff 동안 이 lease로 카드 전체를 막으면 최대 수분짜리 새 병목이 된다.
   // worker가 실제 반납 권한 HTTP를 수행하는 짧은 구간에만 직접 충돌하는 명령을 제한한다.
@@ -2745,6 +2751,11 @@ function scheduleDashboardStructureProjectionUnderLock_(tid, patch) {
       return String(id || '').trim();
     }).filter(Boolean);
     task.addedScheduleIds = addedIds.filter(function(id, idx) { return addedIds.indexOf(id) === idx; });
+    // 삭제된 마지막 suffix를 새 추가가 재사용할 수 있다. 최신 추가 권한이 이전
+    // 삭제 권한보다 우선하며, 오래된 tombstone을 새 행에 적용하지 않는다.
+    task.removeScheduleIds = (task.removeScheduleIds || []).filter(function(id) {
+      return patch.addedScheduleIds.indexOf(id) < 0;
+    });
   }
   if (patch.clearReturnCountIds) {
     var countIds = (task.clearReturnCountIds || []).concat(patch.clearReturnCountIds || []).map(function(id) {
@@ -2967,10 +2978,47 @@ function flushDashboardStructureProjectionQueue_() {
         if (!returnSaved || !returnSaved.ok) ok = false;
       }
       if (ok && task.removeScheduleIds && task.removeScheduleIds.length) {
-        var removed = typeof supaMarkScheduleItemsRemoved_ === 'function'
-          ? supaMarkScheduleItemsRemoved_(tid, task.removeScheduleIds)
-          : { ok: false, error: 'Supabase 품목 제외 함수 없음' };
-        if (!removed || !removed.ok) ok = false;
+        var removalLock = LockService.getScriptLock();
+        var removalLocked = false;
+        var removalClaimed = false;
+        var absentRemovalIds = [];
+        var removalLeaseKey = 'dashboardRemovalProjectionInFlight_' + tid;
+        try {
+          removalLocked = removalLock.tryLock(1000);
+          if (!removalLocked) { pending = true; nextDelay = Math.min(nextDelay, 1000); return; }
+          var removalTask = null;
+          try { removalTask = JSON.parse(props.getProperty(queueKey) || '{}'); } catch (removalTaskErr) {}
+          if (!removalTask || String(removalTask.token || '') !== token ||
+              Number(removalTask.revision || 0) !== revision ||
+              dashboardTradeMutationLeaseError_(props, tid, 'projectionRemoval', '')) {
+            pending = true; nextDelay = Math.min(nextDelay, 1000); return;
+          }
+          var removalSheet = ssForProjection.getSheetByName('스케줄상세');
+          if (!removalSheet) throw new Error('제외 투영 검증용 스케줄상세 시트 없음');
+          var liveRemovalRows = removalSheet.getLastRow() > 1
+            ? removalSheet.getRange(2, 1, removalSheet.getLastRow() - 1, 2).getDisplayValues() : [];
+          var presentRemovalIds = {};
+          liveRemovalRows.forEach(function(row) {
+            if (String(row[1] || '').trim() === tid) presentRemovalIds[String(row[0] || '').trim()] = true;
+          });
+          absentRemovalIds = task.removeScheduleIds.filter(function(id) { return !presentRemovalIds[id]; });
+          if (absentRemovalIds.length) {
+            props.setProperty(removalLeaseKey, JSON.stringify({ token: token + ':' + revision, at: Date.now() }));
+            removalClaimed = true;
+          }
+        } finally {
+          if (removalLocked) try { removalLock.releaseLock(); } catch (removalReleaseErr) {}
+        }
+        try {
+          if (absentRemovalIds.length) {
+            var removed = typeof supaMarkScheduleItemsRemoved_ === 'function'
+              ? supaMarkScheduleItemsRemoved_(tid, absentRemovalIds)
+              : { ok: false, error: 'Supabase 품목 제외 함수 없음' };
+            if (!removed || !removed.ok) ok = false;
+          }
+        } finally {
+          if (removalClaimed) clearDashboardMutationLease_(props, removalLeaseKey, token + ':' + revision);
+        }
       }
     } catch (projectionErr) {
       ok = false;
@@ -16531,6 +16579,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   }
   var _postRegisterAlimtalk = null; // 락 해제 후 보낼 알림톡 payload (외부 HTTP를 락 밖으로)
   var _postRegisterScheduleFormat = false; // 9천+ 행 전체 서식은 등록 락 밖의 별도 워커로
+  var _deferRegistrationDrain = false;
   var _registerOutcome = null;
   var _regPerf = { lockWaitMs: Date.now() - _regPerfT0, reqID: "" };
   try {
@@ -16895,6 +16944,24 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       forbiddenMergeError.code = "registered_trade_exists";
       throw forbiddenMergeError;
     }
+    // 기존 거래 합침도 제외 투영 HTTP와 같은 거래별 fence를 지킨다. 요청은
+    // 삭제/완료 처리하지 않고 내구 대기에 보존해 짧은 claim 해제 후 재시도한다.
+    if (mergeMode && mergeTargetTID) {
+      var mergeMutationBlock = dashboardTradeMutationLeaseError_(
+        PropertiesService.getScriptProperties(), mergeTargetTID, 'equipmentAdd', ''
+      );
+      if (mergeMutationBlock) {
+        if (registerOptions.failIfBusy === true) {
+          var mergeBusyError = new Error(mergeMutationBlock.error);
+          mergeBusyError.code = mergeMutationBlock.code;
+          mergeBusyError.retryable = mergeMutationBlock.retryable;
+          throw mergeBusyError;
+        }
+        _deferRegistrationDrain = true;
+        if (markRegisterQueued_(sheet, triggerRow)) enqueuePendingRegister_(reqID, 30000);
+        return mergeMutationBlock;
+      }
+    }
     // 합침 요청에는 기존 품목이 섞여 다시 들어오는 경우가 있다. 새 품목만 쓰도록
     // 현재 거래의 C/D/E(세트/장비/수량)와 정확히 같은 행을 multiset으로 한 번씩 제외한다.
     var mergeSchedulePlan = planMergedScheduleRows_(
@@ -17229,7 +17296,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     }
     var _drainT0 = Date.now();
     try {
-      processRegistrationQueue_(sheet);
+      if (!_deferRegistrationDrain) processRegistrationQueue_(sheet);
     } catch (queueErr) {
       Logger.log("등록대기 자동 처리 실패: " + queueErr.message);
       try { ensurePendingRegisterTrigger_(30000); } catch (triggerErr) {}
