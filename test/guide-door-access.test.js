@@ -14,6 +14,7 @@ const ctx = {
   PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k,v) => { props[k] = v; } }) },
   CacheService: { getScriptCache: () => ({ get: k => cache[k] || null, put: (k,v) => { cache[k] = v; } }) },
   UrlFetchApp: { fetch: url => { requests++; const code = url.split('/').pop(); if (responses[code] instanceof Error) throw responses[code]; return { getResponseCode: () => 200, getContentText: () => JSON.stringify(responses[code]) }; } },
+  Utilities: { formatDate: (date, zone) => new Intl.DateTimeFormat('en-GB', {hour:'2-digit',hourCycle:'h23',timeZone:zone}).format(date) },
   _getPopbillToken: () => 'test-token'
 };
 vm.createContext(ctx);
@@ -23,9 +24,10 @@ ctx._getCheckoutGuideTemplate_ = () => ctx.TPL_CHECKOUT;
 ctx._buildCheckoutGuideMsg = name => ctx._buildCheckoutMsg(name);
 const reset = () => { for (const k of Object.keys(cache)) delete cache[k]; };
 const password = 'test-code*';
+const nightAt = new Date('2026-10-15T01:00:00+09:00');
 const suffix = '[매장 출입문 비밀번호: ' + password + ']\n나가실 때는 반드시 검정색 철문을 닫고 #버튼을 눌러 문을 잠궈주세요!';
 for (const kind of ['checkout', 'checkin']) {
-  const old = ctx.getGuideAlimtalkPayload_(kind, '테스트');
+  const old = ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt);
   assert(!old.content.includes('출입문 비밀번호'));
 }
 assert.strictEqual(requests, 0, 'unconfigured rollout must not call Popbill');
@@ -36,22 +38,29 @@ for (const kind of ['checkout', 'checkin']) {
   const expected = ctx.buildGuideDoorMessage_(kind, '#{고객명}', '#{출입문비밀번호}');
   responses[code] = { templateCode: code, state: '2', template: expected };
   reset();
-  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트').doorAccess, 'pending review must preserve the approved old pair');
+  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).doorAccess, 'pending review must preserve the approved old pair');
   responses[code].state = '3';
   reset();
-  const live = ctx.getGuideAlimtalkPayload_(kind, '테스트');
+  const live = ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt);
   assert.strictEqual(live.templateCode, code);
   assert(live.content.endsWith(suffix));
   assert(!live.content.includes('철문은 닫지 마시고'));
   assert.strictEqual(live.vars['#{출입문비밀번호}'], password);
   assert.strictEqual(live.vars['#{고객명}'], '테스트');
   assert.strictEqual(live.content, expected.replace('#{고객명}', '테스트').replace('#{출입문비밀번호}', password));
+  for (const [time, required] of [['21:59', false], ['22:00', true], ['06:59', true], ['07:00', false], ['12:00', false]]) {
+    const at = new Date('2026-10-15T' + time + ':00+09:00');
+    const selected = ctx.getGuideAlimtalkPayload_(kind, '테스트', at);
+    assert.strictEqual(selected.doorAccess, required, kind + ' locking must follow operation time at ' + time);
+    assert.strictEqual(selected.content.includes('문을 잠궈주세요'), required);
+  }
+  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트').doorAccess, 'missing operation time must not add a locking instruction');
   responses[code].template += '\n다른 문구';
   reset();
-  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트').doorAccess, 'approved but mismatched body must not activate');
+  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).doorAccess, 'approved but mismatched body must not activate');
   responses[code] = new Error('network failure');
   reset();
-  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트').doorAccess, 'lookup failure must preserve existing sends');
+  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).doorAccess, 'lookup failure must preserve existing sends');
 }
 assert(!JSON.stringify(ctx.getGuideDoorAccessStatus()).includes(password), 'status must never disclose the password');
 assert(!Object.keys(props).some(k => k.startsWith('GUIDE_SENT')), 'configuration must not reset sent flags');

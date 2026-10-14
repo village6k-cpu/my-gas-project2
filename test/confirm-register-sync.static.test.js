@@ -491,7 +491,7 @@ console.log('popbill-hmac checks OK');
   const api = read('sheetAPI.js');
   assert(
     /function testGuideAlimtalk\(args\)/.test(ca) &&
-      ca.includes("getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름)") &&
+      ca.includes("getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름, args.scheduledAt || null)") &&
       ca.includes('sendAlimtalk(tpl, 연락처, 이름, guide.content, guide.vars)'),
     'testGuideAlimtalk must reuse the exact guide template/message pair that automatic sends use'
   );
@@ -541,7 +541,7 @@ console.log('guide-alimtalk-test-tool checks OK');
   );
   const guideFn = ca.slice(ca.indexOf('function checkGuideAlimtalk'), ca.indexOf('// ── 발송 기록 저장'));
   assert(
-    guideFn.includes("getGuideAlimtalkPayload_('checkout', cust.name)") &&
+    guideFn.includes("getGuideAlimtalkPayload_('checkout', cust.name, info.checkoutDT)") &&
       guideFn.includes('sendAlimtalk(outGuide.templateCode, cust.tel, cust.name, outGuide.content, outGuide.vars)'),
     'automatic checkout guide sends must switch template and message together'
   );

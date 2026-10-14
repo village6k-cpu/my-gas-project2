@@ -19175,7 +19175,7 @@ function testGuideAlimtalk(args) {
   var 종류 = String(args.종류 || "반출").trim();
   var 이름 = String(args.이름 || "테스트").trim();
   var isCheckin = 종류 === "반납";
-  var guide = getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름);
+  var guide = getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름, args.scheduledAt || null);
   var tpl = guide.templateCode;
   try {
     var res = sendAlimtalk(tpl, 연락처, 이름, guide.content, guide.vars);
@@ -19678,7 +19678,7 @@ function checkGuideAlimtalk() {
     var outFlag = 'out_' + tid;
     if (!sentData[outFlag] && nowMs >= outSendMs && nowMs < checkoutMs) {
       try {
-        var outGuide = getGuideAlimtalkPayload_('checkout', cust.name);
+        var outGuide = getGuideAlimtalkPayload_('checkout', cust.name, info.checkoutDT);
         var outRes = sendAlimtalk(outGuide.templateCode, cust.tel, cust.name, outGuide.content, outGuide.vars);
         if (!_alimtalkAccepted_(outRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(outRes));
         sentData[outFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
@@ -19702,7 +19702,7 @@ function checkGuideAlimtalk() {
       var inDeadlineMs = returnMs;  // 반납 시각 지나면 발송 안 함 (이미 반납했을 것)
       if (!sentData[inFlag] && nowMs >= inSendMs && nowMs < inDeadlineMs) {
         try {
-          var inGuide = getGuideAlimtalkPayload_('checkin', cust.name);
+          var inGuide = getGuideAlimtalkPayload_('checkin', cust.name, info.returnDT);
           var inRes = sendAlimtalk(inGuide.templateCode, cust.tel, cust.name, inGuide.content, inGuide.vars);
           if (!_alimtalkAccepted_(inRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(inRes));
           sentData[inFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');

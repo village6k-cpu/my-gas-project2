@@ -51,10 +51,18 @@ function getGuideDoorTemplateStatus_(kind) {
     approved: String(template.state) === '3' && matches };
 }
 
-function getGuideAlimtalkPayload_(kind, customerName) {
+function isGuideNightOperation_(operationAt) {
+  if (!operationAt) return false;
+  var dt = Object.prototype.toString.call(operationAt) === '[object Date]' ? operationAt : new Date(operationAt);
+  if (isNaN(dt.getTime())) return false;
+  var hour = Number(Utilities.formatDate(dt, 'Asia/Seoul', 'HH'));
+  return hour >= 22 || hour < 7;
+}
+
+function getGuideAlimtalkPayload_(kind, customerName, operationAt) {
   if (!GUIDE_DOOR_TEMPLATE_CODES_[kind]) throw new Error('반출/반납 구분 오류');
   var password = PropertiesService.getScriptProperties().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
-  var status = password ? getGuideDoorTemplateStatus_(kind) : null;
+  var status = password && isGuideNightOperation_(operationAt) ? getGuideDoorTemplateStatus_(kind) : null;
   if (status && status.approved) {
     return { templateCode: status.templateCode, content: buildGuideDoorMessage_(kind, customerName, password),
       vars: { '#{고객명}': customerName, '#{출입문비밀번호}': password }, doorAccess: true };
