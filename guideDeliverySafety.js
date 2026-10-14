@@ -34,7 +34,10 @@ function guidePopbillRead_(path) {
     options.headers.Authorization = 'Bearer ' + _getPopbillToken(true);
     response = UrlFetchApp.fetch('https://popbill.linkhub.co.kr' + path, options);
   }
-  if (response.getResponseCode() !== 200) throw new Error('전송 결과 조회 실패');
+  if (response.getResponseCode() !== 200) {
+    var errorCode='unknown';try{errorCode=JSON.parse(response.getContentText()).code;}catch(e){}
+    throw new Error('전송 결과 조회 실패 HTTP '+response.getResponseCode()+' 코드 '+String(errorCode));
+  }
   return JSON.parse(response.getContentText());
 }
 function sendGuideLms_(phone, name, content, requestNum) {
