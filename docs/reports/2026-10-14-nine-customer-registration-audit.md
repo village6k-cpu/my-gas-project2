@@ -35,6 +35,15 @@ An internal `repairTradeProjection` request with `statusOnly:true` reads queue/s
 
 ## Verification / deployment
 
+### Follow-up checkpoint, 11:35 KST
+
+- GAS782 live queue statistics were total1/due1/target0, attempts0, no claims. The independently reproduced head-of-line defect is repaired, but it is **not** evidence for the live timer's nonexecution. Timer root cause remains unverified.
+- Live782 capabilities still described every equipment name as an exact `목록` name. This authoritative schema instruction contradicted approved raw-demand registration; repaired schema explains original-name preservation and separates price/supply follow-up without relaxing execution validators.
+- Added internal POST-only scoped execution of already-existing projection work. It cannot enqueue, grant removals, repeat GAS deletion, execute other queue keys or clear global triggers. Stored trade-ID mismatch is rejected while retaining both queues. Status-only always wins over the drain flag.
+- Property reclamation now preserves actual per-scope hashed mutation-log keys for pending trades; the previous suffix matcher missed those keys. This is a proven retention gap, not a claim that current receipts were lost.
+- Accepted separate80C V-mount batteries2 were missing for 노사무엘. Operation ac0c7d58-95bc-4e52-8f4d-87e40da1a893 added row261008-003-13, qty2, catalog daily5000, and regenerated the contract. **Do not replay.** Final exact-state verification detected existing included camera-battery row05 changed from `FX9/6 배터리 (전체)` to `V배터리`; mutation provenance is still being reconciled. Source now12 rows; app convergence still requires readback. Latest connecting-cable request has no subsequent staff approval.
+- Final review independently passed42 focused tests. Its two edge-case suggestions were reproduced RED and fixed GREEN. Final focused patch tests18/18 plus GAS syntax checks passed before integration. No customer sends, model changes, service restarts or broad process termination.
+
 - Core catalog/name repair: 3 observed failing tests -> passing; strict-dropdown integration cases: 2 observed failures -> passing. Independent review36/36 passed and linked-reference contradiction fixed.
 - First full run had four Windows shell-resolution failures, not silently ignored: `ci-deploy-current-head`3 and `gas-version-budget`1. Rerunning those suites with actual Git Bash on PATH passed7/7. The main integration then ran the entire root suite successfully before deploy.
 - Main56851ee, GAS779, Vercel dpl_8AK3KCQzcDntsx2UExcSWkJqYNjX READY.
