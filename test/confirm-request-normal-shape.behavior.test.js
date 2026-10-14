@@ -24,6 +24,11 @@ class Sheet {
     const range = {
       getValues: values, getDisplayValues: () => values().map(r => r.map(String)),
       getValue: () => values()[0][0], getDisplayValue: () => String(values()[0][0]),
+      getDataValidations: () => Array.from({length:count},(_,i)=>Array.from({length:width},(_,j)=>{
+        const prior=s.styles[row-1+i]?.[col-1+j]?.validation;
+        return prior?{copy:()=>({setAllowInvalid(value){this.value=value;return this;},build(){return {...prior,allowInvalid:this.value};}})}:null;
+      })),
+      setDataValidations(v) {each((r,c)=>{s.styles[r][c].validation=v[r-row+1][c-col+1];});return this;},
       setValues(v) {
         each((r,c) => {
           const rule = s.styles[r][c].validation;

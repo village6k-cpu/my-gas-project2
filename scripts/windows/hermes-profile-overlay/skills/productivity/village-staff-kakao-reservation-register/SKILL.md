@@ -37,9 +37,15 @@ For normal operations, do not run repository sync/start scripts, inspect runner 
 1. Inspect the exact customer room and read the whole relevant continuation, not only the first booking block. Distinguish customer requests from staff confirmations and later changes.
 2. Read the matching open RQ, existing registered trade, live schedule, catalog/set masters, customer data, and inventory evidence needed to decide the current plan.
 3. Resolve aliases contextually. Preserve every accepted add, removal, quantity, set/component choice, discount, contact, and exact period. Ask only when remaining ambiguity materially changes money, equipment, recipient, or schedule.
-4. Compare the final plan with authoritative state, then choose exactly one execution path below.
+4. Compare the final plan with authoritative state, then choose exactly one execution path below. For raw demand and cross-channel IDs use [the demand and evidence boundary](references/live-evidence-id-and-unresolved-alias-boundary.md).
 5. Use one UUID v4 as `operationId`. If the outcome is uncertain, keep that UUID and reconcile; never generate a new ID and replay the write.
 6. Report success only from authoritative readback, not from a process exit, accepted request, Slack status, or stale receipt.
+
+### Staff-approved demand is the registration boundary
+
+When staff accepted the exact current equipment demand, register the complete demand through the validated no-send confirmed route even if a name is absent from every catalog, stock is short, or price is pending. Keep the accepted raw name and quantity in `desired_after`; an unmapped item is not a reason to drop a line, substitute a different model, or ask staff to repeat approval. Read back the full schedule first, then track catalog identity, supply and pending-price work separately. A blank pending price is not a free rental and must not produce a final quote or customer send.
+
+Ask a focused question only when the actual accepted demand is materially unknown, not merely its catalog mapping. Preserve already approved known demand while that separate question remains open. A generated included accessory can remain unchanged without independent catalog membership. An item resolved in `장비마스터` or `세트마스터` is not missing merely because autocomplete `목록` omits it. Never change a known equipment identity just to satisfy a dropdown.
 
 ## One official execution path when the live cart differs
 
@@ -59,7 +65,7 @@ Input shape:
     "expected_before": [{"name":"현재 RQ 상위 품목","quantity":1}],
     "expected_set_components": [],
     "expected_period": {"start_date":"YYYY-MM-DD","start_time":"HH:00","end_date":"YYYY-MM-DD","end_time":"HH:00"},
-    "desired_after": [{"name":"최종 카탈로그/세트명","quantity":1}],
+    "desired_after": [{"name":"최종 정확명 또는 직원이 승인한 원문명","quantity":1}],
     "desired_period": {"start_date":"YYYY-MM-DD","start_time":"HH:00","end_date":"YYYY-MM-DD","end_time":"HH:00"},
     "set_component_selections": [],
     "source_evidence": {

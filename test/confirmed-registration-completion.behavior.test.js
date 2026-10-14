@@ -30,6 +30,10 @@ test('final approved form can complete an incomplete pending period and customer
   assert.equal(replacement.예약자명,'김지윤');assert.equal(replacement.연락처,'010-0000-0002');
   assert.equal(replacement.할인유형,'개인사업자/프리랜서');
   assert.equal(replacement.반출시간,'21:00');
+  assert.equal(replacement.장비명원문보존,true,
+    'approved replacement identities must not be silently fuzzy-matched before the exact registration fence');
+  const qualified='가변 ND 필터 (82mm, 1-5 Stop)';
+  assert.equal(ctx._resolveConfirmRequestPlannedEquipmentName_(qualified,['가변 ND 필터'],replacement.장비명원문보존),qualified);
 });
 
 test('final registration still rejects incomplete desired periods and unsupported contact changes',async()=>{

@@ -97,6 +97,15 @@ Compare actual final equipment before replaying any addition or substitution.
   and exact current baseline. Original baseline blanks do not block completion.
   Include identity completion when needed. If no RQ exists, use request_id=null
   and pending_request_candidate for the atomic intake-and-register route.
+  A checked RQ, available inventory, staff reply or quote is not a registered
+  schedule. If staff accepted the current demand and no active trade covers it,
+  preserve every approved raw name/quantity through this commit even when a
+  catalog mapping, included accessory identity, supply or price needs review.
+  Keep that review separate; unknown price is not zero/free. A later thanks or
+  answered reply does not discharge the missing registration. Do not classify
+  the booking as already_applied/already_answered from an RQ alone. If only a
+  separate later choice remains unknown, preserve the known approved demand
+  and that unresolved choice; do not invent an identity or block the whole cart.
 - **Agreed cancellation:** use the same registered-change tool with kind=reservation_cancel after identifying the exact booking and current cancellation agreement across the full conversation. Include all live schedule rows (including components) in expected_before, desired_after=[], date_change=null, and no request_id. Cancelling a single item uses equipment_remove. Later withdrawal of the cancellation matters; no keyword list decides intent. Verify contract status 취소 and zero schedule rows. Do not replay an already cancelled booking; refund/fees and customer sending are separate work.
 - **Registered change:** use `village_registered_reservation_change` after live
   reconciliation and contextual staff authorization. Never recreate the full
