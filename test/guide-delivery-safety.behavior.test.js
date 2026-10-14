@@ -135,3 +135,10 @@ test('reversed pickup/return dates raise an alert instead of being discarded as 
   h.ctx.guideSafetyBookings_=()=>[{tid:'261014-020',cust,checkoutAt:out,returnAt:ret}];
   const report=h.ctx.inspectGuideDeliverySafety();assert.equal(report.rows.length,1);assert(report.rows[0].issues.length);
 });
+test('explicit editor setup can use the sole registered mobile sender as the verified owner alert number',()=>{
+  const h=load();delete h.props.GUIDE_ALERT_PHONE;h.props.POPBILL_SENDER_NUM='01000000000';
+  h.ctx.guidePopbillRead_=()=>[{number:'01000000000',state:1}];
+  h.ctx.ScriptApp={getProjectTriggers:()=>[],newTrigger:()=>({timeBased(){return this;},everyMinutes(){return this;},create(){return{};}})};
+  assert.equal(typeof h.ctx.setupGuideDeliverySafetyForCurrentSender,'function');
+  const r=h.ctx.setupGuideDeliverySafetyForCurrentSender();assert(r.configured);assert.equal(h.props.GUIDE_ALERT_PHONE,'01000000000');
+});

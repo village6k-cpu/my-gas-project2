@@ -331,3 +331,13 @@ function setupGuideDeliverySafety(args) {
   if(!existing.length)ScriptApp.newTrigger('checkGuideDeliverySafety').timeBased().everyMinutes(5).create();
   return {configured:true,monitorEveryMinutes:5};
 }
+
+// 편집기에서 명시적으로 실행하는 내부 초기화 도구. 발신번호가 지정한 운영자 번호와
+// 동일함을 사전에 확인한 경우에만 사용한다. 유일한 등록·사용 번호인지 다시 검사한다.
+function setupGuideDeliverySafetyForCurrentSender() {
+  var phone=normalizeAlimtalkReceiver_(PropertiesService.getScriptProperties().getProperty('POPBILL_SENDER_NUM'));
+  var senders=guidePopbillRead_('/Message/SenderNumber');
+  var active=Array.isArray(senders)?senders.filter(function(s){return Number(s.state)===1;}):[];
+  if(active.length!==1 || String(active[0].number).replace(/[^0-9]/g,'')!==phone)throw new Error('운영자가 확인한 유일한 등록 발신번호 필요');
+  return setupGuideDeliverySafety({alertPhone:phone});
+}
