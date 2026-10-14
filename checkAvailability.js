@@ -5973,7 +5973,9 @@ function historicalDiscountSnapshot_(tid, masterSheet, ledgerSheet, contractShee
           if (/^(연락처|반출직원|반납직원|추가할인|장기할인|쿠폰할인)$/.test(String(candidate).replace(/\s/g, ''))) return '';
           return candidate;
         }
-        return cells[r][fallbackCol] == null ? '' : cells[r][fallbackCol];
+        // 라벨 오른쪽이 비었으면 빈 필드다. 구형 연락처 라벨이 I열에 있을 때
+        // 고정 I열 fallback은 라벨 자신/왼쪽 다른 필드를 연락처로 오독한다.
+        return '';
       }
     }
     return null;
@@ -6080,7 +6082,7 @@ function restoreTradeDiscountMetadata(args) {
     // dryRun의 스냅샷은 이후 쓰기 시 잠금 안에서 다시 CAS한다. 순수 검사까지
     // 전역 쓰기 잠금을 잡아 대량 과거 점검이 현재 예약 등록을 밀어내면 안 된다.
     if (!dryRun) {
-      if (!lock.tryLock(1000)) return { success: false, code: 'BUSY', noMutationPerformed: true };
+      if (!lock.tryLock(10000)) return { success: false, code: 'BUSY', noMutationPerformed: true };
       held = true;
     }
     var lease = dryRun ? null : dashboardTradeMutationLeaseError_(props, tid, 'discountMetadata', '');

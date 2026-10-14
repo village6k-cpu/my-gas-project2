@@ -21,7 +21,7 @@ function fixture(){
  })});
  const masterRows=[master],ledgerRows=[ledger],props={getProperty:k=>values.get(k)||null,setProperty:(k,v)=>values.set(k,String(v)),setProperties:o=>Object.entries(o).forEach(([k,v])=>values.set(k,String(v)))};
  const ctx={Date,Math,JSON,Number,PropertiesService:{getScriptProperties:()=>props},
-  LockService:{getScriptLock:()=>({tryLock:()=>{if(ctx.onLock)ctx.onLock();return true;},releaseLock(){}})},
+  LockService:{getScriptLock:()=>({tryLock:waitMs=>ctx.onLock?ctx.onLock(waitMs)!==false:true,releaseLock(){}})},
   SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:()=>Object.assign(table(masterRows),{getParent:()=>({getSpreadsheetTimeZone:()=>ctx.masterTimeZone||'Asia/Seoul'})})}),openById:()=>({getName:()=>ctx.documentTitle||'계약서_'+tid+'_테스트고객',getSpreadsheetTimeZone:()=>ctx.documentTimeZone||'Asia/Seoul',getSheets:()=>[{getDataRange:()=>({getValues:()=>doc,getFormulas:()=>formulas}),getName:()=> '계약서'}]})},
   Utilities:{formatDate:(v,tz)=>new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'}).format(v),DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,s)=>Array.from(crypto.createHash('sha256').update(s).digest())}};
  vm.runInNewContext(gas,ctx);
@@ -46,6 +46,18 @@ test('read-only inspection does not take the global write lock or block ordinary
 test('read-only inspection does not run mutable expired-lease cleanup outside the write lock',()=>{
  const f=fixture();f.ctx.dashboardTradeMutationLeaseError_=()=>{throw Error('mutable lease cleanup');};
  assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
+});
+test('the explicit historical write waits a bounded ten seconds without changing read-only inspection',()=>{
+ const f=fixture(),proof=f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true});
+ let calls=0;f.ctx.onLock=wait=>{calls++;assert.equal(wait,10000);};
+ const result=f.ctx.restoreTradeDiscountMetadata({...f.input,expectedSnapshotDigest:proof.snapshotDigest});
+ assert.equal(result.success,true);assert.equal(calls,1);assert.equal(f.writes.length,1);
+});
+test('bounded lock contention remains explicitly unwritten and never changes a source cell',()=>{
+ const f=fixture(),proof=f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true});
+ f.ctx.onLock=wait=>{assert.equal(wait,10000);return false;};
+ const result=f.ctx.restoreTradeDiscountMetadata({...f.input,expectedSnapshotDigest:proof.snapshotDigest});
+ assert.equal(result.code,'BUSY');assert.equal(result.noMutationPerformed,true);assert.equal(f.writes.length,0);assert.equal(f.values.size,0);
 });
 test('current VAT-labelled final total is supported without falling back to a physical row',()=>{
  const f=fixture();f.doc[23][0]='총 결제 금액 (VAT 10% 포함)';
@@ -99,6 +111,17 @@ test('an omitted return year rolls over only after a title-bound December start'
  assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
 });
 function legacy(f){f.doc[1][2]='';f.doc[2][2]='';f.doc[6][2]='';f.doc[7][2]='';}
+test('a blank contact at the old shared borrower row is not the contact label itself',()=>{
+ const f=fixture();legacy(f);f.doc[1]=Array(14).fill('');f.doc[1][1]='예약자(상호)';f.doc[1][3]='테스트고객';f.doc[1][8]='연락처';
+ const proof=f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true});assert.equal(proof.success,true);
+ const before=JSON.stringify({ledger:f.ledger,doc:f.doc});
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,expectedSnapshotDigest:proof.snapshotDigest}).success,true);
+ assert.equal(JSON.stringify({ledger:f.ledger,doc:f.doc}),before);
+});
+test('an exhausted final-total label cannot borrow an unlabelled amount to its left',()=>{
+ const f=fixture();f.doc[23]=Array(14).fill('');f.doc[23][7]=70400;f.doc[23][9]='총 결제 금액';
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,false);assert.equal(f.writes.length,0);
+});
 test('an unfilled legacy template is bound by exact unique ledger identity, checkout date and file title',()=>{
  const f=fixture();legacy(f);
  const p=f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true});assert.equal(p.success,true);
