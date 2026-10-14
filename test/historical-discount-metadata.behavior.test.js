@@ -69,6 +69,35 @@ test('legacy ledger and master Date cells are each compared in their own spreads
  f.master[4]=new Date('2026-04-03T22:00:00Z');f.master[6]=new Date('2026-04-04T17:00:00Z');f.ledger[0]=new Date('2026-04-02T15:00:00Z');
  assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
 });
+for(const [start,end] of [
+ ['26-04-03 10시','26-04-04 10시'],
+ ['2026년 4월 3일 10시','2026년 4월 4일 10시'],
+ ['4월3일10시','4월4일10시'],
+ ['260403','260404'],
+])test('legacy calendar spelling is verified without repricing: '+start,()=>{
+ const f=fixture();f.doc[6][2]=start;f.doc[7][2]=end;
+ const p=f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true});assert.equal(p.success,true);
+ const before=JSON.stringify({ledger:f.ledger,doc:f.doc});
+ const r=f.ctx.restoreTradeDiscountMetadata({...f.input,expectedSnapshotDigest:p.snapshotDigest});
+ assert.equal(r.success,true);assert.equal(JSON.stringify({ledger:f.ledger,doc:f.doc}),before);
+});
+for(const [name,start,end,mutate] of [
+ ['unbound omitted year','4월3일10시','4월4일10시',f=>f.ctx.documentTitle='일반 계약서'],
+ ['invalid calendar','26-02-31 10시','26-04-04 10시',()=>{}],
+ ['conflicting month/day','4월2일10시','4월4일10시',()=>{}],
+ ['ambiguous midnight','26-04-03 10시','26-04-04 24시',()=>{}],
+ ['ambiguous midnight clock','26-04-03 10시','26-04-04 24:00',()=>{}],
+ ['ambiguous ISO midnight','26-04-03 10시','2026-04-04T24:00',()=>{}],
+ ['ambiguous Korean midnight','26-04-03 10시','4월4일오후24시',()=>{}],
+])test('legacy calendar parser rejects '+name,()=>{
+ const f=fixture();f.doc[6][2]=start;f.doc[7][2]=end;mutate(f);
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,false);assert.equal(f.writes.length,0);
+});
+test('an omitted return year rolls over only after a title-bound December start',()=>{
+ const f=fixture();f.master[4]='2026-12-31';f.master[6]='2027-01-01';f.ledger[0]='2026-12-31';
+ f.doc[6][2]='12월31일10시';f.doc[7][2]='1월1일10시';
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
+});
 function legacy(f){f.doc[1][2]='';f.doc[2][2]='';f.doc[6][2]='';f.doc[7][2]='';}
 test('an unfilled legacy template is bound by exact unique ledger identity, checkout date and file title',()=>{
  const f=fixture();legacy(f);
