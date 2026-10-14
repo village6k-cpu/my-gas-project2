@@ -19,16 +19,16 @@ const ctx = {
 };
 vm.createContext(ctx);
 vm.runInContext(builders, ctx);
+vm.runInContext(fs.readFileSync(path.join(root, 'guideParkingNotice.js'), 'utf8'), ctx);
 vm.runInContext(fs.readFileSync(path.join(root, 'guideDoorAccess.js'), 'utf8'), ctx);
 ctx._getCheckoutGuideTemplate_ = () => ctx.TPL_CHECKOUT;
 ctx._buildCheckoutGuideMsg = name => ctx._buildCheckoutMsg(name);
 const reset = () => { for (const k of Object.keys(cache)) delete cache[k]; };
 const password = 'test-code*';
 const nightAt = new Date('2026-10-15T01:00:00+09:00');
-const suffix = '[매장 출입문 비밀번호: ' + password + ']\n나가실 때는 반드시 검정색 철문을 닫고 #버튼을 눌러 문을 잠궈주세요!';
+const conditional = '22:00~07:00에 반출/반납하실 경우에는 검정색 철문을 닫고 #버튼을 눌러 문을 잠그고 가주세요.';
 for (const kind of ['checkout', 'checkin']) {
-  const old = ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt);
-  assert(!old.content.includes('출입문 비밀번호'));
+  assert.throws(() => ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt), /비밀번호/, 'unconfigured access must not silently fall back to a password-free guide');
 }
 assert.strictEqual(requests, 0, 'unconfigured rollout must not call Popbill');
 assert(ctx.configureGuideDoorAccess({ password: '\n' }).error);
@@ -38,12 +38,21 @@ for (const kind of ['checkout', 'checkin']) {
   const expected = ctx.buildGuideDoorMessage_(kind, '#{고객명}', '#{출입문비밀번호}');
   responses[code] = { templateCode: code, state: '2', template: expected };
   reset();
-  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).doorAccess, 'pending review must preserve the approved old pair');
+  const pending=ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt);
+  assert.equal(pending.channel,'sms','pending approval must use the corrected operational SMS rather than conflicting legacy content');
+  assert(pending.content.includes(password));
   responses[code].state = '3';
   reset();
   const live = ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt);
   assert.strictEqual(live.templateCode, code);
-  assert(live.content.endsWith(suffix));
+  assert(live.content.includes(conditional));
+  assert(live.content.includes(ctx.GUIDE_PARKING_NOTICE_));
+  const p=live.content.indexOf('[매장 출입문 비밀번호:');
+  const lock=live.content.indexOf(conditional,p);
+  const recipient=live.content.indexOf('⚠️ 예약자와 실제 반출자가 다른 경우',lock);
+  const parking=live.content.indexOf('❤️❤️주차 주의❤️❤️',recipient);
+  assert(p < lock && lock < recipient && recipient < parking, 'password, lock rule and pickup confirmation must be one highlighted block before parking');
+  assert(live.content.slice(recipient,parking).includes('━━━━━━━━━━━━━━━━'),'parking must be separated from the access block');
   assert(!live.content.includes('철문은 닫지 마시고'));
   assert.strictEqual(live.vars['#{출입문비밀번호}'], password);
   assert.strictEqual(live.vars['#{고객명}'], '테스트');
@@ -51,17 +60,28 @@ for (const kind of ['checkout', 'checkin']) {
   for (const [time, required] of [['21:59', false], ['22:00', true], ['06:59', true], ['07:00', false], ['12:00', false]]) {
     const at = new Date('2026-10-15T' + time + ':00+09:00');
     const selected = ctx.getGuideAlimtalkPayload_(kind, '테스트', at);
-    assert.strictEqual(selected.doorAccess, required, kind + ' locking must follow operation time at ' + time);
-    assert.strictEqual(selected.content.includes('문을 잠궈주세요'), required);
+    assert.strictEqual(selected.doorAccess, true, kind + ' password must be available at every operation time');
+    assert(selected.content.includes(conditional), 'the fixed conditional instruction must be included at '+time);
+    assert.strictEqual(selected.content,live.content, 'operation time must not select another message');
   }
-  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트').doorAccess, 'missing operation time must not add a locking instruction');
+  assert(ctx.getGuideAlimtalkPayload_(kind, '테스트').doorAccess, 'guide selection must not depend on a provided operation time');
   responses[code].template += '\n다른 문구';
   reset();
-  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).doorAccess, 'approved but mismatched body must not activate');
+  assert.equal(ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).channel,'sms', 'approved but mismatched body must use corrected SMS');
   responses[code] = new Error('network failure');
   reset();
-  assert(!ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).doorAccess, 'lookup failure must preserve existing sends');
+  assert.equal(ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).channel,'sms', 'lookup failure must retain password and corrected instructions');
 }
+for (const kind of ['checkout','checkin']) {
+  const sms=ctx.buildGuideAccessSms_(kind,'테스트',password);
+  assert(Buffer.byteLength(sms,'utf8')<=2000,'fallback SMS must fit the Popbill byte limit');
+  assert(sms.includes(conditional) && sms.includes(ctx.GUIDE_PARKING_NOTICE_) && sms.includes(password));
+}
+const newCode='026101499999';
+ctx.guidePopbillRead_=()=> [{templateCode:newCode,state:'3',template:ctx.buildGuideDoorMessage_('checkout','#{고객명}','#{출입문비밀번호}') }];
+reset();
+assert.equal(ctx.getGuideAlimtalkPayload_('checkout','테스트').templateCode,newCode,'only an approved exactly matching new template may automatically activate');
+assert.equal(props.GUIDE_SAFE_TEMPLATE_checkout,newCode);
 assert(!JSON.stringify(ctx.getGuideDoorAccessStatus()).includes(password), 'status must never disclose the password');
 assert(!Object.keys(props).some(k => k.startsWith('GUIDE_SENT')), 'configuration must not reset sent flags');
 console.log('guide door access approval, content, fallback and privacy checks OK');

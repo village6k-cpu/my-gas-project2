@@ -491,8 +491,8 @@ console.log('popbill-hmac checks OK');
   const api = read('sheetAPI.js');
   assert(
     /function testGuideAlimtalk\(args\)/.test(ca) &&
-      ca.includes("getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름, args.scheduledAt || null)") &&
-      ca.includes('sendAlimtalk(tpl, 연락처, 이름, guide.content, guide.vars)'),
+      ca.includes("getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름)") &&
+      ca.includes('sendAlimtalk(guide.templateCode, 연락처, 이름, guide.content, guide.vars') && ca.includes("guide.channel === 'sms'"),
     'testGuideAlimtalk must reuse the exact guide template/message pair that automatic sends use'
   );
   assert(
@@ -541,8 +541,7 @@ console.log('guide-alimtalk-test-tool checks OK');
   );
   const guideFn = ca.slice(ca.indexOf('function checkGuideAlimtalk'), ca.indexOf('// ── 발송 기록 저장'));
   assert(
-    guideFn.includes("getGuideAlimtalkPayload_('checkout', cust.name, info.checkoutDT)") &&
-      guideFn.includes('sendAlimtalk(outGuide.templateCode, cust.tel, cust.name, outGuide.content, outGuide.vars)'),
+    guideFn.includes("sendGuideSafely_(tid, 'checkout', cust, info.checkoutDT)"),
     'automatic checkout guide sends must switch template and message together'
   );
 }
@@ -604,8 +603,8 @@ console.log('register-alimtalk-test-tool checks OK');
     'register alimtalk must NOT set REG_ALIM_SENT_ flag when popbill rejects (e.g. template under review)'
   );
   assert(
-    /_alimtalkAccepted_\(outRes\)/.test(ca) && /_alimtalkAccepted_\(inRes\)/.test(ca),
-    'guide alimtalk must only mark sent when popbill issued a receiptNum'
+    /if \(outRes\.sent\)/.test(ca) && /if \(inRes\.sent\)/.test(ca),
+    'legacy guide flags must only be written when the durable delivery guard accepted a new request'
   );
   assert(
     /GUIDE_SENT_V2/.test(ca) && !/sentKey = 'GUIDE_SENT_' \+ todayStr/.test(ca),
@@ -718,10 +717,8 @@ console.log('guide-skip-completed checks OK');
     'guide alimtalk must match customers by phone first and fail closed on duplicate/missing phone matches'
   );
   assert(
-    /var visitMap = readGuideCustomerVisitMap_\(\)/.test(fn) &&
-      /getGuideCustomerVisitInfo_\(visitMap, cust\.name, cust\.tel\)/.test(fn) &&
-      /if \(!visitInfo\.eligible\)/.test(fn),
-    'automatic guide sends must pass through the visit-count eligibility gate immediately before sending'
+    !/readGuideCustomerVisitMap_\(\)/.test(fn) && !/visitInfo\.eligible/.test(fn),
+    'essential access guides must not exclude frequent customers or depend on customerDB availability'
   );
   assert(
     !/ss\.getSheetByName\('고객DB'\)/.test(fn) && !/usageCount/.test(fn),
@@ -729,9 +726,9 @@ console.log('guide-skip-completed checks OK');
   );
   assert(
     /customerDb: \{/.test(diag) &&
-      /guideEligible: visitInfo\.eligible/.test(diag) &&
+      /legacyVisitEligible: visitInfo\.eligible/.test(diag) &&
       /visitCount: visitInfo\.visitCount/.test(diag) &&
-      /visitSkipReason: visitInfo\.eligible \? '' : visitInfo\.reason/.test(diag),
+      /visitSkipReason: ''/.test(diag),
     'guide diagnostics must expose customer DB load state and visit-count eligibility per trade'
   );
 }

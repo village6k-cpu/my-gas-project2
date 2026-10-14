@@ -1650,6 +1650,10 @@ function runFunction(funcName, params) {
     "testGuideAlimtalk",
     "configureGuideDoorAccess",
     "getGuideDoorAccessStatus",
+    "inspectGuideDeliverySafety",
+    "checkGuideDeliverySafety",
+    "setupGuideDeliverySafety",
+    "confirmGuidePickupContact",
     "diagGuideAlimtalkSchedule",
     "markGuideAlimtalkSent",
     "repairFailedGuideAlimtalk",
@@ -1802,6 +1806,13 @@ function runFunction(funcName, params) {
       var doorArgs = typeof params.args === "string" ? JSON.parse(params.args) : (params.args || {});
       var doorResult = funcName === "configureGuideDoorAccess" ? configureGuideDoorAccess(doorArgs) : getGuideDoorAccessStatus();
       return { success: !doorResult.error, function: funcName, result: doorResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "inspectGuideDeliverySafety") return inspectGuideDeliverySafety();
+    if (funcName === "checkGuideDeliverySafety") return checkGuideDeliverySafety();
+    if (funcName === "setupGuideDeliverySafety") return setupGuideDeliverySafety(typeof params.args === "string" ? JSON.parse(params.args) : (params.args || {}));
+    if (funcName === "confirmGuidePickupContact") {
+      var pickupArgs = typeof params.args === "string" ? JSON.parse(params.args) : (params.args || {});
+      return confirmGuidePickupContact(pickupArgs);
     }
     if (funcName === "diagGuideAlimtalkSchedule") {
       var dgArgs = params.args;

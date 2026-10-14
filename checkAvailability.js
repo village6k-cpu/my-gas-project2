@@ -37,6 +37,10 @@ function onOpen() {
     .addSeparator()
     .addItem("🔍 선택 행 할인유형 재조회", "lookupDiscountForSelectedRow")
     .addSeparator()
+    .addItem("🔐 출입 안내 안전 점검", "showGuideDeliverySafety")
+    .addItem("✅ 실제 반출자·비밀번호 수신 확인", "confirmGuidePickupContactFromMenu")
+    .addItem("⚙️ 출입 안내 긴급 경보 설정", "setupGuideDeliverySafety")
+    .addSeparator()
     .addItem("🔄 장비 목록 갱신", "refreshEquipmentList")
     .addItem("📸 실사기록 동기화", "syncAuditFromMaster")
     .addSeparator()
@@ -18862,7 +18866,7 @@ function doClearRequests() {
  * 팝빌 API 토큰 발급
  * 스크립트 속성에 POPBILL_LINK_ID, POPBILL_SECRET_KEY 필요
  */
-var POPBILL_TOKEN_CACHE_KEY_ = 'popbillSessionToken_v2';
+var POPBILL_TOKEN_CACHE_KEY_ = 'popbillSessionToken_v3';
 
 function _getPopbillToken(forceRefresh) {
   // 세션 토큰은 수 시간 유효한데 매 발송마다 재발급하면 외부 HTTP 1회가 통째로 낭비.
@@ -18887,7 +18891,7 @@ function _getPopbillToken(forceRefresh) {
   var forwardIP = '*';
   var reqBody = JSON.stringify({
     access_id: corpNum,
-    scope: ['member', '153', '154', '155', '156', '157']
+    scope: ['member', '150', '151', '153', '154', '155', '156', '157']
   });
 
   var sha = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, reqBody, Utilities.Charset.UTF_8);
@@ -18941,6 +18945,7 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns,
   var props = PropertiesService.getScriptProperties();
   var senderNum = props.getProperty('POPBILL_SENDER_NUM');
   var altSendType = Object.prototype.hasOwnProperty.call(options, 'altSendType') ? String(options.altSendType) : 'A';
+  var altContent = Object.prototype.hasOwnProperty.call(options, 'altContent') ? String(options.altContent) : content;
 
   var token = _getPopbillToken();
   // 공식 SDK와 동일: 발송 경로는 /ATS, corpNum은 토큰에 바인딩됨 (경로에 넣으면 404)
@@ -18952,18 +18957,19 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns,
   };
   if (vars) {
     msgObj.msg = content;
-    msgObj.altmsg = content;
+    msgObj.altmsg = altContent;
     msgObj.vars = vars;
   }
 
   var body = {
     snd: senderNum,
     content: content,
-    altContent: content,
+    altContent: altContent,
     msgs: [msgObj],
     templateCode: templateCode,
     altSendType: altSendType
   };
+  if (options.requestNum) body.requestNum = String(options.requestNum);
   if (btns && btns.length) body.btns = btns; // 템플릿 버튼 (예: 웹링크 '내 예약 확인')
 
   var options = {
@@ -19164,7 +19170,7 @@ function getRegisterAlimtalkTradeSnapshot_(tradeId) {
 }
 
 /**
- * 반출/반납 안내 알림톡 테스트 발송 — 이미 승인된 템플릿이라 실물 도착까지 검증 가능.
+ * 반출/반납 출입 안내 테스트 발송 — 승인 전에는 올바른 안내를 문자로 전송한다.
  * args: { 연락처: "010-...", 종류?: "반출"|"반납", 이름?: "테스트" }
  * 시트/GUIDE_SENT_ 중복방지 플래그에 아무 기록 없음.
  */
@@ -19175,13 +19181,15 @@ function testGuideAlimtalk(args) {
   var 종류 = String(args.종류 || "반출").trim();
   var 이름 = String(args.이름 || "테스트").trim();
   var isCheckin = 종류 === "반납";
-  var guide = getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름, args.scheduledAt || null);
-  var tpl = guide.templateCode;
   try {
-    var res = sendAlimtalk(tpl, 연락처, 이름, guide.content, guide.vars);
-    return { success: true, 종류: 종류, template: tpl, popbill: res };
+    var guide = getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름);
+    var res = guide.channel === 'sms'
+      ? sendGuideLms_(연락처, 이름, guide.content, Utilities.getUuid())
+      : sendAlimtalk(guide.templateCode, 연락처, 이름, guide.content, guide.vars, null,
+        {altSendType:'A',altContent:guide.altContent,requestNum:Utilities.getUuid()});
+    return { success: _alimtalkAccepted_(res), 종류: 종류, channel: guide.channel, popbill: res };
   } catch (e) {
-    return { error: e.message, 종류: 종류, template: tpl };
+    return { error: e.message, 종류: 종류 };
   }
 }
 
@@ -19526,11 +19534,12 @@ function diagGuideAlimtalkSchedule(args) {
         phoneMasked: maskPhoneForDisplay_(contract.tel || ''),
         contractStatus: contract.status || '',
         scheduleStatus: String(schedData[i][9] || '').trim(),
-        guideEligible: visitInfo.eligible,
+        guideEligible: !!contract.name && !!contract.tel && !/취소|완료/.test(contract.status),
+        legacyVisitEligible: visitInfo.eligible,
         visitCount: visitInfo.visitCount,
         visitMatchedBy: visitInfo.matchedBy,
         visitSourceRow: visitInfo.sourceRow,
-        visitSkipReason: visitInfo.eligible ? '' : visitInfo.reason,
+        visitSkipReason: '',
         checkoutAt: _formatGuideKst_(checkoutDT),
         returnAt: _formatGuideKst_(returnDT),
         legacyCheckoutPlus3At: checkoutMs ? _formatGuideKst_(checkoutMs + GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS) : '',
@@ -19589,9 +19598,16 @@ function markGuideAlimtalkSent(args) {
  *
  * 반출 안내톡: 반출 시간 12시간 전 (발송 가능 시간 내에서)
  * 반납 안내톡: 반납 12시간 전 ↔ 반출+3시간 중 늦은 시각 (당일 반출-반납 건은 반출 전 발송 방지)
- * 대상: 3회 미만 고객만
+ * 대상: 모든 미완료·미취소 고객. 방문 횟수는 출입 안내의 제외 사유가 아니다.
  */
 function checkGuideAlimtalk() {
+  var guideLock = LockService.getScriptLock();
+  if (!guideLock.tryLock(1000)) return { skipped: ['안내 발송 진행 중'], sent: [], errors: [] };
+  try { return checkGuideAlimtalkLocked_(); }
+  finally { guideLock.releaseLock(); }
+}
+
+function checkGuideAlimtalkLocked_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var schedSheet = ss.getSheetByName('스케줄상세');
   var contractSheet = ss.getSheetByName('계약마스터');
@@ -19600,11 +19616,7 @@ function checkGuideAlimtalk() {
 
   var now = new Date();
 
-  // 발송 가능 시간 아니면 즉시 종료
-  if (!_isInSendWindow(now)) {
-    Logger.log('⏸ 발송 가능 시간 아님 (08:00~22:00 외)');
-    return;
-  }
+  // 출입에 필요한 정보성 안내는 심야 신규 예약도 누락되지 않도록 시간 제한 없이 처리한다.
 
   // ── 계약마스터 데이터 로드 ──
   // A=거래ID, B=예약자명, C=연락처, J=계약상태
@@ -19617,10 +19629,11 @@ function checkGuideAlimtalk() {
     var name = String(cmData[ci][1] || '').trim();
     var tel = String(cmData[ci][2] || '').trim();
     var cStatus = String(cmData[ci][9] || '').trim();
-    if (tid) contractMap[tid] = { name: name, tel: tel, status: cStatus };
+    if (tid) {
+      var duplicateContract = !!contractMap[tid];
+      contractMap[tid] = { name: name, tel: tel, status: cStatus, ambiguous: duplicateContract };
+    }
   }
-
-  var visitMap = readGuideCustomerVisitMap_();
 
   // ── 스케줄상세에서 거래ID별 반출일시 수집 ──
   var schedData = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getValues();
@@ -19637,14 +19650,19 @@ function checkGuideAlimtalk() {
     var 상태 = String(schedData[si][9] || '').trim();  // J
 
     if (!거래ID || 상태 === '취소') continue;
-    if (tradeInfo[거래ID]) continue;  // 같은 거래ID 첫 행만
 
     var checkoutDT = _parseCheckoutDateTime(반출일, 반출시간);
-    if (!checkoutDT) continue;
+    if (!checkoutDT || isNaN(checkoutDT.getTime())) continue;
     // _parseCheckoutDateTime은 날짜+시간 → Date 범용 파서라 반납에도 그대로 사용
     var returnDT = _parseCheckoutDateTime(반납일, 반납시간);
 
-    tradeInfo[거래ID] = { checkoutDT: checkoutDT, returnDT: returnDT };
+    if (tradeInfo[거래ID]) {
+      if (tradeInfo[거래ID].checkoutDT.getTime() !== checkoutDT.getTime()
+          || (!!tradeInfo[거래ID].returnDT !== !!returnDT)
+          || (returnDT && tradeInfo[거래ID].returnDT.getTime() !== returnDT.getTime())) tradeInfo[거래ID].ambiguous = true;
+      continue;
+    }
+    tradeInfo[거래ID] = { checkoutDT: checkoutDT, returnDT: returnDT, ambiguous: !!(returnDT && returnDT.getTime()<=checkoutDT.getTime()) };
   }
 
   // ── 중복 발송 방지 (거래 단위 단일 키 — 날짜별 키는 자정 넘으면 플래그가 사라져
@@ -19659,31 +19677,30 @@ function checkGuideAlimtalk() {
   Object.keys(tradeInfo).forEach(function(tid) {
     var info = tradeInfo[tid];
     var cust = contractMap[tid];
-    if (!cust || !cust.name || !cust.tel) return;
+    if (!cust) return;
+    if (cust.ambiguous || info.ambiguous) { results.errors.push('반출 ' + tid + ': 계약/일정 불일치 확인 필요'); return; }
 
     // 취소/이미 반납 완료된 계약에는 안내 불필요 ("반납일이 다가와" 오발송 방지)
     if (/취소|완료/.test(cust.status)) return;
 
-    // 3회 미만 고객만
-    var visitInfo = getGuideCustomerVisitInfo_(visitMap, cust.name, cust.tel);
-    if (!visitInfo.eligible) {
-      results.skipped.push('방문횟수 제외 ' + tid + ' ' + cust.name + ': ' + visitInfo.reason);
-      return;
-    }
+    // 출입 비밀번호는 방문 횟수와 관계없이 필요하다. 실제 반출자 확인 기록이 있으면 그 번호를 쓴다.
+    try { cust = guideRecipient_(tid, cust, info.checkoutDT); }
+    catch(recipientError) { results.errors.push('반출 ' + tid + ': 연락처 확인 필요'); return; }
+    if(!cust.name || !cust.tel){results.errors.push('반출 '+tid+': 실제 반출자 성함/연락처 확인 필요');return;}
 
     var checkoutMs = info.checkoutDT.getTime();
 
     // ── 반출 안내톡: 반출 12시간 전 ──
     var outSendMs = checkoutMs - (12 * 60 * 60 * 1000);
     var outFlag = 'out_' + tid;
-    if (!sentData[outFlag] && nowMs >= outSendMs && nowMs < checkoutMs) {
+    if (nowMs >= outSendMs && nowMs < checkoutMs) {
       try {
-        var outGuide = getGuideAlimtalkPayload_('checkout', cust.name, info.checkoutDT);
-        var outRes = sendAlimtalk(outGuide.templateCode, cust.tel, cust.name, outGuide.content, outGuide.vars);
-        if (!_alimtalkAccepted_(outRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(outRes));
-        sentData[outFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
-        results.sent.push('반출 ' + tid + ' ' + cust.name);
-        Logger.log('✅ 반출 안내톡: ' + tid + ' ' + cust.name + ' → ' + JSON.stringify(outRes));
+        var outRes = sendGuideSafely_(tid, 'checkout', cust, info.checkoutDT);
+        if (outRes.sent) {
+          sentData[outFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
+          results.sent.push('반출 ' + tid);
+        }
+        if (/failed|rejected|unknown/.test(outRes.state)) results.errors.push('반출 ' + tid + ': 도착 확인 필요');
       } catch(err) {
         results.errors.push('반출 ' + tid + ': ' + err.message);
         Logger.log('❌ 반출 안내톡 실패: ' + tid + ' ' + err.message);
@@ -19700,14 +19717,14 @@ function checkGuideAlimtalk() {
       if (inSendMs === null) return;
       var inFlag = 'in_' + tid;
       var inDeadlineMs = returnMs;  // 반납 시각 지나면 발송 안 함 (이미 반납했을 것)
-      if (!sentData[inFlag] && nowMs >= inSendMs && nowMs < inDeadlineMs) {
+      if (nowMs >= inSendMs && nowMs < inDeadlineMs) {
         try {
-          var inGuide = getGuideAlimtalkPayload_('checkin', cust.name, info.returnDT);
-          var inRes = sendAlimtalk(inGuide.templateCode, cust.tel, cust.name, inGuide.content, inGuide.vars);
-          if (!_alimtalkAccepted_(inRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(inRes));
-          sentData[inFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
-          results.sent.push('반납 ' + tid + ' ' + cust.name);
-          Logger.log('✅ 반납 안내톡: ' + tid + ' ' + cust.name + ' → ' + JSON.stringify(inRes));
+          var inRes = sendGuideSafely_(tid, 'checkin', cust, info.returnDT);
+          if (inRes.sent) {
+            sentData[inFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
+            results.sent.push('반납 ' + tid);
+          }
+          if (/failed|rejected|unknown/.test(inRes.state)) results.errors.push('반납 ' + tid + ': 도착 확인 필요');
         } catch(err) {
           results.errors.push('반납 ' + tid + ': ' + err.message);
           Logger.log('❌ 반납 안내톡 실패: ' + tid + ' ' + err.message);
