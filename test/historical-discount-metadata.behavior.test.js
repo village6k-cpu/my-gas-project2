@@ -21,9 +21,9 @@ function fixture(){
  })});
  const masterRows=[master],ledgerRows=[ledger],props={getProperty:k=>values.get(k)||null,setProperty:(k,v)=>values.set(k,String(v)),setProperties:o=>Object.entries(o).forEach(([k,v])=>values.set(k,String(v)))};
  const ctx={Date,Math,JSON,Number,PropertiesService:{getScriptProperties:()=>props},
-  LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock(){}})},
-  SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:()=>table(masterRows)}),openById:()=>({getSheets:()=>[{getDataRange:()=>({getValues:()=>doc,getFormulas:()=>formulas}),getName:()=> '계약서'}]})},
-  Utilities:{DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,s)=>Array.from(crypto.createHash('sha256').update(s).digest())}};
+  LockService:{getScriptLock:()=>({tryLock:()=>{if(ctx.onLock)ctx.onLock();return true;},releaseLock(){}})},
+  SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:()=>table(masterRows)}),openById:()=>({getName:()=>ctx.documentTitle||'계약서_'+tid+'_테스트고객',getSheets:()=>[{getDataRange:()=>({getValues:()=>doc,getFormulas:()=>formulas}),getName:()=> '계약서'}]})},
+  Utilities:{formatDate:v=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(v),DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,s)=>Array.from(crypto.createHash('sha256').update(s).digest())}};
  vm.runInNewContext(gas,ctx);
  ctx.openTradeLedgerContext_=()=>({sheet:table(ledgerRows)});
  ctx.dashboardTradeMutationLeaseError_=()=>null;
@@ -46,6 +46,36 @@ test('current VAT-labelled final total is supported without falling back to a ph
 test('the deployed template planned-return label is treated as the rental return date',()=>{
  const f=fixture();f.doc[7][0]='반납일자(예정)';
  assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
+});
+test('Sheets Date cells keep their type until timezone-aware rental-period comparison',()=>{
+ const f=fixture();f.doc[6][2]=new Date('2026-04-03T01:00:00Z');f.doc[7][2]=new Date('2026-04-04T01:00:00Z');
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
+});
+function legacy(f){f.doc[1][2]='';f.doc[2][2]='';f.doc[6][2]='';f.doc[7][2]='';}
+test('an unfilled legacy template is bound by exact unique ledger identity, checkout date and file title',()=>{
+ const f=fixture();legacy(f);
+ const p=f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true});assert.equal(p.success,true);
+ const r=f.ctx.restoreTradeDiscountMetadata({...f.input,expectedSnapshotDigest:p.snapshotDigest});assert.equal(r.success,true);assert.equal(f.writes.length,1);
+});
+test('a labelled blank legacy additional-discount field is not confused with the next long-discount heading',()=>{
+ const f=fixture();f.doc[20]=Array(14).fill('');f.doc[20][0]='사전 할인';f.doc[20][2]='학생30%';f.doc[20][3]='추가 할인';f.doc[20][8]='장기할인';f.doc[20][9]='해당없음';
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,discountType:'학생',dryRun:true}).success,true);
+});
+test('a document linked to another trade while waiting for the lock blocks the K write',()=>{
+ const f=fixture(),p=f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true});
+ f.ctx.onLock=()=>{const row=[...f.ledger];row[4]='260403-016';f.ledgerRows.push(row);};
+ const r=f.ctx.restoreTradeDiscountMetadata({...f.input,expectedSnapshotDigest:p.snapshotDigest});
+ assert.equal(r.success,false);assert.equal(f.writes.length,0);
+});
+for(const [name,mutate] of [
+ ['wrong file title',f=>f.ctx.documentTitle='계약서_260403-016_테스트고객'],
+ ['wrong ledger phone',f=>f.ledger[5]='010-9999-9999'],
+ ['wrong ledger checkout date',f=>f.ledger[0]='2026-04-02'],
+ ['conflicting filled borrower',f=>f.doc[1][2]='다른고객'],
+ ['conflicting filled date',f=>f.doc[6][2]='2026/04/02'],
+ ['another trade shares the document',f=>{const other=[...f.ledger];other[4]='260403-016';f.ledgerRows.push(other);}],
+])test('legacy restoration rejects '+name,()=>{
+ const f=fixture();legacy(f);mutate(f);assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,false);assert.equal(f.writes.length,0);
 });
 test('historical correction only changes K and preserves coupon, document, settlement and no-regen state',()=>{
  const f=fixture(),before=JSON.stringify({ledger:f.ledger,doc:f.doc});
