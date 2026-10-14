@@ -2837,6 +2837,38 @@ function ensureDashboardStructureProjectionTrigger_(delayMs) {
   }
 }
 
+/** 대기 중인 앞 20개가 실행 가능한 뒤 작업을 굶기지 않도록 먼저 due를 고른다.
+ * 오래된 due부터 처리해 짧은 backoff가 트리거 실행 간격 사이에 만료돼도 재시도가
+ * 더 오래 기다린 작업을 계속 앞지를 수 없게 한다. snapshot만 읽는 순수 planner다. */
+function planDashboardStructureProjectionBatch_(all, now) {
+  var allKeys = Object.keys(all || {}).filter(function(key) {
+    return key.indexOf(DASHBOARD_STRUCTURE_QUEUE_PREFIX_) === 0;
+  });
+  var due = [];
+  var futureCount = 0;
+  var nextDelay = 5 * 60 * 1000;
+  allKeys.forEach(function(key, index) {
+    var task = null;
+    try { task = JSON.parse(all[key] || '{}'); } catch (parseErr) {}
+    var tid = String(task && task.tradeId || key.substring(DASHBOARD_STRUCTURE_QUEUE_PREFIX_.length)).trim();
+    var valid = !!(task && tid && task.token);
+    var dueAt = Number(task && task.nextAt || 0);
+    var waitMs = dueAt - now;
+    if (valid && waitMs > 0) {
+      futureCount++;
+      nextDelay = Math.min(nextDelay, waitMs);
+    } else {
+      due.push({ key: key, at: valid && isFinite(dueAt) ? dueAt : 0, index: index });
+    }
+  });
+  due.sort(function(a, b) { return a.at - b.at || a.index - b.index; });
+  var dueKeys = due.map(function(entry) { return entry.key; });
+  var overflow = dueKeys.length > 20;
+  return { allKeys: allKeys, dueKeys: dueKeys, keys: dueKeys.slice(0, 20),
+    total: allKeys.length, futureCount: futureCount,
+    pending: overflow || futureCount > 0, nextDelay: overflow ? 1000 : nextDelay };
+}
+
 /** 거래별 큐의 외부 HTTP는 전역 ScriptLock 밖에서 실행하고 성공 확인 뒤에만 lease를 지운다. */
 function flushDashboardStructureProjectionQueue_() {
   var props = PropertiesService.getScriptProperties();
@@ -2847,14 +2879,10 @@ function flushDashboardStructureProjectionQueue_() {
   } catch (triggerCleanupErr) {}
   props.deleteProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_);
   var all = props.getProperties();
-  var allQueueKeys = Object.keys(all).filter(function(key) {
-    return key.indexOf(DASHBOARD_STRUCTURE_QUEUE_PREFIX_) === 0;
-  });
-  var keys = allQueueKeys.slice(0, 20);
-  var pending = allQueueKeys.length > keys.length;
-  var nextDelay = 5 * 60 * 1000;
-  // 이번 실행에서 처리하지 못한 overflow가 있으면 다음 묶음을 즉시 이어서 처리한다.
-  if (pending) nextDelay = 1000;
+  var batch = planDashboardStructureProjectionBatch_(all, Date.now());
+  var keys = batch.keys;
+  var pending = batch.pending;
+  var nextDelay = batch.nextDelay;
   // 외부 호출 중 GAS hard-timeout이 나도 큐가 고아가 되지 않도록 먼저 watchdog을 건다.
   if (keys.length) ensureDashboardStructureProjectionTrigger_(60 * 1000);
   keys.forEach(function(queueKey) {
@@ -3226,6 +3254,8 @@ function readDashboardTradeProjectionState_(tid) {
   var sourceScheduleIds = rows.filter(function(row) { return String(row[1] || '').trim() === tid; })
     .map(function(row) { return String(row[0] || '').trim(); });
   var now = Date.now();
+  var batch = planDashboardStructureProjectionBatch_(props.getProperties(), now);
+  var targetQueueKey = DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + tid;
   var claims = [];
   var setupClosing = String(props.getProperty('setupClosing_' + tid) || '');
   if (setupClosing) {
@@ -3243,7 +3273,10 @@ function readDashboardTradeProjectionState_(tid) {
     return trigger.getHandlerFunction() === 'flushDashboardStructureProjectionQueue_';
   }).length;
   return { success: true, statusOnly: true, tradeId: tid, measuredAt: now,
-    queue: queue, sourceScheduleIds: sourceScheduleIds, claims: claims, triggerCount: triggerCount };
+    queue: queue, sourceScheduleIds: sourceScheduleIds, claims: claims, triggerCount: triggerCount,
+    queueStats: { total: batch.total, due: batch.dueKeys.length, future: batch.futureCount,
+      targetPosition: batch.allKeys.indexOf(targetQueueKey), targetDuePosition: batch.dueKeys.indexOf(targetQueueKey),
+      targetInNextBatch: batch.keys.indexOf(targetQueueKey) >= 0 } };
 }
 
 function normalizeDashboardMutationId_(value) {
