@@ -22,10 +22,10 @@ function fixture(){
  const masterRows=[master],ledgerRows=[ledger],props={getProperty:k=>values.get(k)||null,setProperty:(k,v)=>values.set(k,String(v)),setProperties:o=>Object.entries(o).forEach(([k,v])=>values.set(k,String(v)))};
  const ctx={Date,Math,JSON,Number,PropertiesService:{getScriptProperties:()=>props},
   LockService:{getScriptLock:()=>({tryLock:()=>{if(ctx.onLock)ctx.onLock();return true;},releaseLock(){}})},
-  SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:()=>table(masterRows)}),openById:()=>({getName:()=>ctx.documentTitle||'계약서_'+tid+'_테스트고객',getSheets:()=>[{getDataRange:()=>({getValues:()=>doc,getFormulas:()=>formulas}),getName:()=> '계약서'}]})},
-  Utilities:{formatDate:v=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(v),DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,s)=>Array.from(crypto.createHash('sha256').update(s).digest())}};
+  SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:()=>Object.assign(table(masterRows),{getParent:()=>({getSpreadsheetTimeZone:()=>ctx.masterTimeZone||'Asia/Seoul'})})}),openById:()=>({getName:()=>ctx.documentTitle||'계약서_'+tid+'_테스트고객',getSpreadsheetTimeZone:()=>ctx.documentTimeZone||'Asia/Seoul',getSheets:()=>[{getDataRange:()=>({getValues:()=>doc,getFormulas:()=>formulas}),getName:()=> '계약서'}]})},
+  Utilities:{formatDate:(v,tz)=>new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'}).format(v),DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,s)=>Array.from(crypto.createHash('sha256').update(s).digest())}};
  vm.runInNewContext(gas,ctx);
- ctx.openTradeLedgerContext_=()=>({sheet:table(ledgerRows)});
+ ctx.openTradeLedgerContext_=()=>({sheet:Object.assign(table(ledgerRows),{getParent:()=>({getSpreadsheetTimeZone:()=>ctx.ledgerTimeZone||'Asia/Seoul'})})});
  ctx.dashboardTradeMutationLeaseError_=()=>null;
  ctx.supaMarkTradeDirty_=()=>financialWrites.push('inventory-notification');ctx.invalidateDashboardCacheForTrade_=()=>{};
  ctx.scheduleContractRegen=()=>financialWrites.push('regen');
@@ -39,6 +39,14 @@ test('dry run proves current category and amount without changing any cell',()=>
  const f=fixture(),r=f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true});
  assert.equal(r.success,true);assert.equal(r.dryRun,true);assert.ok(r.snapshotDigest);assert.equal(r.amount,70400);assert.equal(f.writes.length,0);
 });
+test('read-only inspection does not take the global write lock or block ordinary reservations',()=>{
+ const f=fixture();f.ctx.onLock=()=>{throw Error('inspection must not acquire write lock');};
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);assert.equal(f.writes.length,0);
+});
+test('read-only inspection does not run mutable expired-lease cleanup outside the write lock',()=>{
+ const f=fixture();f.ctx.dashboardTradeMutationLeaseError_=()=>{throw Error('mutable lease cleanup');};
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
+});
 test('current VAT-labelled final total is supported without falling back to a physical row',()=>{
  const f=fixture();f.doc[23][0]='총 결제 금액 (VAT 10% 포함)';
  assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
@@ -49,6 +57,16 @@ test('the deployed template planned-return label is treated as the rental return
 });
 test('Sheets Date cells keep their type until timezone-aware rental-period comparison',()=>{
  const f=fixture();f.doc[6][2]=new Date('2026-04-03T01:00:00Z');f.doc[7][2]=new Date('2026-04-04T01:00:00Z');
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
+});
+test('late-hour contract Dates use the source spreadsheet timezone, not the server timezone',()=>{
+ const f=fixture();f.ctx.documentTimeZone='America/Los_Angeles';
+ f.doc[6][2]=new Date('2026-04-03T22:00:00Z');f.doc[7][2]=new Date('2026-04-04T17:00:00Z');
+ assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
+});
+test('legacy ledger and master Date cells are each compared in their own spreadsheet timezone',()=>{
+ const f=fixture();legacy(f);f.ctx.masterTimeZone='America/Los_Angeles';f.ctx.ledgerTimeZone='Asia/Seoul';
+ f.master[4]=new Date('2026-04-03T22:00:00Z');f.master[6]=new Date('2026-04-04T17:00:00Z');f.ledger[0]=new Date('2026-04-02T15:00:00Z');
  assert.equal(f.ctx.restoreTradeDiscountMetadata({...f.input,dryRun:true}).success,true);
 });
 function legacy(f){f.doc[1][2]='';f.doc[2][2]='';f.doc[6][2]='';f.doc[7][2]='';}
