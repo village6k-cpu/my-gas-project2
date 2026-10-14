@@ -2825,7 +2825,12 @@ function ensureDashboardStructureProjectionTrigger_(delayMs) {
       return trigger.getHandlerFunction() === 'flushDashboardStructureProjectionQueue_';
     });
   } catch (triggerListErr) {}
-  if (existingTriggers.length && scheduledAt > now && scheduledAt <= targetAt + 1000) return;
+  // after()의 예약 시각은 실행 보장이 아니다. 매분 rescue가 조금 늦은 기존 트리거를
+  // 계속 교체하면 실제 실행 전에 삭제되어 큐가 영구 대기한다. 짧은 지연은 그대로
+  // 실행 기회를 주고, 5분 이상 지난 고아 트리거만 제한적으로 교체한다.
+  var recentDueTrigger = scheduledAt > 0 && scheduledAt <= now && now - scheduledAt < 5 * 60 * 1000;
+  var timelyFutureTrigger = scheduledAt > now && scheduledAt <= targetAt + 1000;
+  if (existingTriggers.length && (recentDueTrigger || timelyFutureTrigger)) return;
   try {
     // 항상 1개로 수렴시킨다(Code.js replaceOneShotTrigger_). 중복이 쌓이면 프로젝트
     // 트리거 20개 상한을 먹어 모든 one-shot 큐가 동시에 죽는다.
@@ -3305,6 +3310,7 @@ function readDashboardTradeProjectionState_(tid) {
   }).length;
   return { success: true, statusOnly: true, tradeId: tid, measuredAt: now,
     queue: queue, sourceScheduleIds: sourceScheduleIds, claims: claims, triggerCount: triggerCount,
+    triggerScheduledAt: Number(props.getProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_) || 0),
     queueStats: { total: batch.total, due: batch.dueKeys.length, future: batch.futureCount,
       targetPosition: batch.allKeys.indexOf(targetQueueKey), targetDuePosition: batch.dueKeys.indexOf(targetQueueKey),
       targetInNextBatch: batch.keys.indexOf(targetQueueKey) >= 0 } };
