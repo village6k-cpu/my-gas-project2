@@ -2894,6 +2894,8 @@ function flushDashboardStructureProjectionQueue_() {
       try { barrier.releaseLock(); } catch (barrierReleaseErr) {}
     }
     var ok = true;
+    var projectionStage = 'source_read';
+    var projectionFailure = '';
     try {
       // 기준선 기능은 운영 경로에서 제거했다. 예전 큐에 남은 baselineItems는 소비만 하고
       // 외부 조회/생성을 하지 않는다. 구조 동기화와 반납 상태 작업만 계속 처리한다.
@@ -2904,6 +2906,7 @@ function flushDashboardStructureProjectionQueue_() {
         var cfg = SUPA_CFG_();
         var built = buildSupabaseTrades_([tid]);
         if (built.trades && built.trades.length) {
+          projectionStage = 'trade_upsert';
           // 복구 큐도 매분 dirty worker와 동일하게 앱에서 입력한 메모를 보존한다.
           supaDropOverwritingNotes_(cfg, built.trades);
           if (!supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
@@ -2914,10 +2917,12 @@ function flushDashboardStructureProjectionQueue_() {
           var authorizedAddedIds = (task.addedScheduleIds || []).filter(function(id) {
             return (task.removeScheduleIds || []).indexOf(id) < 0;
           });
+          projectionStage = 'authorized_additions';
           if (!supaInsertAuthorizedScheduleItems_(cfg, tid, built.items, authorizedAddedIds)) ok = false;
           if (!ok) throw new Error('추가 스케줄 행 투영 실패');
         }
         if (ok && built.items && built.items.length) {
+          projectionStage = 'structure_upsert';
           var structureOk = checkoutStarted
             ? supaPatchExistingScheduleItems_(cfg, built.items)
             : supaUpsertGrouped_(cfg, 'schedule_items', built.items, 'schedule_id');
@@ -2925,6 +2930,7 @@ function flushDashboardStructureProjectionQueue_() {
         }
       }
       if (task.returnState) {
+        projectionStage = 'return_state';
         var rs = task.returnState;
         var returnCounts = rs.returnCounts || null;
         if (!rs.done && task.clearReturnCountIds && task.clearReturnCountIds.length) {
@@ -2978,6 +2984,7 @@ function flushDashboardStructureProjectionQueue_() {
         if (!returnSaved || !returnSaved.ok) ok = false;
       }
       if (ok && task.removeScheduleIds && task.removeScheduleIds.length) {
+        projectionStage = 'exact_removals';
         var removalLock = LockService.getScriptLock();
         var removalLocked = false;
         var removalClaimed = false;
@@ -3022,6 +3029,7 @@ function flushDashboardStructureProjectionQueue_() {
       }
     } catch (projectionErr) {
       ok = false;
+      projectionFailure = String(projectionErr.message || projectionErr).replace(/https?:\/\/\S+/g, '[url]').slice(0, 500);
       Logger.log('장비 상태 투영 실패(' + tid + '): ' + projectionErr.message);
     }
 
@@ -3047,6 +3055,8 @@ function flushDashboardStructureProjectionQueue_() {
         props.deleteProperty(queueKey);
         clearDashboardMutationLease_(props, 'dashboardStructureMutation_' + tid, token);
       } else {
+        current.lastAttemptStage = projectionStage;
+        current.lastError = projectionStage + ': ' + (projectionFailure || '외부 저장 실패');
         current.attempts = Number(current.attempts || 0) + 1;
         current.at = Date.now();
         if (current.attempts >= DASHBOARD_STRUCTURE_MAX_ATTEMPTS_) {
@@ -3091,9 +3101,10 @@ function flushDashboardStructureProjectionQueue_() {
 
 /** 앱 자동 복구용. 반출 후에는 현재 시트 품목을 기존 불변 기준선과 정확히
  * 교차 검증한 뒤만 누락 행을 복구한다. 외부 HTTP는 내구 큐 worker가 잠금 밖에서 수행한다. */
-function repairDashboardTradeProjection_(tid, removedScheduleIds) {
+function repairDashboardTradeProjection_(tid, removedScheduleIds, statusOnly) {
   tid = String(tid || '').trim();
   if (!tid) return { error: '거래ID 필수' };
+  if (statusOnly === true) return readDashboardTradeProjectionState_(tid);
   var explicitRemovals = removedScheduleIds === undefined ? [] : removedScheduleIds;
   if (!Array.isArray(explicitRemovals) || explicitRemovals.length > 100) {
     return { error: '복구할 제외 스케줄ID는 100개 이하 배열이어야 합니다.' };
@@ -3185,6 +3196,47 @@ function repairDashboardTradeProjection_(tid, removedScheduleIds) {
     if (locked) try { lock.releaseLock(); } catch (releaseErr) {}
     if (projectionQueued) ensureDashboardStructureProjectionTrigger_();
   }
+}
+
+/** 내부 운영용 읽기 전용 진단. 큐/claim을 수정하거나 외부 쓰기를 실행하지 않는다. */
+function readDashboardTradeProjectionState_(tid) {
+  if (!/^\d{6}-\d{3,}$/.test(tid)) return { error: '정확한 거래ID 필수' };
+  var props = PropertiesService.getScriptProperties();
+  var raw = props.getProperty(DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + tid);
+  var queue = null;
+  if (raw) {
+    try {
+      var task = JSON.parse(raw);
+      var exactIds = function(ids) {
+        return Array.isArray(ids) ? ids.filter(function(id) {
+          return typeof id === 'string' && id.indexOf(tid + '-') === 0 && /^\d{6}-\d{3,}-\d+$/.test(id);
+        }).slice(0, 200) : [];
+      };
+      queue = { revision: Number(task.revision || 0), attempts: Number(task.attempts || 0),
+        at: Number(task.at || 0), nextAt: Number(task.nextAt || 0), degraded: !!task.degraded,
+        lastAttemptStage: String(task.lastAttemptStage || ''),
+        lastError: String(task.lastError || '').replace(/https?:\/\/\S+/g, '[url]').slice(0, 500),
+        addedScheduleIds: exactIds(task.addedScheduleIds), removeScheduleIds: exactIds(task.removeScheduleIds),
+        hasReturnState: !!task.returnState, syncStructure: !!task.syncStructure };
+    } catch (parseErr) { queue = { parseError: true }; }
+  }
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('스케줄상세');
+  var rows = sheet && sheet.getLastRow() > 1
+    ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getDisplayValues() : [];
+  var sourceScheduleIds = rows.filter(function(row) { return String(row[1] || '').trim() === tid; })
+    .map(function(row) { return String(row[0] || '').trim(); });
+  var now = Date.now();
+  var claims = [];
+  ['registeredTradePriceMutation_', 'checkoutItemMutation_', 'returnMutation_', 'dashboardAuxMutation_',
+    'dashboardRemovalProjectionInFlight_', DASHBOARD_RETURN_PROJECTION_LEASE_PREFIX_].forEach(function(prefix) {
+    var lease = readDashboardMutationLease_(props, prefix + tid);
+    if (lease) claims.push({ kind: prefix, ageMs: now - lease.at, expired: now - lease.at >= DASHBOARD_MUTATION_LEASE_MS_ });
+  });
+  var triggerCount = ScriptApp.getProjectTriggers().filter(function(trigger) {
+    return trigger.getHandlerFunction() === 'flushDashboardStructureProjectionQueue_';
+  }).length;
+  return { success: true, statusOnly: true, tradeId: tid, measuredAt: now,
+    queue: queue, sourceScheduleIds: sourceScheduleIds, claims: claims, triggerCount: triggerCount };
 }
 
 function normalizeDashboardMutationId_(value) {
