@@ -3043,9 +3043,22 @@ function flushDashboardStructureProjectionQueue_() {
 
 /** 앱 자동 복구용. 반출 후에는 현재 시트 품목을 기존 불변 기준선과 정확히
  * 교차 검증한 뒤만 누락 행을 복구한다. 외부 HTTP는 내구 큐 worker가 잠금 밖에서 수행한다. */
-function repairDashboardTradeProjection_(tid) {
+function repairDashboardTradeProjection_(tid, removedScheduleIds) {
   tid = String(tid || '').trim();
   if (!tid) return { error: '거래ID 필수' };
+  var explicitRemovals = removedScheduleIds === undefined ? [] : removedScheduleIds;
+  if (!Array.isArray(explicitRemovals) || explicitRemovals.length > 100) {
+    return { error: '복구할 제외 스케줄ID는 100개 이하 배열이어야 합니다.' };
+  }
+  var removalSeen = {};
+  for (var eri = 0; eri < explicitRemovals.length; eri++) {
+    var removalId = explicitRemovals[eri];
+    if (typeof removalId !== 'string' || !/^\d{6}-\d{3}-\d+$/.test(removalId) ||
+        removalId.indexOf(tid + '-') !== 0 || removalSeen[removalId]) {
+      return { error: '같은 거래의 중복 없는 정확한 스케줄ID가 필요합니다.' };
+    }
+    removalSeen[removalId] = true;
+  }
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sched = ss.getSheetByName('스케줄상세');
   if (!sched) return { error: '스케줄상세 시트 없음' };
@@ -3062,6 +3075,10 @@ function repairDashboardTradeProjection_(tid) {
     return { error: '장비 복구 안전 상태를 확인하지 못했습니다: ' + String(durableCheckout && durableCheckout.error || '조회 실패') };
   }
   var checkoutStarted = localCheckoutStarted || !!durableCheckout.started;
+  if (explicitRemovals.length && (checkoutStarted || durableCheckout.tradeFound !== true ||
+      durableCheckout.returnDone === true || durableCheckout.contractStatus === '반납완료')) {
+    return { error: '반출 전 거래의 권위 상태가 확인된 경우에만 제외 투영을 복구할 수 있습니다.' };
+  }
   var baselineItems = checkoutStarted
     ? getDashboardReturnCheckableItems_(group && group.equipments || [])
     : [];
@@ -3098,12 +3115,22 @@ function repairDashboardTradeProjection_(tid) {
     if (!locked) return { error: '다른 거래 변경 처리 중입니다.', code: 'BUSY', retryable: true };
     var blocked = dashboardTradeMutationLeaseError_(props, tid, 'structure', '');
     if (blocked) return blocked;
-    var token = scheduleDashboardStructureProjectionUnderLock_(tid, {
+    // 시트 삭제를 재실행하지 않는다. 명시된 제외 ID가 현재 시트에 없는지 같은
+    // 구조 변경 잠금 안에서 재검증하고, 그 정확한 ID의 앱 tombstone만 복구한다.
+    if (explicitRemovals.length) {
+      var currentRows = sched.getRange(2, 1, sched.getLastRow() - 1, 2).getDisplayValues();
+      if (currentRows.some(function(row) {
+        return String(row[1] || '').trim() === tid && removalSeen[String(row[0] || '').trim()];
+      })) return { error: '시트에 현재 존재하는 스케줄 행은 제외 투영으로 복구할 수 없습니다.' };
+    }
+    var projection = {
       syncStructure: true,
       baselineItems: baselineItems,
       baselineExact: checkoutStarted,
       baselineAllowEmptyRecovery: allowEmptyRecovery
-    });
+    };
+    if (explicitRemovals.length) projection.removeScheduleIds = explicitRemovals.slice();
+    var token = scheduleDashboardStructureProjectionUnderLock_(tid, projection);
     projectionQueued = true;
     return { success: true, tradeId: tid, projectionPending: true, token: token };
   } finally {
