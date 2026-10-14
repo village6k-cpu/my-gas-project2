@@ -7,7 +7,7 @@ const gas=fs.readFileSync(path.join(__dirname,'../checkAvailability.js'),'utf8')
 function fn(name){const start=gas.indexOf('function '+name+'(');assert.ok(start>=0,name);const end=gas.indexOf('\nfunction ',start+1);return gas.slice(start,end<0?undefined:end);}
 const plain=x=>JSON.parse(JSON.stringify(x));
 test('staff-approved demand absent from the catalog is preserved as a review issue',()=>{
- const context={};vm.runInNewContext(fn('_collectConfirmedReservationCatalogIssues_'),context);
+ const context={};vm.runInNewContext(fn('_confirmedReservationCatalogNames_')+'\n'+fn('_collectConfirmedReservationCatalogIssues_'),context);
  const ss={getSheetByName:()=>({getLastRow:()=>2,getRange:()=>({getDisplayValues:()=>[['정식 카메라']]})})};
  const plan=[{name:'정식 카메라',quantity:1},{name:'외부 조달 렌즈',quantity:2}];
  assert.deepEqual(plain(context._collectConfirmedReservationCatalogIssues_(ss,plan)),[{kind:'catalog_unresolved',equipment:'외부 조달 렌즈',quantity:2}]);
@@ -37,7 +37,7 @@ test('staff approval never bypasses invalid reservation dates',()=>{
 });
 
 test('equipment-master identity remains valid when the autocomplete catalog is stale',()=>{
- const context={};vm.runInNewContext(fn('_collectConfirmedReservationCatalogIssues_'),context);
+ const context={};vm.runInNewContext(fn('_confirmedReservationCatalogNames_')+'\n'+fn('_collectConfirmedReservationCatalogIssues_'),context);
  const ss={getSheetByName:name=>name==='장비마스터'?{getLastRow:()=>2,getRange:(row,col)=>{assert.equal(col,4);return {getDisplayValues:()=>[['파보용 그리드']]};}}:null};
  assert.deepEqual(plain(context._collectConfirmedReservationCatalogIssues_(ss,[{name:'파보용 그리드',quantity:1}])),[]);
 });

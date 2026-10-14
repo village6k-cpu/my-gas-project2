@@ -15866,13 +15866,7 @@ function _applyConfirmedReservationSetSelections_(sheet, reqID, selections) {
   var exactReqID = String(reqID || "").trim().toUpperCase();
   if (!/^RQ-\d{6}-\d{3}$/.test(exactReqID)) throw new Error("set selection request_id is invalid");
   var ss = sheet.getParent ? sheet.getParent() : SpreadsheetApp.getActiveSpreadsheet();
-  var listSheet = ss.getSheetByName("목록");
-  if (!listSheet || listSheet.getLastRow() < 2) throw new Error("목록 시트를 찾을 수 없습니다");
-  var catalogNames = {};
-  listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues().forEach(function(row) {
-    var name = String(row[0] || "").normalize("NFKC").trim();
-    if (name) catalogNames[name] = true;
-  });
+  var catalogNames = _confirmedReservationCatalogNames_(ss);
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) throw new Error("set selection request is missing");
   var rows = sheet.getRange(2, 1, lastRow - 1, 17).getDisplayValues();
@@ -15908,6 +15902,7 @@ function _applyConfirmedReservationSetSelections_(sheet, reqID, selections) {
   });
 
   writes.forEach(function(write) {
+    _allowConfirmRequestEquipmentDemand_(sheet, write.row, 1);
     sheet.getRange(write.row, 6).setValue(write.selected_item);
     sheet.getRange(write.row, 8).setValue("확인");
     sheet.getRange(write.row, 9, 1, 2).clearContent();
@@ -15933,13 +15928,7 @@ function _applyConfirmedReservationExactSetComponents_(sheet, reqID, desiredComp
   if (!/^RQ-\d{6}-\d{3}$/.test(exactReqID)) throw new Error("exact set projection request_id is invalid");
   var desired = _normalizeStaffConfirmedSetComponents_(desiredComponents || []);
   var ss = sheet.getParent ? sheet.getParent() : SpreadsheetApp.getActiveSpreadsheet();
-  var listSheet = ss.getSheetByName("목록");
-  if (!listSheet || listSheet.getLastRow() < 2) throw new Error("목록 시트를 찾을 수 없습니다");
-  var catalogNames = {};
-  listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues().forEach(function(row) {
-    var name = String(row[0] || "").normalize("NFKC").trim();
-    if (name) catalogNames[name] = true;
-  });
+  var catalogNames = _confirmedReservationCatalogNames_(ss);
 
   function snapshotRows() {
     var lastRow = sheet.getLastRow();
@@ -16030,7 +16019,10 @@ function _applyConfirmedReservationExactSetComponents_(sheet, reqID, desiredComp
   });
 
   writes.forEach(function(write) {
-    if (write.nameChanged) sheet.getRange(write.row, 6).setValue(write.component_item);
+    if (write.nameChanged) {
+      _allowConfirmRequestEquipmentDemand_(sheet, write.row, 1);
+      sheet.getRange(write.row, 6).setValue(write.component_item);
+    }
     if (write.quantityChanged) sheet.getRange(write.row, 7).setValue(write.quantity);
     sheet.getRange(write.row, 8).setValue("확인");
     sheet.getRange(write.row, 9, 1, 2).clearContent();
@@ -16072,7 +16064,7 @@ function _confirmedReservationPeriodEquivalent_(left, right) {
     left.end_date === right.end_date && left.end_time === right.end_time;
 }
 
-function _collectConfirmedReservationCatalogIssues_(ss, plan) {
+function _confirmedReservationCatalogNames_(ss) {
   var exact = {};
   // 물리 장비/세트가 이미 있는데 자동완성 목록 갱신이 늦었다고 미연결로 오인하지 않는다.
   [["목록", 1], ["장비마스터", 4], ["세트마스터", 1]].forEach(function(source) {
@@ -16083,6 +16075,11 @@ function _collectConfirmedReservationCatalogIssues_(ss, plan) {
       if (name) exact[name] = true;
     });
   });
+  return exact;
+}
+
+function _collectConfirmedReservationCatalogIssues_(ss, plan) {
+  var exact = _confirmedReservationCatalogNames_(ss);
   return plan.filter(function(item) {
     return !exact[String(item.name || "").normalize("NFKC").trim()];
   }).map(function(item) {
@@ -16107,6 +16104,7 @@ function _confirmedReservationReplacementRequest_(sheet, fence, normalized, expe
     비고: String(display[16] || raw[16] || "").trim(),
     추가요청: String(display[17] || raw[17] || "").trim(),
     staff_confirmed_exact_set_components: expectedFinalSetComponents,
+    장비명원문보존: true,
     staff_confirmed_pending_mutation: {
       target_scope: "pending_request",
       request_id: normalized.request_id,

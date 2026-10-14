@@ -8,6 +8,9 @@ const vm = require('node:vm');
 
 const gas = fs.readFileSync(path.resolve(__dirname, '..', 'checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
 const api = fs.readFileSync(path.resolve(__dirname, '..', 'sheetAPI.js'), 'utf8');
+const confirmedCatalogSource = gas.slice(gas.indexOf('function _confirmedReservationCatalogNames_('),
+  gas.indexOf('function _collectConfirmedReservationCatalogIssues_('))
+  + gas.slice(gas.indexOf('function _allowConfirmRequestEquipmentDemand_('),gas.indexOf('function _updateConfirmRequestRowsInPlace_('));
 
 test('GAS exposes a typed exact-fenced confirmed registration operation instead of a generic 등록 action', () => {
   assert.match(gas, /function\s+commitConfirmedReservation\s*\(/);
@@ -403,6 +406,7 @@ test('atomic fast registration applies one exact set choice and rechecks before 
       return {
         getDisplayValues: () => structuredClone(selected),
         getDisplayValue: () => String(requestRows[row - 2][column - 1] || ''),
+        getDataValidations: () => [[null]],
         setValue(value) { requestRows[row - 2][column - 1] = value; return this; },
         clearContent() {
           for (let r = row - 2; r < row - 2 + numRows; r += 1) {
@@ -418,7 +422,7 @@ test('atomic fast registration applies one exact set choice and rechecks before 
     _processByReqID: (_sheet, row) => processCalls.push(row)
   };
   vm.runInNewContext(
-    `${gas.slice(start, end)}\nthis.applySelections = _applyConfirmedReservationSetSelections_;`,
+    `${confirmedCatalogSource}\n${gas.slice(start, end)}\nthis.applySelections = _applyConfirmedReservationSetSelections_;`,
     context
   );
   const selection = [{
@@ -470,6 +474,7 @@ test('replacement stages the complete desired set projection and preserves exist
         .map((source) => source.slice(column - 1, column - 1 + numColumns));
       return {
         getDisplayValues: () => structuredClone(selected),
+        getDataValidations: () => [[null]],
         setValue(value) { requestRows[row - 2][column - 1] = value; return this; },
         clearContent() {
           for (let r = row - 2; r < row - 2 + numRows; r += 1) {
@@ -490,7 +495,7 @@ test('replacement stages the complete desired set projection and preserves exist
     _processByReqID: (_sheet, row) => processCalls.push(row)
   };
   vm.runInNewContext(
-    `${gas.slice(start, end)}\nthis.applyExact = _applyConfirmedReservationExactSetComponents_;`,
+    `${confirmedCatalogSource}\n${gas.slice(start, end)}\nthis.applyExact = _applyConfirmedReservationExactSetComponents_;`,
     context
   );
   const desired = [
