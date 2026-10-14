@@ -732,6 +732,12 @@ function handleRequestCore_(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "restoreTradeDiscountMetadata": {
+        var metadataMethodError = requireVillagePost_(e, 'restoreTradeDiscountMetadata');
+        if (metadataMethodError) return metadataMethodError;
+        return jsonResponse(restoreTradeDiscountMetadata(postBody));
+      }
+
       case "updateTradeDiscount": {
         // 등록된 거래의 할인유형 변경 (계약마스터 K열) — 금액·계약서는 재생성 워커가 반영
         return jsonResponse(updateTradeDiscountType(

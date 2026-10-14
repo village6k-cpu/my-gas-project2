@@ -1088,6 +1088,24 @@ function trashContractFilesForTrade_(거래ID) {
 
 function deleteAndRegenerateContract(ss, 거래ID, 추가요청, options) {
   const props = PropertiesService.getScriptProperties();
+  // 직접 재생성도 과거 할인 메타데이터 복원과 같은 선점 경계를 사용한다.
+  // Drive/외부 원장 IO 동안 전역 잠금을 잡지 않고 거래별 표식만 유지한다.
+  const regenLock = LockService.getScriptLock();
+  const inheritedLock = regenLock.hasLock();
+  const exclusionKey = 'contractDirectRegen_v1_' + 거래ID;
+  const exclusion = JSON.stringify({ at: Date.now(), token: Utilities.getUuid() });
+  if (!inheritedLock && !regenLock.tryLock(1000)) throw new Error('계약서 변경 작업 진행 중입니다');
+  try {
+    const existing = props.getProperty(exclusionKey);
+    if (existing) {
+      var previous = JSON.parse(existing);
+      // GAS 실행 한도(6분)보다 길게 둬 살아 있는 재생성을 중복 선점하지 않는다.
+      if (!previous.at || Date.now() - previous.at < 9 * 60 * 1000) throw new Error('계약서 재생성이 이미 진행 중입니다');
+    }
+    props.setProperty(exclusionKey, exclusion);
+  } finally { if (!inheritedLock) regenLock.releaseLock(); }
+
+  try {
 
   // 기존 파일 휴지통으로 이동
   trashContractFilesForTrade_(거래ID);
@@ -1112,6 +1130,9 @@ function deleteAndRegenerateContract(ss, 거래ID, 추가요청, options) {
 
   var extraText = 추가요청 !== undefined ? 추가요청 : getAdditionalRequestTextByTradeId_(ss, 거래ID);
   return generateContractFile(ss, 거래ID, extraText, options);
+  } finally {
+    if (props.getProperty(exclusionKey) === exclusion) props.deleteProperty(exclusionKey);
+  }
 }
 
 function regenerateContractById(거래ID, 추가요청, options) {

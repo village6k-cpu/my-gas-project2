@@ -5929,6 +5929,150 @@ function updateTradeDiscountType(tid, discountType, options) {
   };
 }
 
+/** 과거 계약서에 이미 적용된 할인유형만 복원한다. 금액/문서/입금/고객DB는 쓰지 않는다.
+ * inspect(dryRun) → snapshot CAS → K열 1셀 → readback. 일반 할인변경/재생성과 분리한다. */
+function historicalDiscountSnapshot_(tid, masterSheet, ledgerSheet, contractSheet) {
+  function uniqueRow(sheet, col) {
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+    var found = [];
+    rows.forEach(function(row, index) { if (String(row[col] || '').trim() === tid) found.push({ row: index + 2, cells: row }); });
+    if (found.length !== 1) throw new Error('과거 할인 복원: 거래ID 행이 유일하지 않습니다');
+    return found[0];
+  }
+  var master = uniqueRow(masterSheet, 0), ledger = uniqueRow(ledgerSheet, 4);
+  if (String(master.cells[1] || '').trim() !== String(ledger.cells[1] || '').trim()) throw new Error('과거 할인 복원: 고객명 불일치');
+  var range = contractSheet.getDataRange(), cells = range.getValues(), formulas = range.getFormulas();
+  if (!cells.length || cells.length > 250) throw new Error('과거 할인 복원: 계약서 범위 확인 필요');
+  var flat = [].concat.apply([], cells).map(function(v) { return String(v == null ? '' : v).trim(); });
+  function phone(value) {
+    var digits = String(value || '').replace(/\D/g, '');
+    if (digits.indexOf('82') === 0) digits = '0' + digits.slice(2);
+    if (digits.length === 10 && digits.indexOf('10') === 0) digits = '0' + digits;
+    return digits;
+  }
+  var mentionedIds = flat.join(' ').match(/\b\d{6}-\d{3}\b/g) || [];
+  if (mentionedIds.some(function(id) { return id !== tid; })) throw new Error('과거 할인 복원: 다른 거래ID의 계약서');
+  function field(label, fallbackCol) {
+    for (var r = 0; r < cells.length; r++) {
+      for (var c = 0; c < cells[r].length; c++) {
+        var cellLabel = String(cells[r][c] || '').replace(/\s/g, '');
+        if (cellLabel !== label && !(label === '총결제금액' && cellLabel === '총결제금액(VAT10%포함)') &&
+            !(label === '반납일자' && cellLabel === '반납일자(예정)')) continue;
+        for (var next = c + 1; next < cells[r].length; next++) {
+          if (cells[r][next] !== '' && cells[r][next] != null) return String(cells[r][next]).trim();
+        }
+        return String(cells[r][fallbackCol] || '').trim();
+      }
+    }
+    return null;
+  }
+  var expectedPhone = phone(master.cells[2]);
+  if (!expectedPhone || phone(field('연락처', 8)) !== expectedPhone || field('예약자(상호)', 2) !== String(master.cells[1] || '').trim()) {
+    throw new Error('과거 할인 복원: 계약서 고객 식별정보 불일치');
+  }
+  function rentalDate(value) {
+    if (value instanceof Date) return Utilities.formatDate(value, 'Asia/Seoul', 'yyyy-MM-dd');
+    var match = String(value || '').match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\D|$)/);
+    return match ? match[1] + '-' + ('0' + match[2]).slice(-2) + '-' + ('0' + match[3]).slice(-2) : '';
+  }
+  if (!rentalDate(master.cells[4]) || rentalDate(field('대여일자', 2)) !== rentalDate(master.cells[4]) ||
+      !rentalDate(master.cells[6]) || rentalDate(field('반납일자', 2)) !== rentalDate(master.cells[6])) {
+    throw new Error('과거 할인 복원: 계약서 대여기간 불일치');
+  }
+  var pre = field('사전할인', 2), add = field('추가할인', 8);
+  // 최근 템플릿은 추가할인 라벨이 비어 있어도 사전할인과 같은 행 I셀을 사용한다.
+  if (add === null && pre !== null) {
+    for (var ri = 0; ri < cells.length; ri++) {
+      if (cells[ri].some(function(v) { return String(v || '').replace(/\s/g, '') === '사전할인'; })) add = String(cells[ri][8] || '').trim();
+    }
+  }
+  var cleanPre = String(pre || '').replace(/\s/g, ''), cleanAdd = String(add || '').replace(/\s/g, '');
+  var category = null;
+  if (/^학생(?:20|30)%$/.test(cleanPre)) category = '학생';
+  if (cleanPre === '개인사업자/프리랜서20%') category = '개인사업자/프리랜서';
+  if ((category || cleanPre === '해당없음') && cleanAdd === '단골10%') category = '단골';
+  if ((category || cleanPre === '해당없음') && cleanAdd === '제휴업체20%') category = '제휴';
+  if (cleanPre === '해당없음' && cleanAdd === '해당없음') category = '일반';
+  if (cleanAdd !== '해당없음' && cleanAdd !== '단골10%' && cleanAdd !== '제휴업체20%') category = null;
+  var total = Number(String(field('총결제금액', 7) || '').replace(/[^0-9.-]/g, ''));
+  if (!Number.isSafeInteger(total) || total <= 0 || !Number.isSafeInteger(ledger.cells[8]) || total !== ledger.cells[8]) {
+    throw new Error('과거 할인 복원: 기존 계약서와 거래내역 금액 대조 필요');
+  }
+  return { master: master, ledger: ledger, document: { cells: cells, formulas: formulas }, category: category, amount: total };
+}
+
+function historicalDiscountSnapshotDigest_(snapshot) {
+  // 행 정렬은 식별자가 아니다. 거래ID로 다시 찾은 셀/수식 전체를 CAS한다.
+  var value = JSON.stringify({ master: snapshot.master.cells, ledger: snapshot.ledger.cells, document: snapshot.document });
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, value, Utilities.Charset.UTF_8).map(function(b) {
+    return ('0' + ((b + 256) % 256).toString(16)).slice(-2);
+  }).join('');
+}
+
+function restoreTradeDiscountMetadata(args) {
+  args = args || {};
+  var tid = String(args.tid || '').trim(), desired = String(args.discountType || '').trim();
+  var mutationId = normalizeDashboardMutationId_(args.mutationId), dryRun = args.dryRun === true;
+  if (!/^\d{6}-\d{3}$/.test(tid) || !DASHBOARD_DISCOUNT_TYPES_[desired] || !mutationId || args.previousDiscountType === undefined) {
+    return { success: false, error: '과거 할인 복원: 거래ID/유형/mutationId/이전값 필수', noMutationPerformed: true };
+  }
+  var props = PropertiesService.getScriptProperties(), lock = LockService.getScriptLock(), held = false, wrote = false;
+  var receiptKey = 'historicalDiscountRestore_v1_' + tid;
+  try {
+    var master = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
+    var ledger = openTradeLedgerContext_().sheet;
+    var ledgerRows = ledger.getRange(2, 1, ledger.getLastRow() - 1, ledger.getLastColumn()).getValues();
+    var matches = ledgerRows.filter(function(row) { return String(row[4] || '').trim() === tid; });
+    if (matches.length !== 1) throw new Error('과거 할인 복원: 거래내역 식별 불일치');
+    var url = String(matches[0][2] || '').trim(), id = url.match(/^https:\/\/docs\.google\.com\/spreadsheets\/d\/([\w-]+)(?:\/|$)/);
+    if (!id) throw new Error('과거 할인 복원: 원본 계약서 링크 없음');
+    // Drive 열기는 전역 잠금 밖에서 한다. 읽기만 하며 재생성을 절대 예약하지 않는다.
+    var document = SpreadsheetApp.openById(id[1]).getSheets()[0];
+    if (!lock.tryLock(1000)) return { success: false, code: 'BUSY', noMutationPerformed: true };
+    held = true;
+    var lease = dashboardTradeMutationLeaseError_(props, tid, 'discountMetadata', '');
+    if (lease) throw new Error(lease.error || '과거 할인 복원: 다른 변경 진행 중');
+    if (props.getProperty('contractEditTS_' + tid) || props.getProperty('contractRegenClaim_v1_' + tid) || props.getProperty('contractDirectRegen_v1_' + tid)) throw new Error('과거 할인 복원: 계약서 재생성 진행 중');
+    var snapshot = historicalDiscountSnapshot_(tid, master, ledger, document);
+    if (String(snapshot.ledger.cells[2] || '').trim() !== url) throw new Error('과거 할인 복원: 계약서 링크 변경됨');
+    if (snapshot.category !== desired) throw new Error('과거 할인 복원: 원본 계약서 할인유형과 다름');
+    var digest = historicalDiscountSnapshotDigest_(snapshot), previous = String(snapshot.master.cells[10] || '').trim();
+    var rawReceipt = props.getProperty(receiptKey), receipt = rawReceipt ? JSON.parse(rawReceipt) : null;
+    if (!dryRun && receipt) {
+      if (receipt.phase !== 'completed' || receipt.mutationId !== mutationId || receipt.desired !== desired || receipt.beforeDigest !== args.expectedSnapshotDigest || receipt.afterDigest !== digest) {
+        throw new Error('과거 할인 복원: 기존 영수증 확인 필요; 재실행 금지');
+      }
+      return { success: true, duplicate: true, tradeId: tid, discountType: previous, amount: snapshot.amount, contractUrl: url, contractRegenPending: false, serverRevision: receipt.serverRevision };
+    }
+    if (previous !== String(args.previousDiscountType).trim()) throw new Error('과거 할인 복원: 할인유형 동시 변경');
+    if (dryRun) return { success: true, dryRun: true, tradeId: tid, discountType: previous, recoveredDiscountType: snapshot.category, amount: snapshot.amount, contractUrl: url, snapshotDigest: digest };
+    if (!args.expectedSnapshotDigest || digest !== args.expectedSnapshotDigest) throw new Error('과거 할인 복원: 기준선 변경 또는 증거 없음');
+    if (previous === desired) return { success: true, unchanged: true, tradeId: tid, discountType: desired, amount: snapshot.amount, contractUrl: url, contractRegenPending: false };
+    var revision = Math.max(Date.now(), getDashboardDiscountRevision_(props, tid) + 1), markers = {};
+    receipt = { phase: 'pending', mutationId: mutationId, desired: desired, beforeDigest: digest, serverRevision: revision };
+    markers[receiptKey] = JSON.stringify(receipt);
+    markers[dashboardDiscountRevisionKey_(tid)] = String(revision);
+    var dirtyKey = typeof supaDirtyPropertyKey_ === 'function' ? supaDirtyPropertyKey_(tid) : 'SUPA_DIRTY_v2_' + tid;
+    markers[dirtyKey] = String(revision) + ':historicalDiscountMetadata';
+    props.setProperties(markers, false);
+    wrote = true;
+    master.getRange(snapshot.master.row, 11).setValue(desired);
+    snapshot.master.cells[10] = desired;
+    var expectedAfter = historicalDiscountSnapshotDigest_(snapshot);
+    var after = historicalDiscountSnapshot_(tid, master, ledger, document);
+    if (historicalDiscountSnapshotDigest_(after) !== expectedAfter) throw new Error('과거 할인 복원: 저장 후 대조 불일치; 재실행 금지');
+    receipt.phase = 'completed'; receipt.afterDigest = expectedAfter;
+    props.setProperty(receiptKey, JSON.stringify(receipt));
+    lock.releaseLock(); held = false;
+    // 위 durable dirty 표식만 사용한다. 과거 메타데이터 정정으로 재고 알림을 예약하지 않는다.
+    try { invalidateDashboardCacheForTrade_(tid); } catch (cacheErr) {}
+    return { success: true, tradeId: tid, discountType: desired, previousDiscountType: previous, amount: after.amount, contractUrl: url,
+      metadataOnly: true, financialCellsPreserved: true, contractRegenPending: false, serverRevision: revision, snapshotDigest: expectedAfter };
+  } catch (err) {
+    return { success: false, error: err && err.message ? err.message : String(err), noMutationPerformed: !wrote, readbackRequired: wrote, customerNotificationSent: false };
+  } finally { if (held) try { lock.releaseLock(); } catch (releaseErr) {} }
+}
+
 // 현재 대화에서 AI가 선택한 취소 대상과 실시간 원장을 대조한다. 의도는 키워드로 재판단하지 않는다.
 function validateRegisteredCancellationBaseline_(tradeId, expected, state) {
   if (!expected || !expected.operationId || !expected.expectedPeriod || !Array.isArray(expected.expectedRows) || !expected.expectedRows.length) throw new Error('취소 기준선이 필요합니다');
