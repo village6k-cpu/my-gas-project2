@@ -1332,6 +1332,8 @@ function buildSupabaseTrades_(tids) {
         var mEnd = parseDT(mRows[mi][6], mDisp[mi][7]);   // G,H: 반납 일시
         master[mTid] = {
           name: String(mRows[mi][1] || '').trim(),
+          phone: String(mRows[mi][2] || '').trim(),
+          sourceCount: master[mTid] ? master[mTid].sourceCount + 1 : 1,
           status: String(mRows[mi][9] || '').trim(),      // J: 계약상태
           discountType: String(mRows[mi][10] || '').trim(), // K: 할인유형
           startISO: mStart ? mStart.toISOString() : null,
@@ -1468,6 +1470,51 @@ function buildSupabaseTrades_(tids) {
     items = items.concat(buildItemsForTrade_(tid2, d));
   }
 
+  // 최근 30일 윈도우 밖 거래도 금액/계약서 정본은 거래내역에 있다. 옛 거래의
+  // 할인유형 복원이 골격만 만들거나 stale 금액을 영구 보존하지 않도록 1회 읽는다.
+  // 고객/연락처/반출일/유일한 문서 연결이 확인된 값만 복사하며 정산 상태는 쓰지 않는다.
+  var archivalFinancial = {};
+  var archivalIds = Object.keys(want).filter(function(id) {
+    return !dates[id] && master[id] && master[id].startISO && master[id].endISO && cancelledTradeIds.indexOf(id) < 0;
+  });
+  if (archivalIds.length && typeof openTradeLedgerContext_ === 'function') {
+    var archivalProps = PropertiesService.getScriptProperties().getProperties();
+    var ledgerContext = openTradeLedgerContext_(), ledgerSheet = ledgerContext.sheet;
+    var ledgerRows = ledgerSheet.getLastRow() > 1 ? ledgerSheet.getRange(2, 1, ledgerSheet.getLastRow() - 1, 9).getValues() : [];
+    var ledgerById = {}, documentCounts = {};
+    function documentId(value) {
+      var match = String(value || '').trim().match(/^https:\/\/docs\.google\.com\/spreadsheets\/d\/([\w-]+)(?:\/|$)/);
+      return match ? match[1] : '';
+    }
+    function phoneDigits(value) {
+      var digits = String(value || '').replace(/\D/g, '');
+      if (digits.indexOf('82') === 0) digits = '0' + digits.slice(2);
+      if (digits.length === 10 && digits.indexOf('10') === 0) digits = '0' + digits;
+      return digits;
+    }
+    function ledgerDate(value) {
+      if (value instanceof Date) return Utilities.formatDate(value, ledgerContext.spreadsheet.getSpreadsheetTimeZone(), 'yyyy-MM-dd');
+      var match = String(value || '').match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\D|$)/);
+      return match ? match[1] + '-' + ('0' + match[2]).slice(-2) + '-' + ('0' + match[3]).slice(-2) : '';
+    }
+    ledgerRows.forEach(function(row) {
+      var id = String(row[4] || '').trim(), file = documentId(row[2]);
+      if (want[id]) (ledgerById[id] || (ledgerById[id] = [])).push(row);
+      if (file) documentCounts[file] = (documentCounts[file] || 0) + 1;
+    });
+    archivalIds.forEach(function(id) {
+      var m = master[id], matches = ledgerById[id] || [];
+      if (m.sourceCount !== 1 || matches.length !== 1 || archivalProps['contractEditTS_' + id] ||
+          archivalProps['contractRegenClaim_v1_' + id] || archivalProps['contractDirectRegen_v1_' + id] ||
+          archivalProps['registeredTradePriceMutation_' + id]) return;
+      var row = matches[0], file = documentId(row[2]), tel = phoneDigits(m.phone);
+      if (!tel || phoneDigits(row[5]) !== tel || String(row[1] || '').trim() !== m.name ||
+          ledgerDate(row[0]) !== Utilities.formatDate(new Date(m.startISO), 'Asia/Seoul', 'yyyy-MM-dd') ||
+          !file || documentCounts[file] !== 1 || !Number.isSafeInteger(row[8]) || row[8] <= 0) return;
+      archivalFinancial[id] = { amount: row[8], contract_url: String(row[2]).trim() };
+    });
+  }
+
   // 취소/과거 등 timeline에 더는 없는 거래 — 계약마스터 기준으로 상태 반영 (조용한 유실 방지)
   for (var wTid in want) {
     if (cancelledTradeIds.indexOf(wTid) >= 0) continue;
@@ -1481,6 +1528,10 @@ function buildSupabaseTrades_(tids) {
       discount_type: wm.discountType || null
     };
     if (wm.name) cancelled.customer_name = wm.name;
+    if (archivalFinancial[wTid]) {
+      cancelled.amount = archivalFinancial[wTid].amount;
+      cancelled.contract_url = archivalFinancial[wTid].contract_url;
+    }
     trades.push(cancelled);
   }
 
