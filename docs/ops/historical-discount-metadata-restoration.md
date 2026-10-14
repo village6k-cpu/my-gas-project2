@@ -2,6 +2,8 @@
 
 `restoreTradeDiscountMetadata`는 서버 내부 인증 + POST 전용이다. 계약서에 실제로 적용된 할인유형을 계약마스터 K열에 복원하며, 일반 할인변경 API와 달리 계약서를 재생성하지 않는다. 기존 계약서의 모든 값·수식, 거래내역의 금액·입금·링크, 고객DB 기본값을 보존한다. 시트 구조나 열 순서를 바꾸지 않는다.
 
+읽기 검사는 전역 쓰기 잠금을 잡지 않는다. 명시적인 복원 쓰기만 최대 10초 동안 잠금 획득을 기다린 뒤 최신 기준선을 다시 검증한다. 잠금을 획득하지 못하면 `BUSY + noMutationPerformed:true`이며, 무제한 대기나 다른 작업 잠금 강제 해제는 하지 않는다.
+
 1. `tid`, `discountType`, `previousDiscountType`(공란 포함), 새 `mutationId`, `dryRun:true`로 검사한다.
 2. 검사 응답의 금액·문서 링크·복원 유형을 원래 합의와 대조한다. 현재 고객DB를 과거 자격의 근거로 소급하지 않는다.
 3. 같은 입력에 `expectedSnapshotDigest`를 넣고 `dryRun`을 제거하여 1회 전송한다.
