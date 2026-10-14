@@ -71,6 +71,22 @@ test('uncertain network failure retains the request identifier and is never blin
   h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);assert.equal(h.sends.length,1);
   const r=JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020);assert.equal(r.state,'unknown');assert(r.requestNum);
 });
+test('a definitive IP rejection can recover after its cooldown without retrying ambiguous or other failures',()=>{
+  const h=load();let sequence=0;h.ctx.Utilities.getUuid=()=> 'request-'+(++sequence);
+  h.setReply({code:-10010039});h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
+  let rejected=JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020);
+  assert.equal(rejected.state,'rejected');assert.equal(rejected.rejectionCode,-10010039);
+  const firstRequest=rejected.requestNum;
+  h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);assert.equal(h.sends.length,1,'blocked calls must be rate limited');
+  rejected.createdAt=Date.now()-5*60*1000-1;h.props.GUIDE_DELIVERY_V3_out_261014_020=JSON.stringify(rejected);
+  h.setReply({receiptNum:'026101499999900003'});h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
+  const recovered=JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020);
+  assert.equal(h.sends.length,2);assert.equal(recovered.state,'pending');assert.notEqual(recovered.requestNum,firstRequest);
+  for(const state of ['unknown','pending','failed','rejected']){
+    const other=load();other.props.GUIDE_DELIVERY_V3_out_261014_020=JSON.stringify({binding:cust.tel+'|'+cust.name+'|'+due.getTime(),state,rejectionCode:-1,createdAt:Date.now()-3600000,requestNum:'prior'});
+    other.ctx.sendGuideSafely_('261014-020','checkout',cust,due);assert.equal(other.sends.length,0);
+  }
+});
 test('pickup confirmation cannot be inferred from a successful delivery to the booker',()=>{
   const h=load();assert.equal(h.ctx.guidePickupAcknowledged_('261014-020',cust,due),false);
 });
@@ -141,4 +157,13 @@ test('explicit editor setup can use the sole registered mobile sender as the ver
   h.ctx.ScriptApp={getProjectTriggers:()=>[],newTrigger:()=>({timeBased(){return this;},everyMinutes(){return this;},create(){return{};}})};
   assert.equal(typeof h.ctx.setupGuideDeliverySafetyForCurrentSender,'function');
   const r=h.ctx.setupGuideDeliverySafetyForCurrentSender();assert(r.configured);assert.equal(h.props.GUIDE_ALERT_PHONE,'01000000000');
+});
+test('explicit setup after owner verification does not depend on the failing messaging gateway',()=>{
+  const h=load();delete h.props.GUIDE_ALERT_PHONE;h.props.POPBILL_SENDER_NUM='01000000000';
+  let creates=0;
+  h.ctx.guidePopbillRead_=()=>{throw Error('전송 결과 조회 실패 HTTP 400 코드 -10010039');};
+  h.ctx.ScriptApp={getProjectTriggers:()=>creates?[{getHandlerFunction:()=> 'checkGuideDeliverySafety'}]:[],newTrigger:()=>({timeBased(){return this;},everyMinutes(n){assert.equal(n,5);return this;},create(){creates++;return{};}})};
+  assert(h.ctx.setupGuideDeliverySafetyForCurrentSender().configured);
+  assert.equal(h.props.GUIDE_ALERT_PHONE,'01000000000');assert(h.props.GUIDE_SAFETY_INSTALLED_AT);
+  h.ctx.setupGuideDeliverySafetyForCurrentSender();assert.equal(creates,1,'repeated setup must not duplicate the watchdog');
 });

@@ -103,7 +103,12 @@ function sendGuideSafely_(tid, kind, cust, operationAt) {
   var binding = phone + '|' + cust.name + '|' + operationAt.getTime();
   if (record && record.binding === binding) {
     record = verifyGuideRecord_(record); guideSafetyWrite_(key, record);
-    return { state: record.state, receiptNum: record.receiptNum || '', sent: false };
+    // -10010039는 팝빌이 허용 IP 밖의 요청을 접수 전에 거절한 확정 응답이다.
+    // 제한 해제 후 복구할 수 있도록 이 경우만 5분 이후 새 요청을 허용한다.
+    // 접수번호가 있거나 응답이 불분명한 건은 중복 발송하지 않는다.
+    var retryIpRejection = record.state === 'rejected' && record.rejectionCode === -10010039
+      && !record.receiptNum && Date.now()-record.createdAt >= 5*60*1000;
+    if (!retryIpRejection) return { state: record.state, receiptNum: record.receiptNum || '', sent: false };
   }
   var payload = getGuideAlimtalkPayload_(kind, cust.name);
   record = { tid: tid, binding: binding, phone: phone, operationMs: operationAt.getTime(),
@@ -118,6 +123,7 @@ function sendGuideSafely_(tid, kind, cust, operationAt) {
         { altSendType: 'A', altContent: payload.altContent, requestNum: record.requestNum });
     if (!result || !result.receiptNum) {
       record.state = 'rejected'; record.reason = '발송 접수 거절';
+      if (result && Number(result.code)<0) record.rejectionCode=Number(result.code);
     } else {
       record.state = 'pending'; record.receiptNum = String(result.receiptNum);
     }
@@ -335,12 +341,10 @@ function setupGuideDeliverySafety(args) {
   return {configured:true,monitorEveryMinutes:5};
 }
 
-// 편집기에서 명시적으로 실행하는 내부 초기화 도구. 발신번호가 지정한 운영자 번호와
-// 동일함을 사전에 확인한 경우에만 사용한다. 유일한 등록·사용 번호인지 다시 검사한다.
+// 편집기에서 명시적으로 실행하는 내부 초기화 도구. 현재 발신번호가 지정한 운영자
+// 경보 번호와 동일하고 팝빌에 등록되었음을 별도로 확인한 후에만 실행한다.
+// 발송 경로 장애가 있어도 독립 점검 트리거와 긴급 경보 설정은 초기화할 수 있어야 한다.
 function setupGuideDeliverySafetyForCurrentSender() {
   var phone=normalizeAlimtalkReceiver_(PropertiesService.getScriptProperties().getProperty('POPBILL_SENDER_NUM'));
-  var senders=guidePopbillRead_('/Message/SenderNumber');
-  var active=Array.isArray(senders)?senders.filter(function(s){return Number(s.state)===1;}):[];
-  if(active.length!==1 || String(active[0].number).replace(/[^0-9]/g,'')!==phone)throw new Error('운영자가 확인한 유일한 등록 발신번호 필요');
   return setupGuideDeliverySafety({alertPhone:phone});
 }
