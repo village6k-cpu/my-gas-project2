@@ -5980,25 +5980,48 @@ function historicalDiscountSnapshot_(tid, masterSheet, ledgerSheet, contractShee
   }
   var masterTimeZone = masterSheet.getParent().getSpreadsheetTimeZone();
   var ledgerTimeZone = ledgerSheet.getParent().getSpreadsheetTimeZone();
-  function rentalDate(value, timeZone) {
+  function rentalDate(value, timeZone, yearHint, notBefore) {
     if (value instanceof Date) return Utilities.formatDate(value, timeZone, 'yyyy-MM-dd');
-    var match = String(value || '').match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\D|$)/);
-    return match ? match[1] + '-' + ('0' + match[2]).slice(-2) + '-' + ('0' + match[3]).slice(-2) : '';
+    var text = String(value || '').trim();
+    // 24시는 다음날 자정인지 원장 날짜의 자정인지 원문 확인이 필요하다.
+    if (/24\s*(?::|시)/.test(text)) return '';
+    var match = text.match(/^(\d{4}|\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?:\D|$)/);
+    var omittedYear = false;
+    if (!match) {
+      match = text.match(/^(?:(\d{4}|\d{2})\s*년\s*)?(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+      omittedYear = !!match && !match[1];
+    }
+    // 구형 숫자 YYMMDD는 정확한 거래별 파일명으로 결속된 문서에서만 허용한다.
+    if (!match && yearHint) match = text.match(/^(\d{2})(\d{2})(\d{2})$/);
+    if (!match || (omittedYear && !yearHint)) return '';
+    var year = omittedYear ? yearHint : Number(match[1]);
+    if (!omittedYear && match[1].length === 2) year += 2000;
+    var month = Number(match[2]), day = Number(match[3]);
+    function key(y) { return String(y) + '-' + ('0' + month).slice(-2) + '-' + ('0' + day).slice(-2); }
+    // 연도 없는 반납일은 문서에 명시된 반출일부터 딱 한 해만 넘어갈 수 있다.
+    if (omittedYear && notBefore && key(year) < notBefore) year++;
+    var date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return '';
+    return key(year);
   }
   var borrower = field('예약자(상호)', 2), contact = field('연락처', 8);
   var start = field('대여일자', 2), end = field('반납일자', 2);
   var expectedPhone = phone(master.cells[2]), expectedName = String(master.cells[1] || '').trim();
   var masterStart = rentalDate(master.cells[4], masterTimeZone), masterEnd = rentalDate(master.cells[6], masterTimeZone);
+  var titleBound = String(contractTitle || '').trim() === '계약서_' + tid + '_' + expectedName;
+  var documentYear = titleBound && /^\d{6}-\d{3}$/.test(tid) ? 2000 + Number(tid.slice(0, 2)) : 0;
+  var documentStart = rentalDate(start, documentTimeZone, documentYear);
+  var documentEnd = rentalDate(end, documentTimeZone, documentYear, documentStart);
   var missingIdentity = borrower === '' || contact === '' || start === '' || end === '';
   var legacyBound = missingIdentity && borrower !== null && contact !== null && start !== null && end !== null &&
-    String(contractTitle || '').trim() === '계약서_' + tid + '_' + expectedName &&
+    titleBound &&
     phone(ledger.cells[5]) === expectedPhone && rentalDate(ledger.cells[0], ledgerTimeZone) === masterStart;
   if (!expectedPhone || (String(borrower || '').trim() !== expectedName && !(legacyBound && borrower === '')) ||
       (phone(contact) !== expectedPhone && !(legacyBound && contact === ''))) {
     throw new Error('과거 할인 복원: 계약서 고객 식별정보 불일치');
   }
-  if (!masterStart || (rentalDate(start, documentTimeZone) !== masterStart && !(legacyBound && start === '')) ||
-      !masterEnd || (rentalDate(end, documentTimeZone) !== masterEnd && !(legacyBound && end === ''))) {
+  if (!masterStart || (documentStart !== masterStart && !(legacyBound && start === '')) ||
+      !masterEnd || (documentEnd !== masterEnd && !(legacyBound && end === ''))) {
     throw new Error('과거 할인 복원: 계약서 대여기간 불일치');
   }
   var pre = field('사전할인', 2), add = field('추가할인', 8);
