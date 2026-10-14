@@ -31,3 +31,12 @@ test('authenticated repair action passes only an explicit statusOnly flag',()=>{
  const branch=api.slice(api.indexOf('case "repairTradeProjection":'),api.indexOf('case "getTradeDiscountState":'));
  assert.match(branch,/statusOnly/);
 });
+test('diagnostic includes setup-closing and uses the return-projection-specific expiry',()=>{
+ const f=fixture('{}'),now=Date.now();
+ f.state['setupClosing_'+tid]=now+'|private-token';
+ f.state['dashboardReturnProjectionInFlight_'+tid]=JSON.stringify({at:now-4*60000,token:'private-token'});
+ const x=f.ctx.repairDashboardTradeProjection_(tid,undefined,true);
+ assert.equal(x.claims.find(c=>c.kind==='setupClosing_')?.expired,false);
+ assert.equal(x.claims.find(c=>c.kind==='dashboardReturnProjectionInFlight_')?.expired,true);
+ assert.equal(JSON.stringify(x).includes('private-token'),false);assert.equal(f.writes(),0);
+});

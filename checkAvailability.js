@@ -3227,10 +3227,17 @@ function readDashboardTradeProjectionState_(tid) {
     .map(function(row) { return String(row[0] || '').trim(); });
   var now = Date.now();
   var claims = [];
+  var setupClosing = String(props.getProperty('setupClosing_' + tid) || '');
+  if (setupClosing) {
+    var setupAt = Number(setupClosing.split('|')[0]) || 0;
+    claims.push({ kind: 'setupClosing_', ageMs: now - setupAt, expired: now - setupAt >= DASHBOARD_SETUP_CLOSING_LEASE_MS_ });
+  }
   ['registeredTradePriceMutation_', 'checkoutItemMutation_', 'returnMutation_', 'dashboardAuxMutation_',
     'dashboardRemovalProjectionInFlight_', DASHBOARD_RETURN_PROJECTION_LEASE_PREFIX_].forEach(function(prefix) {
     var lease = readDashboardMutationLease_(props, prefix + tid);
-    if (lease) claims.push({ kind: prefix, ageMs: now - lease.at, expired: now - lease.at >= DASHBOARD_MUTATION_LEASE_MS_ });
+    var ttl = prefix === DASHBOARD_RETURN_PROJECTION_LEASE_PREFIX_
+      ? DASHBOARD_RETURN_PROJECTION_LEASE_MS_ : DASHBOARD_MUTATION_LEASE_MS_;
+    if (lease) claims.push({ kind: prefix, ageMs: now - lease.at, expired: now - lease.at >= ttl });
   });
   var triggerCount = ScriptApp.getProjectTriggers().filter(function(trigger) {
     return trigger.getHandlerFunction() === 'flushDashboardStructureProjectionQueue_';
