@@ -4882,6 +4882,30 @@ function confirmationFreshnessGuard({ stale = false, staleAfterChecks = stale ? 
   };
 }
 
+for (const conversationDiscount of ['학생', '', null]) {
+  test(`native intake preserves resolved discount through validation and executed state: ${conversationDiscount}`, async () => {
+    const decision = completeSheetDecision({sheet_row_candidate:{discount_type:conversationDiscount}});
+    let state;
+    const receipt = await workerModule.executeVillageConfirmationRequest({
+      config:{sheetApiKey:'internal-key',fetchImpl:async()=>({ok:true,status:200,text:async()=>JSON.stringify({table:{rows:[{c:[{v:'010-1111-2222'},{v:'홍길동'},{v:conversationDiscount ? '일반' : '학생'}]}]}})})},
+      job:{jobId:'discount-intake-test',roomKey:'discount-room',roomRevision:1},roomRevision:1,decision,
+      dependencies:{
+        freshnessGuard:confirmationFreshnessGuard(),
+        fetchEquipmentCatalogSnapshot:async()=>confirmationCatalogForDecision(decision),
+        appendToSheet:async(_config,payload)=>{
+          assert.equal(payload.args.할인유형,'학생');
+          return {success:true,reqID:'RQ-261014-001',results:[]};
+        },
+        ensureConfirmRequestDiscountApplied:async()=>({updated:false,reason:'already_applied',discountType:'학생'}),
+        onExecutionState:value=>{state=value;}
+      }
+    });
+    assert.equal(receipt.status,'ok',JSON.stringify(receipt.error));
+    assert.equal(state.decision.sheet_row_candidate.discount_type,'학생');
+    assert.equal(state.sheetPayload.args.할인유형,'학생');
+  });
+}
+
 test('executeVillageConfirmationRequest writes AI-selected live catalog names instead of customer aliases', async () => {
   const decision = completeSheetDecision({
     reservation_inquiry: {
@@ -6241,7 +6265,7 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   assert.match(prompt, /도저히 매칭할 수 없을 때만.*catalog_match_status="unmatched"/s);
   assert.match(prompt, /Q\/R에는 원문\/추론\/가용확인 후 안내/s);
   assert.match(prompt, /FX3.*A7S3.*FX6/s);
-  assert.match(prompt, /할인유형: 고객DB I열이 카톡보다 우선/s);
+  assert.match(prompt, /할인유형: 현재 고객·직원의 실제 대화/s);
   assert.match(prompt, /학생.*개인사업자\/프리랜서.*단골.*제휴.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
   assert.match(prompt, /new_inquiry.*capture the complete currently requested plan immediately/s);
@@ -6336,7 +6360,7 @@ test('customer DB discount normalization supports Village 2.0 segment values', (
   assert.equal(normalizeCustomerDbDiscountType(''), '');
 });
 
-test('enrichSheetPayloadWithCustomerDbDiscount overrides Kakao/general discount from Village 2.0 DB', async () => {
+test('enrichSheetPayloadWithCustomerDbDiscount fills absent conversation discount from Village 2.0 DB', async () => {
   const gviz = '/*O_o*/\ngoogle.visualization.Query.setResponse({"table":{"rows":['
     + '{"c":[{"v":"010-1111-2222"},{"v":"김학생"},{"v":"학생30%"}]},'
     + '{"c":[{"v":"010-3333-4444"},{"v":"박단골"},{"v":"단골10%"}]}'
@@ -6348,7 +6372,7 @@ test('enrichSheetPayloadWithCustomerDbDiscount overrides Kakao/general discount 
     args: {
       예약자명: '박단골',
       연락처: '010-3333-4444',
-      할인유형: '일반',
+      할인유형: '',
       장비: [{ 이름: 'FX3', 수량: 1 }]
     }
   };
@@ -7772,7 +7796,7 @@ test('validateAiDecisionContract rejects missing AI semantics instead of reconst
       plan_complete: false,
       start_date: '내일',
       pickup_time: '12시 30분',
-      discount_type: ''
+      discount_type: 'unsupported_discount'
     },
     follow_up_items: [{
       type: 'not_a_real_type',
@@ -12492,7 +12516,7 @@ test('buildHermesPrompt wires Village Brain owner context as advisory read-only 
   assert.equal(prompt.includes('G-BRAIN OWNER CONTEXT'), false);
   assert.ok(prompt.includes('brain-context-latest.md'));
   assert.ok(prompt.includes('customer-profiles.jsonl'));
-  assert.ok(prompt.includes('할인유형은 여전히 고객DB I열이 우선'));
+  assert.ok(prompt.includes('할인유형은 현재 대화 근거 우선'));
   assert.ok(prompt.includes('auto_send grounding으로 선언할 수 없다'));
   const withoutBrain = buildHermesPrompt({ id: 'job-brain-none', preview_text: '문의' });
   assert.equal(withoutBrain.includes('VILLAGE BRAIN OWNER CONTEXT'), false);
@@ -12976,7 +13000,7 @@ test('set quotes are grounded by 세트마스터 alone — component ❓ rows ne
   // 단가 없는 포함 액세서리)까지 품목으로 세어 세트 견적 자동발송이 멈췄다(강소원 사례).
   // 청구 라인 정의를 프롬프트에 고정해 같은 회귀를 막는다.
   const prompt = buildHermesPrompt({ id: 'job-price' }, { ragContext: { enabled: true } });
-  assert.match(prompt, /세트는 세트 전체가 청구 라인 1개/);
+  assert.match(prompt, /세트 전체가 1개/);
   assert.match(prompt, /가격 근거를 깨지 않는다/);
   assert.doesNotMatch(prompt, /모든 독립 품목의 단가/);
 });

@@ -262,7 +262,8 @@ export async function lookupCustomerDbDiscountForRequest({ customerName = '', ph
   const nameMatches = nameKey
     ? mapped.filter((row) => row.name === nameKey).map((row) => ({ ...row, matchedBy: 'name' }))
     : [];
-  const matches = phoneMatches.length ? phoneMatches : nameMatches;
+  // A supplied phone is an identity fence, not merely a preferred search term.
+  const matches = phoneKey ? phoneMatches : nameMatches;
   const distinctPhones = Array.from(new Set(matches.map((row) => normalizeCustomerDbPhoneKey(row.phone)).filter(Boolean)));
   const ambiguous = !phoneKey && distinctPhones.length > 1;
   const best = pickBestCustomerDbDiscount(matches);
@@ -286,13 +287,15 @@ export async function enrichSheetPayloadWithCustomerDbDiscount(config = {}, shee
     customerName: args.예약자명,
     phone: args.연락처
   }, config, options);
-  if (!lookup.discountType) return { payload: sheetPayload, lookup };
+  const resolvedDiscount = normalizeCustomerDbDiscountType(args.할인유형)
+    || normalizeCustomerDbDiscountType(lookup.discountType);
+  if (!resolvedDiscount) return { payload: sheetPayload, lookup };
   return {
     payload: {
       ...sheetPayload,
       args: {
         ...args,
-        할인유형: lookup.discountType
+        할인유형: resolvedDiscount
       }
     },
     lookup
@@ -625,7 +628,7 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
         query: '{AI_TRADE_ID}'
       })
     },
-    note: 'These URLs are read-only lookup aids. 확인요청 columns: A=reqID, B-E period, F equipment, G qty, I result, J detail, K customer, L phone, M discount, N register command, O register status, P tradeID, Q memo, R extra. 계약마스터 columns include A tradeID, B customer, C phone, E-H period, J status, K discount. 고객DB columns: A phone, B customer name, C affiliation when present, I discount/segment when present; village2_customer_db_discount_gviz is the authoritative discount lookup and outranks Kakao text. AI must decide what to query and how to interpret results. Do not use write/run/register/send actions.'
+    note: 'These URLs are read-only lookup aids. 확인요청 columns: A=reqID, B-E period, F equipment, G qty, I result, J detail, K customer, L phone, M discount, N register command, O register status, P tradeID, Q memo, R extra. 계약마스터 columns include A tradeID, B customer, C phone, E-H period, J status, K discount. 고객DB columns: A phone, B customer name, C affiliation when present, I discount/segment when present; discount: current conversation first, identity-safe DB fallback. Match supplied phone; unique name only without phone. AI must decide what to query and how to interpret results. Do not use write/run/register/send actions.'
   };
 }
 
@@ -714,14 +717,14 @@ export function buildHermesPrompt(job, options = {}) {
     ? `\nTERMINAL_ACK_HINT (advisory): 외부 DOM 휴리스틱이 최신 고객 메시지를 단순 종결 인사로 분류했다. 이것은 판단이 아니라 참고 신호다. 화면을 직접 확인해 동의하면 reply_decision.replyMode=no_reply로 빠르게 종결하라. 예약/입금/장비/일정 등 운영 맥락이 남아 있거나 실질 질문이 보이면 이 힌트를 무시하고 정상 판단하라.\n`
     : '';
   const brainContextText = options.brainContext?.enabled
-    ? `\nVILLAGE BRAIN OWNER CONTEXT (read-only, advisory):\n${options.brainContext.contextPath ? `- 사장 판단 기준·운영 해석 문서(file 도구로 read-only 열람): ${options.brainContext.contextPath}\n` : ''}${options.brainContext.customerProfilesPath ? `- 고객 프로필 JSONL(1인 1줄: name/segment/누적방문/미수금/사고이력/이탈주의): ${options.brainContext.customerProfilesPath} — 파일이 크니 전체를 읽지 말고 현재 고객명이 포함된 줄만 찾아 읽어라.\n` : ''}- 단골/VIP 여부, 미수금, 과거 사고이력, 사장 응대 기준을 파악해 사장처럼 응대하는 데 쓴다. 프로필의 segment는 참고용이며 할인유형은 여전히 고객DB I열이 우선한다.\n- 이 블록은 빌리지 자체 VILLAGE_Brain 산출물이다. Garry Tan의 별도 오픈소스 GBrain과 혼동하지 않는다.\n- advisory다: 재고/예약/가격/정책의 근거가 아니다. CURRENT_CONFIRMED_POLICY와 시트/화면이 항상 우선하며, brain 파일을 auto_send grounding으로 선언할 수 없다.\n`
+    ? `\nVILLAGE BRAIN OWNER CONTEXT (read-only, advisory):\n${options.brainContext.contextPath ? `- 사장 판단 기준·운영 해석 문서(file 도구로 read-only 열람): ${options.brainContext.contextPath}\n` : ''}${options.brainContext.customerProfilesPath ? `- 고객 프로필 JSONL(1인 1줄: name/segment/누적방문/미수금/사고이력/이탈주의): ${options.brainContext.customerProfilesPath} — 파일이 크니 전체를 읽지 말고 현재 고객명이 포함된 줄만 찾아 읽어라.\n` : ''}- 단골/VIP 여부, 미수금, 과거 사고이력, 사장 응대 기준을 파악해 사장처럼 응대하는 데 쓴다. 프로필의 segment는 참고용이며 할인유형은 현재 대화 근거 우선, 근거 부재 시 동일 고객DB I열로 보강한다.\n- 이 블록은 빌리지 자체 VILLAGE_Brain 산출물이다. Garry Tan의 별도 오픈소스 GBrain과 혼동하지 않는다.\n- advisory다: 재고/예약/가격/정책의 근거가 아니다. CURRENT_CONFIRMED_POLICY와 시트/화면이 항상 우선하며, brain 파일을 auto_send grounding으로 선언할 수 없다.\n`
     : '';
   const sheetExecutionText = options.gatewayConfirmationToolAvailable
     ? `GATEWAY NATIVE SHEET EXECUTION CONTRACT:
 - In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
 - village_read is the native read-only tool; use it in this turn instead of unavailable terminal/file tools. request.kind=catalog with query finds exact 세트마스터 names and G-column prices; customer with name/phone reads 고객DB; reservations with query=customer name reads contracts and RQs; request/trade with query=exact ID reads that record. Results can be truncated: narrow the query before deciding absence or completeness. Reads do not consume the mutation lease.
 - Read shop terminology/defaults with village_read(request={kind:"knowledge",question:"context and question"}), or skills reading village-operations equipment references. Verify exact names in the current catalog. Knowledge cannot prove stock, price, identity or booking authority; historical procedures cannot override current policy.
-- For a price question, resolve the exact billable equipment and period from conversation plus village_read, then call kind=quote with quote={source:"catalog",customer_name,phone,discount_type,start_date,start_time,end_date,end_time,items:[{name,quantity}]}. Dates are YYYY-MM-DD, times HH:mm, phone may be empty, and items contain every billable set/standalone item once (not included accessories). Or use quote={source:"request"|"trade",id:the exact live ID}. The tool applies customerDB discount first, rental days, long-term discount and VAT; copy that exact quote object into FINAL_JSON.price_quote for fresh send-time verification.
+- For a price question, resolve the exact billable equipment and period from conversation plus village_read, then call kind=quote with quote={source:"catalog",customer_name,phone,discount_type,start_date,start_time,end_date,end_time,items:[{name,quantity}]}. Dates are YYYY-MM-DD, times HH:mm, phone may be empty, and items contain every billable set/standalone item once (not included accessories). Or use quote={source:"request"|"trade",id:the exact live ID}. For catalog quotes, use the conversation-supported discount_type, or an empty string when absent for identity-safe DB fallback. The tool applies that resolved discount, rental days, long-term discount and VAT; copy that exact quote object into FINAL_JSON.price_quote for fresh send-time verification.
 - If quote.complete=true, answer the customer's actual price question now using totalVatIncluded, clearly saying 부가세 포함. Use classification="price", sensitive_commitment, authoritative_sheet, requiresRag=false. Do not substitute "확인해볼게요/견적 확인 후 안내드릴게요" for a lookup you can do in this turn, or repeat an earlier empty acknowledgement. If a billable item/period is genuinely unresolved, ask the one specific missing question; never present a partial sum as the total. Sending a quote document still requires village_document_send; a computed price is not proof of delivery.
 - A successful inquiry receipt can require schedule review while its independent, complete price answer is still auto-sendable with price_quote. Keep the schedule review follow-up, but do not claim availability or registration in the price reply. Failed/partial mutations still require no-send owner review.
 - INQUIRY LIFECYCLE에 따라 genuinely new 또는 아직 미반영인 변경 문의만 village_confirmation_request로 접수한다. 이미 처리된 예약/품목, 거절된 요청, 단순 보유 질문은 입력하지 않는다.
@@ -798,7 +801,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
 - 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/처리판 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
 - CURRENT_CONFIRMED_POLICY가 최신 FAQ/정책 기준이다. RAG가 충돌하면 현재 정책으로 고치고, 없는 정책 FAQ는 high/retrieved RAG로 보강하거나 draft_only/follow_up.
-- 가격 문의는 세트마스터 단가, 고객할인(고객DB I열 우선), 장기할인으로 직접 계산해 답한다. 청구 라인 = 별도로 과금되는 품목 하나. 세트는 세트 전체가 청구 라인 1개이고 세트마스터 G열 단가가 그 근거의 전부다. 세트 구성품·포함 액세서리(AC라인, 소프트박스, 케이블 등)는 청구 라인이 아니므로 단가 0·미등록(❓)·모델선택 필요 표시가 있어도 가격 근거를 깨지 않는다 — 그런 표시는 등록 절차 이슈일 뿐이다. 요청된 모든 청구 라인의 단가가 세트마스터/시트에서 확인되고 금액 산식대로 계산됐을 때만 safetyClass="sensitive_commitment" + grounding="authoritative_sheet"로 auto_send 가능. 일부 청구 라인의 단가를 못 찾았으면 부분합계를 전체 금액처럼 안내하지 말고 초안/follow_up. price_paused면 가격 자동발송 금지.
+- 가격은 세트마스터 G열 단가·고객할인(현재 대화 우선, 없으면 동일 고객DB)·장기할인으로 계산한다. 청구 라인은 별도 과금 품목이며 세트 전체가 1개다. 세트 구성품·포함 액세서리(AC라인, 소프트박스, 케이블 등)는 청구 라인이 아니므로 단가 0·미등록(❓)·모델선택 필요 표시가 있어도 가격 근거를 깨지 않는다 — 그런 표시는 등록 절차 이슈일 뿐이다. 요청된 모든 청구 라인의 단가가 세트마스터/시트에서 확인되고 금액 산식대로 계산됐을 때만 safetyClass="sensitive_commitment" + grounding="authoritative_sheet"로 auto_send 가능. 일부 청구 라인의 단가를 못 찾았으면 부분합계를 전체 금액처럼 안내하지 말고 초안/follow_up. price_paused면 가격 자동발송 금지.
 - 서류(계약서/견적서/세금계산서/거래명세서)는 계산 생략 금지. 거래ID는 계약마스터+스케줄상세 대표/단품 L열 단가로 수량×일수×단가 계산; RQ는 확인요청 결과+세트마스터 단가로 부분계산하고 미등록/단가불명은 "미계산/확인 필요"로 표시한다.
 -반복견적=내예약 견적 안내
 - ${policyCalcRuleLine}
@@ -839,7 +842,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 약어/속어는 AI 의미 판단 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. confidently matchable이면 catalog_match_status="matched"와 정확 카탈로그명을 쓰며, 원문은 정말 매칭 불가능한 경우만 fallback이다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II. 세대가 명시되지 않은 16-35는 소니 GM 16-35mm를 검토할 수 있지만, 16-35 GM2를 근거 없이 그 이름으로 바꾸지 않는다.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
-- 할인유형: 고객DB I열이 카톡보다 우선. DB 값(학생/개인사업자/프리랜서/단골/제휴/일반)이 있으면 sheet_row_candidate.discount_type에 그대로 쓰고, 없을 때만 카톡에서 학생/개사프/일반 추론.
+- 할인유형: 현재 고객·직원의 실제 대화/메모 우선(업체 예시 제외), 부재 시 동일 고객DB, 최종 일반. 예비 미상은 null/공란. 전화 불일치 제외/전화 없으면 이름 단일 매칭. RQ 정정: customer_identity_update.discount_type. M·계약 K·견적 검증.
 - 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리한다. 없거나 동명이인이어도 확인요청 생성은 막지 말고 sheet_row_candidate.phone=""로 둔다. 연락처는 등록 단계 필수라 follow_up/답장에서는 연락처 요청을 남긴다.
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
 - 유효한 신규 대여 문의는 일정 일부/연락처/모델 세부가 부족해도 누락하지 않는다. 기존 RQ/계약/스케줄은 먼저 대조한다. 모든 장비는 정확 카탈로그명 또는 실제 미해결 원문으로 구분한다. 거절·미보유 품목을 유효한 요청에 섞지 않는다.
@@ -1413,8 +1416,8 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
     // Re-parsing isolated clock tokens here can override a correct final period.
     // Validate the structured date/time contract above, not natural-language meaning.
     if (!text(row.customer_name).trim()) errors.push('sheet_row_candidate.customer_name is required');
-    if (!CONFIRM_REQUEST_DISCOUNT_TYPES.has(text(row.discount_type).trim())) {
-      errors.push('sheet_row_candidate.discount_type must be an explicit allowed value');
+    if (text(row.discount_type).trim() && !CONFIRM_REQUEST_DISCOUNT_TYPES.has(text(row.discount_type).trim())) {
+      errors.push('sheet_row_candidate.discount_type must be blank or an allowed value');
     }
     const equipmentWriteMode = text(row.equipment_write_mode).trim() || 'full_plan';
     if (!['full_plan', 'additions_only', 'replace_full_plan'].includes(equipmentWriteMode)) {
@@ -3032,13 +3035,22 @@ async function buildConfirmRequestCalculation(config = {}, reqID = '') {
     }
   }
   const baseAmount = items.reduce((sum, item) => sum + (item.qty * item.price * days), 0);
-  const payment = calculateVillagePayment(baseAmount, days, first['할인유형'] || '일반');
+  let discountType = normalizeCustomerDbDiscountType(first['할인유형']);
+  if (text(first['할인유형']).trim() && !discountType) throw new Error('invalid_discount_type');
+  if (!discountType) {
+    const customer = await lookupCustomerDbDiscountForRequest({
+      customerName: text(first['예약자명']).trim(), phone: text(first['연락처']).trim()
+    }, config);
+    if (customer.ambiguous) throw new Error('ambiguous_customer');
+    discountType = customer.discountType || '일반';
+  }
+  const payment = calculateVillagePayment(baseAmount, days, discountType);
   return {
     kind: 'confirm_request',
     reqID,
     customer: text(first['예약자명']).trim(),
     phone: text(first['연락처']).trim(),
-    discountType: text(first['할인유형']).trim() || '일반',
+    discountType,
     period: `${normalizeDatePart(first['반출일'])} ${normalizeTimePart(first['반출시간'])} ~ ${normalizeDatePart(first['반납일'])} ${normalizeTimePart(first['반납시간'])}`.replace(/\s+/g, ' ').trim(),
     pricedItems: items,
     unresolvedItems: unresolved,
@@ -3115,7 +3127,7 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
       requireReadText(quote.customer_name);
       requireReadText(quote.phone, 30, true);
       if (quote.phone && !/^\+?[0-9 -]{7,20}$/.test(quote.phone)) throw new Error('invalid_customer_phone');
-      if (!['학생','개인사업자/프리랜서','단골','제휴','일반'].includes(quote.discount_type)) throw new Error('invalid_discount_type');
+      if (!['','학생','개인사업자/프리랜서','단골','제휴','일반'].includes(quote.discount_type)) throw new Error('invalid_discount_type');
       const dates = ['start','end'].map(prefix => {
         const date = quote[prefix + '_date'], time = quote[prefix + '_time'];
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('invalid_quote_period');
@@ -3136,7 +3148,8 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
       if (customer.ambiguous) throw new Error('ambiguous_customer');
       inventory_context=await fetchNativeInventoryContext(config,{plan:{items:quote.items,
         start:quote.start_date+'T'+quote.start_time+':00+09:00',end:quote.end_date+'T'+quote.end_time+':00+09:00'}});
-      const discount = customer.discountType || quote.discount_type;
+      const conversationDiscount = normalizeCustomerDbDiscountType(quote.discount_type);
+      const discount = conversationDiscount || customer.discountType || '일반';
       const days = calcRentalDaysForQuote(quote.start_date,quote.start_time,quote.end_date,quote.end_time);
       const pricedItems = [], unresolvedItems = [];
       for (let offset = 0; offset < quote.items.length; offset += 4) {
@@ -3150,7 +3163,7 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
       }
       const baseAmount = pricedItems.reduce((sum,item) => sum + item.qty * item.price * days, 0);
       calculation = {kind:'catalog',customer:quote.customer_name,discountType:discount,
-        customerDiscountSource:customer.discountType ? 'customer_db' : 'conversation',
+        customerDiscountSource:conversationDiscount ? 'conversation' : (customer.discountType ? 'customer_db' : 'default'),
         pricedItems,unresolvedItems,
         payment:unresolvedItems.length ? null : calculateVillagePayment(baseAmount,days,discount)};
     }
@@ -5240,7 +5253,8 @@ export async function appendToSheet(config, payload) {
 }
 
 export async function ensureConfirmRequestDiscountApplied(config = {}, sheetResult = null, sheetPayload = null, customerDbLookup = null) {
-  const discountType = normalizeCustomerDbDiscountType(customerDbLookup?.discountType || sheetPayload?.args?.할인유형 || '');
+  const discountType = normalizeCustomerDbDiscountType(sheetPayload?.args?.할인유형)
+    || normalizeCustomerDbDiscountType(customerDbLookup?.discountType);
   if (!discountType) return { skipped: true, reason: 'missing_discount_type' };
   if (!sheetResult || sheetResult.success !== true) return { skipped: true, reason: 'sheet_insert_not_successful' };
   if (sheetResult.duplicate === true) return { skipped: true, reason: 'duplicate_request_not_patched' };
@@ -10009,12 +10023,13 @@ export async function executeVillageConfirmationRequest({
           : await enrichDiscountImpl(config, sheetPayload);
         sheetPayload = enriched.payload;
         customerDbDiscountLookup = enriched.lookup;
-        if (customerDbDiscountLookup?.discountType) {
+        const resolvedDiscount = normalizeCustomerDbDiscountType(sheetPayload?.args?.할인유형);
+        if (resolvedDiscount) {
           executedDecision = {
             ...executedDecision,
             sheet_row_candidate: {
               ...(executedDecision.sheet_row_candidate || {}),
-              discount_type: customerDbDiscountLookup.discountType
+              discount_type: resolvedDiscount
             }
           };
         }

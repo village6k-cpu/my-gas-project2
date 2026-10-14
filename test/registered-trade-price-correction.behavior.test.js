@@ -58,6 +58,7 @@ function harness(options = {}) {
     readContractAmount_: (ws,ref) => ws.getRange(ref).getValue(),
     registeredTradeCorrectionDate_: (raw) => String(raw),
     registeredTradeCorrectionTime_: (raw) => String(raw),
+    _normalizeDiscountTypeOrBlank_: value => String(value || '').trim(),
     regenerateContractById(tid, extra, opts) {
       calls.regenerations++; assert.equal(calls.lockHeld,false,'regeneration must release ScriptLock');
       assert.equal(tid,input.tradeId); assert.equal(opts.strictLedgerLink,true);
@@ -149,6 +150,18 @@ test('same operation verifies stored terminal result without reapplying or regen
   assert.equal(h.run(changed).success,false); assert.equal(h.calls.regenerations,1);
   const stale=copy(input);stale.operationId='ce1e3110-3517-48e3-928d-3cbe283d9900';
   const rejected=h.run(stale); assert.equal(rejected.noMutationPerformed,true); assert.equal(h.calls.writes.length,1);
+});
+
+test('legacy completed price receipt remains read-only compatible after discount readback expands',()=>{
+  const h=harness(); assert.equal(h.run().success,true);
+  const key='registeredTradePriceReceipt_v1_'+input.operationId;
+  const receipt=JSON.parse(h.props.get(key)); delete receipt.beforeContract.discountType;
+  h.props.set(key,JSON.stringify(receipt));
+  const replay=h.run(); assert.equal(replay.success,true,replay.error); assert.equal(replay.replayed,true);
+  assert.equal(h.calls.regenerations,1); assert.equal(h.calls.writes.length,1);
+  h.contract.data[1][10]='일반';
+  assert.equal(h.run().success,false,'legacy raw snapshot digest must still detect discount drift');
+  assert.equal(h.calls.regenerations,1); assert.equal(h.calls.writes.length,1);
 });
 
 test('normalizers reject missing approval, mixed changes, empty or imprecise prices before any write',()=>{

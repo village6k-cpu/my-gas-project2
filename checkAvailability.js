@@ -16411,6 +16411,10 @@ function _confirmedReservationResult_(normalized, effectiveRequestId, replacedRe
     finalSetComponents,
     expectedFinalSetComponents
   );
+  var expectedDiscount = _normalizeDiscountTypeOrBlank_(group.discount);
+  if (expectedDiscount && state.contract.discountType !== expectedDiscount) {
+    throw new Error('registered reservation authoritative readback mismatch: 할인유형');
+  }
   if (state.contract.startDate !== normalized.desired_period.start_date ||
       state.contract.startTime !== normalized.desired_period.start_time ||
       state.contract.endDate !== normalized.desired_period.end_date ||
@@ -21012,8 +21016,8 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
   if (!contractSheet || !scheduleSheet) throw new Error('계약마스터/스케줄상세 중 일부가 없습니다');
 
   var contractLast = contractSheet.getLastRow();
-  var contractRaw = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 10).getValues() : [];
-  var contractDisplay = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 10).getDisplayValues() : [];
+  var contractRaw = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 11).getValues() : [];
+  var contractDisplay = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 11).getDisplayValues() : [];
   var contractMatches = [];
   for (var ci = 0; ci < contractRaw.length; ci++) {
     if (String(contractRaw[ci][0] || '').trim() === tradeId) contractMatches.push(ci);
@@ -21026,7 +21030,8 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
     endDate: registeredTradeCorrectionDate_(contractRaw[cidx][6], contractDisplay[cidx][6]),
     endTime: registeredTradeCorrectionTime_(contractRaw[cidx][7], contractDisplay[cidx][7]),
     rounds: Number(contractRaw[cidx][8] || contractDisplay[cidx][8] || 0),
-    status: String(contractDisplay[cidx][9] || contractRaw[cidx][9] || '').trim()
+    status: String(contractDisplay[cidx][9] || contractRaw[cidx][9] || '').trim(),
+    discountType: _normalizeDiscountTypeOrBlank_(contractDisplay[cidx][10] || contractRaw[cidx][10])
   };
 
   var scheduleLast = scheduleSheet.getLastRow();
@@ -21495,7 +21500,11 @@ function readRegisteredTradePriceContract_(correction, snapshot, regeneration) {
 function registeredTradePriceResult_(correction, receipt, snapshot, replayed) {
   if (registeredTradePriceSnapshotDigest_(snapshot) !== receipt.afterDigest) throw new Error('price correction final schedule/contract readback mismatch');
   var state = readRegisteredTradeCorrectionState_(correction.tradeId);
-  if (JSON.stringify(state.contract) !== JSON.stringify(receipt.beforeContract)) throw new Error('price correction contract state changed');
+  var comparableContract = Object.assign({}, state.contract);
+  // Older v1 receipts predate the additive K-column readback. Their raw
+  // snapshot digest above still fences discount drift and all other cells.
+  if (!Object.prototype.hasOwnProperty.call(receipt.beforeContract, 'discountType')) delete comparableContract.discountType;
+  if (JSON.stringify(comparableContract) !== JSON.stringify(receipt.beforeContract)) throw new Error('price correction contract state changed');
   var contract = readRegisteredTradePriceContract_(correction, snapshot, receipt.regeneration);
   var ledger = readRegisteredTradePriceLedger_(correction.tradeId);
   if (ledger.contractUrl !== receipt.regeneration.url || ledger.amount !== contract.amount || (receipt.contractAmount !== undefined && contract.amount !== receipt.contractAmount)) throw new Error('price correction contract/ledger readback mismatch');

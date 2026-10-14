@@ -72,7 +72,7 @@ test('quote uses current customerDB discount and send-time relookup detects a ch
     if(u.searchParams.get('query')==='카메라 세트') return {ok:true,text:async()=>JSON.stringify({results:[{data:['카메라 세트','','','','','',unitPrice]}]})};
     return fetchBase(url,options);
   };
-  const plan={...quote,phone:'010-1111-2222'};
+  const plan={...quote,phone:'010-1111-2222',discount_type:''};
   const result=await worker.executeVillageReadOnlyLookup(c,{kind:'quote',quote:plan});
   assert.equal(result.totalVatIncluded,71280);
   assert.equal(result.calculations[0].customerDiscountSource,'customer_db');
