@@ -534,7 +534,7 @@ test('fast registration authoritative readback proves the selected set component
   const state = {
     contract: {
       startDate: period.start_date, startTime: period.start_time,
-      endDate: period.end_date, endTime: period.end_time
+      endDate: period.end_date, endTime: period.end_time, discountType: '일반'
     },
     schedule: {
       periods: ['2026-09-07|07:00|2026-09-07|20:00'],
@@ -563,6 +563,7 @@ test('fast registration authoritative readback proves the selected set component
       Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
     ),
     _confirmRequestPhoneKey_: (value) => String(value || '').replace(/\D/g, ''),
+    _normalizeDiscountTypeOrBlank_: (value) => String(value || '').trim(),
     _staffConfirmedSetComponentsEquivalent_: (left, right) => JSON.stringify(left) === JSON.stringify(right),
     _confirmedReservationPlanForFence_: (value) => structuredClone(value),
     _confirmedReservationPeriodForFence_: (value) => structuredClone(value)
