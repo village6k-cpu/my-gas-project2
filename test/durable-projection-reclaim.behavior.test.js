@@ -76,3 +76,10 @@ test('reclamation preserves a property changed after its snapshot',()=>{
   f.ctx.reclaimDashboardScriptProperties_(f.props,{aggressive:true});
   assert.equal(f.state[key],'new concurrent value');
 });
+
+test('accepted projection also preserves the real per-scope hashed mutation-log key',()=>{
+ const f=fixture(),key=f.ctx.dashboardMutationLogKey_(f.tid,'addEquip');
+ const receipt=JSON.stringify([{id:'accepted:add',state:'pending',at:Date.now()}]);f.state[key]=receipt;
+ f.ctx.reclaimDashboardScriptProperties_(f.props,{aggressive:true});
+ assert.equal(f.state[key],receipt);
+});

@@ -2870,15 +2870,30 @@ function planDashboardStructureProjectionBatch_(all, now) {
 }
 
 /** 거래별 큐의 외부 HTTP는 전역 ScriptLock 밖에서 실행하고 성공 확인 뒤에만 lease를 지운다. */
-function flushDashboardStructureProjectionQueue_() {
+function flushDashboardStructureProjectionQueue_(targetTradeId) {
+  var scoped = typeof targetTradeId === 'string';
+  if (scoped && !/^\d{6}-\d{3,}$/.test(targetTradeId)) throw new Error('정확한 거래ID 필수');
   var props = PropertiesService.getScriptProperties();
-  try {
+  if (!scoped) try {
     ScriptApp.getProjectTriggers().forEach(function(trigger) {
       if (trigger.getHandlerFunction() === 'flushDashboardStructureProjectionQueue_') ScriptApp.deleteTrigger(trigger);
     });
   } catch (triggerCleanupErr) {}
-  props.deleteProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_);
+  if (!scoped) props.deleteProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_);
   var all = props.getProperties();
+  if (scoped) {
+    var scopedKey = DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + targetTradeId;
+    var scopedSnapshot = {};
+    if (all[scopedKey]) {
+      var scopedTask = null;
+      try { scopedTask = JSON.parse(all[scopedKey]); } catch (scopedParseErr) {}
+      if (scopedTask && scopedTask.tradeId && String(scopedTask.tradeId).trim() !== targetTradeId) {
+        throw new Error('투영 큐 거래ID 불일치: 원본 큐 보존');
+      }
+      scopedSnapshot[scopedKey] = all[scopedKey];
+    }
+    all = scopedSnapshot;
+  }
   var batch = planDashboardStructureProjectionBatch_(all, Date.now());
   var keys = batch.keys;
   var pending = batch.pending;
@@ -3116,6 +3131,11 @@ function flushDashboardStructureProjectionQueue_() {
       }
     }
   });
+  // 수동/HTTP 복구는 정확한 기존 작업만 소비하고 전역 트리거를 지우지 않는다.
+  if (scoped) {
+    if (pending) ensureDashboardStructureProjectionTrigger_(nextDelay);
+    return;
+  }
   if (pending) ensureDashboardStructureProjectionTrigger_(nextDelay);
   else {
     props.deleteProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_);
@@ -3129,10 +3149,21 @@ function flushDashboardStructureProjectionQueue_() {
 
 /** 앱 자동 복구용. 반출 후에는 현재 시트 품목을 기존 불변 기준선과 정확히
  * 교차 검증한 뒤만 누락 행을 복구한다. 외부 HTTP는 내구 큐 worker가 잠금 밖에서 수행한다. */
-function repairDashboardTradeProjection_(tid, removedScheduleIds, statusOnly) {
+function repairDashboardTradeProjection_(tid, removedScheduleIds, statusOnly, options) {
   tid = String(tid || '').trim();
   if (!tid) return { error: '거래ID 필수' };
   if (statusOnly === true) return readDashboardTradeProjectionState_(tid);
+  options = options || {};
+  if (options.drainPending === true) {
+    if (!/^\d{6}-\d{3,}$/.test(tid)) return { error: '정확한 거래ID 필수' };
+    if (removedScheduleIds !== undefined) return { error: '기존 작업 실행에는 새 제외 ID를 함께 전달할 수 없습니다.' };
+    flushDashboardStructureProjectionQueue_(tid);
+    var drainState = readDashboardTradeProjectionState_(tid);
+    drainState.statusOnly = false;
+    drainState.drainPerformed = true;
+    drainState.projectionPending = !!drainState.queue;
+    return drainState;
+  }
   var explicitRemovals = removedScheduleIds === undefined ? [] : removedScheduleIds;
   if (!Array.isArray(explicitRemovals) || explicitRemovals.length > 100) {
     return { error: '복구할 제외 스케줄ID는 100개 이하 배열이어야 합니다.' };
@@ -3439,7 +3470,7 @@ function reclaimDashboardScriptProperties_(props, options) {
   function preservePendingProjection(key) {
     if (/^dashboardStructureQueue_/.test(key)) return true;
     if (!/^dashboard(?:MutationLog|StructureMutation|ReturnProjectionLease)_/.test(key)) return false;
-    var match = key.match(/(\d{6}-\d{3})$/);
+    var match = key.match(/(\d{6}-\d{3,})(?:_[A-Za-z0-9]+)?$/);
     if (!match) return false;
     if (queuedTrades[match[1]]) return true;
     // A queue may arrive after the initial property snapshot.

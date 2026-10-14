@@ -56,7 +56,7 @@ function getConfirmationRequestSchema_() {
       반출시간: "HH:MM (두 자리, 예: 07:00)",
       반납일: "YYYY-MM-DD",
       반납시간: "HH:MM (두 자리, 예: 22:00)",
-      장비: "[{\"이름\": \"목록 시트의 정확한 장비명\", \"수량\": 1}]"
+      장비: "[{\"이름\": \"합의한 장비명 원문 또는 확인된 정본명\", \"수량\": 1}]"
     },
     example: {
       반출일: "2026-08-07",
@@ -67,7 +67,7 @@ function getConfirmationRequestSchema_() {
       연락처: "010-1234-5678",
       장비: [{ 이름: "소니 A7S3 바디세트", 수량: 1 }]
     },
-    notes: "필드명은 한글 정본을 사용. 영문 별칭(customerName/phone/pickupDate 등)은 Windows 러너(village-confirm-request.js)에서만 자동 매핑되며, GAS API 직접 호출 시에는 한글 필드만 허용."
+    notes: "필드명은 한글 정본을 사용. 영문 별칭(customerName/phone/pickupDate 등)은 Windows 러너(village-confirm-request.js)에서만 자동 매핑되며, GAS API 직접 호출 시에는 한글 필드만 허용. 장비명원문보존=true로 합의한 원문 수요와 수량을 보존하며 카탈로그 매칭 실패만으로 누락시키지 말 것. 직원이 승인한 예약 등록은 검증된 confirmed 경로로 수행하고, 미확정 모델·재고·단가는 별도 확인한다. 미확정 단가는 무료가 아니며 최종 견적·고객 발송을 승인하지 않는다."
   };
 }
 
@@ -714,10 +714,17 @@ function handleRequestCore_(e) {
         ));
 
       case "repairTradeProjection":
+        var repairStatusOnly = params.statusOnly === true || params.statusOnly === 'true' || postBody.statusOnly === true;
+        var repairDrainRequested = !repairStatusOnly && (params.drainPending === true || params.drainPending === 'true' || postBody.drainPending === true);
+        if (repairDrainRequested) {
+          var repairMethodError = requireVillagePost_(e, 'repairTradeProjection drain');
+          if (repairMethodError) return repairMethodError;
+        }
         return jsonResponse(repairDashboardTradeProjection_(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId,
           params.removedScheduleIds || postBody.removedScheduleIds,
-          params.statusOnly === true || params.statusOnly === 'true' || postBody.statusOnly === true
+          repairStatusOnly,
+          { drainPending: repairDrainRequested }
         ));
 
       case "getTradeDiscountState":
