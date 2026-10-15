@@ -145,7 +145,7 @@ function verifyGuideRecord_(record) {
       else { record.state = 'delivered'; record.deliveredVia = via; record.verifiedAt = Date.now(); }
     } else if (Number(msg.state) === 3 && result !== 100) {
       // 카카오 실패 이후 통신사 결과가 아직 없으면 대체문자 처리 중일 수 있다.
-      if (record.channel === 'sms' || (msg.altResult !== undefined && String(msg.altResult) !== '')) {
+      if (record.smsFallback === false || record.channel === 'sms' || (msg.altResult !== undefined && String(msg.altResult) !== '')) {
         record.state = 'failed'; record.reason = '전송 실패 ' + result + '/' + String(msg.altResult || '');
       }
     }
@@ -175,7 +175,7 @@ function sendGuideSafely_(tid, kind, cust, operationAt) {
   var replacedRequest = blockedLegacySms ? record.requestNum : '';
   if (blockedLegacySms) guideSafetyWrite_('GUIDE_REJECTED_SMS_V1_' + record.requestNum, record);
   record = { tid: tid, binding: binding, phone: phone, operationMs: operationAt.getTime(),
-    kind: kind, name: cust.name, templateCode: payload.templateCode || '', channel: payload.channel,
+    kind: kind, name: cust.name, templateCode: payload.templateCode || '', channel: payload.channel, smsFallback: false,
     state: 'unknown', requestNum: Utilities.getUuid(), createdAt: Date.now() };
   if (replacedRequest) record.replacesRejectedSmsRequest = replacedRequest;
   // 외부 호출 전에 원장에 남겨 하드킬/timeout에서도 같은 건을 다시 접수하지 않는다.

@@ -66,6 +66,13 @@ test('blocked Kakao succeeds only if the alternate SMS has a final success resul
   h.setDelivery(message(681,100));h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
   const r=JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020);assert.equal(r.state,'delivered');assert.equal(r.deliveredVia,'sms');
 });
+test('a final Kakao failure with SMS disabled is failed rather than pending forever',()=>{
+  const h=load();h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
+  h.setDelivery(message(624,''));h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
+  assert.equal(JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020).state,'failed');
+  h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
+  assert.equal(h.sends.length,1,'a final failure must not trigger blind resending');
+});
 test('wrong recipient or a password-free success cannot satisfy access delivery',()=>{
   for(const mutate of [r=>r.msgs[0].receiveNum='01087654321',r=>r.msgs[0].content='old guide without password',r=>r.templateCode='wrong-template',r=>r.msgs[0].content='test-password but wrong instructions']){
     const h=load();h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);const r=message();mutate(r);h.setDelivery(r);

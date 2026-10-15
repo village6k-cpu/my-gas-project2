@@ -170,6 +170,8 @@ authority or issuance evidence.
 ## Messaging and follow-up
 
 - Read the full current conversation before drafting or classifying a response.
+- For Village pickup/return instructions, including `무인반출 안내`, use the approved checkout/checkin Alimtalk flow. Resolve the exact booking from the live schedule, check `run → getGuideDoorAccessStatus`, then call internal `run → manageGuideAlimtalk` with `{action:"send",tradeId:"<verified trade ID>",kind:"checkout"|"checkin"}`. This uses the authoritative recipient and delivery journal. Never use `testGuideAlimtalk` for a customer booking or copy another customer's chat, temporary evidence file, or partner-shop guide as Village instructions.
+- Read back the same booking with `manageGuideAlimtalk` action `verify`. Report `pending`, `rejected`, `failed`, or `suspended` accurately; only `delivered:true` proves provider delivery. It does not prove the actual pickup person read the password. Do not bypass suspension or create an SMS fallback. Require separate live evidence before recording actual pickup-person confirmation.
 - Keep internal follow-up work distinct from customer reply work.
 - Detect duplicate delivery using recipient, conversation, content, and current
   delivery state; do not rely on one local queue row.
