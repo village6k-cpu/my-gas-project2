@@ -19601,6 +19601,7 @@ function markGuideAlimtalkSent(args) {
  * 대상: 모든 미완료·미취소 고객. 방문 횟수는 출입 안내의 제외 사유가 아니다.
  */
 function checkGuideAlimtalk() {
+  if (typeof GUIDE_DELIVERY_INCIDENT_SUSPENDED_ !== 'undefined' && GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return stopGuideDeliveryIncident();
   var guideLock = LockService.getScriptLock();
   if (!guideLock.tryLock(1000)) return { skipped: ['안내 발송 진행 중'], sent: [], errors: [] };
   try { return checkGuideAlimtalkLocked_(); }
@@ -19608,6 +19609,7 @@ function checkGuideAlimtalk() {
 }
 
 function checkGuideAlimtalkLocked_() {
+  if (typeof GUIDE_DELIVERY_INCIDENT_SUSPENDED_ !== 'undefined' && GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return {suspended:true,sent:[],errors:[]};
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var schedSheet = ss.getSheetByName('스케줄상세');
   var contractSheet = ss.getSheetByName('계약마스터');
@@ -19759,6 +19761,7 @@ function checkGuideAlimtalkLocked_() {
  * 30분마다 checkGuideAlimtalk 자동 실행
  */
 function setupGuideAlimtalkTrigger() {
+  if (typeof GUIDE_DELIVERY_INCIDENT_SUSPENDED_ !== 'undefined' && GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return stopGuideDeliveryIncident();
   // 기존 트리거 제거
   var triggers = ScriptApp.getProjectTriggers();
   triggers.forEach(function(t) {

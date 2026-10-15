@@ -1,5 +1,18 @@
 // 출입 안내 안전장치: 접수와 도착을 구분하고, 별도 트리거가 누락 및 실제 반출자 확인을 점검한다.
 // 비밀번호/본문은 발송 기록, 로그, 운영자 경보에 저장하지 않는다.
+// 2026-10-15 팝빌 국외 IP 반복 요청 사고: 검증된 국내 발송 경로를 준비하기 전까지 중단.
+var GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = true;
+function stopGuideDeliveryIncident() {
+  var removed=[];
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    var name=t.getHandlerFunction();
+    if(name==='checkGuideAlimtalk' || name==='checkGuideDeliverySafety') {
+      ScriptApp.deleteTrigger(t);removed.push(name);
+    }
+  });
+  PropertiesService.getScriptProperties().setProperty('GUIDE_DELIVERY_INCIDENT_STOPPED_AT',String(Date.now()));
+  return {suspended:true,removed:removed};
+}
 function guideSafetyKey_(prefix, tid) { return prefix + String(tid).replace(/-/g, '_'); }
 function guideSafetyRead_(key) {
   var raw = PropertiesService.getScriptProperties().getProperty(key);
@@ -28,6 +41,7 @@ function guidePickupAcknowledged_(tid, cust, checkoutAt) {
   return !!(pickup && pickup.accessConfirmed === true);
 }
 function guidePopbillRead_(path) {
+  if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) throw new Error('팝빌 출입 안내 API 긴급 중단');
   var options = { headers: { Authorization: 'Bearer ' + _getPopbillToken() }, muteHttpExceptions: true };
   var response = UrlFetchApp.fetch('https://popbill.linkhub.co.kr' + path, options);
   if (response.getResponseCode() === 401) {
@@ -41,6 +55,7 @@ function guidePopbillRead_(path) {
   return JSON.parse(response.getContentText());
 }
 function sendGuideLms_(phone, name, content, requestNum) {
+  if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) throw new Error('팝빌 문자 API 긴급 중단');
   phone = normalizeAlimtalkReceiver_(phone);
   if (Utilities.newBlob(content).getBytes().length > 2000) throw new Error('출입 안내 대체문자 길이 초과');
   var props = PropertiesService.getScriptProperties();
@@ -97,18 +112,15 @@ function verifyGuideRecord_(record) {
 // 기존 GUIDE_SENT_V2는 API 접수 기록이다. 새 버전은 자체 도착 기록만으로 중복을 막는다.
 // 이미 예전 안내를 받은 가까운 예약에는 새 조건문과 주차 안내를 1회 보완 발송한다.
 function sendGuideSafely_(tid, kind, cust, operationAt) {
+  if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return {state:'suspended',sent:false};
   var phone = normalizeAlimtalkReceiver_(cust.tel);
   var key = guideRecordKey_(tid, kind);
   var record = guideSafetyRead_(key);
   var binding = phone + '|' + cust.name + '|' + operationAt.getTime();
   if (record && record.binding === binding) {
     record = verifyGuideRecord_(record); guideSafetyWrite_(key, record);
-    // -10010039는 팝빌이 허용 IP 밖의 요청을 접수 전에 거절한 확정 응답이다.
-    // 제한 해제 후 복구할 수 있도록 이 경우만 5분 이후 새 요청을 허용한다.
-    // 접수번호가 있거나 응답이 불분명한 건은 중복 발송하지 않는다.
-    var retryIpRejection = record.state === 'rejected' && record.rejectionCode === -10010039
-      && !record.receiptNum && Date.now()-record.createdAt >= 5*60*1000;
-    if (!retryIpRejection) return { state: record.state, receiptNum: record.receiptNum || '', sent: false };
+    // 보안/IP 제한으로 거절된 요청도 운영자 확인 없이 자동 재접수하지 않는다.
+    return { state: record.state, receiptNum: record.receiptNum || '', sent: false };
   }
   var payload = getGuideAlimtalkPayload_(kind, cust.name);
   record = { tid: tid, binding: binding, phone: phone, operationMs: operationAt.getTime(),
@@ -169,6 +181,7 @@ function guideSafetyBookings_() {
   return Object.keys(bookings).map(function(tid) { bookings[tid].conflict=!!conflicts[tid]; return bookings[tid]; });
 }
 function sendGuideSafetyAlert_(issue) {
+  if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return {state:'suspended'};
   var props=PropertiesService.getScriptProperties();
   var phone=props.getProperty('GUIDE_ALERT_PHONE');
   if(!phone) throw new Error('출입 안내 긴급 경보 번호 미설정');
@@ -247,6 +260,7 @@ function inspectGuideDeliverySafety() {
   return {checkedAt:now,rows:rows,alertPhoneConfigured:!!PropertiesService.getScriptProperties().getProperty('GUIDE_ALERT_PHONE')};
 }
 function checkGuideDeliverySafety() {
+  if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return stopGuideDeliveryIncident();
   var lock=LockService.getScriptLock();
   if(!lock.tryLock(1000))return {skipped:true,reason:'출입 안내 작업 진행 중'};
   var props=PropertiesService.getScriptProperties();
@@ -327,6 +341,7 @@ function showGuideDeliverySafety() {
   SpreadsheetApp.getUi().alert('출입 안내 안전 점검',r.rows.map(function(b){return b.tid+' · '+b.checkoutAt+'\n'+(b.issues.join(' / ')||(b.outCheckRequired===false?'도입 전 반출 건 · 반납 안내 점검 대상':'전송·반출자 확인 완료'));}).join('\n\n')||'24시간 이내 미완료 예약 없음',SpreadsheetApp.getUi().ButtonSet.OK);
 }
 function setupGuideDeliverySafety(args) {
+  if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return stopGuideDeliveryIncident();
   args=args||{};
   var props=PropertiesService.getScriptProperties();
   if(args.alertPhone) props.setProperty('GUIDE_ALERT_PHONE',normalizeAlimtalkReceiver_(args.alertPhone));

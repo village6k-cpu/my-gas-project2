@@ -18,6 +18,8 @@ function load(){
   };
   const code=fs.existsSync('guideDeliverySafety.js')?fs.readFileSync('guideDeliverySafety.js','utf8'):'';
   vm.runInNewContext(code,ctx);
+  // 발송 로직 단위 테스트만 격리해서 검사한다. 운영 코드의 긴급 중단 기본값은 별도 검증한다.
+  ctx.GUIDE_DELIVERY_INCIDENT_SUSPENDED_=false;
   ctx.sendGuideSafetyAlert_=issue=>alerts.push(issue);
   return {ctx,props,sends,alerts,setReply:r=>reply=r,setDelivery:r=>delivery=r};
 }
@@ -71,7 +73,7 @@ test('uncertain network failure retains the request identifier and is never blin
   h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);assert.equal(h.sends.length,1);
   const r=JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020);assert.equal(r.state,'unknown');assert(r.requestNum);
 });
-test('a definitive IP rejection can recover after its cooldown without retrying ambiguous or other failures',()=>{
+test('IP/security rejections never automatically retry even after the former cooldown',()=>{
   const h=load();let sequence=0;h.ctx.Utilities.getUuid=()=> 'request-'+(++sequence);
   h.setReply({code:-10010039});h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
   let rejected=JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020);
@@ -81,7 +83,7 @@ test('a definitive IP rejection can recover after its cooldown without retrying 
   rejected.createdAt=Date.now()-5*60*1000-1;h.props.GUIDE_DELIVERY_V3_out_261014_020=JSON.stringify(rejected);
   h.setReply({receiptNum:'026101499999900003'});h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
   const recovered=JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020);
-  assert.equal(h.sends.length,2);assert.equal(recovered.state,'pending');assert.notEqual(recovered.requestNum,firstRequest);
+  assert.equal(h.sends.length,1);assert.equal(recovered.state,'rejected');assert.equal(recovered.requestNum,firstRequest);
   for(const state of ['unknown','pending','failed','rejected']){
     const other=load();other.props.GUIDE_DELIVERY_V3_out_261014_020=JSON.stringify({binding:cust.tel+'|'+cust.name+'|'+due.getTime(),state,rejectionCode:-1,createdAt:Date.now()-3600000,requestNum:'prior'});
     other.ctx.sendGuideSafely_('261014-020','checkout',cust,due);assert.equal(other.sends.length,0);
