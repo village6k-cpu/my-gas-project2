@@ -44,6 +44,23 @@ test('unapproved or unavailable templates never fall back to a direct SMS or cre
   assert.equal(h.sends.length,0);assert.equal(sms,0);
   assert.equal(h.props.GUIDE_DELIVERY_V3_out_261014_020,undefined);
 });
+test('only an unaccepted foreign-IP SMS rejection can transition once into approved Alimtalk',()=>{
+  for(const state of ['rejected','unknown','pending','delivered']){
+    const h=load(),key='GUIDE_DELIVERY_V3_out_261014_020';
+    const old={tid:'261014-020',kind:'checkout',name:cust.name,phone:cust.tel,operationMs:due.getTime(),
+      binding:cust.tel+'|'+cust.name+'|'+due.getTime(),channel:'sms',state,rejectionCode:-10010039,requestNum:'old-sms-request',createdAt:Date.now()-3600000};
+    h.props[key]=JSON.stringify(old);
+    h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
+    assert.equal(h.sends.length,state==='rejected'?1:0,state);
+    if(state==='rejected'){
+      assert.equal(JSON.parse(h.props['GUIDE_REJECTED_SMS_V1_old-sms-request']).state,'rejected');
+      assert.equal(JSON.parse(h.props[key]).channel,'alimtalk');
+      assert.equal(JSON.parse(h.props[key]).replacesRejectedSmsRequest,'old-sms-request');
+      h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
+      assert.equal(h.sends.length,1,'the new Alimtalk request must never be repeated');
+    }
+  }
+});
 test('blocked Kakao succeeds only if the alternate SMS has a final success result',()=>{
   const h=load();h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
   h.setDelivery(message(681,100));h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);

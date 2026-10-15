@@ -161,16 +161,23 @@ function sendGuideSafely_(tid, kind, cust, operationAt) {
   var key = guideRecordKey_(tid, kind);
   var record = guideSafetyRead_(key);
   var binding = phone + '|' + cust.name + '|' + operationAt.getTime();
-  if (record && record.binding === binding) {
+  // 사고 때 SMS가 접수조차 되지 않은 예약은 안전한 알림톡으로 한 번 전환한다.
+  // 동일 알림톡 거절/응답 불명/접수번호 있는 건은 자동 재시도하지 않는다.
+  var blockedLegacySms = record && record.binding === binding && record.channel === 'sms'
+    && record.state === 'rejected' && Number(record.rejectionCode) === -10010039 && !record.receiptNum;
+  if (record && record.binding === binding && !blockedLegacySms) {
     record = verifyGuideRecord_(record); guideSafetyWrite_(key, record);
     // 보안/IP 제한으로 거절된 요청도 운영자 확인 없이 자동 재접수하지 않는다.
     return { state: record.state, receiptNum: record.receiptNum || '', sent: false };
   }
   var payload = getGuideAlimtalkPayload_(kind, cust.name);
   if (payload.channel !== 'alimtalk') return {state:'approval_pending',sent:false};
+  var replacedRequest = blockedLegacySms ? record.requestNum : '';
+  if (blockedLegacySms) guideSafetyWrite_('GUIDE_REJECTED_SMS_V1_' + record.requestNum, record);
   record = { tid: tid, binding: binding, phone: phone, operationMs: operationAt.getTime(),
     kind: kind, name: cust.name, templateCode: payload.templateCode || '', channel: payload.channel,
     state: 'unknown', requestNum: Utilities.getUuid(), createdAt: Date.now() };
+  if (replacedRequest) record.replacesRejectedSmsRequest = replacedRequest;
   // 외부 호출 전에 원장에 남겨 하드킬/timeout에서도 같은 건을 다시 접수하지 않는다.
   guideSafetyWrite_(key, record);
   try {
