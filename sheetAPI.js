@@ -629,6 +629,11 @@ function handleRequestCore_(e) {
         // 고객용 견적서 PDF — 같은 토큰을 재검증하고 Google Sheets 계약서 원본은 반환하지 않음 (myPage.js)
         return jsonResponse(getMyReservationEstimatePdf(params.token || postBody.token || ""));
 
+      case "cardPaymentCandidates":
+        return jsonResponse(getCardPaymentCandidates_(
+          params.amount || postBody.amount, params.tid || postBody.tid
+        ));
+
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(
           params.q || params.query || postBody.q || postBody.query || "",
