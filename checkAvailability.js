@@ -2643,6 +2643,10 @@ function dashboardTradeMutationLeaseError_(props, tid, ownKind, ownToken) {
   if (priceLease && !(ownKind === 'registeredTradePrice' && String(priceLease.token || '') === String(ownToken || ''))) {
     return { error: '같은 거래의 단가와 계약서를 정정 중입니다.', code: 'BUSY', retryable: true };
   }
+  var roundsLease = activeDashboardMutationLease_(props, 'registeredTradeRoundsMutation_' + tid);
+  if (roundsLease && !(ownKind === 'registeredTradeRounds' && String(roundsLease.token || '') === String(ownToken || ''))) {
+    return { error: '같은 거래의 회차와 계약서를 정정 중입니다.', code: 'BUSY', retryable: true };
+  }
   var itemLease = activeDashboardMutationLease_(props, 'checkoutItemMutation_' + tid);
   if (itemLease && !(ownKind === 'checkoutItem' && String(itemLease.token || '') === String(ownToken || ''))) {
     return { error: '같은 거래의 품목 반출 체크를 저장 중입니다.', code: 'BUSY', retryable: true };
@@ -20815,7 +20819,7 @@ function parseWithClaude(text, imageBase64, imageMediaType) {
 }
 function normalizeRegisteredTradeCorrection_(args) {
   args = args || {};
-  var allowed = { tradeId: true, operationId: true, sourceRequestId: true, expectedPeriod: true, dateChange: true, remove: true, add: true, staffApproval: true, priceChanges: true };
+  var allowed = { tradeId: true, operationId: true, sourceRequestId: true, expectedPeriod: true, dateChange: true, remove: true, add: true, staffApproval: true, priceChanges: true, roundsChange: true };
   Object.keys(args).forEach(function(key) {
     if (!allowed[key]) throw new Error('지원하지 않거나 금지된 등록거래 보정 필드: ' + key);
   });
@@ -20969,7 +20973,19 @@ function normalizeRegisteredTradeCorrection_(args) {
   });
   if (add.length > 100) throw new Error('add는 최대 100개입니다');
   var priceChanges = normalizeRegisteredTradePriceChanges_(args.priceChanges, tradeId);
-  if (!dateChange && !remove.length && !add.length && !priceChanges.length) throw new Error('날짜·제거·추가·단가 중 하나 이상이 필요합니다');
+  var roundsChange = null;
+  if (args.roundsChange !== undefined) {
+    if (!args.roundsChange || typeof args.roundsChange !== 'object' || Array.isArray(args.roundsChange) ||
+        Object.keys(args.roundsChange).some(function(key) { return key !== 'expectedRounds' && key !== 'rounds'; }) ||
+        Object.keys(args.roundsChange).length !== 2 ||
+        !Number.isSafeInteger(args.roundsChange.expectedRounds) || args.roundsChange.expectedRounds < 1 || args.roundsChange.expectedRounds > 99 ||
+        !Number.isSafeInteger(args.roundsChange.rounds) || args.roundsChange.rounds < 1 || args.roundsChange.rounds > 99) {
+      throw new Error('roundsChange expectedRounds/rounds는 각각 1~99 정수여야 합니다');
+    }
+    if (args.roundsChange.expectedRounds === args.roundsChange.rounds) throw new Error('roundsChange는 실제 회차 변경이어야 합니다');
+    roundsChange = { expectedRounds: args.roundsChange.expectedRounds, rounds: args.roundsChange.rounds };
+  }
+  if (!dateChange && !remove.length && !add.length && !priceChanges.length && !roundsChange) throw new Error('날짜·제거·추가·단가·회차 중 하나 이상이 필요합니다');
   if (sourceRequestId && !remove.length && !add.length) {
     throw new Error('sourceRequestId는 장비 추가·삭제·교체 변경에만 사용할 수 있습니다');
   }
@@ -21000,6 +21016,9 @@ function normalizeRegisteredTradeCorrection_(args) {
   if (priceChanges.length && (!staffApproval || !expectedPeriod || dateChange || remove.length || add.length || sourceRequestId)) {
     throw new Error('priceChanges requires staffApproval and expectedPeriod, and must be price-only');
   }
+  if (roundsChange && (expectedPeriod || dateChange || remove.length || add.length || staffApproval || priceChanges.length || sourceRequestId)) {
+    throw new Error('roundsChange는 다른 변경·승인·기간과 혼합할 수 없는 rounds-only 요청이어야 합니다');
+  }
   var hasCustomSetAdd = add.some(function(entry) { return Array.isArray(entry.selectedComponents); });
   if (hasCustomSetAdd && (!staffApproval || !expectedPeriod)) {
     throw new Error('맞춤 세트 구성·단가는 정확한 직원 승인과 기존 기간 기준선이 필요합니다');
@@ -21015,6 +21034,7 @@ function normalizeRegisteredTradeCorrection_(args) {
     add: add
   };
   if (priceChanges.length) normalized.priceChanges = priceChanges;
+  if (roundsChange) normalized.roundsChange = roundsChange;
   return normalized;
 }
 
@@ -21880,6 +21900,173 @@ function correctRegisteredTradePrices_(correction) {
   }
 }
 
+function readRegisteredTradeRoundsSnapshot_(tradeId) {
+  var snapshot = readRegisteredTradePriceSnapshot_(tradeId);
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
+  var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues();
+  var matches = [];
+  ids.forEach(function(row, index) {
+    if (String(row[0] || '').trim() === tradeId) matches.push(index + 2);
+  });
+  if (matches.length !== 1) throw new Error('rounds correction contract identity is not unique');
+  snapshot.contractRow = matches[0];
+  return snapshot;
+}
+
+function readRegisteredTradeRoundsContractAmount_(regeneration) {
+  if (!regeneration || regeneration.success !== true || !regeneration.fileId || !regeneration.url ||
+      !regeneration.linkUpdate || regeneration.linkUpdate.success !== true) {
+    throw new Error('rounds correction contract regeneration unverified');
+  }
+  var ws = SpreadsheetApp.openById(regeneration.fileId).getSheets()[0];
+  invalidateContractSheetScan_();
+  var refs = findContractPaymentRefs_(ws, findTemplateRows(ws));
+  var amount = readContractAmount_(ws, refs.finalAmountCell);
+  if (!Number.isSafeInteger(amount) || amount < 0) throw new Error('rounds correction generated contract amount invalid');
+  return amount;
+}
+
+function registeredTradeRoundsResult_(correction, receipt, snapshot, replayed) {
+  if (registeredTradePriceSnapshotDigest_(snapshot) !== receipt.afterDigest) {
+    throw new Error('rounds correction final schedule/contract readback mismatch');
+  }
+  var state = readRegisteredTradeCorrectionState_(correction.tradeId);
+  var expectedContract = Object.assign({}, receipt.beforeState.contract, { rounds: correction.roundsChange.rounds });
+  if (JSON.stringify(state.contract) !== JSON.stringify(expectedContract) ||
+      JSON.stringify(state.schedule) !== JSON.stringify(receipt.beforeState.schedule)) {
+    throw new Error('rounds correction unrelated state changed');
+  }
+  var contractAmount = readRegisteredTradeRoundsContractAmount_(receipt.regeneration);
+  var ledger = readRegisteredTradePriceLedger_(correction.tradeId);
+  if (ledger.contractUrl !== receipt.regeneration.url || ledger.amount !== contractAmount ||
+      receipt.regeneration.finalAmount !== contractAmount ||
+      (receipt.contractAmount !== undefined && receipt.contractAmount !== contractAmount)) {
+    throw new Error('rounds correction generated contract/ledger amount mismatch');
+  }
+  if (!state.ledger || state.ledger.contractLink !== ledger.contractUrl || state.ledger.amount !== ledger.amount) {
+    throw new Error('rounds correction authoritative ledger readback mismatch');
+  }
+  var proof = {
+    expectedRounds: correction.roundsChange.expectedRounds,
+    rounds: correction.roundsChange.rounds,
+    contractAmount: contractAmount,
+    ledgerAmount: ledger.amount,
+    contractUrl: ledger.contractUrl,
+    beforeDigest: receipt.beforeDigest,
+    afterDigest: receipt.afterDigest
+  };
+  return {
+    success: true,
+    status: 'CORRECTED',
+    tradeId: correction.tradeId,
+    operationId: correction.operationId,
+    replayed: !!replayed,
+    stages: ['contractChangeRounds', 'regenerateContract'],
+    contractRegeneration: receipt.regeneration,
+    readback: state,
+    authoritativeReadback: { before: receipt.beforeState, after: state, roundsChange: proof },
+    roundsReadback: proof,
+    customerNotificationSent: false
+  };
+}
+
+// A rounds operation owns one permanent receipt. Once claimed, neither its exact
+// I-cell write nor its strict regeneration is ever replayed after an interruption.
+function correctRegisteredTradeRounds_(correction) {
+  var props = PropertiesService.getScriptProperties(), lock = LockService.getScriptLock();
+  var key = 'registeredTradeRoundsReceipt_v1_' + correction.operationId;
+  var leaseKey = 'registeredTradeRoundsMutation_' + correction.tradeId;
+  var digest = registeredTradePriceDigest_(correction), held = false, claimed = false, ownsLease = false, receipt = null, stages = [];
+  try {
+    if (!lock.tryLock(1500)) return { success: false, code: 'BUSY', noMutationPerformed: true, customerNotificationSent: false };
+    held = true;
+    var block = dashboardTradeMutationLeaseError_(props, correction.tradeId, 'registeredTradeRounds', correction.operationId);
+    if (block) throw new Error(block.error || 'rounds correction busy');
+    var previous = props.getProperty(key);
+    if (previous) {
+      receipt = JSON.parse(previous);
+      if (receipt.version !== 1 || receipt.requestDigest !== digest || receipt.tradeId !== correction.tradeId) {
+        throw new Error('rounds correction operationId receipt conflict');
+      }
+      claimed = true;
+      stages = receipt.stages || [];
+      if (receipt.phase !== 'completed') throw new Error('rounds correction operation is incomplete; do not replay write or regeneration');
+      return registeredTradeRoundsResult_(correction, receipt, readRegisteredTradeRoundsSnapshot_(correction.tradeId), true);
+    }
+    var beforeState = readRegisteredTradeCorrectionState_(correction.tradeId, false);
+    if (beforeState.contract.rounds !== correction.roundsChange.expectedRounds) {
+      throw new Error('rounds correction expectedRounds CAS mismatch');
+    }
+    var snapshot = readRegisteredTradeRoundsSnapshot_(correction.tradeId);
+    if (snapshot.contract[8] !== correction.roundsChange.expectedRounds) {
+      throw new Error('rounds correction 계약마스터 I열 CAS mismatch');
+    }
+    readRegisteredTradePriceLedger_(correction.tradeId);
+    var expected = JSON.parse(JSON.stringify(snapshot));
+    expected.contract[8] = correction.roundsChange.rounds;
+    receipt = {
+      version: 1,
+      tradeId: correction.tradeId,
+      requestDigest: digest,
+      phase: 'claimed',
+      beforeState: beforeState,
+      beforeDigest: registeredTradePriceSnapshotDigest_(snapshot),
+      afterDigest: registeredTradePriceSnapshotDigest_(expected),
+      stages: []
+    };
+    props.setProperty(key, JSON.stringify(receipt)); claimed = true;
+    props.setProperty(leaseKey, JSON.stringify({ token: correction.operationId, at: Date.now() })); ownsLease = true;
+    if (registeredTradePriceSnapshotDigest_(readRegisteredTradeRoundsSnapshot_(correction.tradeId)) !== receipt.beforeDigest) {
+      throw new Error('rounds correction baseline drifted before write');
+    }
+    SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터')
+      .getRange(snapshot.contractRow, 9).setValue(correction.roundsChange.rounds);
+    SpreadsheetApp.flush();
+    if (registeredTradePriceSnapshotDigest_(readRegisteredTradeRoundsSnapshot_(correction.tradeId)) !== receipt.afterDigest) {
+      throw new Error('rounds correction immediate I열 readback mismatch');
+    }
+    stages.push('contractChangeRounds'); receipt.stages = stages.slice(); receipt.phase = 'regenerating';
+    props.setProperty(key, JSON.stringify(receipt));
+    lock.releaseLock(); held = false;
+    var regeneration = regenerateContractById(correction.tradeId, undefined, { strictLedgerLink: true });
+    if (!regeneration || regeneration.success !== true) throw new Error('rounds correction regeneration failed');
+    stages.push('regenerateContract');
+    if (!lock.tryLock(1500)) throw new Error('rounds correction final readback lock unavailable');
+    held = true;
+    receipt.regeneration = {
+      success: true,
+      fileId: regeneration.fileId,
+      url: regeneration.url,
+      finalAmount: regeneration.finalAmount,
+      linkUpdate: regeneration.linkUpdate
+    };
+    SpreadsheetApp.flush();
+    var result = registeredTradeRoundsResult_(correction, receipt, readRegisteredTradeRoundsSnapshot_(correction.tradeId), false);
+    receipt.phase = 'completed'; receipt.stages = stages.slice(); receipt.contractAmount = result.roundsReadback.contractAmount;
+    props.setProperty(key, JSON.stringify(receipt));
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      status: claimed ? 'PARTIAL_STATE' : 'ERROR',
+      code: claimed ? 'PARTIAL_STATE' : 'REGISTERED_CORRECTION_PREFLIGHT_REJECTED',
+      outcomeUnknown: claimed,
+      noMutationPerformed: !claimed,
+      tradeId: correction.tradeId,
+      operationId: correction.operationId,
+      appliedStages: stages,
+      error: error.message || String(error),
+      customerNotificationSent: false
+    };
+  } finally {
+    if (!held && ownsLease) held = lock.tryLock(1500);
+    if (held) {
+      if (ownsLease) clearDashboardMutationLease_(props, leaseKey, correction.operationId);
+      lock.releaseLock();
+    }
+  }
+}
+
 /** 내부 운영용: 정확히 지정된 0원 상품만 정본 단가로 복구한다. 임의 단가는 받지 않는다. */
 function repairRegisteredTradeCatalogPrices(args) {
   args = args || {};
@@ -21906,6 +22093,7 @@ function repairRegisteredTradeCatalogPrices(args) {
 function correctRegisteredTrade(args) {
   var correction = normalizeRegisteredTradeCorrection_(args);
   if (correction.priceChanges) return correctRegisteredTradePrices_(correction);
+  if (correction.roundsChange) return correctRegisteredTradeRounds_(correction);
   var historicalAuthority = null;
   var historicalCandidate = correction.add.length > 0 && !correction.dateChange;
   // Supabase HTTP는 ScriptLock 밖에서만 수행한다. 이 조회는 반출 순간에 고정된 taken_qty와

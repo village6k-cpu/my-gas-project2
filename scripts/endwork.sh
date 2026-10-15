@@ -5,6 +5,7 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
 BRANCH="$(git branch --show-current)"
 DEPLOY_ID="AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT"
@@ -41,8 +42,12 @@ if [[ -z "$(git status --porcelain)" ]]; then
 fi
 
 # 3. HEAD 기준 GAS가 바뀌었는지 확인. 바뀌었으면 push 중단.
-TMP_GAS="$(mktemp -d /tmp/gas-endwork-remote.XXXXXX)"
-TMP_HEAD="$(mktemp -d /tmp/gas-endwork-head.XXXXXX)"
+# Native Windows git cannot read MSYS /tmp paths reliably in this runtime.
+# Keep snapshots under .git and pass repo-relative paths to git diff.
+TMP_GAS="$(mktemp -d "$ROOT/.git/gas-endwork-remote.XXXXXX")"
+TMP_HEAD="$(mktemp -d "$ROOT/.git/gas-endwork-head.XXXXXX")"
+TMP_GAS_REL="${TMP_GAS#$ROOT/}"
+TMP_HEAD_REL="${TMP_HEAD#$ROOT/}"
 cleanup() { rm -rf "$TMP_GAS" "$TMP_HEAD"; }
 trap cleanup EXIT
 
@@ -66,7 +71,7 @@ while IFS= read -r f; do
   # clasp pull and Git checkouts may use different CRLF/LF conventions on
   # Windows.  Preserve the remote-change guard, but compare the actual text
   # rather than treating a line-ending-only conversion as remote source drift.
-  if [[ ! -f "$TMP_HEAD/$f" ]] || ! git diff --no-index --quiet --ignore-cr-at-eol -- "$TMP_GAS/$f" "$TMP_HEAD/$f"; then
+  if [[ ! -f "$TMP_HEAD/$f" ]] || ! git diff --no-index --quiet --ignore-cr-at-eol -- "$TMP_GAS_REL/$f" "$TMP_HEAD_REL/$f"; then
     echo "  ⚠️  HEAD 이후 GAS에서 바뀐 파일: $f"
     REMOTE_CHANGED=1
   fi

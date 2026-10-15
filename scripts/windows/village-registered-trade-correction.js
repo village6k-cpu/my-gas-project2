@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 
 const ALLOWED_INPUT_FIELDS = new Set([
-  'cancel', 'tradeId', 'operationId', 'sourceRequestId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate', 'staffApproval', 'priceChanges'
+  'cancel', 'tradeId', 'operationId', 'sourceRequestId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate', 'staffApproval', 'priceChanges', 'roundsChange'
 ]);
 const ALLOWED_DATE_FIELDS = new Set([
   'newStartDate', 'newEndDate', 'startTime', 'endTime', 'allowConflicts'
@@ -174,6 +174,21 @@ function normalizePriceChanges(value, tradeId) {
   });
 }
 
+function normalizeRoundsChange(value) {
+  if (value === undefined) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).length !== 2
+      || Object.keys(value).some(field => field !== 'expectedRounds' && field !== 'rounds')) {
+    throw new Error('roundsChange must contain only expectedRounds and rounds');
+  }
+  if (!Number.isSafeInteger(value.expectedRounds) || value.expectedRounds < 1 || value.expectedRounds > 99
+      || !Number.isSafeInteger(value.rounds) || value.rounds < 1 || value.rounds > 99) {
+    throw new Error('roundsChange expectedRounds and rounds must be integers from 1 to 99');
+  }
+  if (value.expectedRounds === value.rounds) throw new Error('roundsChange must change the rounds value');
+  return { expectedRounds: value.expectedRounds, rounds: value.rounds };
+}
+
 function normalizeCorrectionInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('correction input must be a JSON object');
@@ -303,7 +318,8 @@ function normalizeCorrectionInput(input) {
     remove,
     add,
     sendEstimate: booleanValue(input.sendEstimate, 'sendEstimate', false),
-    staffApproval: normalizeStaffApproval(input.staffApproval)
+    staffApproval: normalizeStaffApproval(input.staffApproval),
+    roundsChange: normalizeRoundsChange(input.roundsChange)
   };
   if (normalized.cancel && (!normalized.staffApproval || !normalized.expectedPeriod || !remove.length || add.length || normalized.dateChange || normalized.sourceRequestId || normalized.sendEstimate || input.priceChanges)) {
     throw new Error('cancellation requires exact current rows, period and staff approval without other changes or sends');
@@ -312,6 +328,11 @@ function normalizeCorrectionInput(input) {
   if (priceChanges.length) {
     if (!normalized.staffApproval || !normalized.expectedPeriod || normalized.dateChange || remove.length || add.length || normalized.sourceRequestId || normalized.sendEstimate) throw new Error('priceChanges requires staffApproval and expectedPeriod, and must be price-only without send');
     normalized.priceChanges = priceChanges;
+  }
+  if (normalized.roundsChange && (normalized.cancel || normalized.expectedPeriod || normalized.dateChange
+      || remove.length || add.length || normalized.staffApproval || normalized.sourceRequestId
+      || normalized.sendEstimate || priceChanges.length)) {
+    throw new Error('roundsChange must be a rounds-only correction without send or other changes');
   }
   if (normalized.staffApproval) {
     if (!normalized.expectedPeriod) throw new Error('staffApproval requires expectedPeriod');
@@ -323,7 +344,7 @@ function normalizeCorrectionInput(input) {
   if (hasCustomSetAdd && (!normalized.staffApproval || !normalized.expectedPeriod || normalized.sendEstimate)) {
     throw new Error('custom set additions require staffApproval and expectedPeriod without customer send');
   }
-  if (!normalized.dateChange && remove.length === 0 && add.length === 0 && !normalized.sendEstimate && !priceChanges.length) {
+  if (!normalized.dateChange && remove.length === 0 && add.length === 0 && !normalized.sendEstimate && !priceChanges.length && !normalized.roundsChange) {
     throw new Error('At least one correction or send must be requested');
   }
   if (normalized.sourceRequestId && remove.length === 0 && add.length === 0) {
@@ -461,6 +482,29 @@ function verifyPriceCorrectionReadback(normalized, payload) {
   return true;
 }
 
+function verifyRoundsCorrectionReadback(normalized, payload) {
+  if (!normalized.roundsChange) return true;
+  const proof = payload.roundsReadback;
+  const before = payload.authoritativeReadback?.before;
+  const after = payload.authoritativeReadback?.after;
+  const regeneration = payload.contractRegeneration;
+  if (!proof || JSON.stringify(proof) !== JSON.stringify(payload.authoritativeReadback?.roundsChange)
+      || !before?.contract || !after?.contract || !before?.schedule || !after?.schedule
+      || before.contract.rounds !== normalized.roundsChange.expectedRounds
+      || after.contract.rounds !== normalized.roundsChange.rounds
+      || JSON.stringify({...before.contract, rounds: normalized.roundsChange.rounds}) !== JSON.stringify(after.contract)
+      || JSON.stringify(before.schedule) !== JSON.stringify(after.schedule)
+      || proof.expectedRounds !== normalized.roundsChange.expectedRounds || proof.rounds !== normalized.roundsChange.rounds
+      || !Number.isSafeInteger(proof.contractAmount) || proof.contractAmount < 0
+      || proof.contractAmount !== proof.ledgerAmount || proof.ledgerAmount !== after.ledger?.amount
+      || proof.contractAmount !== regeneration?.finalAmount
+      || proof.contractUrl !== regeneration?.url || proof.contractUrl !== after.ledger?.contractLink
+      || !regeneration?.linkUpdate || regeneration.linkUpdate.success !== true
+      || !/^[a-f0-9]{64}$/.test(proof.beforeDigest || '') || !/^[a-f0-9]{64}$/.test(proof.afterDigest || '')
+      || JSON.stringify(payload.stages) !== JSON.stringify(['contractChangeRounds', 'regenerateContract'])) return false;
+  return true;
+}
+
 function verifyCustomSetAddReadback(normalized, payload) {
   const customAdds = normalized.add.filter(entry => Array.isArray(entry.selectedComponents));
   if (!customAdds.length) return true;
@@ -513,7 +557,7 @@ async function runRegisteredTradeCorrection({
     }
     return {ok:true,verified:true,tradeId:normalized.tradeId,appliedStages,readback:payload.readback,authoritativeReadback:payload.authoritativeReadback,contractRegeneration:null,send:{attempted:false,accepted:false},requestFinalization:null};
   }
-  const hasCorrection = !!normalized.dateChange || normalized.remove.length > 0 || normalized.add.length > 0 || !!normalized.priceChanges;
+  const hasCorrection = !!normalized.dateChange || normalized.remove.length > 0 || normalized.add.length > 0 || !!normalized.priceChanges || !!normalized.roundsChange;
   let correctionPayload = null;
   if (hasCorrection) {
     const args = {
@@ -525,7 +569,8 @@ async function runRegisteredTradeCorrection({
       ...(normalized.dateChange ? { dateChange: normalized.dateChange } : {}),
       ...(normalized.remove.length ? { remove: normalized.remove } : {}),
       ...(normalized.add.length ? { add: normalized.add } : {}),
-      ...(normalized.priceChanges ? { priceChanges: normalized.priceChanges } : {})
+      ...(normalized.priceChanges ? { priceChanges: normalized.priceChanges } : {}),
+      ...(normalized.roundsChange ? { roundsChange: normalized.roundsChange } : {})
     };
     correctionPayload = await postAction({
       config,
@@ -582,6 +627,7 @@ async function runRegisteredTradeCorrection({
       || !validRegeneration
       || !validRequestFinalization
       || !verifyPriceCorrectionReadback(normalized, correctionPayload)
+      || !verifyRoundsCorrectionReadback(normalized, correctionPayload)
       || !verifyCustomSetAddReadback(normalized, correctionPayload)
       || correctionPayload.customerNotificationSent !== false
     ) {
@@ -635,14 +681,16 @@ async function runRegisteredTradeCorrection({
           success: correctionPayload.contractRegeneration.success === true,
           ...(pricingPending ? {deferred: true, reason: 'pricing_pending', pendingScheduleIds: correctionPayload.contractRegeneration.pendingScheduleIds} : {}),
           url: String(correctionPayload.contractRegeneration.url || correctionPayload.contractRegeneration.contractUrl || ''),
-          fileId: String(correctionPayload.contractRegeneration.fileId || '')
+          fileId: String(correctionPayload.contractRegeneration.fileId || ''),
+          ...(Number.isSafeInteger(correctionPayload.contractRegeneration.finalAmount) ? {finalAmount: correctionPayload.contractRegeneration.finalAmount} : {})
         }
       : null,
     send,
     readback: correctionPayload?.readback || null,
     authoritativeReadback: correctionPayload?.authoritativeReadback || null,
     requestFinalization: correctionPayload?.requestFinalization || null,
-    ...(normalized.priceChanges ? { priceReadback: correctionPayload.priceReadback } : {})
+    ...(normalized.priceChanges ? { priceReadback: correctionPayload.priceReadback } : {}),
+    ...(normalized.roundsChange ? { roundsReadback: correctionPayload.roundsReadback } : {})
   };
 }
 
