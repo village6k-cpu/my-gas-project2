@@ -7942,8 +7942,12 @@ function updateTradePaymentMethod(tid, method) {
   invalidateDashboardTradeExtraCache_([tid]);
   touchDashboardSearchCacheVersion_();
   invalidateDashboardCache();
+  // API setValue는 onEdit을 발생시키지 않는다. 토스 예약목록/직원 화면에도 반영한다.
+  if (wroteSheet) supaMarkTradeDirty_(tid);
+  var paymentComplete = wroteSheet && (method !== '카드결제' || !!(sideEffects && sideEffects.applied));
+  if (wroteSheet && !paymentComplete) warning = (sideEffects && sideEffects.warning) || '카드결제 입금완료 반영 실패';
   return {
-    success: wroteSheet,
+    success: paymentComplete,
     tid: tid,
     method: method,
     wroteSheet: wroteSheet,
