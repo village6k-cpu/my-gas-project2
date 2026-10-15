@@ -27,6 +27,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { gasPost } from "@/lib/server/gasPublic";
 
 export const runtime = "nodejs";
+export const maxDuration = 90;
 
 // ── 환경변수 ──────────────────────────────────────────────────────
 const LOOKUP_TOKEN = process.env.LOOKUP_TOKEN;
@@ -84,7 +85,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // 2) 바디 파싱
   let body: ConfirmBody = {};
   try {
-    body = await req.json();
+    const parsed: unknown = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return lookupJson({ error: "요청 바디는 JSON 객체여야 합니다." }, { status: 400 });
+    }
+    body = parsed as ConfirmBody;
   } catch {
     return lookupJson({ error: "요청 바디가 JSON이 아닙니다." }, { status: 400 });
   }
@@ -99,7 +104,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // ⚠️ GAS updateTradePaymentMethod는 method === '카드결제'일 때만
   //    applyTradePaymentSideEffects_로 M열 입금상태='입금완료'를 찍는다.
   //    다른 값/빈 값이면 결제수단만 바뀌고 입금완료 처리가 안 됨.
-  const method = (body.method && body.method.trim()) || "카드결제";
+  if (body.method != null && body.method !== "카드결제") {
+    return lookupJson({ error: "카드 승인에는 카드결제 수단만 사용할 수 있습니다." }, { status: 400 });
+  }
+  const method = "카드결제";
 
   // 3) GAS updatePayment 호출 → 시트 결제수단='카드결제' → 부수효과로 입금완료
   //    실제 계약: action=updatePayment, params { tid, method }
@@ -111,6 +119,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     };
 
     const result = await gasPost(gasPayload);
+    const ack = result as { success?: boolean; wroteSheet?: boolean; error?: string; warning?: string } | null;
+    if (!ack || ack.error || ack.success !== true || ack.wroteSheet !== true) {
+      throw new Error(ack?.error || ack?.warning || "장부 반영 완료를 확인하지 못했습니다.");
+    }
 
     return lookupJson({
       ok: true,
