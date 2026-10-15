@@ -1655,6 +1655,7 @@ function runFunction(funcName, params) {
     "testGuideAlimtalk",
     "configureGuideDoorAccess",
     "getGuideDoorAccessStatus",
+    "manageGuideAlimtalk",
     "inspectGuideDeliverySafety",
     "checkGuideDeliverySafety",
     "setupGuideDeliverySafety",
@@ -1811,6 +1812,9 @@ function runFunction(funcName, params) {
       var doorArgs = typeof params.args === "string" ? JSON.parse(params.args) : (params.args || {});
       var doorResult = funcName === "configureGuideDoorAccess" ? configureGuideDoorAccess(doorArgs) : getGuideDoorAccessStatus();
       return { success: !doorResult.error, function: funcName, result: doorResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "manageGuideAlimtalk") {
+      return manageGuideAlimtalk(typeof params.args === "string" ? JSON.parse(params.args) : (params.args || {}));
     }
     if (funcName === "inspectGuideDeliverySafety") return inspectGuideDeliverySafety();
     if (funcName === "checkGuideDeliverySafety") return checkGuideDeliverySafety();

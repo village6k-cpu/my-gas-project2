@@ -1,8 +1,14 @@
 // 출입 안내 안전장치: 접수와 도착을 구분하고, 실제 반출자 수신 확인은 별도로 기록한다.
 // 비밀번호/본문은 발송 기록, 로그, 운영자 경보에 저장하지 않는다.
-// 2026-10-15 팝빌 국외 IP 반복 요청 사고: 검증된 국내 발송 경로를 준비하기 전까지 중단.
+// 문자 API는 영구 차단한 채, 승인 원문을 검증한 알림톡만 운영자가 재개한다.
 var GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = true;
+try {
+  GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = PropertiesService.getScriptProperties()
+    .getProperty('GUIDE_ALIMTALK_SUSPENDED') !== 'false';
+} catch (guideStateError) { /* 상태 조회 실패 시 중단을 유지한다. */ }
 function stopGuideDeliveryIncident() {
+  GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = true;
+  PropertiesService.getScriptProperties().setProperty('GUIDE_ALIMTALK_SUSPENDED','true');
   var removed=[];
   ScriptApp.getProjectTriggers().forEach(function(t) {
     var name=t.getHandlerFunction();
@@ -13,6 +19,53 @@ function stopGuideDeliveryIncident() {
   PropertiesService.getScriptProperties().setProperty('GUIDE_DELIVERY_INCIDENT_STOPPED_AT',String(Date.now()));
   return {suspended:true,removed:removed};
 }
+
+/** 내부 인증 전용. 재개/거래별 발송/도착 조회 모두 같은 안전 원장을 사용한다. */
+function manageGuideAlimtalk(args) {
+  args=args||{};
+  var action=String(args.action||'status');
+  if(action==='stop') return stopGuideDeliveryIncident();
+  if(action==='resume') {
+    var status=getGuideDoorAccessStatus();
+    if(!status.configured || !status.checkout.approved || !status.checkin.approved) {
+      throw new Error('비밀번호 설정 및 반출·반납 템플릿 승인/원문 일치 확인 필요');
+    }
+    // SMS 및 대체문자 호출은 별도로 계속 차단한다. 재개 자체는 고객에게 발송하지 않는다.
+    PropertiesService.getScriptProperties().setProperty('GUIDE_ALIMTALK_SUSPENDED','false');
+    GUIDE_DELIVERY_INCIDENT_SUSPENDED_=false;
+    setupGuideAlimtalkTrigger();
+    return {suspended:false,intervalMinutes:30,smsEnabled:false};
+  }
+  if(action==='status') return getGuideDoorAccessStatus();
+  if(action!=='send' && action!=='verify') throw new Error('안내 작업 구분 오류');
+  if(GUIDE_DELIVERY_INCIDENT_SUSPENDED_) throw new Error('출입 안내 알림톡 중단 상태');
+  var tid=String(args.tradeId||'').trim(),kind=String(args.kind||'');
+  if(!/^\d{6}-\d{3}$/.test(tid) || ['checkout','checkin'].indexOf(kind)<0) throw new Error('거래ID/반출·반납 구분 필요');
+  var lock=LockService.getScriptLock();
+  if(!lock.tryLock(10000)) throw new Error('안내 작업 진행 중');
+  try {
+    var record;
+    if(action==='verify') {
+      record=guideSafetyRead_(guideRecordKey_(tid,kind));
+      if(!record)return {tradeId:tid,kind:kind,state:'missing',delivered:false};
+      record=verifyGuideRecord_(record);guideSafetyWrite_(guideRecordKey_(tid,kind),record);
+      return {tradeId:tid,kind:kind,state:record.state,receiptNum:record.receiptNum||'',delivered:record.state==='delivered',reason:record.reason||''};
+    }
+    var matches=guideSafetyBookings_().filter(function(b){return b.tid===tid;});
+    if(matches.length!==1 || matches[0].conflict || !matches[0].cust || /취소|완료/.test(matches[0].cust.status))throw new Error('확정된 유효 예약 1건 필요');
+    var b=matches[0],now=Date.now();
+    if(!b.checkoutAt || !b.returnAt || b.returnAt.getTime()<=b.checkoutAt.getTime() || now>=b.returnAt.getTime())throw new Error('유효한 반출/반납 일정 필요');
+    if(kind==='checkout' && now>b.checkoutAt.getTime()+2*60*60*1000)throw new Error('반출 안내 가능 시각 경과');
+    if(kind==='checkin' && now<b.checkoutAt.getTime())throw new Error('반출 전 반납 안내 발송 불가');
+    var cust=guideRecipient_(tid,b.cust,b.checkoutAt);
+    if(!cust.name || !cust.tel)throw new Error('실제 반출자 성함/연락처 확인 필요');
+    var result=sendGuideSafely_(tid,kind,cust,kind==='checkout'?b.checkoutAt:b.returnAt);
+    return {tradeId:tid,kind:kind,state:result.state,receiptNum:result.receiptNum||'',accepted:result.sent===true,delivered:result.state==='delivered'};
+  } finally {lock.releaseLock();}
+}
+
+/** 편집기에서 재개할 때도 승인 검사와 같은 진입점을 쓴다. */
+function resumeGuideAlimtalk() { return manageGuideAlimtalk({action:'resume'}); }
 function guideSafetyKey_(prefix, tid) { return prefix + String(tid).replace(/-/g, '_'); }
 function guideSafetyRead_(key) {
   var raw = PropertiesService.getScriptProperties().getProperty(key);
@@ -42,6 +95,7 @@ function guidePickupAcknowledged_(tid, cust, checkoutAt) {
 }
 function guidePopbillRead_(path) {
   if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) throw new Error('팝빌 출입 안내 API 긴급 중단');
+  if(String(path).indexOf('/KakaoTalk/')!==0)throw new Error('앱스크립트 문자 API 접근 중단');
   var options = { headers: { Authorization: 'Bearer ' + _getPopbillToken() }, muteHttpExceptions: true };
   var response = UrlFetchApp.fetch('https://popbill.linkhub.co.kr' + path, options);
   if (response.getResponseCode() === 401) {
