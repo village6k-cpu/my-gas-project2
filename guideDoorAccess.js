@@ -2,8 +2,8 @@
 // 실제 비밀번호는 공개 코드에 저장하지 않고 GAS Script Properties에서만 읽는다.
 var GUIDE_DOOR_PASSWORD_PROPERTY_ = 'GUIDE_DOOR_PASSWORD';
 var GUIDE_DOOR_TEMPLATE_CODES_ = {
-  checkout: '026090001186',
-  checkin: '026090001187'
+  checkout: '026100001008',
+  checkin: '026100001009'
 };
 
 function buildGuideDoorMessage_(kind, customerName, password) {
@@ -14,9 +14,9 @@ function buildGuideDoorMessage_(kind, customerName, password) {
 }
 
 function buildGuideAccessBlock_(password) {
-  return '━━━━━━━━━━━━━━━━\n🔐🔐 매장 출입 안내 🔐🔐\n'
+  return '━━━━━━━━━━━━━━━━\n★★ 매장 출입 안내 ★★\n'
     + '[매장 출입문 비밀번호: ' + password + ']\n\n'
-    + '🌙 ' + guideLockInstruction_() + '\n\n'
+    + '★ ' + guideLockInstruction_() + '\n\n'
     + '⚠️ 예약자와 실제 반출자가 다른 경우 실제 반출자에게 이 안내를 전달해주세요. 실제 반출자의 성함·연락처와 비밀번호 확인 여부를 카카오톡 채널로 알려주세요.\n'
     + '━━━━━━━━━━━━━━━━';
 }
@@ -89,14 +89,13 @@ function getGuideAlimtalkPayload_(kind, customerName) {
   var password = PropertiesService.getScriptProperties().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
   if (!password) throw new Error('출입문 비밀번호 미설정');
   var status = getGuideDoorTemplateStatus_(kind);
-  var sms = buildGuideAccessSms_(kind, customerName, password);
   if (status && status.approved) {
     return { templateCode: status.templateCode, content: buildGuideDoorMessage_(kind, customerName, password),
       vars: { '#{고객명}': customerName, '#{출입문비밀번호}': password }, doorAccess: true,
-      channel: 'alimtalk', altContent: sms };
+      channel: 'alimtalk' };
   }
-  // 승인 전/본문 불일치/조회 실패에도 비밀번호 없는 안내나 잘못된 잠금 지침을 보내지 않는다.
-  return { channel: 'sms', content: sms, doorAccess: true, approvalPending: true };
+  // 승인 전·본문 불일치·조회 실패를 직접 문자 발송으로 우회하지 않는다.
+  return { channel: 'blocked', doorAccess: true, approvalPending: true };
 }
 
 /** 내부 인증 run 전용. 비밀번호 값, 본문, 발송 기록은 응답에 포함하지 않는다. */
@@ -111,11 +110,12 @@ function configureGuideDoorAccess(args) {
 /** 발송 없이 승인 상태와 적용 여부만 확인한다. */
 function getGuideDoorAccessStatus() {
   var configured = !!PropertiesService.getScriptProperties().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
+  var suspended = typeof GUIDE_DELIVERY_INCIDENT_SUSPENDED_ !== 'undefined' && GUIDE_DELIVERY_INCIDENT_SUSPENDED_;
   var checkout = getGuideDoorTemplateStatus_('checkout');
   var checkin = getGuideDoorTemplateStatus_('checkin');
-  checkout.active = configured && checkout.approved;
-  checkin.active = configured && checkin.approved;
-  checkout.channel=checkout.active?'alimtalk':configured?'sms':'unconfigured';
-  checkin.channel=checkin.active?'alimtalk':configured?'sms':'unconfigured';
-  return { configured: configured, checkout: checkout, checkin: checkin,lockingInstruction:guideLockInstruction_() };
+  checkout.active = !suspended && configured && checkout.approved;
+  checkin.active = !suspended && configured && checkin.approved;
+  checkout.channel=checkout.active?'alimtalk':suspended?'suspended':configured?'blocked':'unconfigured';
+  checkin.channel=checkin.active?'alimtalk':suspended?'suspended':configured?'blocked':'unconfigured';
+  return { configured: configured, suspended: suspended, checkout: checkout, checkin: checkin,lockingInstruction:guideLockInstruction_() };
 }

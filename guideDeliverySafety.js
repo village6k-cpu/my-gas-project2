@@ -1,4 +1,4 @@
-// 출입 안내 안전장치: 접수와 도착을 구분하고, 별도 트리거가 누락 및 실제 반출자 확인을 점검한다.
+// 출입 안내 안전장치: 접수와 도착을 구분하고, 실제 반출자 수신 확인은 별도로 기록한다.
 // 비밀번호/본문은 발송 기록, 로그, 운영자 경보에 저장하지 않는다.
 // 2026-10-15 팝빌 국외 IP 반복 요청 사고: 검증된 국내 발송 경로를 준비하기 전까지 중단.
 var GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = true;
@@ -55,20 +55,8 @@ function guidePopbillRead_(path) {
   return JSON.parse(response.getContentText());
 }
 function sendGuideLms_(phone, name, content, requestNum) {
-  if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) throw new Error('팝빌 문자 API 긴급 중단');
-  phone = normalizeAlimtalkReceiver_(phone);
-  if (Utilities.newBlob(content).getBytes().length > 2000) throw new Error('출입 안내 대체문자 길이 초과');
-  var props = PropertiesService.getScriptProperties();
-  var payload = { snd: props.getProperty('POPBILL_SENDER_NUM'), msgs: [{ rcv: phone, rcvnm: name }],
-    subject: '빌리지 출입 안내', content: content, adsYN: false, requestNum: requestNum };
-  var options = { method: 'post', contentType: 'application/json;charset=utf-8',
-    headers: { Authorization: 'Bearer ' + _getPopbillToken() }, payload: JSON.stringify(payload), muteHttpExceptions: true };
-  var response = UrlFetchApp.fetch('https://popbill.linkhub.co.kr/LMS', options);
-  if (response.getResponseCode() === 401) {
-    options.headers.Authorization = 'Bearer ' + _getPopbillToken(true);
-    response = UrlFetchApp.fetch('https://popbill.linkhub.co.kr/LMS', options);
-  }
-  return JSON.parse(response.getContentText());
+  // 과거 호출자가 남아 있어도 국외 IP 문자 API를 다시 호출할 수 없게 한다.
+  throw new Error('앱스크립트 직접 문자 API 긴급 중단');
 }
 function verifyGuideRecord_(record) {
   if (record.state === 'delivered' || record.state === 'failed' || record.state === 'rejected') return record;
@@ -123,16 +111,15 @@ function sendGuideSafely_(tid, kind, cust, operationAt) {
     return { state: record.state, receiptNum: record.receiptNum || '', sent: false };
   }
   var payload = getGuideAlimtalkPayload_(kind, cust.name);
+  if (payload.channel !== 'alimtalk') return {state:'approval_pending',sent:false};
   record = { tid: tid, binding: binding, phone: phone, operationMs: operationAt.getTime(),
     kind: kind, name: cust.name, templateCode: payload.templateCode || '', channel: payload.channel,
     state: 'unknown', requestNum: Utilities.getUuid(), createdAt: Date.now() };
   // 외부 호출 전에 원장에 남겨 하드킬/timeout에서도 같은 건을 다시 접수하지 않는다.
   guideSafetyWrite_(key, record);
   try {
-    var result = payload.channel === 'sms'
-      ? sendGuideLms_(phone, cust.name, payload.content, record.requestNum)
-      : sendAlimtalk(payload.templateCode, phone, cust.name, payload.content, payload.vars, null,
-        { altSendType: 'A', altContent: payload.altContent, requestNum: record.requestNum });
+    var result = sendAlimtalk(payload.templateCode, phone, cust.name, payload.content, payload.vars, null,
+      { altSendType: '', requestNum: record.requestNum });
     if (!result || !result.receiptNum) {
       record.state = 'rejected'; record.reason = '발송 접수 거절';
       if (result && Number(result.code)<0) record.rejectionCode=Number(result.code);
@@ -182,38 +169,10 @@ function guideSafetyBookings_() {
 }
 function sendGuideSafetyAlert_(issue) {
   if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return {state:'suspended'};
-  var props=PropertiesService.getScriptProperties();
-  var phone=props.getProperty('GUIDE_ALERT_PHONE');
-  if(!phone) throw new Error('출입 안내 긴급 경보 번호 미설정');
-  var key=guideSafetyKey_('GUIDE_ALERT_V1_',issue.category||issue.tid||'system');
-  var prior=null, now=Date.now();
-  try {prior=guideSafetyRead_(key);}catch(e){}
-  if(prior) {prior=verifyGuideAlertRecord_(prior);guideSafetyWrite_(key,prior);}
-  var signature=String(issue.reason);
-  // 미해결 경보는 1시간 간격으로 반복. 경보의 API 접수도 도착 성공과 구별한다.
-  var cooldown=prior && /failed|rejected/.test(prior.state)?5*60*1000:60*60*1000;
-  if(prior && prior.signature===signature && now-prior.at<cooldown) return prior;
-  var text='[빌리지 출입 안내 긴급]\n'+(issue.tid||'시스템')+'\n'+issue.reason
-    +'\n'+(issue.checkoutAt ? '반출 '+Utilities.formatDate(issue.checkoutAt,'Asia/Seoul','MM-dd HH:mm')+'\n' : '')
-    +'실제 반출자의 연락처와 비밀번호 수신 여부를 직접 확인해주세요.';
-  var record={at:now,signature:signature,state:'unknown',requestNum:Utilities.getUuid()};
-  guideSafetyWrite_(key,record);
-  try {
-    var result=sendGuideLms_(phone,'빌리지 운영자',text,record.requestNum);
-    if(!result || !result.receiptNum) record.state='rejected';
-    else {record.receiptNum=String(result.receiptNum);record.state='pending';}
-  } catch(e) {record.state='unknown';}
-  guideSafetyWrite_(key,record);return record;
+  return {state:'disabled',reason:'자동 문자 경보 중단'};
 }
 function verifyGuideAlertRecord_(record) {
-  if(record.state==='delivered' || record.state==='failed' || record.state==='rejected')return record;
-  try {
-    var info=guidePopbillRead_(record.receiptNum?'/Message/'+record.receiptNum:'/Message/Get/'+record.requestNum);
-    if(!Array.isArray(info) || info.length!==1)return record;
-    var phone=PropertiesService.getScriptProperties().getProperty('GUIDE_ALERT_PHONE');
-    if(normalizeAlimtalkReceiver_(info[0].receiveNum)!==normalizeAlimtalkReceiver_(phone)) {record.state='failed';return record;}
-    if(Number(info[0].state)===3)record.state=Number(info[0].result)===100?'delivered':'failed';
-  }catch(e){}
+  // 과거 경보 기록은 보존하지만 별도 조회·재전송하지 않는다.
   return record;
 }
 function inspectGuideDeliverySafety() {
@@ -261,47 +220,7 @@ function inspectGuideDeliverySafety() {
 }
 function checkGuideDeliverySafety() {
   if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return stopGuideDeliveryIncident();
-  var lock=LockService.getScriptLock();
-  if(!lock.tryLock(1000))return {skipped:true,reason:'출입 안내 작업 진행 중'};
-  var props=PropertiesService.getScriptProperties();
-  var errors=[],report={rows:[]};
-  try {
-    // 발송부터 확인 원장 갱신까지 같은 잠금 안에서 실행해 새 수신자의 기록을 덮어쓰지 않는다.
-    // 발송 API 장애로 실행 시간을 소진하기 전에 원장 상태와 긴급 반출자 미확인을 남긴다.
-    try {report=inspectGuideDeliverySafety();}catch(e){errors.push('발송 전 계약/일정 점검 오류');}
-    props.setProperty('GUIDE_SAFETY_HEALTH',JSON.stringify({checkedAt:Date.now(),ok:false,phase:'checking',issueCount:report.rows.filter(function(r){return r.issues.length;}).length}));
-    var activeIds={};report.rows.forEach(function(r){activeIds[r.tid]=true;});
-    var urgent=report.rows.filter(function(r){return r.state==='source_error' || r.issues.some(function(x){return /실제 반출자|전화번호|누락/.test(x);});});
-    if(urgent.length)sendGuideSafetyAlert_({category:'preflight',reason:'긴급 확인 '+urgent.length+'건: '+urgent.slice(0,12).map(function(r){return r.tid;}).join(', ')+' / 실제 반출자·출입 안내 및 예약 원장을 직접 확인해주세요.'});
-    try {checkGuideAlimtalkLocked_();}catch(e){errors.push('출입 안내 발송 작업 오류');}
-    props.getKeys().filter(function(k){return /^GUIDE_DELIVERY_V3_/.test(k);}).forEach(function(k) {
-      try {
-        var r=guideSafetyRead_(k);if(!r)return;
-        var recordTid=r.tid||k.replace(/^GUIDE_DELIVERY_V3_(out|in)_/,'').replace('_','-');
-        if(!activeIds[recordTid] && r.operationMs<Date.now()-7*24*60*60*1000){props.deleteProperty(k);return;}
-        guideSafetyWrite_(k,verifyGuideRecord_(r));
-      }catch(e){errors.push('출입 안내 기록 확인 오류 '+k.replace('GUIDE_DELIVERY_V3_',''));}
-    });
-    try {report=inspectGuideDeliverySafety();}catch(e){errors.push('계약/스케줄 또는 안내 기록 점검 오류');}
-    var pending=report.rows.filter(function(r){return r.issues.length;});
-    if(pending.length) {
-      var reasons=[];pending.forEach(function(r){r.issues.forEach(function(x){if(reasons.indexOf(x)<0)reasons.push(x);});});
-      var a=sendGuideSafetyAlert_({category:'delivery',reason:'확인 필요 '+pending.length+'건: '+pending.slice(0,12).map(function(r){return r.tid;}).join(', ')+'\n'+reasons.slice(0,5).join(' / ')});
-      if(a && /failed|rejected|unknown/.test(a.state))errors.push('운영자 경보 도착 미확인');
-    }
-    props.getKeys().filter(function(k){return /^GUIDE_ALERT_V1_/.test(k);}).forEach(function(k){
-      try{var a=guideSafetyRead_(k);if(!a)return;
-        if(a.at<Date.now()-7*24*60*60*1000){props.deleteProperty(k);return;}
-        a=verifyGuideAlertRecord_(a);guideSafetyWrite_(k,a);
-        if(/failed|rejected|unknown/.test(a.state))errors.push('운영자 긴급 경보 도착 미확인');
-      }catch(e){errors.push('운영자 경보 원장 확인 오류');}
-    });
-    if(errors.length)sendGuideSafetyAlert_({reason:errors.join(' / ').slice(0,350)});
-    props.setProperty('GUIDE_SAFETY_LAST_CHECK',String(Date.now()));
-    props.setProperty('GUIDE_SAFETY_HEALTH',JSON.stringify({checkedAt:Date.now(),ok:errors.length===0,errors:errors}));
-    Logger.log('출입 안내 안전 점검: '+report.rows.length+'건, 확인 필요 '+report.rows.filter(function(r){return r.issues.length;}).length+'건');
-    return report;
-  } finally {lock.releaseLock();}
+  return inspectGuideDeliverySafety();
 }
 
 /** 편집 권한 있는 운영자가 직접 실제 반출자와 안내 수신을 확인한 후 기록한다. */
@@ -342,24 +261,18 @@ function showGuideDeliverySafety() {
 }
 function setupGuideDeliverySafety(args) {
   if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return stopGuideDeliveryIncident();
-  args=args||{};
   var props=PropertiesService.getScriptProperties();
-  if(args.alertPhone) props.setProperty('GUIDE_ALERT_PHONE',normalizeAlimtalkReceiver_(args.alertPhone));
-  if(!props.getProperty('GUIDE_ALERT_PHONE')) {
-    var ui=SpreadsheetApp.getUi(),r=ui.prompt('출입 안내 긴급 경보 휴대폰 번호',ui.ButtonSet.OK_CANCEL);
-    if(r.getSelectedButton()!==ui.Button.OK)return {cancelled:true};
-    props.setProperty('GUIDE_ALERT_PHONE',normalizeAlimtalkReceiver_(r.getResponseText()));
-  }
-  var existing=ScriptApp.getProjectTriggers().filter(function(t){return t.getHandlerFunction()==='checkGuideDeliverySafety';});
+  var removed=[];
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if(t.getHandlerFunction()==='checkGuideDeliverySafety') {
+      ScriptApp.deleteTrigger(t);removed.push('checkGuideDeliverySafety');
+    }
+  });
   if(!props.getProperty('GUIDE_SAFETY_INSTALLED_AT'))props.setProperty('GUIDE_SAFETY_INSTALLED_AT',String(Date.now()));
-  if(!existing.length)ScriptApp.newTrigger('checkGuideDeliverySafety').timeBased().everyMinutes(5).create();
-  return {configured:true,monitorEveryMinutes:5};
+  return {configured:true,mode:'manual',removed:removed};
 }
 
-// 편집기에서 명시적으로 실행하는 내부 초기화 도구. 현재 발신번호가 지정한 운영자
-// 경보 번호와 동일하고 팝빌에 등록되었음을 별도로 확인한 후에만 실행한다.
-// 발송 경로 장애가 있어도 독립 점검 트리거와 긴급 경보 설정은 초기화할 수 있어야 한다.
+// 과거 편집기 실행 진입점은 수동 점검 설정만 유지한다.
 function setupGuideDeliverySafetyForCurrentSender() {
-  var phone=normalizeAlimtalkReceiver_(PropertiesService.getScriptProperties().getProperty('POPBILL_SENDER_NUM'));
-  return setupGuideDeliverySafety({alertPhone:phone});
+  return setupGuideDeliverySafety();
 }

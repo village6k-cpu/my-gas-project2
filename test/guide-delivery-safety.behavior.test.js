@@ -29,10 +29,20 @@ test('API acceptance remains pending; final delivery is checked and not resent',
   const h=load();assert.equal(typeof h.ctx.sendGuideSafely_,'function','a durable guide delivery guard must exist');
   h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
   assert.equal(h.sends.length,1);
+  assert.equal(h.sends[0][6].altSendType,'','guide requests must not silently enable SMS substitution');
   const r=JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020);
   assert.equal(r.state,'pending');assert(!JSON.stringify(r).includes('test-password'));
   h.setDelivery(message());h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
   assert.equal(h.sends.length,1);assert.equal(JSON.parse(h.props.GUIDE_DELIVERY_V3_out_261014_020).state,'delivered');
+});
+test('unapproved or unavailable templates never fall back to a direct SMS or create a sent record',()=>{
+  const h=load();
+  h.ctx.getGuideAlimtalkPayload_=()=>({channel:'blocked',approvalPending:true});
+  let sms=0;h.ctx.sendGuideLms_=()=>{sms++;};
+  const result=h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
+  assert.equal(result.state,'approval_pending');assert.equal(result.sent,false);
+  assert.equal(h.sends.length,0);assert.equal(sms,0);
+  assert.equal(h.props.GUIDE_DELIVERY_V3_out_261014_020,undefined);
 });
 test('blocked Kakao succeeds only if the alternate SMS has a final success result',()=>{
   const h=load();h.ctx.sendGuideSafely_('261014-020','checkout',cust,due);
@@ -98,21 +108,20 @@ test('a confirmed different pickup contact is used and tied to this active booki
   assert.equal(actual.tel,'01087654321');assert.equal(h.ctx.guidePickupAcknowledged_('261014-020',cust,due),true);
   assert.equal(h.ctx.guidePickupAcknowledged_('261014-020',cust,new Date(due.getTime()+86400000)),false,'date changes require renewed pickup confirmation');
 });
-test('watchdog owns the same send lock while reconciling and survives a corrupt record',()=>{
-  const h=load();let held=false,released=false;
-  h.ctx.LockService={getScriptLock:()=>({tryLock:()=>{held=true;return true;},releaseLock:()=>{held=false;released=true;}})};
-  h.ctx.checkGuideAlimtalkLocked_=()=>{assert(held);return{};};
-  h.ctx.checkGuideAlimtalk=()=>{};
+test('manual safety inspection never sends messages or runs the send worker',()=>{
+  const h=load();
+  h.ctx.checkGuideAlimtalkLocked_=()=>{throw Error('inspection must not send');};
   h.ctx.inspectGuideDeliverySafety=()=>({rows:[]});
   h.props.GUIDE_DELIVERY_V3_out_bad='{broken';
   const report=h.ctx.checkGuideDeliverySafety();
-  assert(released);assert(h.alerts.length>0,'a corrupt delivery record must raise an operator warning');assert(report);
+  assert.equal(report.rows.length,0);assert.equal(h.alerts.length,0);assert.equal(h.sends.length,0);
+  assert.equal(h.props.GUIDE_DELIVERY_V3_out_bad,'{broken','read-only inspection must retain source evidence');
 });
-test('operator alert success is confirmed through its own final SMS result',()=>{
+test('legacy operator alert records are preserved without further network requests',()=>{
   const h=load();assert.equal(typeof h.ctx.verifyGuideAlertRecord_,'function');
-  h.setDelivery([{state:3,result:100,receiveNum:'01000000000'}]);
+  h.ctx.UrlFetchApp.fetch=()=>{throw Error('legacy alert must not trigger another gateway request');};
   const result=h.ctx.verifyGuideAlertRecord_({receiptNum:'026101499999900002',requestNum:'alert',state:'pending'});
-  assert.equal(result.state,'delivered');
+  assert.equal(result.state,'pending');
 });
 test('a missing contract remains an alertable schedule row',()=>{
   const h=load();const out=new Date(Date.now()+3600000),ret=new Date(Date.now()+7200000);
@@ -153,19 +162,19 @@ test('reversed pickup/return dates raise an alert instead of being discarded as 
   h.ctx.guideSafetyBookings_=()=>[{tid:'261014-020',cust,checkoutAt:out,returnAt:ret}];
   const report=h.ctx.inspectGuideDeliverySafety();assert.equal(report.rows.length,1);assert(report.rows[0].issues.length);
 });
-test('explicit editor setup can use the sole registered mobile sender as the verified owner alert number',()=>{
+test('legacy editor setup now enables manual inspection without guessing an operator number',()=>{
   const h=load();delete h.props.GUIDE_ALERT_PHONE;h.props.POPBILL_SENDER_NUM='01000000000';
   h.ctx.guidePopbillRead_=()=>[{number:'01000000000',state:1}];
   h.ctx.ScriptApp={getProjectTriggers:()=>[],newTrigger:()=>({timeBased(){return this;},everyMinutes(){return this;},create(){return{};}})};
   assert.equal(typeof h.ctx.setupGuideDeliverySafetyForCurrentSender,'function');
-  const r=h.ctx.setupGuideDeliverySafetyForCurrentSender();assert(r.configured);assert.equal(h.props.GUIDE_ALERT_PHONE,'01000000000');
+  const r=h.ctx.setupGuideDeliverySafetyForCurrentSender();assert(r.configured);assert.equal(r.mode,'manual');assert.equal(h.props.GUIDE_ALERT_PHONE,undefined);
 });
-test('explicit setup after owner verification does not depend on the failing messaging gateway',()=>{
+test('manual inspection setup never creates a watchdog or calls a failing messaging gateway',()=>{
   const h=load();delete h.props.GUIDE_ALERT_PHONE;h.props.POPBILL_SENDER_NUM='01000000000';
   let creates=0;
   h.ctx.guidePopbillRead_=()=>{throw Error('전송 결과 조회 실패 HTTP 400 코드 -10010039');};
-  h.ctx.ScriptApp={getProjectTriggers:()=>creates?[{getHandlerFunction:()=> 'checkGuideDeliverySafety'}]:[],newTrigger:()=>({timeBased(){return this;},everyMinutes(n){assert.equal(n,5);return this;},create(){creates++;return{};}})};
+  h.ctx.ScriptApp={getProjectTriggers:()=>[],newTrigger:()=>{creates++;throw Error('watchdog must not be recreated');}};
   assert(h.ctx.setupGuideDeliverySafetyForCurrentSender().configured);
-  assert.equal(h.props.GUIDE_ALERT_PHONE,'01000000000');assert(h.props.GUIDE_SAFETY_INSTALLED_AT);
-  h.ctx.setupGuideDeliverySafetyForCurrentSender();assert.equal(creates,1,'repeated setup must not duplicate the watchdog');
+  assert.equal(h.props.GUIDE_ALERT_PHONE,undefined);assert(h.props.GUIDE_SAFETY_INSTALLED_AT);
+  h.ctx.setupGuideDeliverySafetyForCurrentSender();assert.equal(creates,0,'repeated setup must not create a watchdog');
 });

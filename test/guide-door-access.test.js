@@ -39,8 +39,8 @@ for (const kind of ['checkout', 'checkin']) {
   responses[code] = { templateCode: code, state: '2', template: expected };
   reset();
   const pending=ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt);
-  assert.equal(pending.channel,'sms','pending approval must use the corrected operational SMS rather than conflicting legacy content');
-  assert(pending.content.includes(password));
+  assert.equal(pending.channel,'blocked','pending approval must block sending rather than call the SMS API');
+  assert.equal(pending.content,undefined);
   responses[code].state = '3';
   reset();
   const live = ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt);
@@ -67,10 +67,10 @@ for (const kind of ['checkout', 'checkin']) {
   assert(ctx.getGuideAlimtalkPayload_(kind, '테스트').doorAccess, 'guide selection must not depend on a provided operation time');
   responses[code].template += '\n다른 문구';
   reset();
-  assert.equal(ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).channel,'sms', 'approved but mismatched body must use corrected SMS');
+  assert.equal(ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).channel,'blocked', 'approved but mismatched body must block sending');
   responses[code] = new Error('network failure');
   reset();
-  assert.equal(ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).channel,'sms', 'lookup failure must retain password and corrected instructions');
+  assert.equal(ctx.getGuideAlimtalkPayload_(kind, '테스트', nightAt).channel,'blocked', 'lookup failure must not enable direct SMS sending');
 }
 for (const kind of ['checkout','checkin']) {
   const sms=ctx.buildGuideAccessSms_(kind,'테스트',password);
@@ -83,5 +83,8 @@ reset();
 assert.equal(ctx.getGuideAlimtalkPayload_('checkout','테스트').templateCode,newCode,'only an approved exactly matching new template may automatically activate');
 assert.equal(props.GUIDE_SAFE_TEMPLATE_checkout,newCode);
 assert(!JSON.stringify(ctx.getGuideDoorAccessStatus()).includes(password), 'status must never disclose the password');
+ctx.GUIDE_DELIVERY_INCIDENT_SUSPENDED_=true;
+assert.equal(ctx.getGuideDoorAccessStatus().checkout.active,false,'template approval cannot override an incident stop');
+assert.equal(ctx.getGuideDoorAccessStatus().checkout.channel,'suspended');
 assert(!Object.keys(props).some(k => k.startsWith('GUIDE_SENT')), 'configuration must not reset sent flags');
-console.log('guide door access approval, content, fallback and privacy checks OK');
+console.log('guide door access approval, content, blocked SMS and privacy checks OK');

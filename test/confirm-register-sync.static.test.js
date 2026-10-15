@@ -492,8 +492,8 @@ console.log('popbill-hmac checks OK');
   assert(
     /function testGuideAlimtalk\(args\)/.test(ca) &&
       ca.includes("getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름)") &&
-      ca.includes('sendAlimtalk(guide.templateCode, 연락처, 이름, guide.content, guide.vars') && ca.includes("guide.channel === 'sms'"),
-    'testGuideAlimtalk must reuse the exact guide template/message pair that automatic sends use'
+      ca.includes('sendAlimtalk(guide.templateCode, 연락처, 이름, guide.content, guide.vars') && ca.includes("guide.channel !== 'alimtalk'"),
+    'testGuideAlimtalk must reuse the approved guide template/message pair and block other channels'
   );
   assert(
     api.includes('"testGuideAlimtalk"') && api.includes('funcName === "testGuideAlimtalk"'),

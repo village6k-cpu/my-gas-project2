@@ -39,7 +39,7 @@ function onOpen() {
     .addSeparator()
     .addItem("🔐 출입 안내 안전 점검", "showGuideDeliverySafety")
     .addItem("✅ 실제 반출자·비밀번호 수신 확인", "confirmGuidePickupContactFromMenu")
-    .addItem("⚙️ 출입 안내 긴급 경보 설정", "setupGuideDeliverySafety")
+    .addItem("⚙️ 출입 안내 수동 점검 설정", "setupGuideDeliverySafety")
     .addSeparator()
     .addItem("🔄 장비 목록 갱신", "refreshEquipmentList")
     .addItem("📸 실사기록 동기화", "syncAuditFromMaster")
@@ -19170,11 +19170,12 @@ function getRegisterAlimtalkTradeSnapshot_(tradeId) {
 }
 
 /**
- * 반출/반납 출입 안내 테스트 발송 — 승인 전에는 올바른 안내를 문자로 전송한다.
+ * 반출/반납 출입 안내 테스트 발송 — 긴급 중단과 템플릿 승인 조건을 모두 따른다.
  * args: { 연락처: "010-...", 종류?: "반출"|"반납", 이름?: "테스트" }
  * 시트/GUIDE_SENT_ 중복방지 플래그에 아무 기록 없음.
  */
 function testGuideAlimtalk(args) {
+  if (typeof GUIDE_DELIVERY_INCIDENT_SUSPENDED_ !== 'undefined' && GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return {suspended:true,success:false};
   args = args || {};
   var 연락처 = String(args.연락처 || args.phone || "").trim();
   if (!연락처) return { error: "연락처 필수" };
@@ -19183,10 +19184,9 @@ function testGuideAlimtalk(args) {
   var isCheckin = 종류 === "반납";
   try {
     var guide = getGuideAlimtalkPayload_(isCheckin ? 'checkin' : 'checkout', 이름);
-    var res = guide.channel === 'sms'
-      ? sendGuideLms_(연락처, 이름, guide.content, Utilities.getUuid())
-      : sendAlimtalk(guide.templateCode, 연락처, 이름, guide.content, guide.vars, null,
-        {altSendType:'A',altContent:guide.altContent,requestNum:Utilities.getUuid()});
+    if (guide.channel !== 'alimtalk') return {success:false,approvalPending:true,종류:종류};
+    var res = sendAlimtalk(guide.templateCode, 연락처, 이름, guide.content, guide.vars, null,
+      {altSendType:'',requestNum:Utilities.getUuid()});
     return { success: _alimtalkAccepted_(res), 종류: 종류, channel: guide.channel, popbill: res };
   } catch (e) {
     return { error: e.message, 종류: 종류 };
