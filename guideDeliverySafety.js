@@ -49,7 +49,9 @@ function manageGuideAlimtalk(args) {
       record=guideSafetyRead_(guideRecordKey_(tid,kind));
       if(!record)return {tradeId:tid,kind:kind,state:'missing',delivered:false};
       record=verifyGuideRecord_(record);guideSafetyWrite_(guideRecordKey_(tid,kind),record);
-      return {tradeId:tid,kind:kind,state:record.state,receiptNum:record.receiptNum||'',delivered:record.state==='delivered',reason:record.reason||''};
+      return {tradeId:tid,kind:kind,state:record.state,channel:record.channel,receiptNum:record.receiptNum||'',
+        requestNum:record.requestNum,rejectionCode:record.rejectionCode,createdAt:record.createdAt,
+        delivered:record.state==='delivered',reason:record.reason||''};
     }
     var matches=guideSafetyBookings_().filter(function(b){return b.tid===tid;});
     if(matches.length!==1 || matches[0].conflict || !matches[0].cust || /취소|완료/.test(matches[0].cust.status))throw new Error('확정된 유효 예약 1건 필요');
