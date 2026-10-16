@@ -8679,6 +8679,11 @@ function buildAvailabilityItems_(equipName, qty, components) {
       if (!n) return;
       map[n] = (map[n] || 0) + ((Number(c.qty) || 1) * qty);
     });
+    if (typeof inventoryIdentityCatalog_ === 'function') {
+      var identity = inventoryIdentityCatalog_(), main = identity.resolve(equipName).item;
+      if (main && !components.some(function(c) { return identity.resolve(c.name).item?.id === main.id; }))
+        map[String(equipName).trim()] = qty;
+    }
   } else {
     map[String(equipName || '').trim()] = qty;
   }
@@ -8707,7 +8712,7 @@ function checkAvailabilityForAdd_(itemsToAdd, startDT, endDT, equipSheet, schedS
     }
 
     var overlaps = schedData.filter(function(s) {
-      return s.equipment === equipName &&
+      return (typeof inventoryIdentitySame_==='function'?inventoryIdentitySame_(s.equipment,equipName):s.equipment === equipName) &&
         s.status !== "반납완료" &&
         s.status !== "취소" &&
         s.startDT < endDT &&
@@ -8884,7 +8889,7 @@ function hasPendingSchedulePrice_(row) {
 }
 
 function buildDashboardEquipmentMeta_(equipSheet) {
-  return getDashboardCachedJson_("dashboardEquipmentMeta_v2", 120, function() {
+  var result = getDashboardCachedJson_("dashboardEquipmentMeta_v3", 120, function() {
     var meta = { equipment: {}, categories: {} };
     if (!equipSheet || equipSheet.getLastRow() < 2) return meta;
 
@@ -8897,6 +8902,7 @@ function buildDashboardEquipmentMeta_(equipSheet) {
     });
     return meta;
   });
+  return typeof inventoryIdentityMeta_ === 'function' ? inventoryIdentityMeta_(result, equipSheet) : result;
 }
 
 function findDashboardRowsByValue_(sheet, column, lastRow, value) {
@@ -8969,20 +8975,24 @@ function getDashboardAvailabilityScheduleData_(sheet, lastRow, equipmentNames) {
     if (key) target[key] = true;
   });
   var names = typeof inventorySupplyRelatedNames_ === "function" ? inventorySupplyRelatedNames_(Object.keys(target)) : Object.keys(target);
+  if(typeof inventoryIdentityName_==='function')names=Array.from(new Set(names.map(function(name){return inventoryIdentityName_(name);})));
   if (names.length === 0) return [];
 
   var scheduleMap = getDashboardAvailabilityScheduleMap_(sheet, lastRow);
   var data = [];
-  names.forEach(function(name) {
+  var mapNames=typeof inventoryIdentityMatchesAny_==='function'?Object.keys(scheduleMap).filter(function(name){return inventoryIdentityMatchesAny_(name,names);}):names;
+  mapNames.forEach(function(name) {
     (scheduleMap[name] || []).forEach(function(row) {
-      data.push({
+      var entry={
         equipment: name,
         qty: row[0] || 1,
         startDT: new Date(row[1]),
         endDT: new Date(row[2]),
         status: row[3] || '',
         supplyError: row[4] || ''
-      });
+      };
+      if(row[5])entry.identityCandidates=row[5];
+      data.push(entry);
     });
   });
   return data;
@@ -8990,7 +9000,8 @@ function getDashboardAvailabilityScheduleData_(sheet, lastRow, equipmentNames) {
 
 function getDashboardAvailabilityScheduleMap_(sheet, lastRow) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = "dashboard_availability_schedule_map_v2_" + getTimelineCacheVersion_() + "_" + lastRow;
+  var cacheKey = "dashboard_availability_schedule_map_v3_" + getTimelineCacheVersion_() + "_" + lastRow+
+    (typeof inventoryIdentityVersion_==='function'?'_'+inventoryIdentityVersion_():'');
   var cached = getDashboardCacheJson_(cache, cacheKey);
   if (cached) return cached;
 
@@ -8998,7 +9009,9 @@ function getDashboardAvailabilityScheduleMap_(sheet, lastRow) {
   var rows = sheet.getRange(2, 1, lastRow - 1, 11).getValues();
   buildDashboardScheduleData_(rows).forEach(function(row) {
     if (!map[row.equipment]) map[row.equipment] = [];
-    map[row.equipment].push([row.qty, row.startDT.getTime(), row.endDT.getTime(), row.status, row.supplyError || '']);
+    var packed=[row.qty,row.startDT.getTime(),row.endDT.getTime(),row.status,row.supplyError || ''];
+    if(row.identityCandidates)packed.push(row.identityCandidates);
+    map[row.equipment].push(packed);
   });
   putDashboardCacheJson_(cache, cacheKey, map, 300);
   return map;
@@ -9021,6 +9034,10 @@ function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames)
     targetNames = inventorySupplyRelatedNames_(targetNames);
     targetNames.forEach(function(name) { target[name] = true; });
   }
+  if (typeof inventoryIdentityRelatedNames_ === 'function') {
+    targetNames = inventoryIdentityRelatedNames_(targetNames);
+    targetNames.forEach(function(name) { target[name] = true; });
+  }
   targetNames.sort();
   var cache = CacheService.getScriptCache();
   var rowsCacheKey = getDashboardAvailabilityRowsCacheKey_(lastRow, targetNames);
@@ -9028,7 +9045,8 @@ function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames)
   if (!rowsToRead) {
     rowsToRead = [];
     var rowIndex = getDashboardAvailabilityRowIndex_(sheet, lastRow);
-    targetNames.forEach(function(key) {
+    var indexNames=typeof inventoryIdentityMatchesAny_==='function'?Object.keys(rowIndex).filter(function(key){return inventoryIdentityMatchesAny_(key,targetNames);}):targetNames;
+    indexNames.forEach(function(key) {
       rowsToRead = rowsToRead.concat(rowIndex[key] || []);
     });
     putDashboardCacheJson_(cache, rowsCacheKey, rowsToRead, 300);
@@ -9042,7 +9060,7 @@ function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames)
     return true;
   });
   return readDashboardScheduleRows_(sheet, rowsToRead, 11).filter(function(row) {
-    return !!target[String(row[3] || "").trim()];
+    return typeof inventoryIdentityMatchesAny_==='function'?inventoryIdentityMatchesAny_(row[3],targetNames):!!target[String(row[3] || "").trim()];
   });
 }
 
@@ -9073,15 +9091,22 @@ function getDashboardAvailabilityRowIndex_(sheet, lastRow) {
 
 function buildDashboardScheduleData_(scheduleRows, equipmentNames) {
   var names = typeof inventorySupplyRelatedNames_ === 'function' ? inventorySupplyRelatedNames_(equipmentNames) : equipmentNames;
-  var physical=[];
+  var physical=[], sources=[];
   (scheduleRows || []).forEach(function(row) {
     var entry={equipment:String(row[3] || '').trim(),qty:Number(row[4]) || 1,
+      schedID:row[0],contractID:row[1],setName:row[2] || '',
       startDT:parseDT(row[5],row[6]),endDT:parseDT(row[7],row[8]),status:row[9],note:row[10] || ''};
-    if(!entry.equipment || !entry.startDT || !entry.endDT || ['반납완료','취소'].indexOf(entry.status)>=0)return;
+    if(!entry.equipment || !entry.startDT || !entry.endDT)return;
+    sources.push(entry);
     var parts=typeof inventorySupplyAvailabilityRows_==='function'?inventorySupplyAvailabilityRows_(entry):[entry];
-    parts.forEach(function(part){if(!names || !names.length || names.indexOf(part.equipment)>=0)physical.push(part);});
+    physical=physical.concat(parts);
   });
-  return physical;
+  if(typeof inventoryIdentityRows_==='function') {
+    var identity=inventoryIdentityCatalog_();
+    physical=inventoryIdentityRows_(physical,identity,sources);
+    if(names)names=names.map(function(name){return inventoryIdentityName_(name,identity);});
+  }
+  return physical.filter(function(part){return ['반납완료','취소','제외'].indexOf(part.status)<0 && (!names || !names.length || names.indexOf(part.equipment)>=0 || (part.identityCandidates || []).some(function(name){return names.indexOf(name)>=0;}));});
 }
 
 function mergeAvailabilityItems_(items) {
@@ -9121,7 +9146,7 @@ function checkAvailabilityForAddCached_(itemsToAdd, startDT, endDT, equipMeta, s
     }
 
     var overlaps = scheduleData.filter(function(s) {
-      return s.equipment === equipName &&
+      return (typeof inventoryIdentitySame_==='function'?inventoryIdentitySame_(s.equipment,equipName):s.equipment === equipName) &&
         s.status !== "반납완료" &&
         s.status !== "취소" &&
         s.startDT < endDT &&
@@ -14704,7 +14729,7 @@ function _availabilityEquipNameKey_(value) {
  */
 function findEquipmentForSetHeader_(name, equipSheet) {
   var exact = findEquipment(name, equipSheet);
-  if (exact) return { name: String(name || "").trim(), total: exact.total, 단가: exact.단가 };
+  if (exact) return { name: exact.canonicalName || String(name || "").trim(), total: exact.total, 단가: exact.단가 };
   if (!equipSheet) return null;
 
   var targetKey = _availabilityEquipNameKey_(name);
@@ -14741,10 +14766,15 @@ function checkSetHeaderAvail(sheet, row, 장비명, 수량, 반출일, 반출시
   var setNameKey = _availabilityEquipNameKey_(장비명);
   var inventoryNameKey = _availabilityEquipNameKey_(equipInfo.name);
   schedData.forEach(function(sched) {
-    var schedNameKey = _availabilityEquipNameKey_(sched.equipment);
-    if (schedNameKey !== setNameKey && schedNameKey !== inventoryNameKey) return;
-    if (sched.status === "반납완료" || sched.status === "취소") return;
+    if (sched.status === "반납완료" || sched.status === "취소" || sched.status === "제외") return;
     if (!sched.startDT || !sched.endDT) return;
+    if (!(sched.startDT < reqEndDT && sched.endDT > reqStartDT)) return;
+    if(typeof inventoryIdentitySame_==='function') {
+      if(!inventoryIdentitySame_(sched.equipment,equipInfo.name))return;
+    } else {
+      var schedNameKey = _availabilityEquipNameKey_(sched.equipment);
+      if(schedNameKey !== setNameKey && schedNameKey !== inventoryNameKey)return;
+    }
     if (sched.startDT < reqEndDT && sched.endDT > reqStartDT) {
       overlaps.push(sched);
     }
@@ -14974,9 +15004,10 @@ function checkSingleRowWithData(sheet, row, reqID, 반출일, 반출시간, 반�
   // ── 겹치는 기존 예약 수집 ──
   var overlaps = [];
   schedData.forEach(function(sched) {
-    if (sched.equipment !== 장비명) return;
-    if (sched.status === "반납완료" || sched.status === "취소") return;
+    if (sched.status === "반납완료" || sched.status === "취소" || sched.status === "제외") return;
     if (!sched.startDT || !sched.endDT) return;
+    if (!(sched.startDT < reqEndDT && sched.endDT > reqStartDT)) return;
+    if (typeof inventoryIdentitySame_==='function' ? !inventoryIdentitySame_(sched.equipment,장비명) : sched.equipment !== 장비명) return;
     if (sched.startDT < reqEndDT && sched.endDT > reqStartDT) {
       overlaps.push(sched);
     }
@@ -16837,6 +16868,16 @@ function commitConfirmedReservation(args) {
       appliedStages.push("authoritative_readback");
       confirmedResult.applied_stages = appliedStages.slice();
       confirmedResult.inventory_review = { status: "queued", catalog_issues: (catalogReviewIssues || []).concat(registrationOutcome.pricingIssues || []) };
+      if(typeof inventoryIdentityBindings_==='function') {
+        try {
+          confirmedResult.inventory_review.identity_source='장비마스터.장비ID';
+          confirmedResult.inventory_review.identity_bindings=inventoryIdentityBindings_(normalized.desired_after);
+        } catch(identityError) {
+          // Business registration has committed. Never replay it because the
+          // supplemental identity read is unavailable; report that gap instead.
+          confirmedResult.inventory_review.identity_error=String(identityError.message || identityError);
+        }
+      }
     }
     return confirmedResult;
   } catch (error) {
@@ -17409,7 +17450,8 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   if(typeof inventorySupplyApplyRows_ === 'function') {
     var supplyRows=mergeSchedulePlan.writeSourceIndexes.map(function(i){var d=allData[i];return ['',거래ID,String(d[16]||'').indexOf('[세트]')===0?String(d[16]).slice(4):d[5],d[5],d[6]||1,반출일str,반출시간str,반납일str,반납시간str,'대기','',0,예약자명];});
     var supplyGroups={};supplyRows.forEach(function(r){if(r[2]!==r[3])supplyGroups[r[2]]=true;});
-    var requestedSupply=supplyRows.filter(function(r){return !(r[2]===r[3]&&supplyGroups[r[3]]);}).map(function(r){return {name:r[3],qty:Number(r[4])};});
+    var supplyDemandRows=typeof inventoryIdentityAllocationRows_==='function'?inventoryIdentityAllocationRows_(supplyRows):supplyRows.filter(function(r){return !(r[2]===r[3]&&supplyGroups[r[3]]);});
+    var requestedSupply=supplyDemandRows.map(function(r){return {name:r[3],qty:Number(r[4])};});
     var registrationSupplyPlan=checkAvailabilityForAdd_(mergeAvailabilityItems_(requestedSupply),parseDT(반출일str,반출시간str),parseDT(반납일str,반납시간str),ss.getSheetByName('장비마스터'),schedSheet);
     // Preserve deliberate operator registration with a visible real shortage; never invent supply.
     if(registrationSupplyPlan.ok)inventorySupplyApplyRows_(supplyRows,registrationSupplyPlan);
@@ -18047,7 +18089,13 @@ function planRegisteredTradeInventory_(targetScheduleRows, equipmentExactMap, se
     var isSetComponent = !!setName && setName !== itemName;
     var isSetItem = !!setName && setName === itemName;
     var isSetHeader = isSetItem && !!setNamesWithComponents[setName];
-    if (isSetHeader) {
+    var canonicalName = equipmentExactMap[itemName]?.canonicalName || itemName;
+    var headerBodyExpanded = isSetHeader && equipmentExactMap[itemName] && (targetScheduleRows || []).some(function(other) {
+      var r=other.values || [], info=equipmentExactMap[String(r[3] || '').trim()];
+      return String(r[2] || '').trim()===setName && String(r[3] || '').trim()!==setName && info &&
+        (info.canonicalName || String(r[3]).trim())===canonicalName;
+    });
+    if (isSetHeader && (!equipmentExactMap[itemName] || headerBodyExpanded)) {
       var headerWarning = itemName + ': 세트 헤더(구성품으로 가용성 계산)';
       if (availabilityWarnings.indexOf(headerWarning) < 0) availabilityWarnings.push(headerWarning);
       return;
@@ -18065,7 +18113,7 @@ function planRegisteredTradeInventory_(targetScheduleRows, equipmentExactMap, se
       unresolvedInventory.push('row ' + entry.rowNumber + ': ' + itemName);
       return;
     }
-    itemMap[itemName] = (itemMap[itemName] || 0) + itemQty;
+    itemMap[canonicalName] = (itemMap[canonicalName] || 0) + itemQty;
   });
 
   return {
@@ -18135,14 +18183,18 @@ function extendRegisteredTrade(args) {
   var schedDisplay = schedLast >= 2 ? schedSheet.getRange(2, 1, schedLast - 1, 13).getDisplayValues() : [];
   var targetRows = [];
   var itemMap = {};
+  var extensionDemandRows=typeof inventoryIdentityAllocationRows_==='function'?
+    inventoryIdentityAllocationRows_(schedDisplay.filter(function(r){return String(r[1] || '').trim()===tradeId;})):null;
   for (var si = 0; si < schedDisplay.length; si++) {
     var schedRow = schedDisplay[si];
     if (String(schedRow[1] || '').trim() !== tradeId) continue;
     targetRows.push(si + 2);
+    if(extensionDemandRows && (extensionDemandRows.indexOf(schedRow)<0 || ['반납완료','취소','제외'].indexOf(schedRow[9])>=0))continue;
     var itemName = String(schedRow[3] || '').trim(); // D: 장비명
     var qty = Number(schedRow[4]) || 1; // E: 수량
     if (!itemName || !findEquipment(itemName, equipSheet)) continue; // 세트명/비재고 구성품은 가용성 계산 대상 아님
-    itemMap[itemName] = (itemMap[itemName] || 0) + qty;
+    var physicalName=typeof inventoryIdentityName_==='function'?inventoryIdentityName_(itemName):itemName;
+    itemMap[physicalName] = (itemMap[physicalName] || 0) + qty;
   }
   if (targetRows.length === 0) throw new Error('스케줄상세에 거래ID가 없습니다: ' + tradeId);
 
@@ -18156,7 +18208,7 @@ function extendRegisteredTrade(args) {
     var info = findEquipment(itemName, equipSheet);
     if (!info) return;
     var overlaps = allSchedule.filter(function(row) {
-      return row.equipment === itemName && row.startDT && row.endDT && row.startDT.getTime() < endMs && row.endDT.getTime() > availabilityStartMs;
+      return (typeof inventoryIdentitySame_==='function'?inventoryIdentitySame_(row.equipment,itemName):row.equipment === itemName) && row.startDT && row.endDT && row.startDT.getTime() < endMs && row.endDT.getTime() > availabilityStartMs;
     });
     var points = {};
     points[availabilityStartMs] = true;
@@ -18307,7 +18359,7 @@ function changeDatesForContract(sheet, row) {
 
     // sweep-line: 요청 기간 내 동시 사용 최대치 계산
     var overlaps = schedData.filter(function(s) {
-      return s.equipment === item.장비명 && s.status !== "반납완료" && s.status !== "취소"
+      return (typeof inventoryIdentitySame_==='function'?inventoryIdentitySame_(s.equipment,item.장비명):s.equipment === item.장비명) && s.status !== "반납완료" && s.status !== "취소"
         && s.startDT < newEndDT && s.endDT > newStartDT;
     });
     var timePoints = [newStartDT.getTime()];
@@ -18631,7 +18683,7 @@ function getScheduleData(schedSheet) {
   }
 
   const data = schedSheet.getRange(2, 1, lastRow - 1, 11).getValues();
-  return data.map(row => ({
+  var sources = data.map(row => ({
     schedID: row[0],       // A
     contractID: row[1],    // B: 거래ID
     contractName: contractMap[row[1]] || "",
@@ -18642,9 +18694,11 @@ function getScheduleData(schedSheet) {
     endDT: parseDT(row[7], row[8]),    // H,I: 반납일,시간
     status: row[9],        // J: 반출상태
     note: row[10]          // K: 비고
-  })).filter(s => s.startDT && s.endDT).reduce(function(out, row) {
+  })).filter(s => s.startDT && s.endDT);
+  var physical = sources.reduce(function(out, row) {
     return out.concat(typeof inventorySupplyAvailabilityRows_ === "function" ? inventorySupplyAvailabilityRows_(row) : [row]);
   }, []);
+  return typeof inventoryIdentityRows_==='function' ? inventoryIdentityRows_(physical,null,sources) : physical;
 }
 
 /**
@@ -18653,6 +18707,16 @@ function getScheduleData(schedSheet) {
  *   F:가용수량, G:대여중수량, H:정비중수량, I:상태, J:비고, K:최근실사, L:단가(레거시)
  */
 function findEquipment(name, equipSheet) {
+  if (typeof inventoryIdentityCatalog_ === 'function') {
+    var identityCatalog=inventoryIdentityCatalog_(equipSheet);
+    if(identityCatalog.sourceIssues.length)throw new Error('INVENTORY_IDENTITY_UNAVAILABLE: 장비 ID 별칭 원장 확인 필요');
+    var match = identityCatalog.resolve(name);
+    if (match.candidates.length>1) throw new Error('AMBIGUOUS_INVENTORY_IDENTITY: '+name);
+    if (!match.item) return null;
+    var item=match.item;
+    return {total:Number(item.stock)||0,category:item.category,maintenance:Number(item.maintenance)||0,
+      단가:item.unitPrice,equipmentId:item.id,canonicalName:item.name};
+  }
   const data = getEquipMasterRows_(equipSheet);
   for (let i = 0; i < data.length; i++) {
     if (data[i][3] === name) {
@@ -22734,6 +22798,8 @@ function changeRegisteredTradeDates(args, options) {
         equipmentExactMap[exactName] = { total: Number(row[4]) || 0, 단가: Number(row[11]) || 0 };
       }
     });
+    if(typeof inventoryIdentityMeta_==='function')
+      equipmentExactMap=inventoryIdentityMeta_({equipment:equipmentExactMap,categories:{}},equipmentSheet).equipment;
 
     var availabilityTargetScheduleRows = targetScheduleRows.filter(function(entry) {
       return !excludeScheduleIdMap[String(entry && entry.values && entry.values[0] || '').trim()];
@@ -22780,7 +22846,7 @@ function changeRegisteredTradeDates(args, options) {
       var requestedQty = itemMap[itemName];
       var equipment = equipmentExactMap[itemName];
       var overlaps = otherSchedule.filter(function(row) {
-        return row.equipment === itemName && row.startDT && row.endDT
+        return (typeof inventoryIdentitySame_==='function'?inventoryIdentitySame_(row.equipment,itemName):row.equipment === itemName) && row.startDT && row.endDT
           && row.startDT.getTime() < endMs && row.endDT.getTime() > startMs;
       });
       var points = {};

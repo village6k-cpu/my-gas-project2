@@ -36,7 +36,7 @@ function inventoryRiskIdentity_(equipment) {
   return {
     byId: byId,
     resolve: function(name) {
-      var ids = exact[String(name)] || keys[inventoryRiskNameKey_(name)] || [];
+      var ids = Array.from(new Set((exact[String(name)] || []).concat(keys[inventoryRiskNameKey_(name)] || [])));
       return {item: ids.length === 1 ? byId[ids[0]] : null, candidates: ids.map(function(id) {return byId[id].name;})};
     }
   };
@@ -199,6 +199,11 @@ function buildInventoryRiskReport_(snapshot, options) {
       // A stocked kit with only packing components occupies the kit itself.
       // An equivalent catalog spelling must not erase that manifest or its stock.
       var headerItem=identity.resolve(row.name).item;
+      // A catalog header with unresolved physical contents must itself reach AI
+      // identity review; expanding a packing manifest must not erase the product.
+      if(!headerItem && group.set.components.some(function(c){
+        return c.tracked!==false && !c.allocations && !identity.resolve(c.name).item;
+      })) risk('catalog_stock_missing',row,{setName:group.set.name});
       var physicalComponents=expanded[row.setGroup]?(snapshot.schedules || []).filter(function(r){return groupKey(r,inventoryRiskNameKey_(r.setName))===row.setGroup&&inventoryRiskNameKey_(r.name)!==inventoryRiskNameKey_(row.name);}):group.set.components;
       var mainExpanded=headerItem && physicalComponents.some(function(r){
         var definition=group.set.components.find(function(c){return inventoryRiskNameKey_(c.name)===inventoryRiskNameKey_(r.name);});

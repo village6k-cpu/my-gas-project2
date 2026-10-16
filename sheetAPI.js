@@ -1633,6 +1633,7 @@ function runFunction(funcName, params) {
     "getInventoryStockQuestions",
     "getInventoryResolutionContext",
     "getInventorySupplyPolicy",
+    "getInventoryIdentityCatalog",
     "setScheduleSupplyAllocation",
     "getInventoryRiskReport",
     "getInventoryRiskMonitorStatus",
@@ -1945,6 +1946,9 @@ function runFunction(funcName, params) {
       if (!Array.isArray(rsArgs)) rsArgs = [rsArgs];
       var rsResult = repairTradeContractStatus.apply(null, rsArgs);
       return { success: true, function: funcName, result: rsResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === 'getInventoryIdentityCatalog') {
+      return {success:true,function:funcName,result:getInventoryIdentityCatalog(),executionTime:(new Date()-startTime)+'ms'};
     }
     if (["retireInventoryStockReports", "applyInventorySemanticReview", "setInventoryIncludedComponents", "getInventoryStockQuestions", "getInventoryResolutionContext", "getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts", "setupPreRegistrationStockAlerts", "getPreRegistrationStockAlertStatus", "checkPreRegistrationStockAlert", "flushPreRegistrationStockAlerts", "claimPreRegistrationStockAlertRelay", "authorizePreRegistrationStockAlertRelay", "acknowledgePreRegistrationStockAlertRelay"].indexOf(funcName)>=0) {
       var inventoryArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];

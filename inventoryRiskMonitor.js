@@ -41,7 +41,8 @@ function inventoryRiskEnrichLedger_(equipment,ledger,resolutions) {
   var byId={};equipment.forEach(function(item){byId[item.id]=item;});
   ledger.forEach(function(row){
     var item=byId[row.equipment_id];if(!item)return;
-    item.aliases=[row.name].concat(row.aliases || []);
+    // A stale ledger name must not rename or relink a changed master asset.
+    if(item.name===row.name)item.aliases=(item.aliases || []).concat(row.name,row.aliases || []);
     // Supplemental counts only fill an absent cell for the same verified asset.
     // Never replace explicit zero, maintenance state, or a differing master count.
     if(item.maintenance==='' && row.verify_status==='verified' && item.name===row.name &&
@@ -85,13 +86,12 @@ function readInventoryRiskSnapshot_() {
   try {
     var cfg=SUPA_CFG_(),token=supaToken_(cfg);
     if(!token) throw new Error('보조 데이터 인증 확인 필요');
-    var aliasCache=CacheService.getScriptCache(),aliasText=aliasCache.get('inventory_risk_ledger_aliases_v2');
-    var aliases=aliasText?JSON.parse(aliasText):inventoryRiskDbRows_(cfg,token,'equipment_ledger','select=equipment_id,name,aliases,stock_total,stock_maint,state,verify_status&order=equipment_id');
-    if(!aliasText)try{aliasCache.put('inventory_risk_ledger_aliases_v2',JSON.stringify(aliases),60);}catch(cacheError){}
-    var linkText=aliasCache.get('inventory_identity_links_v1');
-    var links=linkText?JSON.parse(linkText):inventoryRiskDbRows_(cfg,token,'inventory_identity_aliases','select=source_name,equipment_id,equipment_name&order=source_name');
-    if(!linkText)try{aliasCache.put('inventory_identity_links_v1',JSON.stringify(links),30);}catch(cacheError){}
-    inventoryRiskEnrichLedger_(equipment,aliases,links);
+    if(typeof inventoryIdentityEnrich_==='function')inventoryIdentityEnrich_(equipment);
+    else {
+      var aliases=inventoryRiskDbRows_(cfg,token,'equipment_ledger','select=equipment_id,name,aliases,stock_total,stock_maint,state,verify_status&order=equipment_id');
+      var links=inventoryRiskDbRows_(cfg,token,'inventory_identity_aliases','select=source_name,equipment_id,equipment_name&order=source_name');
+      inventoryRiskEnrichLedger_(equipment,aliases,links);
+    }
     var today=Utilities.formatDate(new Date(),'Asia/Seoul','yyyy-MM-dd')+'T00:00:00+09:00';
     var trades=inventoryRiskDbRows_(cfg,token,'trades','select=trade_id,setup_done,return_done&order=trade_id&or='+encodeURIComponent('(return_at.gte.'+today+',and(setup_done.eq.true,return_done.eq.false))'));
     var tradesById={},itemsById={};

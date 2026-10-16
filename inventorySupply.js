@@ -86,20 +86,32 @@ function inventorySupplyAvailabilityRows_(row) {
 
 function inventorySupplyPlan_(items,start,end,meta,schedule) {
   var conflicts=[],warnings=[],allocations=[],equipment=meta.equipment || {},reserved={};
+  function canonical(name) {
+    var info=equipment[name];
+    return info?.canonicalName || meta.identityNames?.[typeof inventoryRiskNameKey_==='function'?inventoryRiskNameKey_(name):name] || name;
+  }
   // Reserve exact upper-model requests first. Flexible lower models use the remainder.
   var order=(items || []).slice().sort(function(a,b){
     return (getInventorySupplyPolicy().upgrades.some(function(r){return r.requestedName===a.name;})?1:0)-
       (getInventorySupplyPolicy().upgrades.some(function(r){return r.requestedName===b.name;})?1:0);
   });
   function free(name) {
+    name=canonical(name);
     var info=equipment[name];if(!info)return 0;
-    var at=[start.getTime()],over=(schedule || []).filter(function(s){return s.equipment===name && s.status!=='반납완료'&&s.status!=='취소'&&s.startDT<end&&s.endDT>start;});
+    var at=[start.getTime()],over=(schedule || []).filter(function(s){return canonical(s.equipment)===name && s.status!=='반납완료'&&s.status!=='취소'&&s.startDT<end&&s.endDT>start;});
     over.forEach(function(s){if(s.startDT>start)at.push(s.startDT.getTime());});
     var peak=0;at.forEach(function(t){var sum=0;over.forEach(function(s){if(s.startDT.getTime()<=t&&s.endDT.getTime()>t)sum+=Number(s.qty)||0;});peak=Math.max(peak,sum);});
     return Math.max(0,(Number(info.total)||0)-(Number(info.maintenance)||0)-peak-(reserved[name]||0));
   }
   order.forEach(function(item){
-    var name=String(item.name || '').trim(),qty=Number(item.qty)||1,info=equipment[name];
+    var requestedName=String(item.name || '').trim(),name=canonical(requestedName),qty=Number(item.qty)||1,info=equipment[name];
+    if(meta.identitySourceIssues?.length){conflicts.push({equipment:requestedName,code:'INVENTORY_IDENTITY_UNAVAILABLE',message:'장비 ID 별칭 원장 확인 필요'});return;}
+    var identityKey=typeof inventoryRiskNameKey_==='function'?inventoryRiskNameKey_(requestedName):requestedName;
+    var ambiguous=meta.identityConflicts?.[identityKey] || (schedule || []).find(function(row){
+      var candidates=row.identityCandidates || meta.identityConflicts?.[typeof inventoryRiskNameKey_==='function'?inventoryRiskNameKey_(row.equipment):row.equipment] || [];
+      return candidates.indexOf(name)>=0 && ['반납완료','취소','제외'].indexOf(row.status)<0 && row.startDT<end && row.endDT>start;
+    });
+    if(ambiguous){conflicts.push({equipment:requestedName,code:'AMBIGUOUS_INVENTORY_IDENTITY',message:requestedName+' 장비 ID 연결 중복 확인 필요'});return;}
     if(inventorySupplyExcluded_(name,info?.category))return;
     var related=inventorySupplyRelatedNames_([name]);
     var invalid=(schedule || []).find(function(s){return s.supplyError && related.indexOf(s.equipment)>=0 && s.startDT<end && s.endDT>start;});
@@ -113,7 +125,7 @@ function inventorySupplyPlan_(items,start,end,meta,schedule) {
     var remaining=qty,ownFree=free(name);
     candidates.forEach(function(provided){
       var quantity=Math.min(remaining,free(provided));if(!quantity)return;
-      allocations.push({requestedName:name,name:provided,qty:quantity,source:'own'});
+      allocations.push({requestedName:requestedName,name:provided===name?requestedName:provided,qty:quantity,source:'own'});
       reserved[provided]=(reserved[provided]||0)+quantity;remaining-=quantity;
     });
     if(remaining)conflicts.push({equipment:name,total:Number(info.total)||0,available:qty-remaining,requested:qty,
@@ -127,8 +139,9 @@ function inventorySupplyPlan_(items,start,end,meta,schedule) {
 function inventorySupplyApplyRows_(rows,plan) {
   var remaining=(plan?.allocations || []).map(function(a){return Object.assign({},a);});
   var namesWithComponents={};rows.forEach(function(r){if(r[2]&&r[2]!==r[3])namesWithComponents[r[2]]=true;});
+  var allocationRows=typeof inventoryIdentityAllocationRows_==='function'?inventoryIdentityAllocationRows_(rows):null;
   rows.forEach(function(r){
-    if(r[2]===r[3]&&namesWithComponents[r[3]])return;
+    if(allocationRows?allocationRows.indexOf(r)<0:r[2]===r[3]&&namesWithComponents[r[3]])return;
     var qty=Number(r[4]),parts=[];
     remaining.forEach(function(a){if(a.requestedName!==r[3]||!a.qty||!qty)return;var n=Math.min(qty,a.qty);parts.push(Object.assign({},a,{qty:n}));a.qty-=n;qty-=n;});
     if(parts.some(function(a){return a.name!==r[3] || a.source==='external';}))r[10]=inventorySupplyNote_(r[10],{equipment:r[3],qty:r[4],startDT:parseDT(r[5],r[6]),endDT:parseDT(r[7],r[8])},parts);
