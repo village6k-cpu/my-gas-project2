@@ -11,7 +11,7 @@ import { PaymentControls } from "./PaymentControls";
 import { MyReservationLinkButton } from "./MyReservationLinkButton";
 import { CustomerSheet } from "./CustomerSheet";
 import { Check, ChevronRight, Phone } from "./icons";
-import { MemoTag } from "./MemoTag";
+import { TradeNotes } from "./TradeNotes";
 import { TradeActions } from "./TradeActions";
 
 const STATUS_BADGE: Record<string, string> = {
@@ -156,6 +156,9 @@ export const ScheduleCard = memo(function ScheduleCard({
         <TradeActions trade={trade} compact />
       </div>
 
+      {/* 전체메모는 접힘 여부와 관계없이 완료 버튼보다 먼저 읽는다. */}
+      <TradeNotes trade={trade} phase={phase} showAdd={open} />
+
       {isCheckout && (
         <div className="px-4 pl-5 pt-3">
           <label className={`tap flex min-h-11 cursor-pointer items-center gap-2.5 rounded-xl px-3 py-2.5 text-[13px] font-bold ring-1 ${
@@ -249,24 +252,13 @@ export const ScheduleCard = memo(function ScheduleCard({
 });
 
 function CollapsedMemoPreview({ trade, onOpen }: { trade: Trade; onOpen: () => void }) {
-  const notes: { phase: "checkout" | "checkin"; text: string }[] = [
-    { phase: "checkout", text: String(trade.noteCheckout ?? "").trim() },
-    { phase: "checkin", text: String(trade.noteCheckin ?? "").trim() },
-  ].filter((n) => n.text) as { phase: "checkout" | "checkin"; text: string }[];
   const itemMemoCount = trade.equipments.filter(
     (e) => String(e.memoCheckout || "").trim() || String(e.memoCheckin || "").trim()
   ).length;
-  if (!notes.length && !itemMemoCount) return null;
+  if (!itemMemoCount) return null;
   return (
     <button type="button" onClick={onOpen} className="tap mx-4 mb-3.5 ml-5 mt-2.5 block w-[calc(100%-2.25rem)] text-left">
       <div className="space-y-1 rounded-xl bg-warn-bg/60 px-2.5 py-2 ring-1 ring-warn-ring/70">
-        {notes.map((n) => (
-          <div key={n.phase} className="flex items-start gap-1.5">
-            <span aria-hidden className="text-[12px]">📝</span>
-            <MemoTag phase={n.phase} className="mt-[1px]" />
-            <span className="line-clamp-2 min-w-0 break-words text-[12px] font-semibold leading-snug text-warn-fg">{n.text}</span>
-          </div>
-        ))}
         {itemMemoCount > 0 && (
           <div className="text-[11px] font-bold text-warn-fg/80">📌 품목 특이사항 {itemMemoCount}건 — 눌러서 확인</div>
         )}

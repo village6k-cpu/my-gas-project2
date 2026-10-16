@@ -9,6 +9,7 @@ const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 const handover = read('apps/today-dashboard/components/HandoverChecklist.tsx');
+const notes = read('apps/today-dashboard/components/TradeNotes.tsx');
 const returns = read('apps/today-dashboard/components/ReturnChecklist.tsx');
 const card = read('apps/today-dashboard/components/ScheduleCard.tsx');
 const memoTag = read('apps/today-dashboard/components/MemoTag.tsx');
@@ -16,19 +17,20 @@ const memoTag = read('apps/today-dashboard/components/MemoTag.tsx');
 // ── ① 전체 메모는 details 안에 숨기지 않는다 ─────────────────────────
 
 assert.doesNotMatch(
-  handover,
+  notes,
   /<details|<summary/,
   'trade-level memos must not hide inside a collapsed <details> — content must be visible without expanding'
 );
 assert.match(
-  handover,
-  /function TradeNotes\(\{ trade, phase \}[\s\S]*trade\.noteCheckout[\s\S]*trade\.noteCheckin/,
+  notes,
+  /function TradeNotes[\s\S]*trade\.noteCheckout[\s\S]*trade\.noteCheckin/,
   'TradeNotes must render BOTH checkout and checkin trade memos on every card'
 );
 assert.match(
-  handover,
-  /<MemoTag phase=\{n\.phase\}/,
-  'each trade memo must carry its origin tag (반출/반납)'
+  notes,
+  /<h3[^>]*>\{NOTE_LABEL\[note\.phase\]\}/,
+  'each trade memo must carry its origin heading (반출/반납)'
+
 );
 
 // ── ② 품목 특이사항: 병합(||) 대신 출처별 분리 표시 ──────────────────
@@ -75,9 +77,16 @@ assert.match(
 );
 assert.match(
   card,
-  /function CollapsedMemoPreview[\s\S]*noteCheckout[\s\S]*noteCheckin[\s\S]*itemMemoCount/,
-  'collapsed preview must cover both trade memos and the item-memo count'
+  /function CollapsedMemoPreview[\s\S]*itemMemoCount/,
+  'collapsed preview must retain the item-memo count'
 );
+
+// 전체메모는 카드 상단에서 상시 표시하고, 상세가 접혀도 숨기지 않는다.
+assert.match(card, /<TradeNotes trade=\{trade\} phase=\{phase\} showAdd=\{open\} \/>/);
+assert.ok(card.indexOf('<TradeNotes') < card.indexOf('onClick={handleDoneToggle}'),
+  'full notes must appear before completion controls');
+assert.doesNotMatch(notes, /line-clamp-|truncate/, 'full notes must never be clipped');
+assert.match(notes, /checkout: "반출 전체 메모"[\s\S]*checkin: "반납 전체 메모"/);
 
 // ── 출처 보존: 저장은 자기 phase 필드에만, 병합 시 교차 복사 금지 ─────
 
