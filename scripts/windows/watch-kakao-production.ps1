@@ -41,7 +41,10 @@ function Report-WatchdogIncident {
     $notifier = Join-Path $PSScriptRoot 'kakao-runtime-incident.js'
     $incidentArgs = @(if ($Healthy.IsPresent) { '--healthy' } else { '--failure'; $Reason })
     & $NodePath $notifier @incidentArgs | Out-Null
-    if ($LASTEXITCODE -ne 0) { Write-Warning 'Kakao runtime incident notification is awaiting delivery.' }
+    if ($LASTEXITCODE -ne 0) {
+        if ($Healthy.IsPresent) { throw 'Kakao capture backlog is unresolved or unverified; recovery remains incomplete.' }
+        Write-Warning 'Kakao runtime incident notification is awaiting delivery.'
+    }
 }
 
 $incidentReason = 'runtime_validation_failed'

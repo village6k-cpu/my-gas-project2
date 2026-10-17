@@ -11,6 +11,8 @@ const reasons={
   plugin_validation_failed:'워커 설치 상태 검증 실패',
   gateway_unavailable:'워커 실행·처리 상태 확인 실패',
   capture_unavailable:'카카오 대화 수집 중단',
+  capture_backlog:'대화 읽기에 실패한 미처리 건이 남아 있습니다. 연결이 복구돼도 등록 누락 확인 전에는 정상화되지 않습니다.',
+  capture_backlog_unknown:'미처리 대화 대조 결과를 확인하지 못했습니다. 자동등록 정상 여부를 확정할 수 없습니다.',
   recovery_incomplete:'자동 복구 후 정상 수집을 확인하지 못함',
   runtime_validation_failed:'자동등록 실행 환경 확인 실패'
 };
@@ -56,6 +58,15 @@ async function reportIncident({healthy,reason,channel,load,save,slack,now=Date.n
   return {status:'sent',receipt:incident.receipt};
 }
 
+async function reportRecovery({backlog,...deps}) {
+  if(backlog?.status==='clear' && backlog.unresolved===0) {
+    return reportIncident({...deps,healthy:true});
+  }
+  const result=await reportIncident({...deps,healthy:false,
+    reason:backlog?.status==='blocked'?'capture_backlog':'capture_backlog_unknown'});
+  return {status:'blocked',incidentStatus:result.status};
+}
+
 function createSlackClient({token,fetchImpl=fetch}) {
   return async(method,payload)=>{
     if(!['conversations.history','conversations.info','chat.postMessage'].includes(method))throw Error('incident_method_not_allowed');
@@ -84,12 +95,21 @@ async function main(argv=process.argv.slice(2)) {
   try {
     const load=()=>fs.existsSync(statePath)?JSON.parse(fs.readFileSync(statePath,'utf8')):{};
     const save=state=>{const tmp=statePath+'.'+process.pid+'.tmp';fs.writeFileSync(tmp,JSON.stringify(state,null,2));fs.renameSync(tmp,statePath);};
-    if(argv.length===1 && argv[0]==='--healthy')return reportIncident({healthy:true,load,save});
+    const recovering=argv.length===1 && argv[0]==='--healthy';
+    let backlog;
+    if(recovering) {
+      try {
+        const response=await fetch('http://127.0.0.1:8787/health',{signal:AbortSignal.timeout(5000)});
+        if(response.ok)backlog=(await response.json()).captureBacklog;
+      } catch { /* Unknown is never a successful business recovery. */ }
+      if(backlog?.status==='clear' && backlog.unresolved===0)return await reportRecovery({backlog,load,save});
+    }
     const configPath=process.env.VILLAGE_STOCK_ALERT_CONFIG || 'C:\\Village\\runtime\\inventory-stock-alerts\\config.json';
     const cfg=JSON.parse(fs.readFileSync(configPath,'utf8'));
     const token=/^SLACK_BOT_TOKEN\s*=\s*(.+)$/m.exec(fs.readFileSync(path.join(process.env.LOCALAPPDATA,'hermes','.env'),'utf8'))?.[1]?.trim().replace(/^['"]|['"]$/g,'');
     if(!token || !/^[CG][A-Z0-9]{8,}$/.test(cfg.channel || ''))throw Error('incident_connection_missing');
     const slack=createSlackClient({token});
+    if(recovering)return await reportRecovery({backlog,channel:cfg.channel,load,save,slack});
     if(argv.length===1 && argv[0]==='--verify-connection') {
       const r=await slack('conversations.info',{channel:cfg.channel});
       if(r.channel?.id!==cfg.channel || !r.channel.is_member || r.channel.is_archived)throw Error('incident_channel_unavailable');
@@ -101,5 +121,5 @@ async function main(argv=process.argv.slice(2)) {
   } finally {fs.closeSync(lock);fs.unlinkSync(lockPath);}
 }
 
-module.exports={reportIncident,findIncidentReceipt,createSlackClient,main};
-if(require.main===module)main().then(r=>console.log(JSON.stringify(r))).catch(()=>{console.error('incident_notice_failed');process.exitCode=1;});
+module.exports={reportIncident,reportRecovery,findIncidentReceipt,createSlackClient,main};
+if(require.main===module)main().then(r=>{console.log(JSON.stringify(r));if(r.status==='blocked' || process.argv[2]==='--healthy' && r.status!=='healthy')process.exitCode=2;}).catch(()=>{console.error('incident_notice_failed');process.exitCode=1;});

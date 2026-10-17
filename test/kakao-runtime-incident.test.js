@@ -22,6 +22,24 @@ function fixture(){
   advance:ms=>now+=ms,offline:x=>offline=x,uncertainPost:x=>uncertainPost=x};
 }
 
+test('recovered connection cannot close an incident while capture jobs remain unresolved', async()=>{
+ const f=fixture();
+ await api.reportIncident({...f.deps,healthy:false,reason:'capture_unavailable'});
+ assert.equal((await api.reportRecovery({...f.deps,backlog:{status:'blocked',unresolved:1}})).status,'blocked');
+ assert.equal(f.state.healthy,false);assert.equal(f.state.incident.closedAt,undefined);
+ assert.equal(f.posts,1,'same incident is not posted twice');
+ assert.equal((await api.reportRecovery({...f.deps,backlog:{status:'clear',unresolved:0}})).status,'healthy');
+ assert.ok(f.state.incident.closedAt);
+});
+
+test('missing or failed backlog readback is not interpreted as zero unfinished work', async()=>{
+ for(const backlog of [undefined,{status:'unknown',unresolved:null},{status:'clear',unresolved:1}]) {
+  const f=fixture();
+  assert.equal((await api.reportRecovery({...f.deps,backlog})).status,'blocked');
+  assert.equal(f.state.healthy,false);
+ }
+});
+
 test('a watchdog failure before any RQ exists creates one verified owner incident',async()=>{
  assert.equal(typeof api.reportIncident,'function');const f=fixture();
  assert.equal((await api.reportIncident({...f.deps,healthy:false,reason:'plugin_validation_failed'})).status,'sent');
@@ -52,6 +70,16 @@ test('verified recovery closes the incident quietly and a later outage gets its 
 test('healthy monitoring never initializes an alert or calls Slack',async()=>{
  assert.equal(typeof api.reportIncident,'function');const f=fixture();f.offline(true);
  assert.equal((await api.reportIncident({...f.deps,healthy:true})).status,'healthy');assert.equal(f.posts,0);
+});
+
+test('healthy CLI exits nonzero if another notifier owns the lock and no readback occurred',()=>{
+ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'village-watchdog-busy-'));
+ try {
+  const root=path.join(temp,'Village/kakao-staging');fs.mkdirSync(root,{recursive:true});
+  fs.writeFileSync(path.join(root,'watchdog-incident.json.lock'),JSON.stringify({pid:process.pid,at:Date.now()}));
+  const r=spawnSync(process.execPath,[modulePath,'--healthy'],{env:{...process.env,LOCALAPPDATA:temp},encoding:'utf8',timeout:10000,windowsHide:true});
+  assert.notEqual(r.status,0);assert.equal(JSON.parse(r.stdout).status,'busy');
+ } finally {fs.rmSync(temp,{recursive:true,force:true});}
 });
 
 test('watchdog catches validation failures and verifies capture after recovery before clearing the incident',()=>{

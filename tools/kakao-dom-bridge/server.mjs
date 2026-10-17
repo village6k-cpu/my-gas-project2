@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
+import { readCaptureBacklog } from './capture-backlog.mjs';
 import { isSharedHermesGatewayIdle } from '../ai-browser-worker/shared-hermes-browser.mjs';
 import { effectiveRegisteredOperationReceipts } from '../ai-browser-worker/registered-operation-recovery.mjs';
 import { deriveCustomerReplyOutcome } from '../work-orchestrator-v2/automation-resolution.mjs';
@@ -43,6 +44,7 @@ import { ensureImmediateNotification } from '../work-orchestrator-v2/immediate-n
 import { digestScheduleWindow, runDigestCycle } from '../work-orchestrator-v2/digest-runner.mjs';
 import { processPendingWorkAction } from '../work-orchestrator-v2/work-actions.mjs';
 import {
+  buildHumanWorkCandidates,
   buildV2P0DeliveryClaim,
   v2P0ReminderDecision
 } from '../work-orchestrator-v2/work-items.mjs';
@@ -1700,7 +1702,24 @@ export function createAiJobDispatcher({
   return async function dispatchGatewayJob(job, context = {}) {
     const config = configForHermesTransport(await getConfig(), resolvedTransport);
     const captured = await capture({ config, job, context });
-    const turn = await buildTurn({ config, job, capture: captured });
+    let turn;
+    try { turn = await buildTurn({ config, job, capture: captured }); }
+    catch (error) {
+      if (error?.code === 'kakao_conversation_evidence_unavailable') {
+        const navigation = captured?.snapshot?.navigation || {};
+        const actual = navigation.devtoolsFirst || navigation;
+        const evidence = actual.conversation_evidence || {};
+        const status = String(actual.status || 'unknown');
+        error.captureDiagnostic = {
+          stage: 'before_gateway_enqueue',
+          navigationStatus: /^[a-z_]{1,100}$/.test(status) ? status : 'unknown',
+          hintMatched: evidence.hint_matched === true,
+          messageCount: Array.isArray(evidence.messages) ? evidence.messages.length : 0,
+          evidenceAttempts: Number.isInteger(actual.evidence_attempts) ? actual.evidence_attempts : 0
+        };
+      }
+      throw error;
+    }
     if (!turn?.event || !turn?.internal) throw new Error('Hermes Gateway turn must contain event and internal evidence');
     const eventKeys = Object.keys(turn.event).sort();
     if (JSON.stringify(eventKeys) !== JSON.stringify(GATEWAY_EVENT_FIELDS)) {
@@ -1766,6 +1785,11 @@ export function assertGatewayFailureNotificationDelivered(result = {}, { slackEn
     ).slice(0, 500)}`);
   }
   const rows = Array.isArray(result?.rows) ? result.rows : [];
+  const workReceipt = result?.workOrchestratorV2;
+  if (workReceipt?.applied === true && workReceipt?.row?.id) return true;
+  if (!rows.length && !String(result?.follow_up_id || '').trim()) {
+    throw new Error('gateway_failure_notification_not_delivered: no durable handoff receipt');
+  }
   const delivery = result?.slackDeliveryResult;
   if (!delivery) {
     if (slackEnabled && rows.length > 0) {
@@ -1912,6 +1936,8 @@ async function fetchWithDnsFallback(endpoint, init = {}) {
         resolve({
           ok: res.statusCode >= 200 && res.statusCode < 300,
           status: res.statusCode,
+          headers: new Headers(res.headers),
+          json: async () => JSON.parse(body),
           text: async () => body
         });
       });
@@ -3776,7 +3802,7 @@ export function compactQueueAuditRecord(filename, object = {}) {
     detectedAt: object.detectedAt || '',
     status: object.status || '',
     reason: object.reason || '',
-    jobId: object.jobId || '',
+    jobId: object.jobId || object.job?.jobId || '',
     roomKey: object.roomKey || object.room_key || '',
     customerName: object.customerName || object.customer_name || '',
     previewText: compactQueueAuditText(object.previewText || object.preview_text || '', 600)
@@ -3811,6 +3837,7 @@ export function compactQueueAuditRecord(filename, object = {}) {
       ...base,
       type: object.type || '',
       message: compactQueueAuditText(object.message || object.error || '', 1600),
+      ...(object.captureDiagnostic ? { captureDiagnostic: object.captureDiagnostic } : {}),
       ...correlation
     };
   }
@@ -4525,9 +4552,34 @@ export async function routeWorkerFailureFollowUp({
     }
   }
 
-  const workOrchestratorV2 = workItemsEnabled
+  let workOrchestratorV2 = workItemsEnabled
     ? Object.freeze({ skipped: true, reason: 'operational_only' })
     : disabled;
+
+  // A customer event whose body could not be captured is unfinished business,
+  // not merely a technical incident. Keep generic operational noise excluded,
+  // but never silently abandon a possible booking after the bounded retry.
+  if (workItemsEnabled && error?.code === 'kakao_conversation_evidence_unavailable') {
+    const candidates = buildHumanWorkCandidates({ job, now, followUpRows: [{
+      work_key: `capture-reconciliation:${String(job.jobId || job.eventHash || job.id)}`,
+      room_key: row.room_key,
+      work_type: 'human_review', priority: 'p0', status: 'open',
+      title: `${customerNameForJob(job)} 대화 처리 누락 확인`,
+      summary: '대화 본문 확인에 실패해 자동 처리가 완료되지 않았습니다. 예약·변경 누락 여부를 원문과 등록 내역으로 대조해야 합니다.',
+      automation_state: 'needs_human',
+      recommended_action: '카카오 원문과 확인요청·스케줄·계약마스터를 대조하세요. 이미 처리된 건은 재등록하지 말고 처리 근거로 종료하세요.',
+      payload: { requires_human_action: true, action_family: 'capture_reconciliation',
+        business_key: `capture-reconciliation:${String(job.jobId || job.eventHash || job.id)}`,
+        alert_reason: 'customer_event_not_processed' }
+    }] });
+    if (candidates.length !== 1 || typeof workStore?.upsertWorkItem !== 'function') {
+      throw new Error('capture reconciliation store is unavailable');
+    }
+    workOrchestratorV2 = await workStore.upsertWorkItem(candidates[0]);
+    if (workOrchestratorV2?.applied !== true || !workOrchestratorV2?.row?.id) {
+      throw new Error('capture reconciliation was not durably applied');
+    }
+  }
 
   const legacyResult = legacyEnabled ? legacy : { inserted: 0, rows: [] };
   return {
@@ -5902,6 +5954,7 @@ async function runWorkerAndRecord(job, context = {}) {
         timeout: /timed out/i.test(error.message),
         failed_at: nowIso()
       });
+      assertGatewayFailureNotificationDelivered(failureFollowUp, { slackEnabled: CONFIG.slackCardDeliveryEnabled });
       appendNdjson('worker-failure-followups.ndjson', { at: nowIso(), jobId: job.jobId, result: failureFollowUp });
     } catch (followUpError) {
       state.failedSupabaseWrites += 1;
@@ -5975,7 +6028,8 @@ async function recordGatewayDispatchFailure(job, error, context = {}) {
   });
   state.failedWorkerRuns += 1;
   appendNdjson('errors.ndjson', {
-    at: nowIso(), type: 'gateway_dispatch', message: String(error?.message || error), job
+    at: nowIso(), type: 'gateway_dispatch', message: String(error?.message || error), job,
+    captureDiagnostic: error?.captureDiagnostic
   });
   let failureFollowUp = null;
   const buildStatusPatch = (policy) => ({
@@ -5987,6 +6041,7 @@ async function recordGatewayDispatchFailure(job, error, context = {}) {
       ai_worker_result: {
         error: String(error?.message || error).slice(0, 1000),
         error_type: policy.errorType,
+        capture_diagnostic: error?.captureDiagnostic || null,
         retryable: policy.retryable,
         failure_follow_up: failureFollowUp
       }
@@ -6672,6 +6727,7 @@ const server = http.createServer(async (req, res) => {
     if (await gatewayHttpHandler(req, res, url)) return;
 
     if (req.method === 'GET' && url.pathname === '/health') {
+      const captureBacklog = await readCaptureBacklog(CONFIG, { fetchImpl: fetchWithDnsFallback });
       await workOrchestratorImmediateRuntime.refreshBacklogHealth();
       const workOrchestratorInvariantHealth = await readBridgeWorkOrchestratorHealth({
         store: workOrchestratorStore,
@@ -6691,6 +6747,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, attachWorkOrchestratorInvariantHealth({
         ok: true,
         gateway: gatewayReadback,
+        captureBacklog,
         config: {
           port: CONFIG.port,
           debounceMs: CONFIG.debounceMs,

@@ -1176,10 +1176,10 @@ test('Gateway failure notification keeps pending when enabled Slack returns a ne
     () => assertGatewayFailureNotificationDelivered(badDelivery, { slackEnabled: true }),
     /gateway_failure_notification_slack_failed/
   );
-  assert.doesNotThrow(() => assertGatewayFailureNotificationDelivered({
+  assert.throws(() => assertGatewayFailureNotificationDelivered({
     inserted: 0, rows: [],
     slackDeliveryResult: { skipped: true, reason: 'no_rows', results: [] }
-  }, { slackEnabled: true }));
+  }, { slackEnabled: true }), /not_delivered/);
   assert.doesNotThrow(() => assertGatewayFailureNotificationDelivered({
     inserted: 1, rows: [{ id: 'failure-card-disabled' }],
     slackDeliveryResult: { skipped: true, reason: 'disabled', results: [] }
