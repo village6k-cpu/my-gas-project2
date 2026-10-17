@@ -40,9 +40,16 @@ function Report-WatchdogIncident {
     if ($WhatIfPreference) { return }
     $notifier = Join-Path $PSScriptRoot 'kakao-runtime-incident.js'
     $incidentArgs = @(if ($Healthy.IsPresent) { '--healthy' } else { '--failure'; $Reason })
-    & $NodePath $notifier @incidentArgs | Out-Null
+    $noticeOutput = & $NodePath $notifier @incidentArgs
     if ($LASTEXITCODE -ne 0) {
-        if ($Healthy.IsPresent) { throw 'Kakao capture backlog is unresolved or unverified; recovery remains incomplete.' }
+        if ($Healthy.IsPresent) {
+            $failure = [InvalidOperationException]::new('Kakao capture backlog is unresolved or unverified; recovery remains incomplete.')
+            try {
+                $notice = ($noticeOutput -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop
+                if ($notice.status -eq 'blocked') { $failure.Data['KakaoRecoveryNoticeHandled'] = $true }
+            } catch { }
+            throw $failure
+        }
         Write-Warning 'Kakao runtime incident notification is awaiting delivery.'
     }
 }
@@ -290,7 +297,9 @@ catch {
 }
 } catch {
     $watchdogFailure = $_
-    try { Report-WatchdogIncident -Reason $incidentReason }
-    catch { Write-Warning 'Kakao runtime incident notification is awaiting delivery.' }
+    if (-not $watchdogFailure.Exception.Data.Contains('KakaoRecoveryNoticeHandled')) {
+        try { Report-WatchdogIncident -Reason $incidentReason }
+        catch { Write-Warning 'Kakao runtime incident notification is awaiting delivery.' }
+    }
     throw $watchdogFailure
 }

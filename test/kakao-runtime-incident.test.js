@@ -82,6 +82,12 @@ test('healthy CLI exits nonzero if another notifier owns the lock and no readbac
  } finally {fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('watchdog preserves a verified backlog incident instead of reclassifying it as gateway failure',()=>{
+ const src=fs.readFileSync(path.join(__dirname,'../scripts/windows/watch-kakao-production.ps1'),'utf8');
+ assert.match(src,/KakaoRecoveryNoticeHandled/);
+ assert.match(src,/if\s*\(-not\s+\$watchdogFailure\.Exception\.Data\.Contains\('KakaoRecoveryNoticeHandled'\)\)/);
+});
+
 test('watchdog catches validation failures and verifies capture after recovery before clearing the incident',()=>{
  const src=fs.readFileSync(path.join(__dirname,'../scripts/windows/watch-kakao-production.ps1'),'utf8');
  assert.match(src,/kakao-runtime-incident\.js/);
