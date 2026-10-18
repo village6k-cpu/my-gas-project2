@@ -1700,6 +1700,16 @@ export function createAiJobDispatcher({
   }
 
   return async function dispatchGatewayJob(job, context = {}) {
+    const existing = typeof channel.get === 'function' ? await channel.get(String(job?.jobId || job?.id || '')) : null;
+    if (existing) {
+      if (existing.room_key !== (job.roomKey || job.room_key) || existing.room_revision !== Number(job.roomRevision ?? job.room_revision)) {
+        throw new Error('Hermes Gateway existing job correlation mismatch');
+      }
+      return { ok: existing.state !== 'failed', queued: ['ready', 'claimed'].includes(existing.state),
+        transport: resolvedTransport, job_id: existing.job_id, state: existing.state, durable: true,
+        human_review_required: existing.human_review_required === true,
+        error_type: String(existing.error?.type || '').slice(0, 120) };
+    }
     const config = configForHermesTransport(await getConfig(), resolvedTransport);
     const captured = await capture({ config, job, context });
     let turn;
@@ -3942,14 +3952,27 @@ async function fetchSupabaseEventByHash(eventHash) {
   return Array.isArray(data) && data.length ? data[0] : null;
 }
 
-async function fetchSupabaseRowsByStatuses(statuses = [], limit = 20) {
+export function buildCaptureRecoveryQuery(endpoint, limit = 24) {
+  const url = new URL(endpoint);
+  url.searchParams.set('status', 'in.(ai_worker_error,processing_by_ai_worker)');
+  url.searchParams.set('payload->capture_retry->>version', 'eq.1');
+  url.searchParams.set('payload->capture_retry->>state', 'eq.pending');
+  url.searchParams.set('payload->capture_retry->>stage', 'eq.before_gateway_enqueue');
+  url.searchParams.set('order', 'updated_at.asc');
+  url.searchParams.set('limit', String(limit));
+  return url;
+}
+
+async function fetchSupabaseRowsByStatuses(statuses = [], limit = 20, { capturePending = false } = {}) {
   if (!supabaseConfigured() || !statuses.length) return [];
-  const url = new URL(supabaseTableEndpoint());
+  const url = capturePending ? buildCaptureRecoveryQuery(supabaseTableEndpoint(), limit) : new URL(supabaseTableEndpoint());
   const cutoff = new Date(Date.now() - CONFIG.supabaseRecoveryLookbackHours * 60 * 60_000).toISOString();
-  url.searchParams.set('status', `in.(${statuses.join(',')})`);
-  url.searchParams.set('created_at', `gte.${cutoff}`);
+  if (!capturePending) {
+    url.searchParams.set('status', `in.(${statuses.join(',')})`);
+    url.searchParams.set('created_at', `gte.${cutoff}`);
+    url.searchParams.set('order', 'updated_at.desc');
+  }
   url.searchParams.set('select', 'id,status,room_key,event_hash,preview_text,unread_count,detected_at,created_at,updated_at,claimed_at,completed_at,error_message,payload');
-  url.searchParams.set('order', 'updated_at.desc');
   url.searchParams.set('limit', String(limit));
   const { response, text, data } = await supabaseFetchWithTimeout(url.toString(), {
     method: 'GET',
@@ -3959,17 +3982,22 @@ async function fetchSupabaseRowsByStatuses(statuses = [], limit = 20) {
   return Array.isArray(data) ? data : [];
 }
 
-async function updateSupabaseEventByHash(eventHash, patch) {
+async function updateSupabaseEventByHash(eventHash, patch, expectedRow = null) {
   if (!supabaseConfigured() || !eventHash || !patch) return { skipped: true };
   const url = new URL(supabaseTableEndpoint());
   url.searchParams.set('event_hash', `eq.${eventHash}`);
+  if (expectedRow) {
+    if (!expectedRow.id || !expectedRow.updated_at || !expectedRow.status) throw new Error('Recovery claim requires exact source version');
+    for (const key of ['id', 'status', 'updated_at']) url.searchParams.set(key, `eq.${expectedRow[key]}`);
+  }
   const { response, text, data } = await supabaseFetchWithTimeout(url.toString(), {
     method: 'PATCH',
     headers: supabaseHeaders('return=representation'),
     body: JSON.stringify(patch)
   });
   if (!response.ok) throw new Error(`Supabase update failed: ${response.status} ${text}`);
-  return { ok: true, row: Array.isArray(data) ? data[0] : data };
+  const row = Array.isArray(data) ? data[0] : data;
+  return { ok: !!row?.id, row };
 }
 
 async function writeSupabaseEvent(eventOrJob, kind) {
@@ -4011,6 +4039,7 @@ function isDuplicateProcessingStale(existing = {}, now = new Date()) {
 }
 
 function shouldRunDuplicateJob(existing = {}) {
+  if (isPendingCaptureRecovery(existing)) return false; // only the durable sweeper owns capture retries
   const status = String(existing?.status || '');
   if (!status) return true;
   if (status === 'processing_by_ai_worker') return isDuplicateProcessingStale(existing);
@@ -5996,6 +6025,9 @@ function getAiJobDispatcher() {
 export function gatewayDispatchFailurePolicy(error, { recoveryAttempts = 0 } = {}) {
   const errorType = String(error?.code || '').trim() || 'gateway_dispatch_failed';
   const transientEvidenceFailure = errorType === 'kakao_conversation_evidence_unavailable';
+  if (transientEvidenceFailure && error?.captureDiagnostic?.stage === 'before_gateway_enqueue') {
+    return { status: 'ai_worker_error', retryable: true, notifyHuman: Number(recoveryAttempts || 0) >= 1, errorType };
+  }
   if (transientEvidenceFailure && Number(recoveryAttempts || 0) < 1) {
     return {
       status: 'ai_worker_error',
@@ -6032,12 +6064,20 @@ async function recordGatewayDispatchFailure(job, error, context = {}) {
     captureDiagnostic: error?.captureDiagnostic
   });
   let failureFollowUp = null;
+  const pendingCapture = error?.code === 'kakao_conversation_evidence_unavailable'
+    && error?.captureDiagnostic?.stage === 'before_gateway_enqueue' && !job?.gateway_dispatch;
+  const captureRetry = pendingCapture ? {
+    version: 1, stage: 'before_gateway_enqueue', state: 'pending',
+    first_failed_at: job?.capture_retry?.first_failed_at || nowIso(),
+    next_attempt_at: new Date(Date.now() + Math.min(300_000, 60_000 * 2 ** Math.min(3, Number(job?.recoveryAttempt || 0)))).toISOString()
+  } : null;
   const buildStatusPatch = (policy) => ({
     status: policy.status,
     error_message: String(error?.message || error).slice(0, 1000),
-    completed_at: nowIso(),
+    completed_at: policy.retryable ? null : nowIso(),
     payload: {
       ...job,
+      ...(captureRetry ? { capture_retry: captureRetry } : {}),
       ai_worker_result: {
         error: String(error?.message || error).slice(0, 1000),
         error_type: policy.errorType,
@@ -6050,7 +6090,10 @@ async function recordGatewayDispatchFailure(job, error, context = {}) {
   let retryPersistence = null;
   if (initialPolicy.retryable) {
     try {
-      retryPersistence = await updateSupabaseEventByHash(job.jobId, buildStatusPatch(initialPolicy));
+      retryPersistence = await updateSupabaseEventByHash(job.jobId, buildStatusPatch(initialPolicy), context.recoveryClaim || null);
+      if (context.recoveryClaim && retryPersistence?.ok === false) {
+        return { ok: false, skipped: true, reason: 'recovery_claim_lost', retryable: false };
+      }
     } catch (supabaseError) {
       state.failedSupabaseWrites += 1;
       appendNdjson('errors.ndjson', {
@@ -6066,6 +6109,7 @@ async function recordGatewayDispatchFailure(job, error, context = {}) {
         origin: context.origin || 'hermes_gateway_dispatch',
         failed_at: nowIso()
       });
+      assertGatewayFailureNotificationDelivered(failureFollowUp, { slackEnabled: CONFIG.slackCardDeliveryEnabled });
       appendNdjson('worker-failure-followups.ndjson', {
         at: nowIso(), jobId: job.jobId, result: failureFollowUp
       });
@@ -6077,7 +6121,7 @@ async function recordGatewayDispatchFailure(job, error, context = {}) {
     }
   }
   if (!initialPolicy.retryable || policy.notifyHuman) {
-    await updateSupabaseEventByHash(job.jobId, buildStatusPatch(policy)).catch((supabaseError) => {
+    await updateSupabaseEventByHash(job.jobId, buildStatusPatch(policy), retryPersistence?.row || context.recoveryClaim || null).catch((supabaseError) => {
       state.failedSupabaseWrites += 1;
       appendNdjson('errors.ndjson', {
         at: nowIso(), type: 'gateway_dispatch_supabase_update', message: supabaseError.message, jobId: job.jobId
@@ -6087,27 +6131,28 @@ async function recordGatewayDispatchFailure(job, error, context = {}) {
   return { ok: false, error, retryable: policy.retryable, status: policy.status };
 }
 
-async function dispatchAiJob(job, context = {}) {
+export async function dispatchAiJob(job, context = {}, dispatcher = getAiJobDispatcher()) {
   try {
-    const result = await getAiJobDispatcher()(job, context);
+    const result = await dispatcher(job, context);
     if (gatewayTransportEnabled && await recoverFailedGatewayDispatch({
       result,
       recover: () => getGatewayFailureNotificationCoordinator().recover()
     })) {
       return result;
     }
-    if (gatewayTransportEnabled && result?.queued) {
+    if (gatewayTransportEnabled && (result?.queued || job.capture_retry && result?.durable)) {
       await updateSupabaseEventByHash(job.jobId, {
         status: 'processing_by_ai_worker',
         payload: {
           ...job,
+          ...(job.capture_retry ? { capture_retry: { ...job.capture_retry, state: 'handed_off', handed_off_at: nowIso() } } : {}),
           gateway_dispatch: {
             transport: CONFIG.hermesTransport,
             state: result.state,
             queued_at: nowIso()
           }
         }
-      }).catch((error) => {
+      }, context.recoveryClaim || null).catch((error) => {
         state.failedSupabaseWrites += 1;
         appendNdjson('errors.ndjson', {
           at: nowIso(), type: 'gateway_dispatch_supabase_processing', message: error.message, jobId: job.jobId
@@ -6175,8 +6220,19 @@ function rowAgeMs(row = {}, fieldOrder = ['updated_at', 'completed_at', 'created
   return Number.POSITIVE_INFINITY;
 }
 
-function shouldRecoverSupabaseRow(row = {}) {
+function isPendingCaptureRecovery(row = {}) {
+  const payload = objectPayload(row.payload);
+  return payload.capture_retry?.version === 1 && payload.capture_retry?.state === 'pending'
+    && payload.capture_retry?.stage === 'before_gateway_enqueue' && !payload.gateway_dispatch;
+}
+
+export function shouldRecoverSupabaseRow(row = {}) {
   const status = String(row.status || '');
+  if (row.payload?.capture_retry?.state === 'handed_off' && row.payload?.gateway_dispatch) return false;
+  if (isPendingCaptureRecovery(row)) {
+    if (status === 'processing_by_ai_worker') return isDuplicateProcessingStale(row);
+    return status === 'ai_worker_error' && Date.parse(row.payload.capture_retry.next_attempt_at) <= Date.now();
+  }
   // The attempt cap must hold for EVERY recoverable status: a failed replay can
   // leave the row in ready/processing states too, and an uncapped status turns
   // one failing job into a worker-monopolizing retry loop.
@@ -6222,6 +6278,8 @@ async function markSupabaseRowSkippedLowValue(row, reason) {
 }
 
 function shouldEscalateExhaustedSupabaseRow(row = {}) {
+  if (row.payload?.capture_retry?.state === 'handed_off' && row.payload?.gateway_dispatch) return false;
+  if (isPendingCaptureRecovery(row)) return false; // notify alongside retry, never abandon a read-only capture
   const status = String(row.status || '');
   return ['ai_worker_error', 'ready_for_ai_worker', 'ai_decision_ready_no_sheet_write', 'processing_by_ai_worker'].includes(status)
     && recoveryAttemptCount(row) >= CONFIG.supabaseRecoveryMaxAttempts
@@ -6270,6 +6328,7 @@ function buildJobFromSupabaseRow(row = {}, attempt = 0) {
 async function fetchRecoverableSupabaseRows() {
   const scanLimit = Math.max(CONFIG.supabaseRecoveryBatchSize * 12, 24);
   const groups = await Promise.all([
+    fetchSupabaseRowsByStatuses(['ai_worker_error', 'processing_by_ai_worker'], scanLimit, { capturePending: true }),
     fetchSupabaseRowsByStatuses(['ready_for_ai_worker', 'ai_decision_ready_no_sheet_write'], scanLimit),
     fetchSupabaseRowsByStatuses(['processing_by_ai_worker'], scanLimit),
     fetchSupabaseRowsByStatuses(['ai_worker_error'], scanLimit)
@@ -6283,6 +6342,10 @@ async function fetchRecoverableSupabaseRows() {
       return true;
     })
     .sort((a, b) => {
+      // Shared oldest-first service: poison capture rooms cannot consume every
+      // batch ahead of ready jobs, and recent arrivals cannot starve old work.
+      const age = Date.parse(a.updated_at || a.created_at || 0) - Date.parse(b.updated_at || b.created_at || 0);
+      if (age) return age;
       const priority = jobPriorityScore(a) - jobPriorityScore(b);
       if (priority) return priority;
       return Date.parse(b.updated_at || b.created_at || 0) - Date.parse(a.updated_at || a.created_at || 0);
@@ -6307,7 +6370,7 @@ async function markSupabaseRowClaimedForRecovery(row, attempt) {
       ...payload,
       bridge_recovery: recovery
     }
-  });
+  }, row);
 }
 
 async function markSupabaseRowEscalated(row, followUpResult) {
@@ -6330,7 +6393,7 @@ async function markSupabaseRowEscalated(row, followUpResult) {
   });
 }
 
-async function runSupabaseRecoverySweep(reason = 'interval') {
+export async function runSupabaseRecoverySweep(reason = 'interval', { dispatch = dispatchAiJob } = {}) {
   if (!CONFIG.supabaseRecoveryEnabled || !supabaseConfigured() || (!CONFIG.workerCommand && !gatewayTransportEnabled)) return { skipped: true };
   if (state.recoverySweepRunning) return { skipped: true, reason: 'already_running' };
   state.recoverySweepRunning = true;
@@ -6372,12 +6435,14 @@ async function runSupabaseRecoverySweep(reason = 'interval') {
       const attempt = recoveryAttemptCount(row) + 1;
       const job = buildJobFromSupabaseRow(row, attempt);
       try {
-        await markSupabaseRowClaimedForRecovery(row, attempt);
+        const claim = await markSupabaseRowClaimedForRecovery(row, attempt);
+        if (!claim?.ok || !claim.row?.id) { result.skipped += 1; continue; }
         appendNdjson('worker-replayed.ndjson', { at: nowIso(), jobId: job.jobId, reason: 'supabase_recovery_sweeper', attempt, rowId: row.id, previousStatus: row.status });
-        const outcome = await dispatchAiJob(job, {
+        const outcome = await dispatch(job, {
           origin: 'supabase_recovery_sweeper',
           attempt,
-          previous_status: row.status
+          previous_status: row.status,
+          recoveryClaim: claim.row
         });
         result.replayed += 1;
         if (outcome.ok) state.recoveredJobs += 1;

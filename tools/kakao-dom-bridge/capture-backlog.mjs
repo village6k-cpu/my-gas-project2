@@ -5,7 +5,7 @@ export async function readCaptureBacklog(config = {}, { fetchImpl = fetch } = {}
   try {
     const url = new URL(`/rest/v1/${encodeURIComponent(config.supabaseTable)}`, config.supabaseUrl);
     url.searchParams.set('select', 'event_hash,room_key,detected_at');
-    url.searchParams.set('status', 'in.(ai_worker_error,needs_human_review)');
+    url.searchParams.set('status', 'in.(ai_worker_error,needs_human_review,processing_by_ai_worker)');
     url.searchParams.set('payload->ai_worker_result->>error_type', 'eq.kakao_conversation_evidence_unavailable');
     url.searchParams.set('order', 'detected_at.asc');
     url.searchParams.set('limit', '1000');

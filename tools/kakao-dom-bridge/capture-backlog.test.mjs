@@ -8,7 +8,7 @@ test('health stays blocked by a capture failure even when the Gateway queue is e
     if (new URL(url).pathname.endsWith('/work_items_v2')) return new Response('[]', { headers: { 'content-range':'*/0' } });
     const q = new URL(url).searchParams;
     assert.equal(init.method, 'GET');
-    assert.equal(q.get('status'), 'in.(ai_worker_error,needs_human_review)');
+    assert.equal(q.get('status'), 'in.(ai_worker_error,needs_human_review,processing_by_ai_worker)', 'claiming a capture retry is not successful recovery');
     assert.equal(q.get('payload->ai_worker_result->>error_type'), 'eq.kakao_conversation_evidence_unavailable');
     assert.equal(q.has('created_at'), false, 'outages must not disappear merely by ageing out');
     return new Response(JSON.stringify(['dom-test','dom-test2','dom-test3'].map(event_hash=>({event_hash,room_key:'chat:123',detected_at:'2026-10-17T13:59:30.228Z'}))), {

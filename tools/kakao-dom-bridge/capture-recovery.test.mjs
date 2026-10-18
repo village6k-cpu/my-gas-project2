@@ -2,6 +2,53 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
 const { routeWorkerFailureFollowUp, assertGatewayFailureNotificationDelivered, createAiJobDispatcher, compactQueueAuditRecord } = await import('./server.mjs');
+const api = await import('./server.mjs');
+
+test('capture retry lookup cannot age out unfinished jobs or replay unmarked historical failures', () => {
+  assert.equal(typeof api.buildCaptureRecoveryQuery, 'function');
+  const query = api.buildCaptureRecoveryQuery('https://example.invalid/rest/v1/ai_processing_events', 24).searchParams;
+  assert.equal(query.has('created_at'), false);
+  assert.equal(query.get('payload->capture_retry->>state'), 'eq.pending');
+  assert.equal(query.get('payload->capture_retry->>version'), 'eq.1');
+  assert.equal(query.get('order'), 'updated_at.asc');
+});
+
+test('proven pre-enqueue capture failures remain retryable beyond the old attempt cap', () => {
+  const error = Object.assign(Error('body unavailable'), { code: 'kakao_conversation_evidence_unavailable',
+    captureDiagnostic: { stage: 'before_gateway_enqueue' } });
+  for (const recoveryAttempts of [0, 1, 2, 10]) {
+    const policy = api.gatewayDispatchFailurePolicy(error, { recoveryAttempts });
+    assert.equal(policy.retryable, true);
+    assert.equal(policy.status, 'ai_worker_error');
+    if (recoveryAttempts > 0) assert.equal(policy.notifyHuman, true, 'escalation must not cancel automatic recovery');
+  }
+});
+
+test('capture retry survives restart and old age, but respects backoff and excludes uncertain execution', () => {
+  assert.equal(typeof api.shouldRecoverSupabaseRow, 'function');
+  const now = Date.now();
+  const row = { status: 'ai_worker_error', created_at: '2026-08-01T00:00:00Z', updated_at: new Date(now - 3600000).toISOString(),
+    payload: { capture_retry: { version: 1, stage: 'before_gateway_enqueue', state: 'pending', next_attempt_at: new Date(now - 1000).toISOString() },
+      bridge_recovery: { attempts: 10 } } };
+  assert.equal(api.shouldRecoverSupabaseRow(JSON.parse(JSON.stringify(row))), true);
+  const waiting = structuredClone(row); waiting.payload.capture_retry.next_attempt_at = new Date(now + 60000).toISOString();
+  assert.equal(api.shouldRecoverSupabaseRow(waiting), false);
+  const uncertain = structuredClone(row); uncertain.payload.gateway_dispatch = { queued_at: '2026-10-18T00:00:00Z' };
+  assert.equal(api.shouldRecoverSupabaseRow(uncertain), false);
+  const historical = structuredClone(row); delete historical.payload.capture_retry;
+  assert.equal(api.shouldRecoverSupabaseRow(historical), false);
+});
+
+test('a captured job already durably enqueued is returned without re-reading or executing it', async () => {
+  const job = { jobId: 'dom-existing', roomKey: 'chat:123', roomRevision: 1 };
+  const dispatch = createAiJobDispatcher({ transport: 'gateway',
+    channel: { async get(id) { assert.equal(id, job.jobId); return { job_id: id, room_key: job.roomKey, room_revision: 1, state: 'completed' }; },
+      enqueue() { assert.fail('must not enqueue completed job'); } },
+    capture: async () => assert.fail('completed job must not be recaptured'),
+    buildTurn: async () => assert.fail('completed job must not be reinterpreted'), runLegacy() {} });
+  const result = await dispatch(job);
+  assert.equal(result.state, 'completed'); assert.equal(result.queued, false);
+});
 
 test('pre-enqueue capture failure preserves bounded navigation diagnostics without retaining conversation text', async () => {
   const dispatch = createAiJobDispatcher({ transport: 'gateway',

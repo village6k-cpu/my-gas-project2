@@ -28,7 +28,31 @@ disconnects are eliminated.
 - Future capture failures persist bounded navigation status, hint match, message
   count and attempt count, without conversation text or credentials.
 
-## Operational limits
+## Automatic capture continuation (follow-up correction)
+
+Alerting alone does not prevent omission. A verified pre-enqueue capture failure
+now retains a durable `capture_retry` marker and remains automatically retryable
+after the former one-retry limit. Escalation runs alongside recovery, not instead
+of it. Retries use 1-5 minute backoff, the existing five-minute sweep and batch
+limit, and shared oldest-first ordering. Marked unfinished captures do not age out
+of the 36-hour generic recovery window. Existing historical failures are not
+silently opted into this policy.
+
+Recovery claims compare exact row ID, status and update timestamp. Empty claims
+do not dispatch. Late capture failures also compare the claim before persisting,
+so they cannot replace a newer handoff or resolution. Existing durable Gateway
+jobs are read back without recapture or repeat execution; the source capture
+marker becomes `handed_off` even when that durable job is already terminal.
+Handoff is not claimed as successful registration: the existing Gateway
+application, operation receipts and ledger checks still determine the outcome.
+
+The isolated lifecycle test uses the real REST persistence code, recovery sweep
+and durable Gateway channel. It covers three continued failures, process-state
+loss, an older source, lost claims, late stale failures, restored capture without
+new messages, one queue entry, restart readback and already-terminal handoff.
+It does not inject failures into customer conversations or create live bookings.
+
+## Historical reconciliation remaining
 
 Historical database readback found 138 capture-error events in 77 rooms, dating
 from August 23 to October 17. These are **unreconciled failure records**, not proof
