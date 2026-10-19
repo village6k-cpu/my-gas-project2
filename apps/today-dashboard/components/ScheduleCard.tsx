@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useId, useState } from "react";
 import type { TabKey, Trade } from "@/lib/domain/types";
 import { isCancelledTrade, phaseForDate, returnCompletionBlockers, setupProgress, timeLabel } from "@/lib/domain/status";
 import { ensureTradePhotos, setKakaoConversationChecked, toggleReturn, toggleSetup } from "@/lib/data/store";
@@ -56,6 +56,24 @@ export const ScheduleCard = memo(function ScheduleCard({
   const isCheckout = phase === "checkout";
   const returnBlockers = isCheckout ? [] : returnCompletionBlockers(trade);
   const done = isCheckout ? trade.setupDone : trade.returnDone && returnBlockers.length === 0;
+  // 확인은 이 화면의 작업 단계에만 유효하다. 메모가 바뀌면 이전 체크를 재사용하지 않는다.
+  const [acknowledgedNotes, setAcknowledgedNotes] = useState<string | null>(null);
+  const [editingNotes, setEditingNotes] = useState(false);
+  const memoHelpId = useId();
+  const hasNotes = !!(trade.noteCheckout?.trim() || trade.noteCheckin?.trim());
+  const notesKey = JSON.stringify([trade.tradeId, phase, trade.noteCheckout ?? "", trade.noteCheckin ?? ""]);
+  const notesChecked = acknowledgedNotes === notesKey;
+  const completionRecorded = isCheckout ? trade.setupDone : trade.returnDone;
+  const memoBlocked = !completionRecorded && (editingNotes || (hasNotes && !notesChecked));
+
+  useEffect(() => { setAcknowledgedNotes(null); }, [notesKey, completionRecorded]);
+  useEffect(() => { setEditingNotes(false); }, [trade.tradeId, phase]);
+
+  function handleNoteEditingChange(editing: boolean) {
+    setEditingNotes(editing);
+    setAcknowledgedNotes(null);
+  }
+
   const doneAt = isCheckout ? trade.setupDoneAt : trade.returnDoneAt;
   const prog = setupProgress(trade, phase);
   const accent = isCheckout ? "bg-checkout-fg" : "bg-checkin-fg";
@@ -63,6 +81,7 @@ export const ScheduleCard = memo(function ScheduleCard({
   const overdue = !trade.returnDone && new Date(trade.returnAt) < new Date(`${date}T00:00:00`);
 
   async function handleDoneToggle() {
+    if (memoBlocked) return;
     if (isCheckout) {
       const result = await toggleSetup(trade.tradeId);
       if (!result.ok) setOpen(true);
@@ -157,7 +176,38 @@ export const ScheduleCard = memo(function ScheduleCard({
       </div>
 
       {/* 전체메모는 접힘 여부와 관계없이 완료 버튼보다 먼저 읽는다. */}
-      <TradeNotes trade={trade} phase={phase} showAdd={open} />
+      <TradeNotes
+        key={`${trade.tradeId}:${phase}`}
+        trade={trade} phase={phase} showAdd={open}
+        onEditingChange={handleNoteEditingChange}
+      />
+
+      {!completionRecorded && (hasNotes || editingNotes) && (
+        <div className="px-4 pl-5 pt-3">
+          {hasNotes && (
+            <label className={`tap flex min-h-12 items-center gap-3 rounded-xl border-2 px-3 py-3 text-[15px] font-bold ${
+              notesChecked
+                ? "border-checkin-ring bg-checkin-bg text-checkin-fg"
+                : "border-warn-ring bg-warn-bg text-ink"
+            } ${editingNotes ? "opacity-60" : "cursor-pointer"}`}>
+              <input
+                type="checkbox"
+                checked={notesChecked}
+                disabled={editingNotes}
+                onChange={(event) => setAcknowledgedNotes(event.target.checked ? notesKey : null)}
+                aria-describedby={memoHelpId}
+                className="h-6 w-6 shrink-0 accent-brand-600"
+              />
+              <span>위 전체메모를 확인했습니다</span>
+            </label>
+          )}
+          <p id={memoHelpId} className="mt-1.5 text-[13px] font-semibold text-ink-soft">
+            {editingNotes ? "메모를 저장하거나 취소한 뒤 확인해 주세요."
+              : notesChecked ? "추가 장비·전달사항 확인 완료"
+              : `${isCheckout ? "반출" : "반납"} 완료 전, 추가 장비·전달사항을 확인하고 체크해 주세요.`}
+          </p>
+        </div>
+      )}
 
       {isCheckout && (
         <div className="px-4 pl-5 pt-3">
@@ -182,7 +232,9 @@ export const ScheduleCard = memo(function ScheduleCard({
         <button
           type="button"
           onClick={handleDoneToggle}
-          className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 disabled:cursor-wait disabled:opacity-70 ${
+          disabled={memoBlocked}
+          aria-describedby={memoBlocked ? memoHelpId : undefined}
+          className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 disabled:cursor-not-allowed disabled:opacity-50 ${
             done
               ? "bg-checkin-bg text-checkin-fg ring-checkin-ring"
               : isCheckout

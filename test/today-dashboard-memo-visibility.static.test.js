@@ -82,7 +82,7 @@ assert.match(
 );
 
 // 전체메모는 카드 상단에서 상시 표시하고, 상세가 접혀도 숨기지 않는다.
-assert.match(card, /<TradeNotes trade=\{trade\} phase=\{phase\} showAdd=\{open\} \/>/);
+assert.match(card, /<TradeNotes\b[^>]*trade=\{trade\} phase=\{phase\} showAdd=\{open\}[^>]*\/>/);
 assert.ok(card.indexOf('<TradeNotes') < card.indexOf('onClick={handleDoneToggle}'),
   'full notes must appear before completion controls');
 assert.doesNotMatch(notes, /line-clamp-|truncate/, 'full notes must never be clipped');
