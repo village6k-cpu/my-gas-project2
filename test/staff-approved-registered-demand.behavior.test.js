@@ -82,7 +82,7 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
     REGISTERED_STAFF_DEMAND_TOKEN_: token,
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, flush() {},
       openByUrl: () => ({ getSheetByName: () => ledger }) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: () => 'https://example.invalid/ledger' }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: key => key === '개고생2_URL' ? 'https://example.invalid/ledger' : '' }) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
     Utilities: { formatDate: date => new Date(date).toISOString().slice(0, 10) },
     normalizeDashboardAddEntries_: entries => entries.map(entry => ({ ...entry })),
@@ -97,6 +97,9 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
     buildDashboardEquipmentMeta_: () => ({ equipment: {
       'Scarce light': { total, maintenance: 0 }, 'Existing light': { total: 5, maintenance: 0 }
     }, categories: { 'Light category': true } }),
+    findDashboardScheduleRowsForEquipments_: () => schedule.rows.slice(1).map(row => [...row]),
+    buildDashboardScheduleData_: rows => rows.map(row => ({contractID: row[1], equipment: row[3], qty: row[4],
+      startDT: parseDT(row[5], row[6]), endDT: parseDT(row[7], row[8]), status: row[9], note: row[10]})),
     getDashboardAvailabilityScheduleData_: scheduleData,
     getScheduleData: scheduleData,
     parseDT,
@@ -113,6 +116,13 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
   const addEnd = source.indexOf('\nvar DASHBOARD_ONSITE_IDEM_PROP_', addStart);
   vm.runInNewContext(supplySource + '\n' + [
     functionSource('buildAvailabilityItems_'),
+    functionSource('setMasterProductKey_'),
+    functionSource('getSetMasterProductAliases_'),
+    functionSource('resolveSetMasterProduct_'),
+    functionSource('resolveSetMasterComponents_'),
+    functionSource('rentalLightingFixtureNames_'),
+    functionSource('rentalAccessoryKind_'),
+    functionSource('resolveRentalAccessoryPrice_'),
     functionSource('requireSetMasterPrice_'),
     ...(source.includes('function resolveStaffApprovedRegistrationPrice_(') ? [functionSource('resolveStaffApprovedRegistrationPrice_')] : []),
     functionSource('mergeAvailabilityItems_'),
@@ -328,4 +338,30 @@ test('single component replacement fences exact source, parent, quantity, mixed 
     assert.equal(bad.schedule.writes, 0);
   }
   assert.throws(() => h.context.preflightRegisteredTradeComponentReplacement_(TRADE, h.plan, {}), /FORBIDDEN/);
+});
+
+test('new accessories use actual lighting in the same trade, never support category or removed fixtures', () => {
+  for (const [existingName, exclude, expectedPrice] of [['어퓨쳐 600X', false, 0], ['C스탠드', false, 5000], ['어퓨쳐 600X', true, 5000]]) {
+    const h = gasHarness({item: existingName});
+    h.context.buildDashboardSetLookup_ = () => ({items: {'릴선': true, '어퓨쳐 600X': true, 'C스탠드': true}, prices: {'릴선':5000,'어퓨쳐 600X':35000,'C스탠드':5000}, components: {}});
+    const result = h.context.dashboardAddEquipments(TRADE, [{name:'릴선 - 1ea', qty:2}], {
+      ...h.options, excludeScheduleIds: exclude ? [TRADE+'-01'] : []
+    });
+    assert.equal(result.success, true, JSON.stringify(result));
+    const added = h.schedule.rows.find(row => row[3] === '릴선 - 1ea');
+    assert.equal(added[11], expectedPrice);
+    assert.equal(added[4], 2);
+    assert.match(added[10], /\[정식상품\]릴선/);
+    assert.equal(h.schedule.rows[1][11], 7000, 'existing equipment is not repriced');
+  }
+});
+
+test('a fixture booked for another period cannot grant a free added extension', () => {
+  const h = gasHarness({item: '어퓨쳐 600X'});
+  h.context.buildDashboardSetLookup_ = () => ({items: {'릴선': true, '어퓨쳐 600X': true}, prices: {'릴선':5000,'어퓨쳐 600X':35000}, components: {}});
+  const result = h.context.dashboardAddEquipments(TRADE, [{name:'릴선', qty:1}], {
+    ...h.options, periodOverride: {startDate:NEW[0],startTime:NEW[1],endDate:NEW[2],endTime:NEW[3]}
+  });
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(h.schedule.rows.find(row => row[3] === '릴선')[11], 5000);
 });

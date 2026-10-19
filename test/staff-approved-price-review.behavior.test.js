@@ -21,11 +21,11 @@ test('the actual registration price stage preserves confirmed unknown equipment 
     ['RQ-X', '', '', '', '', 'Approved unknown lens', 1, '', '❓ 미등록 장비', '', '', '', '', '', '', '', '']
   ];
   const lookup = {items: {'Known camera': true}, prices: {'Known camera': 50000}};
-  const context = { allData: rows, mergeSchedulePlan: {writeSourceIndexes: [0, 1]}, setSheet: {},
+  const context = { reqID: 'RQ-X', mergeTargetScheduleRows: [], allData: rows, mergeSchedulePlan: {writeSourceIndexes: [0, 1]}, setSheet: {},
     buildDashboardSetLookup_: () => lookup,
     findSetPrice: name => context.requireSetMasterPrice_(name, lookup) };
   vm.createContext(context);
-  vm.runInContext(fn('requireSetMasterPrice_') + '\n' + fn('resolveStaffApprovedRegistrationPrice_') +
+  vm.runInContext(fn('setMasterProductKey_') + '\n' + fn('getSetMasterProductAliases_') + '\n' + fn('resolveSetMasterProduct_') + '\n' + fn('resolveSetMasterComponents_') + '\n' + fn('rentalLightingFixtureNames_') + '\n' + fn('rentalAccessoryKind_') + '\n' + fn('resolveRentalAccessoryPrice_') + '\n' + fn('requireSetMasterPrice_') + '\n' + fn('resolveStaffApprovedRegistrationPrice_') +
     '\nfunction stage(approved){var directRegisterApproved=approved;' +
     gas.slice(start, end) + '\nreturn {prices:registrationPrices,notes:registrationPriceNotes};}', context);
   const result = context.stage(true);

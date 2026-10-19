@@ -8833,9 +8833,10 @@ function buildDashboardSetLookup_(setSheet) {
       var setName = String(row[0] || "").trim();
       if (!setName) return;
       lookup.items[setName] = true;
-      if (row[6] !== "" && row[6] !== null && row[6] !== undefined && lookup.prices[setName] === undefined) {
+      if (row[6] !== "" && row[6] !== null && row[6] !== undefined) {
         var price = parseSetMasterPrice_(row[6]);
         if (price === null) lookup.priceErrors[setName] = '단가 형식 오류';
+        else if (lookup.prices[setName] !== undefined && lookup.prices[setName] !== price) lookup.priceErrors[setName] = '동일 상품의 단가 충돌';
         else lookup.prices[setName] = price;
       }
 
@@ -8861,21 +8862,148 @@ function parseSetMasterPrice_(value) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-function requireSetMasterPrice_(name, lookup) {
-  name = String(name || '').trim();
-  if (!lookup.items[name]) throw new Error('세트마스터 A열에 없는 상품: ' + name);
+function requireSetMasterPrice_(name, lookup, rentalContext) {
+  var policyPrice = resolveRentalAccessoryPrice_(name, lookup, rentalContext);
+  if (policyPrice !== null) return policyPrice;
+  var resolution = resolveSetMasterProduct_(name, lookup);
+  if (!resolution.canonicalName) throw new Error('세트마스터 정식 상품 확인 필요: ' + String(name || '').trim() +
+    (resolution.candidates.length ? ' (후보: ' + resolution.candidates.join(', ') + ')' : ''));
+  name = resolution.canonicalName;
   if ((lookup.priceErrors && lookup.priceErrors[name]) || lookup.prices[name] === undefined) {
     throw new Error('세트마스터 G열 단가를 확인하세요: ' + name);
   }
   return lookup.prices[name];
 }
 
+// 판매상품 식별과 실물 재고 식별은 별개다. 모델/마운트/구성/농도를 삭제하거나
+// 유사도만으로 상품을 선택하지 않는다. 동일 정규화 키의 복수 상품도 자동 선택 금지.
+function setMasterProductKey_(name) {
+  return String(name || '').normalize('NFC').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+function getSetMasterProductAliases_() {
+  var aliases = [
+    { alias: '헤이저', canonicalName: '헤이져 머신' },
+    { alias: '헤이저 머신', canonicalName: '헤이져 머신' },
+    { alias: '릴선 - 1ea', canonicalName: '릴선' },
+    { alias: '85mm GM', canonicalName: '소니 단렌즈(1구)' },
+    { alias: '24 mm gm2 단렌즈', canonicalName: '소니 단렌즈(1구)' },
+    { alias: '35 mm gm2 단렌즈', canonicalName: '소니 단렌즈(1구)' },
+    { alias: '씨붐', canonicalName: 'C Boom AVENGER D600' },
+    { alias: '어퓨쳐 spotlight', canonicalName: '어퓨처 스팟마운트' },
+    { alias: '오토폴 3500', canonicalName: '오토폴' },
+    { alias: '메슬리니 대', canonicalName: '매슬리니' },
+    { alias: '넉자 디퓨저', canonicalName: '넉자 그리드' },
+    { alias: '석자 디퓨저', canonicalName: '석자 그리드' },
+    { alias: '로데 비디오 마이크 프로 +', canonicalName: '로데 비디오마이크 프로' },
+    { alias: 'NiSi True Color ND-Vario 가변 ND 필터 (82mm, 1-5 Stop)', canonicalName: 'NiSi True Color ND-Vario 가변 ND 필터' },
+    { alias: '사진 속 핸들그립', canonicalName: '핸들그립' },
+    { alias: 'FX3 핸들그립', canonicalName: '핸들그립' }
+  ];
+  // 운영자가 확인한 판매상품 별칭만 저장. 시트 구조와 실물 재고 별칭을 변경하지 않는다.
+  // [{alias, canonicalName}] 형식이며 가격은 저장하지 않고 매번 세트마스터 G열을 읽는다.
+  var raw = typeof PropertiesService === 'undefined' ? '' :
+    PropertiesService.getScriptProperties().getProperty('SALES_CATALOG_ALIASES_V1');
+  if (!raw) return aliases;
+  var configured;
+  try { configured = JSON.parse(raw); } catch (error) { throw new Error('세트마스터 판매상품 별칭 설정 형식 오류'); }
+  if (!Array.isArray(configured) || configured.some(function(entry) {
+    return !entry || typeof entry.alias !== 'string' || !entry.alias.trim() ||
+      typeof entry.canonicalName !== 'string' || !entry.canonicalName.trim() ||
+      /[\r\n]/.test(entry.alias + entry.canonicalName);
+  })) throw new Error('세트마스터 판매상품 별칭 설정 형식 오류');
+  return aliases.concat(configured);
+}
+
+function resolveSetMasterProduct_(name, lookup) {
+  name = String(name || '').trim();
+  var items = lookup.items || {};
+  if (Object.prototype.hasOwnProperty.call(items, name)) return { canonicalName: name, candidates: [name], match: 'exact' };
+  var key = setMasterProductKey_(name);
+  if (!key) return { canonicalName: '', candidates: [], match: 'unknown' };
+  var candidates = Object.keys(items).filter(function(item) { return setMasterProductKey_(item) === key; });
+  var staleAlias = false;
+  getSetMasterProductAliases_().forEach(function(entry) {
+    if (setMasterProductKey_(entry.alias) !== key) return;
+    // 대상 상품이 사라지면 다른 유사 이름으로 재연결하지 않는다.
+    if (!Object.prototype.hasOwnProperty.call(items, entry.canonicalName)) { staleAlias = true; return; }
+    if (candidates.indexOf(entry.canonicalName) < 0) candidates.push(entry.canonicalName);
+  });
+  return { canonicalName: !staleAlias && candidates.length === 1 ? candidates[0] : '',
+    candidates: candidates, match: staleAlias ? 'stale_alias' : candidates.length === 1 ? 'alias' : candidates.length ? 'ambiguous' : 'unknown' };
+}
+
+function resolveSetMasterComponents_(name, lookup) {
+  var product = resolveSetMasterProduct_(name, lookup);
+  var components = ((lookup.components || {})[product.canonicalName] || []).slice();
+  // 판매 별칭이 실물 별칭이라는 보장은 없다. 정식 상품 자체가 실물 본체이면
+  // 원문 헤더 아래 본체를 명시해 가용검사와 이후 재고 점유에서 빠지지 않게 한다.
+  if (components.length && product.canonicalName !== String(name || '').trim() &&
+      typeof inventoryIdentityCatalog_ === 'function') {
+    var identity = inventoryIdentityCatalog_(), main = identity.resolve(product.canonicalName).item;
+    if (main && !components.some(function(c) { return identity.resolve(c.name).item?.id === main.id; }))
+      components.push({ name: main.name, qty: 1, alt: '' });
+  }
+  return components;
+}
+
+// 2026-10-19 운영자 확인: 조명 카테고리에는 스탠드/그리드도 있으므로
+// 실제 발광 조명기의 정식 판매상품만 동반 무료의 근거로 사용한다.
+function rentalLightingFixtureNames_() {
+  return ['어퓨쳐 600X', '아마란 300C', '시네로이드 CFL-800', '아마란 F22C',
+    '어퓨쳐 600C', '어퓨쳐 MC4 KIT', '파보튜브 6C', '아마란 F21C',
+    '어퓨쳐 B7C 8KIT', '어퓨쳐 600D', '난룩스 이보크 1200B', '아마란 PT4C 2KIT',
+    '어퓨쳐 노바 P300C', '아마란 PT4C 4KIT', '어퓨쳐 300X', '어퓨쳐 스톰 80C',
+    '어퓨쳐 LS 60X', 'NANLUX Evoke 1200B', '어퓨쳐 B7C 1구', '어퓨쳐 MC4 트래블 KIT',
+    '파보튜브 II 30X', '파보튜브 II 30XR', '아마란 PT4C', '파보튜브 II 6C', '스톰 700X'];
+}
+
+function rentalAccessoryKind_(name, lookup) {
+  var resolved = resolveSetMasterProduct_(name, lookup).canonicalName;
+  var key = setMasterProductKey_(resolved || name);
+  if (key === '릴선' || key === '릴선-1ea') return 'extension';
+  if (key === '샌드백') return 'sandbag';
+  if (key === '웨건') return 'wagon';
+  // 충전기/어댑터/더미는 배터리 자체와 구분한다. 세트 구성품은 이 가격함수를 호출하지 않는다.
+  if (!/충전|charger|더미|dummy|어댑터|adapter|리더|reader/.test(key) &&
+      (/배터리$|battery$/.test(key) || /^(?:np-f(?:z)?|bp-u)\d+/.test(key) ||
+       /^(?:소니|sony|avpro)?(?:cf-?[ab]?|cfast|cfexpress|sdxc|sdhc)\d/.test(key) || /메모리(?:카드)?$/.test(key))) return 'restricted';
+  return '';
+}
+
+function resolveRentalAccessoryPrice_(name, lookup, context) {
+  var kind = rentalAccessoryKind_(name, lookup);
+  if (!kind) return null;
+  if (!context || !Array.isArray(context.names)) throw new Error('대여 정책 확인 필요: ' + name + ' — 동반 장비와 수량을 확인하세요');
+  if (kind === 'wagon') throw new Error('대여 정책 확인 필요: 웨건 — 유상 장비 대여 5만원 기준의 기간·할인 적용을 확인하세요');
+  var fixtureNames = rentalLightingFixtureNames_();
+  var canonicalNames = context.names.map(function(item) { return resolveSetMasterProduct_(item, lookup).canonicalName; }).filter(Boolean);
+  if (kind === 'restricted') {
+    var hasOtherRental = context.names.some(function(item) {
+      return !!resolveSetMasterProduct_(item, lookup).canonicalName && !rentalAccessoryKind_(item, lookup);
+    });
+    if (!hasOtherRental) {
+      var restricted = new Error('개별 대여 불가: ' + name + ' — 배터리·메모리는 단독 대여하지 않습니다');
+      restricted.code = 'RENTAL_POLICY_RESTRICTED';
+      throw restricted;
+    }
+    throw new Error('대여 정책 확인 필요: ' + name + ' — 동반 배터리·메모리의 청구 조건을 확인하세요');
+  }
+  var canonical = resolveSetMasterProduct_(name, lookup).canonicalName;
+  if (!canonical) throw new Error('세트마스터 정식 상품 확인 필요: ' + name);
+  if (canonicalNames.some(function(item) { return fixtureNames.indexOf(item) >= 0; })) return 0;
+  if (kind === 'sandbag') throw new Error('대여 정책 확인 필요: 샌드백 단독 대여는 2개 묶음이며 수량별 청구 확인이 필요합니다');
+  // 별도 릴선의 가격은 이 함수 아래의 정본 G열 검증에서 읽는다.
+  return null;
+}
+
 // 직원 확정은 예약 수요 승인이다. 가격 미확정을 예약 거절이나 무료로 바꾸지 않는다.
-function resolveStaffApprovedRegistrationPrice_(name, lookup, staffApproved) {
+function resolveStaffApprovedRegistrationPrice_(name, lookup, staffApproved, rentalContext) {
   try {
-    return { unitPrice: requireSetMasterPrice_(name, lookup), pricingPending: false };
+    return { unitPrice: requireSetMasterPrice_(name, lookup, rentalContext), pricingPending: false,
+      canonicalName: resolveSetMasterProduct_(name, lookup).canonicalName };
   } catch (error) {
-    if (staffApproved !== true) throw error;
+    if (staffApproved !== true || error.code === 'RENTAL_POLICY_RESTRICTED') throw error;
     return { unitPrice: '', pricingPending: true, warning: {
       kind: 'pricing_pending', equipment: String(name || '').trim(),
       message: '[단가확인필요] ' + error.message
@@ -9495,7 +9623,7 @@ function dashboardAddEquipments(tid, entries, options) {
     options.regenerateNow === "1" ||
     options.regenerateNow === "true";
   // 기본값은 입력명 보존. 자동 치환은 rawNames=false를 명시한 내부 경로에서만 허용한다.
-  // 세트 전개·단가는 입력명이 세트마스터와 정확히 맞을 때만 적용된다.
+  // 세트 전개·단가는 정식 판매상품 resolver가 확인한 상품에만 적용된다.
   var rawNames = options.rawNames;
   rawNames = !(rawNames === false || rawNames === 0 || rawNames === "0" || rawNames === "false");
   var forceZeroPrice = options.forceZeroPrice === true || options.forceZeroPrice === 1 ||
@@ -9695,27 +9823,37 @@ function dashboardAddEquipments(tid, entries, options) {
 
     var setLookup = buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
     markProfile_('set_lookup');
+    var rentalPriceContext = { names: addEntries.map(function(entry) { return entry.name; }) };
+    if (addEntries.some(function(entry) { return !!rentalAccessoryKind_(entry.name, setLookup); })) {
+      tidRows.forEach(function(rowNum) {
+        var existing = sched.getRange(rowNum, 1, 1, 13).getDisplayValues()[0];
+        if (excludeScheduleIdMap[String(existing[0] || '')] || /취소|거절|삭제/.test(String(existing[9] || '')) || !(Number(existing[4]) > 0)) return;
+        var existingStart = parseDT(existing[5], existing[6]), existingEnd = parseDT(existing[7], existing[8]);
+        if (existingStart && existingEnd && existingStart <= startDT && existingEnd >= endDT) rentalPriceContext.names.push(String(existing[3] || '').trim());
+      });
+    }
     var rowSpecs = [];
     var pricingWarnings = [];
     var availabilityItems = [];
     var externalSupplyItems = [];
     try {
     addEntries.forEach(function(entry) {
-      var catalogComponents = (setLookup.components[entry.name] || []).filter(function(c) {
+      var product = resolveSetMasterProduct_(entry.name, setLookup);
+      var catalogComponents = resolveSetMasterComponents_(entry.name, setLookup).filter(function(c) {
         var name = String(c.name || "").trim();
         return name !== "" && name !== entry.name;
       });
       var components = catalogComponents;
-      var priceResolution = forceZeroPrice ? { unitPrice: 0, pricingPending: false }
-        : resolveStaffApprovedRegistrationPrice_(entry.name, setLookup, staffApprovedDemand);
+      var priceResolution = forceZeroPrice && rentalAccessoryKind_(entry.name, setLookup) !== 'restricted' ? { unitPrice: 0, pricingPending: false }
+        : resolveStaffApprovedRegistrationPrice_(entry.name, setLookup, staffApprovedDemand, rentalPriceContext);
       var price = priceResolution.unitPrice;
       if (priceResolution.pricingPending) pricingWarnings.push(priceResolution.warning);
       var customSet = customSetEntries[entry.name];
       if (customSet) {
-        if (!(setLookup.items && setLookup.items[entry.name]) || !catalogComponents.length) {
+        if (!product.canonicalName || !catalogComponents.length) {
           throw new Error('세트마스터에 없는 맞춤 세트입니다: ' + entry.name);
         }
-        var catalogPrice = Number(setLookup.prices[entry.name] || 0);
+        var catalogPrice = requireSetMasterPrice_(entry.name, setLookup);
         if (catalogPrice !== customSet.expectedCatalogUnitPrice) {
           throw new Error('세트마스터 단가가 승인 기준과 달라졌습니다: ' + entry.name);
         }
@@ -9742,7 +9880,8 @@ function dashboardAddEquipments(tid, entries, options) {
         components: components,
         price: price,
         pricingPending: priceResolution.pricingPending,
-        isSetMasterItem: !!(setLookup.items && setLookup.items[entry.name])
+        canonicalName: product.canonicalName,
+        isSetMasterItem: !!product.canonicalName
       });
       if (entry.qty > externalSupplyQty) {
         availabilityItems = availabilityItems.concat(buildAvailabilityItems_(entry.name, entry.qty - externalSupplyQty, components));
@@ -9759,7 +9898,7 @@ function dashboardAddEquipments(tid, entries, options) {
     markProfile_('equipment_meta');
     if (requireExactCatalog && !staffApprovedDemand) {
       var unknownExactNames = addEntries.map(function(entry) { return entry.name; }).filter(function(name) {
-        return !(setLookup.items && setLookup.items[name]) && !(equipMeta.equipment && equipMeta.equipment[name]);
+        return !resolveSetMasterProduct_(name, setLookup).canonicalName && !(equipMeta.equipment && equipMeta.equipment[name]);
       });
       if (unknownExactNames.length) {
         return attachProfile_({
@@ -9836,7 +9975,7 @@ function dashboardAddEquipments(tid, entries, options) {
         newRows.push([
           tid + "-" + String(maxN).padStart(2, "0"),
           tid, spec.name, spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
-          "대기", spec.pricingPending ? "[단가확인필요]" : "", spec.price, 예약자명
+          "대기", spec.pricingPending ? "[단가확인필요]" : (spec.canonicalName && spec.canonicalName !== spec.name ? "[정식상품]" + spec.canonicalName : ""), spec.price, 예약자명
         ]);
         spec.components.forEach(function(component) {
           maxN++;
@@ -9852,7 +9991,7 @@ function dashboardAddEquipments(tid, entries, options) {
         newRows.push([
           tid + "-" + String(maxN).padStart(2, "0"),
           tid, setMasterName, spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
-          "대기", spec.pricingPending ? "[단가확인필요]" : "", spec.price, 예약자명
+          "대기", spec.pricingPending ? "[단가확인필요]" : (spec.canonicalName && spec.canonicalName !== spec.name ? "[정식상품]" + spec.canonicalName : ""), spec.price, 예약자명
         ]);
       }
     });
@@ -10335,7 +10474,8 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
     if (!startDT || !endDT) return { error: "반출/반납 일시를 읽지 못했습니다" };
 
     var setLookup = buildDashboardSetLookup_(setSheet);
-    var components = (setLookup.components[equipName] || []).filter(function(c) {
+    var product = resolveSetMasterProduct_(equipName, setLookup);
+    var components = resolveSetMasterComponents_(equipName, setLookup).filter(function(c) {
       var name = String(c.name || "").trim();
       return name !== "" && name !== equipName;
     });
@@ -10377,6 +10517,8 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
           availabilityItems.push({ name: rowEquipName, qty: targetQty - currentQty });
         }
       });
+      if (updates.length === 1) return { error: '정식 상품의 구성품과 기존 예약을 확인한 뒤 수량을 변경하세요',
+        code: 'CATALOG_COMPONENTS_REVIEW_REQUIRED', noMutationPerformed: true };
     } else if (newQty > oldQty) {
       availabilityItems.push({ name: equipName, qty: newQty - oldQty });
     }
@@ -15281,21 +15423,7 @@ function getSetMasterRows_(setSheet) {
 function getSetComponents(name, setSheet) {
   if (!name) return [];
   if (!setSheet) return [];
-  const data = getSetMasterRows_(setSheet);
-  // A: 세트명, B: 구성장비명, C: 수량, D: 비고, E: 대체가능장비, F: 가용체크(없으면 전부 포함)
-  const items = data.filter(row => {
-    if (row[0].toString().trim() !== name.toString().trim()) return false;
-    var componentName = String(row[1] || "").trim();
-    if (!componentName) return false;
-    var flag = (row.length > 5) ? row[5].toString().trim() : "";
-    return flag === "Y" || flag === "";  // F열 없거나 비어있으면 포함
-  });
-
-  return items.map(row => ({
-    name: String(row[1] || "").trim(),
-    qty: row[2] || 1,
-    alt: row[4] || ""
-  }));
+  return resolveSetMasterComponents_(name, buildDashboardSetLookup_(setSheet));
 }
 
 
@@ -17358,13 +17486,21 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   var registrationPriceIssues = [];
   var registrationPriceNotes = {};
   var registrationPriceLookup = buildDashboardSetLookup_(setSheet);
+  var registrationPriceContext = { names: allData.filter(function(row) {
+    return row[0] === reqID && Number(row[6]) > 0 && !/제외|취소|거절/.test(String(row[14] || ''));
+  }).map(function(row) { return String(row[5] || '').trim(); }) };
+  (mergeTargetScheduleRows || []).forEach(function(row) {
+    if (Number(row[4]) > 0 && !/취소|거절|삭제/.test(String(row[9] || ''))) registrationPriceContext.names.push(String(row[3] || '').trim());
+  });
   mergeSchedulePlan.writeSourceIndexes.forEach(function(i) {
     if (String(allData[i][8] || '') !== '세트' && String(allData[i][16] || '').indexOf('[세트]') === 0) return;
-    var priceResolution = resolveStaffApprovedRegistrationPrice_(allData[i][5], registrationPriceLookup, directRegisterApproved);
+    var priceResolution = resolveStaffApprovedRegistrationPrice_(allData[i][5], registrationPriceLookup, directRegisterApproved, registrationPriceContext);
     registrationPrices[i] = priceResolution.unitPrice;
     if (priceResolution.pricingPending) {
       registrationPriceIssues.push(priceResolution.warning);
       registrationPriceNotes[i] = '[단가확인필요]';
+    } else if (priceResolution.canonicalName !== String(allData[i][5] || '').trim()) {
+      registrationPriceNotes[i] = '[정식상품]' + priceResolution.canonicalName;
     }
   });
 

@@ -104,10 +104,10 @@ const onsiteBackendFn = logic.slice(
 );
 assert(
   /var isFree = settlementStatus === '무상'[\s\S]*dashboardAddEquipments\(tid, entries, \{[\s\S]*forceZeroPrice:\s*isFree/.test(onsiteBackendFn) &&
-    /var priceResolution = forceZeroPrice \? \{ unitPrice: 0, pricingPending: false \}/.test(logic) &&
-    /resolveStaffApprovedRegistrationPrice_\(entry.name, setLookup, staffApprovedDemand\)/.test(logic) &&
+    /var priceResolution = forceZeroPrice && rentalAccessoryKind_\(entry.name, setLookup\) !== 'restricted' \? \{ unitPrice: 0, pricingPending: false \}/.test(logic) &&
+    /resolveStaffApprovedRegistrationPrice_\(entry.name, setLookup, staffApprovedDemand, rentalPriceContext\)/.test(logic) &&
     /price:\s*price/.test(logic),
-  'only explicit free additions carry zero price; unsettled additions use the master rate'
+  'explicit free additions preserve operator intent while restricted accessories cannot bypass policy; other additions use contextual master pricing'
 );
 assert(
   /rawNames: params\.rawNames \|\| postBody\.rawNames/.test(api),

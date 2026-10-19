@@ -17,7 +17,7 @@ function harness(rows) {
   const context = { getSetMasterRows_: () => rows,
     getDashboardCachedJson_: (_key, _ttl, factory) => factory() };
   vm.createContext(context);
-  for (const name of ['parseSetMasterPrice_', 'requireSetMasterPrice_', 'buildDashboardSetLookup_', 'getDashboardEquipNameList_', 'findSetPrice']) {
+  for (const name of ['setMasterProductKey_', 'getSetMasterProductAliases_', 'resolveSetMasterProduct_', 'parseSetMasterPrice_', 'resolveSetMasterComponents_', 'rentalLightingFixtureNames_', 'rentalAccessoryKind_', 'resolveRentalAccessoryPrice_', 'requireSetMasterPrice_', 'buildDashboardSetLookup_', 'getDashboardEquipNameList_', 'findSetPrice']) {
     if (source.includes('function ' + name + '(')) vm.runInContext(fn(name), context);
   }
   return { context, sheet };
@@ -40,6 +40,54 @@ test('catalog reads live A/G master values without using stale list or price cac
   assert.equal(h.context.buildDashboardSetLookup_(h.sheet).prices['미니 매트박스'], 10000);
   rows[0][6] = 12000;
   assert.equal(h.context.buildDashboardSetLookup_(h.sheet).prices['미니 매트박스'], 12000);
+});
+test('sales aliases resolve to current master prices and preserve model, mount, count and strength distinctions', () => {
+  const rows = [
+    ['헤이져 머신', '', 1, '', '', '', 30000],
+    ['Sony GM 24-70mm II', '', 1, '', '', '', 25000],
+    ['Black Pro-Mist 1/4 사각', '', 1, '', '', '', 15000],
+    ['Black Pro-Mist 1/8 사각', '', 1, '', '', '', 15000],
+    ['CooKe SP3(25/32/50/75/100)', '', 1, '', '', '', 200000],
+    ['로데 비디오마이크 프로', '', 1, '', '', '', 10000]
+  ];
+  const h = harness(rows);
+  assert.equal(h.context.findSetPrice('헤이저 머신', h.sheet), 30000);
+  assert.equal(h.context.findSetPrice(' sony GM 24-70mm ii ', h.sheet), 25000);
+  rows[0][6] = 35000;
+  assert.equal(h.context.findSetPrice('헤이저', h.sheet), 35000);
+  for (const name of ['Sony GM 24-70mm', 'Black Pro-Mist 1/4', 'Cooke SP3 full frame 6 LENS SET (FE)']) {
+    assert.throws(() => h.context.findSetPrice(name, h.sheet), /정식 상품 확인 필요/);
+  }
+});
+
+test('operator-approved aliases link one exact sales product, never a missing target or multiple candidates', () => {
+  const h = harness([['렌즈 A', '', 1, '', '', '', 20000], ['렌즈 B', '', 1, '', '', '', 25000]]);
+  let aliases = [{alias:'직원 확인 렌즈',canonicalName:'렌즈 A'}];
+  h.context.PropertiesService = {getScriptProperties: () => ({getProperty: () => JSON.stringify(aliases)})};
+  assert.equal(h.context.findSetPrice('직원확인렌즈', h.sheet), 20000);
+  aliases.push({alias:'직원 확인 렌즈',canonicalName:'렌즈 B'});
+  assert.throws(() => h.context.findSetPrice('직원 확인 렌즈', h.sheet), /후보: 렌즈 A, 렌즈 B/);
+  aliases = [{alias:'직원 확인 렌즈',canonicalName:'삭제된 상품'}];
+  assert.throws(() => h.context.findSetPrice('직원 확인 렌즈', h.sheet), /정식 상품 확인 필요/);
+});
+
+test('normalization collisions and conflicting master rates require confirmation, explicit zero remains free', () => {
+  const h = harness([
+    ['a b', '', 1, '', '', '', 10000], ['AB', '', 1, '', '', '', 20000],
+    ['중복 가격', '', 1, '', '', '', 3000], ['중복 가격', '', 1, '', '', '', 5000],
+    ['웨건', '', 1, '', '', '', ''], ['무료', '', 1, '', '', '', 0]
+  ]);
+  assert.throws(() => h.context.findSetPrice('A B', h.sheet), /후보/);
+  assert.throws(() => h.context.findSetPrice('중복 가격', h.sheet), /G열/);
+  assert.throws(() => h.context.findSetPrice('웨 건', h.sheet), /대여 정책 확인/);
+  assert.equal(h.context.findSetPrice('무료', h.sheet), 0);
+});
+
+test('confirmed sales aliases expand the canonical set without replacing the original reservation name', () => {
+  const h = harness([['Camera Kit', 'Camera body', 1, '', '', 'Y', 50000], ['Camera Kit', 'Battery', 2, '', '', 'Y', '']]);
+  vm.runInContext(fn('getSetComponents'), h.context);
+  const components = h.context.getSetComponents('camera kit', h.sheet);
+  assert.deepEqual(Array.from(components, item => [item.name, item.qty]), [['Camera body',1],['Battery',2]]);
 });
 test('frontend suggestions contain A-column products, not B-column components; prices survive transport', () => {
   const ts = require('../apps/today-dashboard/node_modules/typescript');

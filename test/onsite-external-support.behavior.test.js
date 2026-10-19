@@ -82,7 +82,7 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
     REGISTERED_STAFF_DEMAND_TOKEN_: token,
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, flush() {},
       openByUrl: () => ({ getSheetByName: () => ledger }) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: () => 'https://example.invalid/ledger' }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: key => key === '개고생2_URL' ? 'https://example.invalid/ledger' : '' }) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
     Utilities: { formatDate: date => new Date(date).toISOString().slice(0, 10) },
     normalizeDashboardAddEntries_: entries => entries.map(entry => ({ ...entry })),
@@ -113,6 +113,13 @@ function gasHarness({ item = 'Existing light', total = 1, invalidAllocation = fa
   const addEnd = source.indexOf('\nvar DASHBOARD_ONSITE_IDEM_PROP_', addStart);
   vm.runInNewContext(supplySource + '\n' + [
     functionSource('buildAvailabilityItems_'),
+    functionSource('setMasterProductKey_'),
+    functionSource('getSetMasterProductAliases_'),
+    functionSource('resolveSetMasterProduct_'),
+    functionSource('resolveSetMasterComponents_'),
+    functionSource('rentalLightingFixtureNames_'),
+    functionSource('rentalAccessoryKind_'),
+    functionSource('resolveRentalAccessoryPrice_'),
     functionSource('requireSetMasterPrice_'),
     functionSource('resolveStaffApprovedRegistrationPrice_'),
     functionSource('mergeAvailabilityItems_'),
