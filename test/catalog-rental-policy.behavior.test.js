@@ -40,14 +40,17 @@ test('lighting fixture rental makes extension and sandbags free; supports alone 
   assert.equal(c.requireSetMasterPrice_('릴선', lookup, {names: ['릴선']}), 6000);
   assert.throws(() => c.requireSetMasterPrice_('웨건', lookup, {names: ['소니 FX3 바디세트']}), /기간·할인/);
 });
-test('standalone batteries and memory are prohibited; accompanying charge remains pending, never guessed free', () => {
+test('standalone batteries and memory are prohibited; accompanying items use a known catalog price, never guessed free', () => {
   const {c, lookup} = harness();
   for (const name of ['970 배터리', 'V마운트 배터리', 'CF-A 160', '소니 CF-A 128']) {
     assert.throws(() => c.resolveStaffApprovedRegistrationPrice_(name, lookup, true, {names: [name]}),
       error => error.code === 'RENTAL_POLICY_RESTRICTED');
     const result = c.resolveStaffApprovedRegistrationPrice_(name, lookup, true, {names: ['소니 FX3 바디세트', name]});
-    assert.equal(result.pricingPending, true);
-    assert.equal(result.unitPrice, '');
+    const knownPrice=lookup.prices[name];
+    assert.equal(result.pricingPending, knownPrice === undefined);
+    assert.equal(result.unitPrice, knownPrice === undefined ? '' : knownPrice);
+    assert.throws(() => c.requireSetMasterPrice_(name, lookup, {names:[name],settlementStatus:'무상'}),
+      error => error.code === 'RENTAL_POLICY_RESTRICTED');
   }
   assert.equal(c.rentalAccessoryKind_('소니 CF-A 리더기(정품)', lookup), '');
   assert.equal(c.rentalAccessoryKind_('V마운트 배터리 충전기', lookup), '');

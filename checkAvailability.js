@@ -8975,7 +8975,6 @@ function resolveRentalAccessoryPrice_(name, lookup, context) {
   var kind = rentalAccessoryKind_(name, lookup);
   if (!kind) return null;
   if (!context || !Array.isArray(context.names)) throw new Error('대여 정책 확인 필요: ' + name + ' — 동반 장비와 수량을 확인하세요');
-  if (kind === 'wagon') throw new Error('대여 정책 확인 필요: 웨건 — 유상 장비 대여 5만원 기준의 기간·할인 적용을 확인하세요');
   var fixtureNames = rentalLightingFixtureNames_();
   var canonicalNames = context.names.map(function(item) { return resolveSetMasterProduct_(item, lookup).canonicalName; }).filter(Boolean);
   if (kind === 'restricted') {
@@ -8987,8 +8986,13 @@ function resolveRentalAccessoryPrice_(name, lookup, context) {
       restricted.code = 'RENTAL_POLICY_RESTRICTED';
       throw restricted;
     }
-    throw new Error('대여 정책 확인 필요: ' + name + ' — 동반 배터리·메모리의 청구 조건을 확인하세요');
   }
+  // 현장 직원이 이미 선택한 정산 방식을 자동 무료 정책으로 덮어쓰거나 재확인하지 않는다.
+  // 유상은 정본 G열 검증을 계속 거치며, 배터리·메모리 단독 대여 금지는 위에서 확인한다.
+  var settlement = String(context.settlementStatus || '').trim().toLowerCase();
+  if (settlement === '무상' || settlement === 'free') return 0;
+  if (settlement === '유상' || settlement === 'paid' || kind === 'restricted') return null;
+  if (kind === 'wagon') throw new Error('대여 정책 확인 필요: 웨건 — 유상 장비 대여 5만원 기준의 기간·할인 적용을 확인하세요');
   var canonical = resolveSetMasterProduct_(name, lookup).canonicalName;
   if (!canonical) throw new Error('세트마스터 정식 상품 확인 필요: ' + name);
   if (canonicalNames.some(function(item) { return fixtureNames.indexOf(item) >= 0; })) return 0;
@@ -9823,7 +9827,8 @@ function dashboardAddEquipments(tid, entries, options) {
 
     var setLookup = buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
     markProfile_('set_lookup');
-    var rentalPriceContext = { names: addEntries.map(function(entry) { return entry.name; }) };
+    var rentalPriceContext = { names: addEntries.map(function(entry) { return entry.name; }),
+      settlementStatus: options.settlementStatus || (forceZeroPrice ? '무상' : '') };
     if (addEntries.some(function(entry) { return !!rentalAccessoryKind_(entry.name, setLookup); })) {
       tidRows.forEach(function(rowNum) {
         var existing = sched.getRange(rowNum, 1, 1, 13).getDisplayValues()[0];
@@ -10314,6 +10319,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
       rawNames: options.rawNames,
       directRegenerate: options.directRegenerate || options.regenerateNow,
       forceZeroPrice: isFree,
+      settlementStatus: settlementStatus,
       externalSupplyQty: options.externalSupplyQty,
       lockAlreadyHeld: !!idemLock,
       idempotencyReservation: idemHash ? { hash: idemHash, fingerprint: onsiteFingerprint } : null

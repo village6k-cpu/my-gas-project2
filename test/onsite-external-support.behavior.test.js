@@ -196,6 +196,35 @@ test('onsite paid and free dry-run paths carry external quantity into physical s
   }
 });
 
+test('onsite battery paid/free selection reaches pricing and preserves quantity', () => {
+  for (const settlementStatus of ['유상', '무상']) {
+    const h = gasHarness({item:'어퓨쳐 스톰 80C'});
+    h.context.buildDashboardSetLookup_ = () => ({items:{'어퓨쳐 스톰 80C':true,'V마운트 배터리':true},
+      prices:{'어퓨쳐 스톰 80C':20000,'V마운트 배터리':5000},components:{}});
+    vm.runInNewContext('var DASHBOARD_ONSITE_IDEM_PROP_="onsite";\n' + functionSource('dashboardRecordOnsiteAddon') + '\n' + functionSource('dashboardAddedItemsFromRows_'), h.context);
+    const result=h.context.dashboardRecordOnsiteAddon(TRADE,[{name:'V마운트 배터리',qty:2}],{dryRun:true,settlementStatus});
+    assert.equal(result.success,true,result.error);
+    assert.equal(result.plannedItems[0].qty,2);
+    assert.equal(result.plannedItems[0].unitPrice,settlementStatus==='유상'?5000:0);
+    assert.equal(h.schedule.writes,0);
+  }
+});
+
+test('onsite explicit paid choice uses catalog price even for automatically free lighting accessories', () => {
+  for (const name of ['릴선','웨건']) {
+    const h=gasHarness({item:'어퓨쳐 스톰 80C'});
+    h.context.buildDashboardSetLookup_=()=>({items:{'어퓨쳐 스톰 80C':true,[name]:true},prices:{[name]:5000},components:{}});
+    vm.runInNewContext('var DASHBOARD_ONSITE_IDEM_PROP_="onsite";\n'+functionSource('dashboardRecordOnsiteAddon')+'\n'+functionSource('dashboardAddedItemsFromRows_'),h.context);
+    const r=h.context.dashboardRecordOnsiteAddon(TRADE,[{name,qty:2}],{dryRun:true,settlementStatus:'유상'});
+    assert.equal(r.success,true,r.error);
+    assert.equal(r.plannedItems[0].unitPrice,5000);
+    h.context.buildDashboardSetLookup_=()=>({items:{'어퓨쳐 스톰 80C':true,[name]:true},prices:{},components:{}});
+    const missing=h.context.dashboardRecordOnsiteAddon(TRADE,[{name,qty:2}],{dryRun:true,settlementStatus:'유상'});
+    assert.equal(missing.code,'INVALID_CATALOG_PRICE');
+    assert.equal(h.schedule.writes,0);
+  }
+});
+
 test('external support changes the idempotency identity while legacy zero remains compatible', () => {
   const crypto = require('node:crypto');
   const h = gasHarness();
