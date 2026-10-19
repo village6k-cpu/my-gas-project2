@@ -155,7 +155,7 @@ export async function recordFrontPayment(input: Row) {
     merchantId: input.merchantId || alias?.financial_identity?.merchant_id || null,
     payerName: input.customerName || "", status: input.cancelled ? "cancelled" : "active",
     reviewReason: actualTime ? null : "승인 시각 확인 필요",
-    raw: { tradeId, approvalTimeEstimated: !actualTime },
+    raw: { tradeId: tradeId.startsWith("manual-") ? null : tradeId, approvalTimeEstimated: !actualTime },
   }, "front_terminal", { auto: false, project: false, refresh: false }, db);
   let receipt = result.receipt;
   if (input.cancelled) {
@@ -175,12 +175,12 @@ export async function recordFrontPayment(input: Row) {
   }
   if (tradeId && !tradeId.startsWith("manual-") && !receipt.review_reason && receipt.status === "active") {
     const allocations = receipt.allocations ?? [];
-    if (allocations.length === 0) {
+    if (allocations.length === 0 && receipt.revision === 1) {
       await allocatePayment({ receiptId: receipt.id, expectedRevision: receipt.revision,
         allocations: [{ tradeId, amount: receipt.amount }], requestId: `front:${sourceId}`,
         note: "단말에서 선택한 예약의 카드 승인 원본 연결" }, "front_terminal", true, db);
       receipt = checked(await db.from("payment_receipt_balances").select("*").eq("id", receipt.id).single()) as Row;
-    } else if (!allocations.some((a: Row) => a.trade_id === tradeId)) {
+    } else if (allocations.length > 0 && !allocations.some((a: Row) => a.trade_id === tradeId)) {
       throw new Error("이 결제는 다른 예약에 연결되어 있습니다. 수납 관리에서 확인해주세요.");
     }
   }
