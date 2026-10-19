@@ -76,7 +76,7 @@ function harness(options = {}) {
       if (id === './gasPublic') return { gasPost: async payload => {
         calls.gas.push(copy(payload)); events.push('gas:' + payload.action);
         if (options.gasError) throw Error(options.gasError);
-        if (payload.action === 'paymentLedgerSnapshot') return { success: true, accounts: state.accounts };
+        if (payload.action === 'paymentLedgerSnapshot') return { success: true, accounts: options.snapshotAccounts === undefined ? state.accounts : options.snapshotAccounts };
         if (payload.action === 'paymentLedgerProjection') return { success: true, applied: [], rejected: [] };
         throw Error('Unexpected GAS action');
       } };
@@ -153,4 +153,35 @@ test('new cancellation after baseline does not incorrectly flag historical openi
   const result = await h.api.recordFrontPayment({ ...frontInput, cancelled: true });
   assert.equal(result.ok, true);
   assert.equal(h.calls.rpc.some(call => call.name === 'payment_require_review'), false);
+});
+test('manual pending and recovered key identities ingest the same unbound approval receipt', async () => {
+  const h = harness({ receipts: [] });
+  for (const tradeId of ['manual-pending', 'manual-front-1']) {
+    const result = await h.api.recordFrontPayment({ ...frontInput, tradeId });
+    assert.equal(result.ok, true);
+    assert.equal(result.unallocatedAmount, 26400);
+  }
+  const ingests = h.calls.rpc.filter(call => call.name === 'payment_ingest_receipt');
+  assert.equal(ingests.length, 2);
+  assert.equal(ingests[0].args.p_receipt.raw.tradeId, null);
+  assert.equal(ingests[1].args.p_receipt.raw.tradeId, null);
+  assert.deepEqual(ingests[0].args.p_receipt, ingests[1].args.p_receipt, 'changing a local manual display key must not change the immutable approval payload');
+  assert.equal(ingests[0].args.p_request_id, ingests[1].args.p_request_id);
+  assert.equal(h.calls.rpc.some(call => call.name === 'payment_set_allocations'), false);
+});
+test('front approval replay acknowledges staff-unlinked receipt without automatically relinking it', async () => {
+  const h = harness({ duplicate: true, receipts: [receipt({ source: 'front', source_id: 'front-1', amount: 26400, remaining_amount: 26400, revision: 3, allocations: [] })] });
+  const result = await h.api.recordFrontPayment(frontInput);
+  assert.equal(result.ok, true);
+  assert.equal(result.allocatedAmount, 0);
+  assert.equal(result.unallocatedAmount, 26400);
+  assert.equal(h.state.receipts[0].revision, 3);
+  assert.equal(h.calls.rpc.some(call => call.name === 'payment_set_allocations'), false);
+});
+test('missing requested GAS account snapshot rejects refresh and never exposes an old payable account', async () => {
+  const h = harness({ accounts: [account()], snapshotAccounts: [] });
+  await assert.rejects(h.api.refreshPaymentAccounts(['261020-001']), /장부에서 예약을 찾지 못/);
+  assert.equal(h.calls.rpc.some(call => call.name === 'payment_refresh_accounts'), false, 'incomplete snapshot must not be accepted as a current refresh');
+  await assert.rejects(h.api.getPayablePaymentBalances(['261020-001']), /장부에서 예약을 찾지 못/);
+  assert.equal(h.calls.queries.some(call => call.table === 'payment_account_balances'), false, 'stale account must not be used after authoritative source omits the reservation');
 });
