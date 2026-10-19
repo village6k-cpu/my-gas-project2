@@ -10,8 +10,14 @@ const NOTE_LABEL: Record<Phase, string> = {
 };
 
 // 추가 반출 내역은 반납 때도 필요하다. 카드 접힘과 관계없이 전문을 표시한다.
-export function TradeNotes({ trade, phase, showAdd }: { trade: Trade; phase: Phase; showAdd: boolean }) {
+export function TradeNotes({ trade, phase, showAdd, onEditingChange }: {
+  trade: Trade; phase: Phase; showAdd: boolean; onEditingChange?: (editing: boolean) => void;
+}) {
   const [editing, setEditing] = useState<Phase | null>(null);
+  function changeEditing(next: Phase | null) {
+    setEditing(next);
+    onEditingChange?.(next !== null);
+  }
   const notes: { phase: Phase; text: string }[] = [
     { phase: "checkout", text: String(trade.noteCheckout ?? "").trim() },
     { phase: "checkin", text: String(trade.noteCheckin ?? "").trim() },
@@ -23,7 +29,7 @@ export function TradeNotes({ trade, phase, showAdd }: { trade: Trade; phase: Pha
     <div className="space-y-2 px-4 pl-5 pt-3">
       {notes.map((note) => {
         if (editing === note.phase) {
-          return <TradeNoteEditor key={note.phase} trade={trade} phase={note.phase} onClose={() => setEditing(null)} />;
+          return <TradeNoteEditor key={note.phase} trade={trade} phase={note.phase} onClose={() => changeEditing(null)} />;
         }
         if (!note.text) return null;
         const checkout = note.phase === "checkout";
@@ -40,7 +46,7 @@ export function TradeNotes({ trade, phase, showAdd }: { trade: Trade; phase: Pha
               </div>
               <button
                 type="button"
-                onClick={() => setEditing(note.phase)}
+                onClick={() => changeEditing(note.phase)}
                 aria-label={`${NOTE_LABEL[note.phase]} 수정`}
                 className="tap min-h-11 shrink-0 rounded-lg border border-ink/20 bg-white px-3 text-[13px] font-bold text-ink-soft focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600"
               >수정</button>
@@ -52,7 +58,7 @@ export function TradeNotes({ trade, phase, showAdd }: { trade: Trade; phase: Pha
       {!editing && showAdd && !current?.text && (
         <button
           type="button"
-          onClick={() => setEditing(phase)}
+          onClick={() => changeEditing(phase)}
           className="tap min-h-11 w-full rounded-xl border border-dashed border-line bg-paper px-3 py-2 text-left text-[14px] font-semibold text-ink-soft"
         >+ {NOTE_LABEL[phase]}</button>
       )}

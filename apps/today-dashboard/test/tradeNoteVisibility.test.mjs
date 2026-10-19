@@ -78,3 +78,22 @@ test('메모는 HTML이 아닌 원문 텍스트로 렌더링된다', () => {
   assert(!html.includes('<script>'));
   assert(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;\n배터리 &amp; 케이블'));
 });
+
+for (const tab of ['checkout', 'checkin']) {
+  const completionButton = (html) => html.match(/<button\b[^>]*>(?:(?!<\/button>)[\s\S])*<\/button>/g).find(button => button.includes('반출 완료') || button.includes('반납 완료') || button.includes('수량 확인 후 반납완료'));
+  test(`${tab}: 전체메모를 확인하기 전에는 완료할 수 없다`, () => {
+    const html = render(ScheduleCard, { trade, date: '2026-10-16', tab });
+    assert(html.includes('전체메모를 확인했습니다'), '메모 확인 체크가 필요하다');
+    assert.match(completionButton(html), /disabled=""/, '미확인 메모가 있으면 완료를 막아야 한다');
+  });
+  test(`${tab}: 빈 메모와 완료 취소에는 확인 체크를 요구하지 않는다`, () => {
+    for (const data of [
+      { ...trade, noteCheckout: '  ', noteCheckin: '' },
+      { ...trade, setupDone: true, returnDone: true },
+    ]) {
+      const html = render(ScheduleCard, { trade: data, date: '2026-10-16', tab });
+      assert.doesNotMatch(completionButton(html), /disabled=""/);
+      assert(!html.includes('전체메모를 확인했습니다'));
+    }
+  });
+}
