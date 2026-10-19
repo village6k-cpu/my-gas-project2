@@ -21824,14 +21824,17 @@ function registeredTradePriceSnapshotDigest_(snapshot) {
   return registeredTradePriceDigest_({ schedule: snapshot.schedule.map(function(row) { return row.cells; }), contract: snapshot.contract });
 }
 
-function readRegisteredTradePriceLedger_(tradeId) {
+function readRegisteredTradePriceLedger_(tradeId, allowDeferredFirstContract) {
   var url = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
   if (!url) throw new Error('price correction ledger URL missing');
   var sheet = SpreadsheetApp.openByUrl(url).getSheetByName('거래내역');
   if (!sheet || sheet.getLastRow() < 2) throw new Error('price correction ledger missing');
   var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 9).getValues().filter(function(row) { return String(row[4] || '').trim() === tradeId; });
-  if (rows.length !== 1 || !Number.isSafeInteger(rows[0][8]) || rows[0][8] < 0) throw new Error('price correction ledger identity/amount is not exact');
-  return { contractUrl: String(rows[0][2] || '').trim(), amount: rows[0][8] };
+  if (rows.length !== 1) throw new Error('price correction ledger identity/amount is not exact');
+  var deferredFirstContract = allowDeferredFirstContract === true &&
+    String(rows[0][2] || '').trim() === '' && (rows[0][8] === '' || rows[0][8] === null);
+  if (!deferredFirstContract && (!Number.isSafeInteger(rows[0][8]) || rows[0][8] < 0)) throw new Error('price correction ledger identity/amount is not exact');
+  return { contractUrl: String(rows[0][2] || '').trim(), amount: deferredFirstContract ? null : rows[0][8] };
 }
 
 function readRegisteredTradePriceContract_(correction, snapshot, regeneration) {
@@ -21914,7 +21917,14 @@ function correctRegisteredTradePrices_(correction) {
         if (findSetPrice(change.expectedName, liveSetSheet) !== change.unitPrice) throw new Error('세트마스터 단가가 변경되었습니다. 다시 확인하세요');
       });
     }
-    readRegisteredTradePriceLedger_(correction.tradeId);
+    // 최초 계약서가 가격 미확정으로 보류된 예약은 원장 금액/링크도 빈칸이다.
+    // 이번 정확한 보정으로 모든 미확정 행을 해소할 때만 그 초기 상태를 허용한다.
+    // 재생성 이후 readback은 예외 없이 숫자 금액과 계약서 일치를 요구한다.
+    var pendingRows = snapshot.schedule.filter(function(row) { return hasPendingSchedulePrice_(row.cells); });
+    var resolvesAllPending = pendingRows.length > 0 && pendingRows.every(function(row) {
+      return correction.priceChanges.some(function(change) { return change.scheduleId === row.cells[0]; });
+    });
+    readRegisteredTradePriceLedger_(correction.tradeId, resolvesAllPending);
     correction.priceChanges.forEach(function(change) {
       var row = expected.schedule.filter(function(row) { return row.cells[0] === change.scheduleId; })[0];
       var pendingBlank = row && hasPendingSchedulePrice_(row.cells) && change.expectedUnitPrice === 0;

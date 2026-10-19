@@ -280,3 +280,27 @@ test('zero-priced inclusion still requires staff approval and exact existing ide
     assert.equal(h.calls.writes.length,0);assert.equal(h.calls.regenerations,0);
   }
 });
+
+test('pending registration can finalize prices when its first contract and ledger amount were deferred',()=>{
+  const h=harness(), value=copy(input);
+  h.schedule.data[1][10]='[단가확인필요]'; h.schedule.data[1][11]='';
+  h.ledger.data[1][2]=''; h.ledger.data[1][8]='';
+  value.priceChanges[0].expectedUnitPrice=0;
+  const result=h.run(value);
+  assert.equal(result.success,true,result.error);
+  assert.equal(result.priceReadback.contractAmount,600000);
+  assert.equal(result.priceReadback.ledgerAmount,600000);
+});
+test('blank ledger is not accepted for an established contract or unresolved remaining pending rows',()=>{
+  for(const mode of ['existing-contract','remaining-pending','no-pending']){
+    const h=harness(), value=copy(input);
+    h.ledger.data[1][8]='';
+    if(mode!=='no-pending'){
+      h.schedule.data[1][10]='[단가확인필요]';h.schedule.data[1][11]='';value.priceChanges[0].expectedUnitPrice=0;
+    }
+    if(mode!=='existing-contract')h.ledger.data[1][2]='';
+    if(mode==='remaining-pending'){h.schedule.data[3][10]='[단가확인필요]';h.schedule.data[3][11]='';}
+    const result=h.run(value);
+    assert.equal(result.noMutationPerformed,true,mode);assert.equal(h.calls.writes.length,0);
+  }
+});
