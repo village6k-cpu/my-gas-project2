@@ -14,9 +14,12 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { gasPost } from "@/lib/server/gasPublic";
 import { normalizePhoneLast8 } from "@/lib/server/phoneNormalize";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 90;
 
 // ── 환경변수 ──────────────────────────────────────────────────────
 const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -34,6 +37,7 @@ const LOOKUP_CORS_HEADERS = {
 
 function lookupJson(body: unknown, init: ResponseInit = {}): NextResponse {
   const headers = new Headers(init.headers);
+  headers.set("Cache-Control", "no-store, max-age=0");
   for (const [key, value] of Object.entries(LOOKUP_CORS_HEADERS)) {
     headers.set(key, value);
   }
@@ -184,9 +188,36 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
 
     // 미결제(입금완료 아님 — NULL 포함) + 미취소
-    const trades = rows.filter(
-      (t) => t.deposit_status !== "입금완료" && t.contract_status !== "취소"
+    const candidates = rows.filter(
+      (t) => !["입금완료", "결제완료"].includes(String(t.deposit_status ?? "").trim()) &&
+        String(t.contract_status ?? "").trim() !== "취소"
     );
+    if (candidates.length === 0) return lookupJson({ matches: [] });
+
+    // Supabase는 검색 인덱스다. 은행 트리거/직접 시트 편집은 동기화가 누락될 수 있어
+    // 결제 대상과 청구액은 매 조회(결제 직전 재조회 포함)마다 정본을 한 번에 읽는다.
+    type PaymentState = {
+      found: boolean; canPay: boolean; amount: number | null;
+      depositStatus: string; paymentMethod: string;
+    };
+    const state = await gasPost({ action: "terminalPaymentState", tids: candidates.map(t => t.trade_id) }) as
+      { success?: boolean; items?: Record<string, PaymentState>; error?: string } | null;
+    if (!state || state.success !== true || state.error || !state.items) {
+      throw new Error("현재 장부의 결제 상태를 확인하지 못했습니다. 다시 조회해주세요.");
+    }
+    const trades: Row[] = [];
+    for (const candidate of candidates) {
+      const current = state.items[candidate.trade_id];
+      if (!current || typeof current.found !== "boolean" || typeof current.canPay !== "boolean") {
+        throw new Error("예약의 현재 결제 상태가 누락되었습니다. 다시 조회해주세요.");
+      }
+      if (!current.found || !current.canPay) continue;
+      if (!Number.isSafeInteger(current.amount) || Number(current.amount) <= 0 ||
+          !["", "미입금"].includes(current.depositStatus)) {
+        throw new Error("예약의 현재 청구 금액 또는 입금 상태를 확인하지 못했습니다.");
+      }
+      trades.push({ ...candidate, amount: current.amount, deposit_status: current.depositStatus });
+    }
 
     if (trades.length === 0) {
       return lookupJson({ matches: [] });
