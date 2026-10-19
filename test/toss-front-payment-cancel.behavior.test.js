@@ -370,8 +370,8 @@ async function testManualApprovalHistoryFailureShowsApprovedWarning() {
   assert.ok(!harness.pages.some((entry) => entry.type === 'result' && entry.page.title === '결제 실패'));
   assert.strictEqual(
     harness.fetchCalls.filter((call) => call.url.endsWith('/api/lookup/confirm')).length,
-    0,
-    'manual approval must not call reservation confirmation'
+    1,
+    'manual approval must sync its unmatched receipt to the ledger'
   );
 }
 
@@ -833,7 +833,9 @@ async function testConfirmedReservationCancelSyncsLedgerAfterLocalPersistence() 
     tradeId: '260715-001',
     paymentKey: 'payment-key-1',
     amount: 11000,
-    cancelApprovalNumber: 'CANCEL-SYNC-1'
+    cancelApprovalNumber: 'CANCEL-SYNC-1',
+    approvalNumber: 'PAYMENT-APPROVAL-1',
+    timestamp: '2026-07-15T12:00:00.000Z'
   });
   assert.ok(harness.records()[0].cancelledAt);
   assert.strictEqual(harness.records()[0].cancelSyncPending, false);
@@ -849,7 +851,7 @@ async function testConfirmedReservationCancelSyncsLedgerAfterLocalPersistence() 
   assert.ok(persistedIndex < ledgerIndex, 'ledger sync must start only after local cancellation persistence');
 }
 
-async function testManualCancelNeverSyncsLedger() {
+async function testManualCancelSyncsOriginalReceipt() {
   const manual = paymentRecord({
     tradeId: 'manual-payment-key-1',
     sourceType: 'manual'
@@ -870,7 +872,11 @@ async function testManualCancelNeverSyncsLedger() {
 
   await harness.context.executeFullPaymentCancel(manual);
 
-  assert.strictEqual(harness.fetchCalls.length, 0);
+  assert.strictEqual(harness.fetchCalls.length, 1);
+  const cancelled = JSON.parse(harness.fetchCalls[0].init.body);
+  assert.equal(cancelled.tradeId, manual.tradeId);
+  assert.equal(cancelled.paymentKey, manual.paymentKey);
+  assert.equal(cancelled.timestamp, manual.timestamp);
   assert.ok(harness.records()[0].cancelledAt);
   assert.strictEqual(harness.records()[0].cancelSyncPending, false);
 }
@@ -943,8 +949,8 @@ async function testSettingsInitRetriesOnlyPendingCancelledReservationsWithoutTos
 
   await harness.initPromise;
 
-  assert.strictEqual(harness.fetchCalls.length, 1);
-  assert.strictEqual(JSON.parse(harness.fetchCalls[0].init.body).tradeId, 'retry-me');
+  assert.strictEqual(harness.fetchCalls.length, 2);
+  assert.deepStrictEqual(harness.fetchCalls.map(call => JSON.parse(call.init.body).tradeId), ['retry-me', 'manual-payment']);
   assert.strictEqual(harness.lookupCalls.length, 0);
   assert.strictEqual(harness.requestCalls.length, 0);
   const byPaymentKey = Object.fromEntries(
@@ -953,7 +959,7 @@ async function testSettingsInitRetriesOnlyPendingCancelledReservationsWithoutTos
   assert.strictEqual(byPaymentKey['retry-payment'].cancelSyncPending, false);
   assert.strictEqual(byPaymentKey['synced-payment'].cancelSyncPending, false);
   assert.strictEqual(byPaymentKey['not-cancelled-payment'].cancelSyncPending, true);
-  assert.strictEqual(byPaymentKey['manual-payment'].cancelSyncPending, true);
+  assert.strictEqual(byPaymentKey['manual-payment'].cancelSyncPending, false);
   assert.strictEqual(byPaymentKey['missing-trade-payment'].cancelSyncPending, true);
 }
 
@@ -1298,7 +1304,72 @@ async function testInFlightStaysLockedUntilLocalPersistenceFinishes() {
   await first;
 }
 
+async function testSameReservationRetainsEachApprovalKey() {
+  const first = paymentRecord({ paymentKey: 'partial-first', amount: 10000 });
+  const harness = createHarness({ pageMode: 'customer', records: [first] });
+  await harness.initPromise;
+  await harness.context.rememberReceiptRecord({ tradeId: first.tradeId }, { ...first, paymentKey: 'onsite-second', amount: 2000 });
+  assert.deepStrictEqual(harness.records().map(record => [record.paymentKey, record.amount]), [['onsite-second', 2000], ['partial-first', 10000]]);
+  await harness.context.rememberReceiptRecord({ tradeId: first.tradeId }, { ...first, paymentKey: 'onsite-second', amount: 2000 });
+  assert.strictEqual(harness.records().length, 2, 'retrying same approval must not duplicate receipt history');
+}
+
+async function testManualReceiptSyncKeepsIdentityAndPendingOnFailure() {
+  const harness = createHarness({ pageMode: 'customer', records: [], requestPayment: async () => approvedCardResult(), fetch: async () => jsonResponse({ error: 'ledger unavailable' }, 502) });
+  await harness.initPromise;
+  await harness.context.doManualCharge(33000);
+  assert.strictEqual(harness.paymentCalls.length, 1);
+  const payload = JSON.parse(harness.fetchCalls[0].init.body);
+  assert.match(payload.tradeId, /^manual-/);
+  assert.strictEqual(payload.paidAmount, 33000);
+  assert.strictEqual(payload.paymentKey, 'test-payment-key');
+  assert.strictEqual(payload.approvalNumber, 'APPROVED-CARD-1');
+  assert.strictEqual(payload.timestamp, '2026-07-15T12:30:00.000Z');
+  assert.strictEqual(harness.fetchCalls[0].init.headers['x-lookup-token'], 'lookup-token');
+  assert.strictEqual(harness.records()[0].sourceType, 'manual');
+  assert.strictEqual(harness.records()[0].syncPending, true);
+  assert.strictEqual(harness.lastResult().status, 'success', 'approved card must never invite a second charge when ledger sync fails');
+}
+
+async function testReceiptSyncRetriesPreserveFailuresAndSkipCancelledReceipts() {
+  const records = [
+    paymentRecord({ paymentKey: 'retry-success', syncPending: true }),
+    paymentRecord({ tradeId: 'manual-retry', sourceType: 'manual', paymentKey: 'retry-failure', syncPending: true }),
+    paymentRecord({ paymentKey: 'cancelled', syncPending: true, cancelledAt: '2026-07-15T13:00:00.000Z' }),
+    paymentRecord({ paymentKey: 'already-synced', syncPending: false })
+  ];
+  const harness = createHarness({ pageMode: 'settings', records, fetch: async (_url, init) => JSON.parse(init.body).paymentKey === 'retry-failure' ? jsonResponse({ error: 'temporary failure' }, 502) : jsonResponse({ ok: true }) });
+  await harness.initPromise;
+  await harness.context.retryPendingReceiptSyncs();
+  assert.deepStrictEqual(harness.fetchCalls.map(call => JSON.parse(call.init.body).paymentKey), ['retry-success', 'retry-failure']);
+  const byKey = Object.fromEntries(harness.records().map(record => [record.paymentKey, record]));
+  assert.strictEqual(byKey['retry-success'].syncPending, false);
+  assert.strictEqual(byKey['retry-failure'].syncPending, true);
+  assert.strictEqual(byKey.cancelled.syncPending, true);
+  assert.strictEqual(harness.paymentCalls.length, 0);
+  assert.strictEqual(harness.requestCalls.length, 0);
+}
+
+async function testManualPendingRecoveryRetainsManualReceiptClassification() {
+  const harness = createHarness({
+    pageMode: 'customer', records: [],
+    storageValues: { pending: JSON.stringify({ tradeId: 'manual-pending', paymentKey: 'manual-recovered', amount: 26400 }) },
+    getPayment: async () => approvedCardResult()
+  });
+  await harness.initPromise;
+  assert.strictEqual(harness.records().length, 1);
+  assert.strictEqual(harness.records()[0].sourceType, 'manual', 'manual approval recovered after restart must remain discoverable in manual receipt history');
+  assert.match(harness.records()[0].tradeId, /^manual-/);
+  assert.strictEqual((await harness.context.loadManualReceiptRecords()).length, 1);
+  assert.strictEqual(harness.records()[0].syncPending, false);
+  assert.strictEqual(harness.paymentCalls.length, 0, 'recovery must never charge again');
+}
+
 (async function run() {
+  await testManualPendingRecoveryRetainsManualReceiptClassification();
+  await testSameReservationRetainsEachApprovalKey();
+  await testManualReceiptSyncKeepsIdentityAndPendingOnFailure();
+  await testReceiptSyncRetriesPreserveFailuresAndSkipCancelledReceipts();
   await testStrictReceiptReadAllowsActuallyAbsentKey();
   await testStrictReceiptReadRejectsMissingStorageApi();
   await testStrictReceiptReadRejectsInvalidStoreShape();
@@ -1322,7 +1393,7 @@ async function testInFlightStaysLockedUntilLocalPersistenceFinishes() {
   await testRawPaymentNormalizationForCardCashAndBarcode();
   await testLegacyIncompleteRecordHydratesBeforeBuildingCancelPayload();
   await testConfirmedReservationCancelSyncsLedgerAfterLocalPersistence();
-  await testManualCancelNeverSyncsLedger();
+  await testManualCancelSyncsOriginalReceipt();
   await testLedgerFailureLeavesPendingAndShowsAccurateWarning();
   await testSettingsInitRetriesOnlyPendingCancelledReservationsWithoutTossCalls();
   await testRetryPendingCancelSyncsReturnsUsefulSummary();

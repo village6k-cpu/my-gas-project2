@@ -19,6 +19,7 @@ function load(rows, state) {
   vm.runInNewContext(js, {exports:mod.exports,module:mod,process:{env},console,Headers,require:id=>{
     if(id==='next/server')return next;
     if(id==='@supabase/supabase-js')return {createClient:()=>sb};
+    if(id.includes('paymentLedger'))return {paymentLedgerEnabled:()=>false};
     if(id.includes('phoneNormalize'))return {normalizePhoneLast8};
     if(id.includes('gasPublic'))return {gasPost:async payload=>{gasCalls.push(payload);if(state instanceof Error)throw state;return state;}};
     throw new Error(id);

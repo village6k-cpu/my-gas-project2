@@ -25,6 +25,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { gasPost } from "@/lib/server/gasPublic";
+import { paymentLedgerEnabled, recordFrontPayment } from "@/lib/server/paymentLedger";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -74,6 +75,8 @@ interface ConfirmBody {
   method?: string;
   paymentKey?: string; // 토스 결제키 — 멱등성/로그용
   approvalNumber?: string; // 카드 승인번호 — 로그/대사용
+  timestamp?: string | number;
+  merchantId?: string;
 }
 
 // ── 핸들러 ────────────────────────────────────────────────────────
@@ -108,6 +111,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return lookupJson({ error: "카드 승인에는 카드결제 수단만 사용할 수 있습니다." }, { status: 400 });
   }
   const method = "카드결제";
+
+  if (paymentLedgerEnabled()) {
+    try {
+      return lookupJson(await recordFrontPayment(body));
+    } catch (error) {
+      return lookupJson({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
+    }
+  }
 
   // 3) GAS updatePayment 호출 → 시트 결제수단='카드결제' → 부수효과로 입금완료
   //    실제 계약: action=updatePayment, params { tid, method }

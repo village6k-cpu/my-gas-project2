@@ -31,7 +31,7 @@ assert(app.includes('cancelledAt'));
 assert(app.includes('cancelApprovalNumber'));
 assert(app.includes('cancelSyncPending'));
 assert(app.includes('cancelInFlight'));
-assert(/record\.sourceType\s*===\s*['"]reservation['"]/.test(app));
+assert(/timestamp:\s*record\.timestamp/.test(app), 'cancel sync must retain original receipt timestamp');
 assert(app.includes('/api/lookup/cancel'));
 assert(/record\.cancelledAt\s*&&\s*record\.cancelSyncPending/.test(app));
 

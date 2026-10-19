@@ -160,6 +160,8 @@ async function confirmPaid(trade, payment) {
       paidAmount: payment.amount,
       paymentKey: payment.paymentKey,
       approvalNumber: payment.approvalNumber,
+      timestamp: payment.timestamp,
+      customerName: trade.customerName || '',
     }),
   });
   if (!res.ok) throw new Error(await errMsg(res, '결제완료 반영 실패'));
@@ -272,7 +274,7 @@ async function chargeCard(trade) {
 }
 
 async function chargeManualAmount(amount) {
-  return requestCardPayment(Number(amount), null);
+  return requestCardPayment(Number(amount), 'manual-pending');
 }
 
 async function printOfficialPaymentReceipt(paymentKey) {
@@ -384,7 +386,7 @@ async function setCancelSyncPending(record, pending) {
 }
 
 async function syncCancelledReservation(record) {
-  if (!record || record.sourceType !== 'reservation' || !record.tradeId) return null;
+  if (!record || !record.tradeId) return null;
   if (!record.cancelledAt) throw new Error('로컬 취소 완료 기록이 없습니다.');
   if (!record.paymentKey) throw new Error('취소 결제키가 없습니다.');
 
@@ -395,7 +397,9 @@ async function syncCancelledReservation(record) {
       tradeId: record.tradeId,
       paymentKey: record.paymentKey,
       amount: record.amount,
-      cancelApprovalNumber: record.cancelApprovalNumber || null
+      cancelApprovalNumber: record.cancelApprovalNumber || null,
+      approvalNumber: record.approvalNumber || null,
+      timestamp: record.timestamp || null
     })
   });
   if (!res.ok) throw new Error(await errMsg(res, '환불 장부 반영 실패'));
@@ -407,7 +411,7 @@ async function retryPendingCancelSyncs() {
   var pendingRecords = records.filter(function (record) {
     return Boolean(
       record && record.cancelledAt && record.cancelSyncPending &&
-      record.sourceType === 'reservation' && record.tradeId
+      record.tradeId
     );
   });
   var summary = {
@@ -527,7 +531,7 @@ async function markPaymentCancelled(record, cancelDetail) {
     marked = Object.assign({}, stored, record, {
       cancelledAt: cancelledAt,
       cancelApprovalNumber: cancelDetail.approvalNumber || null,
-      cancelSyncPending: record.sourceType === 'reservation'
+      cancelSyncPending: true
     });
     return marked;
   });
@@ -568,16 +572,35 @@ async function rememberReceiptRecord(trade, payment) {
     returnAt: trade && trade.returnAt ? trade.returnAt : '',
     depositStatus: '입금완료',
     paymentMethod: payment.paymentMethod || null
+    ,syncPending: true
   };
   var records = await loadReceiptRecords();
   var filtered = records.filter(function (r) {
     if (!r) return false;
     if (r.paymentKey === record.paymentKey) return false;
-    if (record.tradeId && r.tradeId === record.tradeId) return false;
+    // 같은 예약의 부분/추가 결제도 각 승인 키별로 보존한다.
     return true;
   });
   filtered.unshift(record);
   await saveReceiptRecords(filtered);
+}
+
+async function markReceiptSynced(paymentKey) {
+  var records = await loadReceiptRecords();
+  await saveReceiptRecords(records.map(function (record) {
+    return record && record.paymentKey === paymentKey ? Object.assign({}, record, { syncPending: false }) : record;
+  }));
+}
+
+async function retryPendingReceiptSyncs() {
+  var records = await loadReceiptRecords();
+  var pending = records.filter(function (record) { return record && record.syncPending && !record.cancelledAt; });
+  for (var i = 0; i < pending.length; i += 1) {
+    try {
+      await confirmPaid(pending[i], pending[i]);
+      await markReceiptSynced(pending[i].paymentKey);
+    } catch (e) { /* 승인 원본과 재시도 표시를 보존한다. */ }
+  }
 }
 
 function buildManualReceiptRecord(amount, payment) {
@@ -829,7 +852,7 @@ async function recordConfirmedPaymentCancel(record, result, title, description) 
     );
   }
 
-  if (cancelledRecord.sourceType === 'reservation' && cancelledRecord.tradeId) {
+  if (cancelledRecord.tradeId) {
     try {
       await syncCancelledReservation(cancelledRecord);
     } catch (e) {
@@ -1130,7 +1153,7 @@ var showOrder = safe(function (m) {
   var amount = Number(m.amount);
   sdk.template.renderOrderPage({
     order: {
-      items: [{ label: m.itemSummary || (m.customerName + ' 대여'), value: amount, quantity: 1 }],
+      items: [{ label: (m.paidAmount > 0 ? '남은 결제금액 · ' : '') + (m.itemSummary || (m.customerName + ' 대여')), value: amount, quantity: 1 }],
       discounts: [],
       summary: { totalAmount: amount },
     },
@@ -1220,6 +1243,7 @@ async function doCharge(m) {
   // 카드 승인 성공 → 시트 '입금완료' 반영
   try {
     await confirmPaid(trade, payment);
+    await markReceiptSynced(payment.paymentKey);
   } catch (e) {
     // 카드는 승인됐는데 시트 반영만 실패 → 손님에겐 완료로 안내, pending 유지(다음 부팅 때 복구)
     syncWarning = true;
@@ -1238,6 +1262,7 @@ async function doCharge(m) {
 async function doManualCharge(amount) {
   var payment;
   var historyWarning = false;
+  var syncWarning = false;
   try {
     payment = await chargeManualAmount(amount);
   } catch (e) {
@@ -1252,7 +1277,12 @@ async function doManualCharge(amount) {
     historyWarning = true;
     console.error('[village] 직접 결제 기록 저장 실패(카드는 승인됨):', e);
   }
-  return showSuccess(payment, { historyWarning: historyWarning });
+  try {
+    await confirmPaid(buildManualReceiptRecord(amount, payment), payment);
+    await markReceiptSynced(payment.paymentKey);
+    if (!historyWarning) await storageDel('pending');
+  } catch (e) { syncWarning = true; }
+  return showSuccess(payment, { historyWarning: historyWarning, syncWarning: syncWarning });
 }
 
 // 6) 결과 화면
@@ -1370,9 +1400,12 @@ async function recoverPending() {
         recoveredPayment
       );
       await rememberReceiptRecord(
-        { tradeId: pending.tradeId, customerName: '복구된 예약 결제', itemSummary: '예약 결제', checkoutAt: '', returnAt: '' },
+        String(pending.tradeId || '').indexOf('manual-') === 0
+          ? buildManualReceiptRecord(pending.amount, recoveredPayment)
+          : { tradeId: pending.tradeId, customerName: '복구된 예약 결제', itemSummary: '예약 결제', checkoutAt: '', returnAt: '' },
         recoveredPayment
       );
+      await markReceiptSynced(pending.paymentKey);
       await storageDel('pending');
       return;
     }
@@ -1393,5 +1426,6 @@ async function recoverPending() {
     return;
   }
   try { await recoverPending(); } catch (e) {}
+  try { await retryPendingReceiptSyncs(); } catch (e) {}
   showIdle();
 })();

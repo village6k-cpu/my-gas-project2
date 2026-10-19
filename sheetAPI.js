@@ -632,6 +632,15 @@ function handleRequestCore_(e) {
       case "terminalPaymentState":
         return jsonResponse(getTerminalPaymentState_(params.tids || postBody.tids || []));
 
+      case "paymentLedgerSnapshot":
+        return jsonResponse(getPaymentLedgerSnapshot_(postBody.tids == null ? null : postBody.tids));
+
+      case "paymentLedgerProjection":
+        return jsonResponse(applyPaymentLedgerProjection_(postBody.items || []));
+
+      case "configurePaymentLedger":
+        return jsonResponse(configurePaymentLedger_(postBody.enabled));
+
       case "cardPaymentCandidates":
         return jsonResponse(getCardPaymentCandidates_(
           params.amount || postBody.amount, params.tid || postBody.tid
