@@ -216,11 +216,10 @@ export async function ingestPayment(input: Row, actor: string, options: { refres
   }));
   if (options.refresh !== false) await refreshPaymentAccounts(undefined, undefined, db);
   let stored = checked(await db.from("payment_receipt_balances").select("*").eq("id", result.receiptId).single()) as Row;
-  const accounts = await paymentBalances(undefined, db);
   const cutover = Date.parse(process.env.PAYMENT_LEDGER_CUTOVER_AT ?? "");
   const newReceipt = Number.isFinite(cutover) && Date.parse(occurredAt) >= cutover;
   if (options.auto !== false && stored.source === "bank" && stored.revision === 1 && stored.status === "active" && !stored.review_reason && stored.allocated_amount === 0 && newReceipt) {
-    const candidates = receiptCandidates(stored, accounts);
+    const candidates = receiptCandidates(stored, await paymentBalances(undefined, db));
     if (candidates.length === 1 && stored.remaining_amount <= candidates[0].balance) {
       checked(await db.rpc("payment_set_allocations", {
         p_receipt_id: stored.id, p_allocations: [{ trade_id: candidates[0].trade_id, amount: stored.amount }],
