@@ -3,6 +3,13 @@ function paymentLedgerEnabled_() {
   return PropertiesService.getScriptProperties().getProperty('PAYMENT_LEDGER_ENABLED') === 'true';
 }
 
+function paymentLedgerDate_(value) {
+  var text = cardPaymentDate_(value);
+  if (!/^\d{4}-\d{2}-\d{2}(?:$|[T ])/.test(text)) return null;
+  var day = text.slice(0, 10), date = new Date(day + 'T00:00:00Z');
+  return !isNaN(date.getTime()) && date.toISOString().slice(0, 10) === day ? day : null;
+}
+
 function getPaymentLedgerSnapshot_(tradeIds) {
   if (typeof tradeIds === 'string') tradeIds = JSON.parse(tradeIds);
   if (tradeIds != null && (!Array.isArray(tradeIds) || tradeIds.length > 5000)) throw new Error('거래ID 목록 오류');
@@ -13,19 +20,19 @@ function getPaymentLedgerSnapshot_(tradeIds) {
   var rows = ledger.getLastRow() < 2 ? [] : ledger.getRange(2, 1, ledger.getLastRow() - 1, 13).getValues();
   var contracts = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
   if (!contracts) throw new Error('계약마스터 시트 없음');
-  var contractMap = {};
+  var contractMap = {}, duplicateIds = {};
   var contractRows = contracts.getLastRow() < 2 ? [] : contracts.getRange(2, 1, contracts.getLastRow() - 1, 10).getValues();
   contractRows.forEach(function(row) {
     var id = String(row[0] || '').trim();
     if (!id || (wanted && !wanted[id])) return;
-    if (contractMap[id]) throw new Error('계약마스터 거래ID 중복: ' + id);
-    contractMap[id] = { status: String(row[9] || '').trim(), checkout: cardPaymentDate_(row[4]) };
+    if (contractMap[id]) duplicateIds[id] = true;
+    contractMap[id] = { status: String(row[9] || '').trim(), checkout: paymentLedgerDate_(row[4]) };
   });
   var seen = {}, accounts = [];
   rows.forEach(function(row) {
     var id = String(row[4] || '').trim();
     if (!id || (wanted && !wanted[id])) return;
-    if (seen[id]) throw new Error('거래내역 거래ID 중복: ' + id);
+    if (seen[id]) { duplicateIds[id] = true; return; }
     seen[id] = true;
     var text = String(row[8] == null ? '' : row[8]).trim();
     var amount = text === '' ? NaN : Number(text.replace(/[,₩원\s]/g, ''));
@@ -38,7 +45,13 @@ function getPaymentLedgerSnapshot_(tradeIds) {
       checkout_at: contract && contract.checkout ? contract.checkout : null, observed_at: observedAt
     });
   });
-  return { success: true, accounts: accounts, observedAt: observedAt };
+  accounts.forEach(function(account) {
+    if (!duplicateIds[account.trade_id]) return;
+    // 어느 행이 정본인지 추정하지 않는다. 해당 거래만 결제/배분에서 제외한다.
+    account.billed_amount = null;
+    account.deposit_status = '거래ID 중복 확인필요';
+  });
+  return { success: true, accounts: accounts, observedAt: observedAt, duplicateTradeIds: Object.keys(duplicateIds) };
 }
 
 /** 최신 청구액과 단조 revision이 모두 일치할 때만 M열을 투영한다. */
@@ -49,17 +62,18 @@ function applyPaymentLedgerProjection_(items) {
   try {
     var ledger = getVillageTradeSheet_(), props = PropertiesService.getScriptProperties();
     var rows = ledger.getLastRow() < 2 ? [] : ledger.getRange(2, 1, ledger.getLastRow() - 1, 13).getValues();
-    var index = {};
+    var index = {}, duplicates = {};
     rows.forEach(function(row, i) {
       var id = String(row[4] || '').trim();
       if (!id) return;
-      if (index[id]) throw new Error('거래내역 거래ID 중복: ' + id);
+      if (index[id]) duplicates[id] = true;
       index[id] = { row: i + 2, values: row };
     });
     var applied = [], rejected = [];
     items.forEach(function(item) {
       var id = String(item.tradeId || '').trim(), target = index[id];
       var revision = Number(item.revision), key = 'PAYMENT_REV_' + id;
+      if (duplicates[id]) { rejected.push({ tradeId: id, reason: 'duplicate_trade_id' }); return; }
       if (!target || !Number.isSafeInteger(revision) || revision < 1) { rejected.push({ tradeId: id, reason: 'missing_or_invalid' }); return; }
       var rawAmount = String(target.values[8] == null ? '' : target.values[8]).trim();
       var amount = rawAmount === '' ? null : Number(rawAmount.replace(/[,₩원\s]/g, ''));
