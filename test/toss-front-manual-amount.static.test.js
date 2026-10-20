@@ -24,8 +24,8 @@ assert(
 const manualCharge = app.match(/async function doManualCharge\(amount\) \{[\s\S]*?\n\}/);
 assert(manualCharge, 'manual amount charge function must exist');
 assert(
-  !manualCharge[0].includes('confirmPaid'),
-  'manual amount payments must not call the reservation/sheet confirm endpoint'
+  manualCharge[0].includes('confirmPaid(buildManualReceiptRecord(amount, payment), payment)'),
+  'manual amount approvals must sync their manual receipt identity to the allocation ledger'
 );
 
 console.log('toss-front manual amount static checks passed');

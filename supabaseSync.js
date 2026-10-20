@@ -1251,6 +1251,7 @@ function flushDirtyToSupabase() {
         // keep-set으로 가지치기하면 동기화 빌드 뒤 다른 직원이 추가한 행까지 지울 수 있다.
       }
     }
+    if (typeof flushPaymentLedgerMirror_ === 'function' && !flushPaymentLedgerMirror_(tids)) ok = false;
   } catch (err) {
     Logger.log('flushDirty 오류: ' + err);
     return;

@@ -13,7 +13,7 @@ function load(gasResult) {
   const original = process.env.LOOKUP_TOKEN;
   process.env.LOOKUP_TOKEN = 'test-token';
   try {
-    new Function('require', 'module', 'exports', js)((id) => id === 'next/server' ? next : { gasPost: async () => gasResult }, m, m.exports);
+    new Function('require', 'module', 'exports', js)((id) => id === 'next/server' ? next : id.includes('paymentLedger') ? { paymentLedgerEnabled: () => false } : { gasPost: async () => gasResult }, m, m.exports);
   } finally {
     if (original == null) delete process.env.LOOKUP_TOKEN;
     else process.env.LOOKUP_TOKEN = original;

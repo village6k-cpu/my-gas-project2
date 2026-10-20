@@ -35,6 +35,11 @@ const OperationsView = dynamic(() => import("@/components/OperationsView").then(
   loading: () => <PaneLoading label="운영판" />,
 });
 
+const PaymentsView = dynamic(() => import("@/components/PaymentsView").then((mod) => mod.PaymentsView), {
+  ssr: false,
+  loading: () => <PaneLoading label="수납 관리" />,
+});
+
 const ConfirmView = dynamic(() => import("@/components/ConfirmView").then((mod) => mod.ConfirmView), {
   ssr: false,
   loading: () => <PaneLoading label="확인요청" />,
@@ -118,6 +123,7 @@ export function AppShell({ initial = "today" }: { initial?: NavKey }) {
         {pane("schedule", ScheduleView)}
         {pane("follow", FollowUpView, true)}
         {pane("operations", OperationsView, true)}
+        {pane("payments", PaymentsView, true)}
         {pane("confirm", ConfirmView)}
         {pane("inventory", InventoryView)}
         {pane("dojang", DojangView)}

@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { gasPost } from "@/lib/server/gasPublic";
+import { getPayablePaymentBalances, paymentLedgerEnabled } from "@/lib/server/paymentLedger";
 import { normalizePhoneLast8 } from "@/lib/server/phoneNormalize";
 
 export const runtime = "nodejs";
@@ -99,6 +100,8 @@ interface LookupMatch {
   amount: number | null;
   checkoutAt: string;
   depositStatus: string | null;
+  billedAmount?: number | null;
+  paidAmount?: number;
 }
 
 // ── 품목 요약 (최대 3개 + 나머지) ─────────────────────────────────
@@ -156,6 +159,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       checkout_at: string;
       deposit_status: string | null;
       contract_status: string;
+      billedAmount?: number | null;
+      paidAmount?: number;
     };
 
     let rows: Row[] = [];
@@ -174,11 +179,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       const needle = normalizePhoneLast8(rawPhone);
       if (!needle) return lookupJson({ matches: [] });
       const tail = needle.slice(-4);
-      const { data, error } = await baseSelect
-        .ilike("customer_phone", `%${tail}%`)
+      let phoneQuery = baseSelect.ilike("customer_phone", `%${tail}%`);
+      if (!paymentLedgerEnabled()) phoneQuery = phoneQuery
         // 미결제(입금완료 아님 — NULL 포함) 필터를 서버로 옮겨 limit이 미결제 건에만 적용되게 한다.
         // ⚠️ .neq 단독은 deposit_status=NULL 행을 제외하므로(or is.null 필수) 금지.
-        .or("deposit_status.neq.입금완료,deposit_status.is.null")
+        .or("deposit_status.neq.입금완료,deposit_status.is.null");
+      const { data, error } = await phoneQuery
         .neq("contract_status", "취소") // contract_status는 not null (schema.sql)
         .limit(LOOKUP_LIMIT);
       if (error) throw error;
@@ -189,7 +195,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
     // 미결제(입금완료 아님 — NULL 포함) + 미취소
     const candidates = rows.filter(
-      (t) => !["입금완료", "결제완료"].includes(String(t.deposit_status ?? "").trim()) &&
+      (t) => (paymentLedgerEnabled() || !["입금완료", "결제완료"].includes(String(t.deposit_status ?? "").trim())) &&
         String(t.contract_status ?? "").trim() !== "취소"
     );
     if (candidates.length === 0) return lookupJson({ matches: [] });
@@ -200,12 +206,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       found: boolean; canPay: boolean; amount: number | null;
       depositStatus: string; paymentMethod: string;
     };
+    const trades: Row[] = [];
+    if (paymentLedgerEnabled()) {
+      const balances = await getPayablePaymentBalances(candidates.map(t => t.trade_id));
+      for (const current of balances) {
+        const candidate = candidates.find(t => t.trade_id === current.trade_id);
+        if (candidate) trades.push({ ...candidate, amount: current.balance, deposit_status: current.status,
+          billedAmount: current.billed_amount, paidAmount: current.paid_amount });
+      }
+    } else {
     const state = await gasPost({ action: "terminalPaymentState", tids: candidates.map(t => t.trade_id) }) as
       { success?: boolean; items?: Record<string, PaymentState>; error?: string } | null;
     if (!state || state.success !== true || state.error || !state.items) {
       throw new Error("현재 장부의 결제 상태를 확인하지 못했습니다. 다시 조회해주세요.");
     }
-    const trades: Row[] = [];
     for (const candidate of candidates) {
       const current = state.items[candidate.trade_id];
       if (!current || typeof current.found !== "boolean" || typeof current.canPay !== "boolean") {
@@ -217,6 +231,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         throw new Error("예약의 현재 청구 금액 또는 입금 상태를 확인하지 못했습니다.");
       }
       trades.push({ ...candidate, amount: current.amount, deposit_status: current.depositStatus });
+    }
     }
 
     if (trades.length === 0) {
@@ -251,6 +266,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       amount: t.amount,
       checkoutAt: t.checkout_at,
       depositStatus: t.deposit_status,
+      ...(t.billedAmount !== undefined ? { billedAmount: t.billedAmount, paidAmount: t.paidAmount } : {}),
     }));
 
     return lookupJson({ matches });

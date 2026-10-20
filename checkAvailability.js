@@ -7948,7 +7948,8 @@ function updateTradePaymentMethod(tid, method) {
   invalidateDashboardCache();
   // API setValue는 onEdit을 발생시키지 않는다. 토스 예약목록/직원 화면에도 반영한다.
   if (wroteSheet) supaMarkTradeDirty_(tid);
-  var paymentComplete = wroteSheet && (method !== '카드결제' || !!(sideEffects && sideEffects.applied));
+  var ledgerManaged = !!(sideEffects && sideEffects.managedByPaymentLedger);
+  var paymentComplete = wroteSheet && (ledgerManaged || method !== '카드결제' || !!(sideEffects && sideEffects.applied));
   if (wroteSheet && !paymentComplete) warning = (sideEffects && sideEffects.warning) || '카드결제 입금완료 반영 실패';
   return {
     success: paymentComplete,
@@ -7958,7 +7959,9 @@ function updateTradePaymentMethod(tid, method) {
     sideEffects: sideEffects || { applied: false },
     warning: warning,
     onEditTriggered: false,
-    note: "스크립트 setValue/API 변경은 대상 거래내역 시트의 onEdit 트리거를 실행하지 않으므로, 확인된 카드결제 후속값은 API에서 직접 반영합니다."
+    note: ledgerManaged
+      ? "결제수단만 변경했습니다. 실제 수납과 입금상태는 수납 관리에서 원본 입금·결제를 연결해 반영해주세요."
+      : "스크립트 setValue/API 변경은 대상 거래내역 시트의 onEdit 트리거를 실행하지 않으므로, 확인된 카드결제 후속값은 API에서 직접 반영합니다."
   };
   } finally {
     releaseDashboardAuxMutation_(paymentClaim);
@@ -7966,6 +7969,10 @@ function updateTradePaymentMethod(tid, method) {
 }
 
 function applyTradePaymentSideEffects_(sheet, row, method) {
+  // 결제수단 선택은 수납 증거가 아니다. 원장 활성화 후 K/L/M은 여기서 변경하지 않는다.
+  if (typeof paymentLedgerEnabled_ === 'function' && paymentLedgerEnabled_()) {
+    return { applied: false, managedByPaymentLedger: true };
+  }
   var preset = null;
   if (method === "카드결제") {
     preset = {
@@ -8056,6 +8063,10 @@ function updateTradeProofField(tid, field, value, options) {
   if (!tid) return { error: "tid 필요" };
   if (field !== "proofType" && field !== "issueStatus" && field !== "depositStatus") {
     return { error: "field는 proofType/issueStatus/depositStatus만 허용" };
+  }
+
+  if (field === "depositStatus" && typeof paymentLedgerEnabled_ === 'function' && paymentLedgerEnabled_()) {
+    return { success: false, error: "입금상태는 직접 변경할 수 없습니다. 수납 관리에서 원본 입금·결제를 연결하거나 기존 수납 기준을 확인해주세요." };
   }
 
   if (field === "issueStatus" && value === "발행요청") {

@@ -23,6 +23,7 @@ function loadRoute({ lookupToken, gasPost }) {
   const routeModule = { exports: {} };
   const localRequire = (id) => {
     if (id === 'next/server') return nextServer;
+    if (id === '@/lib/server/paymentLedger') return { paymentLedgerEnabled: () => false };
     if (id === '@/lib/server/gasPublic') return { gasPost };
     return dashboardRequire(id);
   };

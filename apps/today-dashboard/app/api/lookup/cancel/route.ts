@@ -7,6 +7,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { gasPost } from "@/lib/server/gasPublic";
+import { paymentLedgerEnabled, recordFrontPayment } from "@/lib/server/paymentLedger";
 
 export const runtime = "nodejs";
 
@@ -50,6 +51,9 @@ interface CancelBody {
   paymentKey?: string;
   amount?: number;
   cancelApprovalNumber?: string;
+  approvalNumber?: string;
+  timestamp?: string | number;
+  merchantId?: string;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -77,6 +81,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const normalizedTradeId = tradeId.trim();
   const normalizedPaymentKey = paymentKey.trim();
+
+  if (paymentLedgerEnabled()) {
+    try {
+      return lookupJson(await recordFrontPayment({ ...body, paidAmount: body.amount, cancelled: true }));
+    } catch (error) {
+      return lookupJson({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
+    }
+  }
 
   try {
     const gasResult = await gasPost({
