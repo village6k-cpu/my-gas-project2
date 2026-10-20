@@ -104,6 +104,11 @@ export function PaymentsView({ active = true }: { active?: boolean }) {
   }, [dirty, savedAwaitingRefresh, opening, openingSaved]);
 
   const tradeMap = useMemo(() => new Map((data?.trades || []).map((trade) => [trade.tradeId, trade])), [data]);
+  const visibleTrades = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return (data?.trades || []).filter((trade) => !query || `${trade.tradeId} ${trade.customerName}`.toLowerCase().includes(query))
+      .sort((a, b) => b.tradeId.localeCompare(a.tradeId));
+  }, [data, search]);
   const validation = validateAllocationDraft(selected?.amount || 0, rows, selected?.allocations || [], note);
   const allocationError = validation.error || allocationBalanceError(validation.allocations, selected?.allocations || [], data?.trades || []) || (selected?.reviewReason ? "결제 원본 확인이 필요한 수납입니다. 확인이 끝난 뒤 연결할 수 있습니다." : "");
   const draftTotal = rows.reduce((sum, row) => sum + (/^\d+$/.test(row.amount) ? Number(row.amount) : 0), 0);
@@ -116,7 +121,7 @@ export function PaymentsView({ active = true }: { active?: boolean }) {
     if (rows.some((row) => row.tradeId === trade.tradeId) || /취소|cancel/i.test(trade.status)) return false;
     const query = tradeSearch.trim().toLowerCase();
     return query ? `${trade.tradeId} ${trade.customerName}`.toLowerCase().includes(query) : selected?.candidates.includes(trade.tradeId) || (trade.balance ?? 0) > 0;
-  }).sort((a, b) => Number(selected?.candidates.includes(b.tradeId)) - Number(selected?.candidates.includes(a.tradeId))).slice(0, 30);
+  }).sort((a, b) => Number(selected?.candidates.includes(b.tradeId)) - Number(selected?.candidates.includes(a.tradeId)) || b.tradeId.localeCompare(a.tradeId)).slice(0, 30);
 
   async function save() {
     if (!selected || savingRef.current || allocationError || cancelled || stale || savedAwaitingRefresh || !dirty) return;
@@ -251,7 +256,7 @@ export function PaymentsView({ active = true }: { active?: boolean }) {
             <button disabled={saving || openingSaved || !!validateOpeningBalance(openingAmount, openingNote, opening.revision).error} className="mt-3 w-full rounded-lg bg-brand-600 py-2.5 text-sm font-bold text-white disabled:opacity-40" onClick={() => void saveOpening()}>{saving ? "저장 중…" : "근거와 함께 기준 저장"}</button>
           </div>}
           <div className="mt-3 max-h-80 overflow-auto"><table className="w-full min-w-[520px] text-xs"><thead className="sticky top-0 bg-white text-ink-mute"><tr><th className="py-2 text-left">예약</th><th className="text-right">청구</th><th className="text-right">수납</th><th className="text-right">잔액 / 초과</th></tr></thead><tbody>
-            {data.trades.map((trade) => <tr key={trade.tradeId} className="border-t border-line/60"><td className="py-3 font-bold">{trade.customerName}<span className="mt-0.5 block text-[10px] font-normal text-ink-faint">{trade.tradeId}</span>{trade.reviewRequired && <span className="mt-1 block text-[10px] text-attention-fg">기존 수납 확인 필요</span>}<button disabled={saving || !!opening} onClick={() => editOpening(trade)} className="mt-1 block text-[10px] font-normal text-brand-600 underline disabled:opacity-40">기존 수납 기준 확인/조정</button></td><td className="text-right tabular-nums">{money(trade.billedAmount)}</td><td className="text-right tabular-nums">{money(trade.paidAmount)}</td><td className={`text-right font-bold tabular-nums ${(trade.credit ?? 0) > 0 ? "text-attention-fg" : "text-brand-700"}`}>{(trade.credit ?? 0) > 0 ? `초과 ${money(trade.credit)}` : money(trade.balance)}</td></tr>)}
+            {visibleTrades.map((trade) => <tr key={trade.tradeId} className="border-t border-line/60"><td className="py-3 font-bold">{trade.customerName}<span className="mt-0.5 block text-[10px] font-normal text-ink-faint">{trade.tradeId}</span>{trade.reviewRequired && <span className="mt-1 block text-[10px] text-attention-fg">기존 수납 확인 필요</span>}<button disabled={saving || !!opening} onClick={() => editOpening(trade)} className="mt-1 block text-[10px] font-normal text-brand-600 underline disabled:opacity-40">기존 수납 기준 확인/조정</button></td><td className="text-right tabular-nums">{money(trade.billedAmount)}</td><td className="text-right tabular-nums">{money(trade.paidAmount)}</td><td className={`text-right font-bold tabular-nums ${(trade.credit ?? 0) > 0 ? "text-attention-fg" : "text-brand-700"}`}>{(trade.credit ?? 0) > 0 ? `초과 ${money(trade.credit)}` : money(trade.balance)}</td></tr>)}
           </tbody></table></div>
         </section>}
       </div>
