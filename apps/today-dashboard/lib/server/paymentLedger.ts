@@ -215,6 +215,11 @@ export async function ingestPayment(input: Row, actor: string, options: { refres
     p_receipt: receipt, p_request_id: keyFor("ingest", receipt), p_actor: actor,
   }));
   if (options.refresh !== false) await refreshPaymentAccounts(undefined, undefined, db);
+  // Older terminal versions omitted timestamp. The signed provider event is
+  // authoritative and can resolve only this specific missing-evidence hold.
+  if (input.source === "toss") {
+    checked(await db.rpc("payment_reconcile_front_approval", { p_receipt_id: result.receiptId }));
+  }
   let stored = checked(await db.from("payment_receipt_balances").select("*").eq("id", result.receiptId).single()) as Row;
   const cutover = Date.parse(process.env.PAYMENT_LEDGER_CUTOVER_AT ?? "");
   const newReceipt = Number.isFinite(cutover) && Date.parse(occurredAt) >= cutover;

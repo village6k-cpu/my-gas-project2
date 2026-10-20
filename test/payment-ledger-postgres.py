@@ -297,6 +297,45 @@ def invalid_inputs_and_merchant_scope():
     late=receipt(25,'toss','far-time',approval_number='SAME',merchant_id='merchant-a',occurred='2026-10-22T00:00:00Z')
     assert late['receiptId']!=f['receiptId']
 
+def provider_evidence_recovers_terminal_binding():
+    account('recover-front',77000)
+    r=receipt(77000,'front','recover-front-key',approval_number='RECOVER-1',
+        raw={'tradeId':'recover-front','approvalTimeEstimated':True},
+        review_reason='승인 시각 확인 필요')['receiptId']
+    reconcile=lambda:run('select village.payment_reconcile_front_approval(%s)',(r,))
+    assert reconcile()['reconciled'] is False  # No provider evidence yet.
+    t=receipt(77000,'toss','recover-toss-key',approval_number='RECOVER-1',merchant_id='merchant',
+        occurred='2026-10-20T23:59:55Z')
+    assert t['receiptId']==r
+    assert reconcile()['reconciled'] is True
+    assert balance('recover-front')['paid_amount']==77000
+    assert balance('recover-front')['status']=='입금완료'
+    assert run('select review_reason from village.payment_receipts where id=%s',(r,)) is None
+    assert reconcile()['reconciled'] is False
+    assert balance('recover-front')['paid_amount']==77000
+    allocate(r,[],revision=3)
+    assert reconcile()['reconciled'] is False  # Staff unlink is final.
+    assert balance('recover-front')['paid_amount']==0
+    for role in ['anon','authenticated']:
+        must_fail(lambda:run(f"set role {role}; select village.payment_reconcile_front_approval('{r}')"),'permission denied')
+
+def provider_recovery_preserves_review_and_is_atomic():
+    for suffix,reason in [('hold','ambiguous_approval_identity'),('cancel','승인 시각 확인 필요'),
+                          ('missing','승인 시각 확인 필요')]:
+        tid='recovery-'+suffix
+        if suffix!='missing':account(tid,100)
+        r=receipt(100,'front','front-'+suffix,approval_number='APR-'+suffix,
+            raw={'tradeId':tid,'approvalTimeEstimated':True},review_reason=reason)['receiptId']
+        receipt(100,'toss','toss-'+suffix,approval_number='APR-'+suffix,
+            status='cancelled' if suffix=='cancel' else 'active')
+        fn=lambda:run('select village.payment_reconcile_front_approval(%s)',(r,))
+        if suffix=='missing':
+            must_fail(fn,'unknown account')
+            assert run('select revision from village.payment_receipts where id=%s',(r,))==1
+            assert run('select review_reason from village.payment_receipts where id=%s',(r,))==reason
+            assert run("select count(*) from village.payment_events where receipt_id=%s and event_type='approval_evidence_recovered'",(r,))==0
+        else:assert fn()['reconciled'] is False
+
 
 def main():
     global DSN
@@ -313,10 +352,13 @@ def main():
             run('create schema village; create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema village to service_role')
             run(MIGRATION.read_text())
             run(MIGRATION.read_text())  # Safe to reapply before activation.
+            recovery=ROOT/'apps/today-dashboard/supabase/migrations/20261020173000_front_approval_evidence.sql'
+            run(recovery.read_text())
             for fn in [partial_combined_changes,receipt_limits_and_atomicity,idempotency_and_immutable_identity,
                        alias_and_cancellation,cancellation_before_approval,ambiguous_approval,historical_baseline,
                        stale_snapshots_and_projection,trusted_overpayment_only,reallocation_full_map,concurrency,
-                       permissions,opening_balance_reconciliation,conflicting_source_alias,front_trade_binding_survives_toss_first,historical_cancellation_requires_review,missing_contract_and_cancelled_account,invalid_inputs_and_merchant_scope]:check(fn.__name__,fn)
+                       permissions,opening_balance_reconciliation,conflicting_source_alias,front_trade_binding_survives_toss_first,historical_cancellation_requires_review,missing_contract_and_cancelled_account,invalid_inputs_and_merchant_scope,
+                       provider_evidence_recovers_terminal_binding,provider_recovery_preserves_review_and_is_atomic]:check(fn.__name__,fn)
             print(f'{COUNT} PostgreSQL financial scenarios passed (including concurrent transactions).')
         finally:subprocess.run(['pg_ctl','-D',str(data),'-m','immediate','stop'],check=True,stdout=subprocess.DEVNULL)
 

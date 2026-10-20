@@ -95,6 +95,15 @@ test('Toss amount and date coincidence offers a candidate but never automaticall
   assert.equal(result.status, 'unmatched');
   assert.equal(h.calls.rpc.some(call => call.name === 'payment_set_allocations'), false);
 });
+test('verified Toss ingestion reconciles terminal evidence after account refresh and before projection', async () => {
+  const h = harness({ receipts: [receipt({ source: 'front', review_reason: '승인 시각 확인 필요' })] });
+  await h.api.ingestPayment(inputFor('toss'), 'provider_bridge');
+  assert.ok(h.events.indexOf('payment_refresh_accounts') < h.events.indexOf('payment_reconcile_front_approval'));
+  assert.ok(h.calls.rpc.some(c => c.name === 'payment_reconcile_front_approval' && c.args.p_receipt_id === 'receipt-1'));
+  const bank = harness();
+  await bank.api.ingestPayment(inputFor('bank'), 'bank_bridge');
+  assert.equal(bank.events.includes('payment_reconcile_front_approval'), false);
+});
 test('unique bank payer can automatically allocate on first receipt revision', async () => {
   const h = harness();
   const result = await h.api.ingestPayment(inputFor('bank'), 'test', { refresh: false, project: false });
