@@ -8,7 +8,7 @@ import type { GroupMode, TLItem } from "@/lib/domain/timeline";
 import { DAY, computeConflicts, dateOnlyMs, daysBetween, groupItems, revenueByDay, statusBar } from "@/lib/domain/timeline";
 import { removeItem, resizeEquipment, shiftEquipmentDates } from "@/lib/data/store";
 import { ledgerStockFor, useLedgerStocks, type LedgerStock } from "@/lib/data/equipmentStock";
-import { parseYmd, timeLabel } from "@/lib/domain/status";
+import { parseYmd, shortDate, timeLabel } from "@/lib/domain/status";
 import { ChevronRight, Doc, Plus } from "./icons";
 import { TradeActions } from "./TradeActions";
 
@@ -433,9 +433,7 @@ function StockBadge({ ledger }: { ledger: LedgerStock }) {
 }
 
 function BarSheet({ it, trade, onClose }: { it: TLItem; trade?: Trade; onClose: () => void }) {
-  const co = new Date(it.checkoutAt);
-  const ro = new Date(it.returnAt);
-  const fmt = (d: Date, iso: string) => `${d.getMonth() + 1}/${d.getDate()} ${timeLabel(iso)}`;
+  const fmt = (iso: string) => `${shortDate(iso)} ${timeLabel(iso)}`;
   const unit = unitBadge(it);
   const { byName } = useLedgerStocks();
   const ledger = ledgerStockFor(byName, it.label); // 확신 매칭일 때만 표시
@@ -451,10 +449,10 @@ function BarSheet({ it, trade, onClose }: { it: TLItem; trade?: Trade; onClose: 
             <span className="text-ink-mute">예약자</span> <span className="font-bold text-ink">{it.custName}</span> · {it.tradeId}
           </div>
           <div>
-            <span className="text-ink-mute">반출</span> {fmt(co, it.checkoutAt)}
+            <span className="text-ink-mute">반출</span> {fmt(it.checkoutAt)}
           </div>
           <div>
-            <span className="text-ink-mute">반납</span> {fmt(ro, it.returnAt)}
+            <span className="text-ink-mute">반납</span> {fmt(it.returnAt)}
           </div>
           <div>
             <span className="text-ink-mute">상태</span> {it.status}

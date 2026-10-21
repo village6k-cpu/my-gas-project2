@@ -14,6 +14,23 @@ function equipmentActualTakenQty(item: EquipmentItem): number {
 
 const WEEKDAY = ["일", "월", "화", "수", "목", "금", "토"];
 
+const reservationClock = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Seoul", hourCycle: "h23",
+  year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+});
+function reservationParts(iso: string): Record<string, string> | null {
+  // GAS의 시간대 없는 일시는 매장 한국 시각이다. 브라우저/서버의 시간대를 적용하지 않는다.
+  let value = String(iso || "").trim().replace(" ", "T");
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(value)) value += "+09:00";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return Object.fromEntries(reservationClock.formatToParts(date).map(part => [part.type, part.value]));
+}
+function reservationDay(iso: string): string {
+  const p = reservationParts(iso);
+  return p ? `${p.year}-${p.month}-${p.day}` : "";
+}
+
 export function ymd(d: Date): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -34,31 +51,31 @@ export function formatDateLabel(s: string): string {
   return `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일 (${WEEKDAY[d.getDay()]})`;
 }
 export function shortDate(iso: string): string {
-  const d = new Date(iso);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+  const p = reservationParts(iso);
+  return p ? `${Number(p.month)}/${Number(p.day)}` : "—";
 }
 export function timeLabel(iso: string): string {
-  const d = new Date(iso);
-  const h = d.getHours();
-  const m = d.getMinutes();
-  const ampm = h < 12 ? "오전" : "오후";
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return `${ampm} ${h12}:${String(m).padStart(2, "0")}`;
+  const p = reservationParts(iso);
+  if (!p) return "시간 미정";
+  const clock = `${p.hour}:${p.minute}`;
+  return clock === "00:00" ? `${clock} (자정)` : clock === "12:00" ? `${clock} (정오)` : clock;
 }
 export function timeSortKey(iso: string): number {
-  const d = new Date(iso);
-  return d.getHours() * 60 + d.getMinutes();
+  const p = reservationParts(iso);
+  return p ? Number(p.hour) * 60 + Number(p.minute) : Number.POSITIVE_INFINITY;
 }
 export function timeBand(iso: string): string {
-  const h = new Date(iso).getHours();
+  const p = reservationParts(iso);
+  if (!p) return "시간 미정";
+  const h = Number(p.hour);
   if (h < 12) return "오전";
   if (h < 17) return "오후";
   return "저녁";
 }
 
 export function phaseForDate(t: Trade, date: string): "checkout" | "checkin" | "both" | "none" {
-  const isOut = ymd(new Date(t.checkoutAt)) === date;
-  const isIn = ymd(new Date(t.returnAt)) === date;
+  const isOut = reservationDay(t.checkoutAt) === date;
+  const isIn = reservationDay(t.returnAt) === date;
   if (isOut && isIn) return "both";
   if (isOut) return "checkout";
   if (isIn) return "checkin";

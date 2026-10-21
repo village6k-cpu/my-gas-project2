@@ -131,7 +131,7 @@ export const ScheduleCard = memo(function ScheduleCard({
             {done ? (
               <span className="inline-flex items-center gap-1 rounded-md bg-checkin-fg px-1.5 py-0.5 text-[11px] font-bold text-white">
                 <Check className="h-3 w-3" /> {isCheckout ? "반출 완료" : "반납 완료"}
-                {doneAt && <span className="font-medium opacity-80">{timeLabel(doneAt).replace("오전 ", "").replace("오후 ", "")}</span>}
+                {doneAt && <span className="font-medium opacity-80">{timeLabel(doneAt)}</span>}
               </span>
             ) : (
               <>
