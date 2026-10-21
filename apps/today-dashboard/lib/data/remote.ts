@@ -3,7 +3,7 @@ import { supabase } from "../supabase/client";
 import type { HandoverNote, ReturnCount, Trade } from "../domain/types";
 import { canonicalOnsiteScheduleId, dedupeOnsiteItems, isSheetBackedScheduleId, itemFromRow, itemToRow, noteToRow, tradeFromRow, tradeToRow } from "./mappers";
 import { normalizeItems } from "../domain/catalog";
-import { isCheckoutBaselineLocked } from "../domain/status";
+import { addDays, isCheckoutBaselineLocked } from "../domain/status";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -144,7 +144,8 @@ export async function fetchTradesOverlappingDate(date: string): Promise<Trade[]>
   const day = String(date || "").trim();
   if (!sb || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return [];
   const dayStart = `${day}T00:00:00+09:00`;
-  const dayEnd = `${day}T23:59:59+09:00`;
+  // 전날 24:00으로 표시되는 다음 날 자정 반출도 과거 일정 조회에 포함한다.
+  const dayEnd = `${addDays(day, 1)}T00:00:00+09:00`;
   const trades = await fetchRowsPaginated<any>(sb, "trades", "*", [{ column: "trade_id" }], (q) =>
     q.lte("checkout_at", dayEnd).gte("return_at", dayStart)
   );

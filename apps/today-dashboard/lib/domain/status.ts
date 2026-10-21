@@ -17,6 +17,7 @@ const WEEKDAY = ["일", "월", "화", "수", "목", "금", "토"];
 const reservationClock = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Asia/Seoul", hourCycle: "h23",
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  second: "2-digit", fractionalSecondDigits: 3,
 });
 function reservationParts(iso: string): Record<string, string> | null {
   // GAS의 시간대 없는 일시는 매장 한국 시각이다. 브라우저/서버의 시간대를 적용하지 않는다.
@@ -26,9 +27,16 @@ function reservationParts(iso: string): Record<string, string> | null {
   if (Number.isNaN(date.getTime())) return null;
   return Object.fromEntries(reservationClock.formatToParts(date).map(part => [part.type, part.value]));
 }
-function reservationDay(iso: string): string {
+function isReservationMidnight(p: Record<string, string>): boolean {
+  return p.hour === "00" && p.minute === "00" && p.second === "00" && p.fractionalSecond === "000";
+}
+
+/** 운영 일정은 정확한 자정을 전날 24:00으로 묶는다. 저장된 시각/대여기간은 바꾸지 않는다. */
+export function reservationDay(iso: string): string {
   const p = reservationParts(iso);
-  return p ? `${p.year}-${p.month}-${p.day}` : "";
+  if (!p) return "";
+  const day = `${p.year}-${p.month}-${p.day}`;
+  return isReservationMidnight(p) ? addDays(day, -1) : day;
 }
 
 export function ymd(d: Date): string {
@@ -51,22 +59,23 @@ export function formatDateLabel(s: string): string {
   return `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일 (${WEEKDAY[d.getDay()]})`;
 }
 export function shortDate(iso: string): string {
-  const p = reservationParts(iso);
-  return p ? `${Number(p.month)}/${Number(p.day)}` : "—";
+  const day = reservationDay(iso);
+  return day ? `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}` : "—";
 }
 export function timeLabel(iso: string): string {
   const p = reservationParts(iso);
   if (!p) return "시간 미정";
   const clock = `${p.hour}:${p.minute}`;
-  return clock === "00:00" ? `${clock} (자정)` : clock === "12:00" ? `${clock} (정오)` : clock;
+  return isReservationMidnight(p) ? "24:00" : clock === "12:00" ? `${clock} (정오)` : clock;
 }
 export function timeSortKey(iso: string): number {
   const p = reservationParts(iso);
-  return p ? Number(p.hour) * 60 + Number(p.minute) : Number.POSITIVE_INFINITY;
+  return p ? (isReservationMidnight(p) ? 1440 : Number(p.hour) * 60 + Number(p.minute)) : Number.POSITIVE_INFINITY;
 }
 export function timeBand(iso: string): string {
   const p = reservationParts(iso);
   if (!p) return "시간 미정";
+  if (isReservationMidnight(p)) return "저녁";
   const h = Number(p.hour);
   if (h < 12) return "오전";
   if (h < 17) return "오후";
@@ -459,13 +468,10 @@ export function tradesForTab(trades: Trade[], date: string, tab: TabKey): Trade[
     // '전체'는 이 날짜에 실제로 걸치는 거래만 — 오늘 반출/반납 + 오늘 대여 중인 건.
     // (예전엔 필터가 없어 로드된 -30일~+365일 전체 435건을 다 셌고, 날짜와 무관한 미래
     //  예약·과거 완료까지 섞여 '전체 435인데 화면엔 몇 개'로 보였다.)
-    const dayStart = new Date(`${date}T00:00:00`).getTime();
-    const dayEnd = new Date(`${date}T23:59:59.999`).getTime();
     list = list.filter((t) => {
-      const co = new Date(t.checkoutAt).getTime();
-      const ro = new Date(t.returnAt).getTime();
-      if (Number.isNaN(co) || Number.isNaN(ro)) return false;
-      return co <= dayEnd && ro >= dayStart; // 대여기간이 이 날짜와 겹침(반출·반납·진행중 포함)
+      const co = reservationDay(t.checkoutAt);
+      const ro = reservationDay(t.returnAt);
+      return !!co && !!ro && co <= date && ro >= date;
     });
   }
   return [...list].sort((a, b) => {
@@ -504,7 +510,7 @@ function tradeSearchText(t: Trade): string {
 
 function searchEventFor(t: Trade, phase: Phase): TradeSearchEvent {
   const at = phase === "checkout" ? t.checkoutAt : t.returnAt;
-  const date = ymd(new Date(at));
+  const date = reservationDay(at);
   const label = phase === "checkout" ? "반출" : "반납";
   return {
     key: `${t.tradeId}:${phase}:${date}`,

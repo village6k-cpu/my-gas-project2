@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { supabase } from "@/lib/supabase/client";
 import { normalizeStockName } from "@/lib/data/equipmentStock";
-import { ymd, addDays } from "@/lib/domain/status";
+import { ymd, addDays, reservationDay, timeLabel } from "@/lib/domain/status";
 import { ChevronLeft, Phone } from "@/components/icons";
 
 // 마감 조종석 — "오늘 정리 + 내일 준비"를 퇴근 전 한 화면에.
@@ -51,11 +51,10 @@ type Incident = { customer: string; item: string; damaged: number; lost: number;
 
 function hhmm(iso: string | null): string {
   if (!iso) return "";
-  const d = new Date(iso);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return timeLabel(iso);
 }
 function isOn(iso: string | null, day: string): boolean {
-  return !!iso && ymd(new Date(iso)) === day;
+  return !!iso && reservationDay(iso) === day;
 }
 
 export function ClosingView({ onClose }: { onClose: () => void }) {
@@ -82,9 +81,9 @@ export function ClosingView({ onClose }: { onClose: () => void }) {
         // activeOut이 핵심: 어제 나가 모레 반납 예정인 장기 대여는 위 세 창 어디에도 안 걸려서,
         // 없으면 그 팀이 든 장비를 '선반에 있다'고 오판 → 내일 재고 충돌을 놓친다.
         const [byCheckout, byReturn, overdue, activeOut, led] = await Promise.all([
-          sb.from("trades").select("*").gte("checkout_at", `${today}T00:00:00+09:00`).lt("checkout_at", `${addDays(tomorrow, 1)}T00:00:00+09:00`),
-          sb.from("trades").select("*").gte("return_at", `${today}T00:00:00+09:00`).lt("return_at", `${tomorrow}T00:00:00+09:00`),
-          sb.from("trades").select("*").eq("return_done", false).lt("return_at", `${today}T00:00:00+09:00`).gte("return_at", `${addDays(today, -14)}T00:00:00+09:00`),
+          sb.from("trades").select("*").gte("checkout_at", `${today}T00:00:00+09:00`).lte("checkout_at", `${addDays(tomorrow, 1)}T00:00:00+09:00`),
+          sb.from("trades").select("*").gte("return_at", `${today}T00:00:00+09:00`).lte("return_at", `${tomorrow}T00:00:00+09:00`),
+          sb.from("trades").select("*").eq("return_done", false).lte("return_at", `${today}T00:00:00+09:00`).gte("return_at", `${addDays(today, -14)}T00:00:00+09:00`),
           sb.from("trades").select("*").eq("return_done", false).eq("contract_status", "반출").limit(500),
           sb.from("equipment_ledger").select("name,aliases,stock_total,stock_maint,state").limit(1000),
         ]);
@@ -127,7 +126,7 @@ export function ClosingView({ onClose }: { onClose: () => void }) {
 
     const returnedToday = trades.filter((t) => t.return_done && isOn(t.return_done_at || t.return_at, today));
     const dueTodayOpen = trades.filter((t) => !t.return_done && isOn(t.return_at, today));
-    const overdue = trades.filter((t) => !t.return_done && t.return_at && ymd(new Date(t.return_at)) < today);
+    const overdue = trades.filter((t) => !t.return_done && t.return_at && reservationDay(t.return_at) < today);
     const outToday = trades.filter((t) => isOn(t.checkout_at, today) && (t.setup_done || t.contract_status === "반출"));
     const tomorrowOut = trades
       .filter((t) => isOn(t.checkout_at, tomorrow))
@@ -165,7 +164,7 @@ export function ClosingView({ onClose }: { onClose: () => void }) {
     for (const t of trades) {
       if (t.return_done || !(t.setup_done || t.contract_status === "반출")) continue;
       // 내일 이후 반출 예약분은 미리 세팅됐어도 아직 선반에 있다 — 재고에서 빼면 이중 차감
-      if (t.checkout_at && ymd(new Date(t.checkout_at)) > today) continue;
+      if (t.checkout_at && reservationDay(t.checkout_at) > today) continue;
       const mine = itemsBy.get(t.trade_id) || [];
       for (const i of mine) {
         // need와 대칭 — 구성품이 따로 있는 세트 헤더는 물리 장비가 아니라 컨테이너
@@ -210,7 +209,7 @@ export function ClosingView({ onClose }: { onClose: () => void }) {
     if (view.dueTodayOpen.length || view.overdue.length) {
       L.push("", "미반납:");
       for (const t of [...view.dueTodayOpen, ...view.overdue]) {
-        L.push(`- ${t.customer_name || "?"} 감독 (${t.trade_id}) — ${t.return_at ? `${ymd(new Date(t.return_at))} ${hhmm(t.return_at)} 반납 예정` : "반납일 미상"}`);
+        L.push(`- ${t.customer_name || "?"} 감독 (${t.trade_id}) — ${t.return_at ? `${reservationDay(t.return_at)} ${hhmm(t.return_at)} 반납 예정` : "반납일 미상"}`);
       }
     }
     if (view.tomorrowOut.length) {
@@ -295,7 +294,7 @@ export function ClosingView({ onClose }: { onClose: () => void }) {
                         <b className="text-ink">{t.customer_name || "?"}</b>
                         <span className="ml-1.5 text-[11.5px] text-ink-faint">{t.trade_id}</span>
                         <span className="ml-1.5 text-[12px] text-attention-fg">
-                          {t.return_at && ymd(new Date(t.return_at)) < today ? `${ymd(new Date(t.return_at))}부터 지연` : `오늘 ${hhmm(t.return_at)} 예정`}
+                          {t.return_at && reservationDay(t.return_at) < today ? `${reservationDay(t.return_at)}부터 지연` : `오늘 ${hhmm(t.return_at)} 예정`}
                         </span>
                       </span>
                       {t.customer_phone && (
