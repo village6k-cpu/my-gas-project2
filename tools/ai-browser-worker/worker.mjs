@@ -11,6 +11,7 @@ import { INQUIRY_LIFECYCLE_PROMPT, inquiryLifecycleErrors, validatePendingInquir
 import { reconcileConfirmationBatchReceipt } from './confirmation-batch-reconciliation.mjs';
 import { isSharedHermesGatewayIdle } from './shared-hermes-browser.mjs';
 import { effectiveRegisteredOperationReceipts } from './registered-operation-recovery.mjs';
+import { assessKakaoCaptureIntegrity } from './capture-integrity.mjs';
 import {
   inquiryConversationKey,
   actionFamilyForFollowUp,
@@ -7120,6 +7121,7 @@ const KAKAO_CONVERSATION_CHROME_ONLY_LINES = new Set([
 
 export function isUsableKakaoConversationEvidence(evidence = {}) {
   if (evidence?.hint_matched !== true) return false;
+  if (!assessKakaoCaptureIntegrity(evidence).ok) return false;
   const hints = Array.isArray(evidence?.hints)
     ? evidence.hints.map((value) => text(value).replace(/\s+/g, ' ').trim()).filter(Boolean)
     : [];
@@ -7138,6 +7140,7 @@ export function isUsableKakaoConversationEvidence(evidence = {}) {
 }
 
 async function readUsableKakaoConversationEvidence(target, {
+  job = {},
   hints = [],
   timeoutMs = 20000,
   evaluateImpl = devtoolsEvaluateOnTarget,
@@ -7158,10 +7161,43 @@ async function readUsableKakaoConversationEvidence(target, {
       roomMemo: dom?.room_memo,
       source
     });
+    evidence.capture_integrity = assessKakaoCaptureIntegrity(evidence, job);
     if (isUsableKakaoConversationEvidence(evidence)) return { ready: true, dom, evidence, attempts: attempt };
     if (attempt < maxAttempts && evidencePollMs > 0) await sleepImpl(evidencePollMs);
   }
   return { ready: false, dom, evidence, attempts: maxAttempts };
+}
+
+async function refreshKakaoConversationWithoutDraft(target, { evaluateImpl, timeoutMs }) {
+  return evaluateImpl(target, `(${function refreshConversation() {
+    const roots = [document];
+    for (let i = 0; i < roots.length; i++) {
+      for (const element of roots[i].querySelectorAll('*')) {
+        if (element.shadowRoot) roots.push(element.shadowRoot);
+        if (element.tagName === 'IFRAME') {
+          try { if (element.contentDocument) roots.push(element.contentDocument); }
+          catch { return { refreshed: false, reason: 'uninspectable_frame' }; }
+        }
+        if ((element.matches('textarea, [contenteditable="true"]') && String(element.value || element.textContent || '').trim())
+          || (element.matches('input[type="file"]') && element.files?.length)) {
+          return { refreshed: false, reason: 'unsent_draft' };
+        }
+      }
+    }
+    setTimeout(() => location.reload(), 0);
+    return { refreshed: true };
+  }.toString()})()`, { timeoutMs });
+}
+
+async function readKakaoConversationWithRecovery(target, options, { enabled, refreshImpl }) {
+  const first = await readUsableKakaoConversationEvidence(target, options);
+  if (first.ready || !enabled || first.evidence?.capture_integrity?.ok !== false) return first;
+  // One refresh of this exact conversation only; never discard an unsent draft.
+  const refreshed = await refreshImpl(target, options).catch(() => ({ refreshed: false }));
+  if (!refreshed?.refreshed) return first;
+  await options.sleepImpl(500);
+  try { return await readUsableKakaoConversationEvidence(target, options); }
+  catch { return first; } // A navigation failure must remain a retryable capture failure.
 }
 
 function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allowSearch = true } = {}) {
@@ -7407,7 +7443,9 @@ export async function openKakaoTargetChatViaDevtools(job, {
   allowSearch = process.env.KAKAO_WORKER_SEARCH_TARGET_CHAT !== '0',
   evidenceMaxAttempts = 40,
   evidencePollMs = 200,
-  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  refreshStaleConversation = true,
+  refreshImpl = refreshKakaoConversationWithoutDraft
 } = {}) {
   const hints = extractNavigationHints(job);
   const roomIds = extractKakaoRoomIds(job);
@@ -7417,7 +7455,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
   const targetList = Array.isArray(targets) ? targets : [];
   const existingConversationTarget = pickKakaoConversationTarget(targetList, hints, roomIds);
   if (existingConversationTarget) {
-    const evidenceRead = await readUsableKakaoConversationEvidence(existingConversationTarget, {
+    const evidenceRead = await readKakaoConversationWithRecovery(existingConversationTarget, {
+      job,
       hints,
       timeoutMs,
       evaluateImpl,
@@ -7425,7 +7464,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
       evidencePollMs,
       sleepImpl,
       source: 'live_kakao_dom_existing_conversation'
-    });
+    }, { enabled: refreshStaleConversation, refreshImpl });
     const dom = evidenceRead.dom;
     return {
       status: evidenceRead.ready ? 'opened_target_chat' : 'conversation_evidence_unavailable',
@@ -7482,14 +7521,15 @@ export async function openKakaoTargetChatViaDevtools(job, {
       }
     };
   }
-  const evidenceRead = await readUsableKakaoConversationEvidence(conversationTarget, {
+  const evidenceRead = await readKakaoConversationWithRecovery(conversationTarget, {
+    job,
     hints,
     timeoutMs,
     evaluateImpl,
     evidenceMaxAttempts,
     evidencePollMs,
     sleepImpl
-  });
+  }, { enabled: refreshStaleConversation, refreshImpl });
   const dom = evidenceRead.dom;
   return {
     status: evidenceRead.ready ? 'opened_target_chat' : 'conversation_evidence_unavailable',
@@ -9390,6 +9430,7 @@ export function createImmutableKakaoRoomSnapshot({ job = {}, navigationContext =
       source: text(evidence.source).trim(),
       title: text(evidence.title).trim(),
       hint_matched: evidence.hint_matched === true,
+      ...(evidence.capture_integrity ? { capture_integrity: { ...evidence.capture_integrity } } : {}),
       hints: Array.isArray(evidence.hints) ? evidence.hints.map((value) => text(value).trim()).filter(Boolean).slice(0, 20) : [],
       visible_static_text_tail: text(evidence.visible_static_text_tail).slice(-20_000),
       messages: normalizeKakaoConversationMessages(evidence.messages, { maxItems: 80 }),
@@ -9662,7 +9703,8 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
   if (roomKey !== text(snapshot.roomKey).trim()) throw new Error('Gateway turn room_key must exactly match immutable snapshot');
   if (roomRevision !== Number(snapshot.roomRevision)) throw new Error('Gateway turn room_revision must exactly match immutable snapshot');
   if (signal?.aborted) throw signal.reason || new Error('Gateway turn aborted');
-  if (!isUsableKakaoConversationEvidence(snapshot.navigation?.conversation_evidence)) {
+  if (!isUsableKakaoConversationEvidence(snapshot.navigation?.conversation_evidence)
+    || !assessKakaoCaptureIntegrity(snapshot.navigation?.conversation_evidence, job).ok) {
     const error = new Error('Kakao conversation evidence is unavailable after bounded DOM wait');
     error.code = 'kakao_conversation_evidence_unavailable';
     throw error;
