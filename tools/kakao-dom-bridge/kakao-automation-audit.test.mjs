@@ -446,6 +446,21 @@ test('trusted registered mutation and document send preserve typed action and au
   assert.deepEqual(document[0].evidence, { schema: 'village-document-receipt/v1', status: 'ok', readback: true });
 });
 
+test('zero-write lock wait audit does not collide with later success for the same operation', () => {
+  const busy=confirmedRegistrationReceipt({status:'blocked',error:{type:'registration_busy'},applied_stages:[],
+    attempted_stage:'preflight',effective_request_id:null,trade_id:null,authoritative_result:{
+      schema:'village-confirmed-reservation-commit-result/v1',success:false,status:'blocked',error:{type:'registration_busy'},
+      attempted_stage:'preflight',authoritative:null,request_id:null,effective_request_id:null,trade_id:null,
+      applied_stages:[],replaced_request_ids:[],customerNotificationAttempted:false,customerNotificationSent:false}});
+  const waiting=baseJob({tool:'confirmed_reservation_commit',operationId:REGISTRATION_OPERATION,receipt:busy});
+  waiting.registration_retry={state:'pending'};
+  const before=buildKakaoAutomationAuditEvents({durableJob:waiting});
+  const after=buildKakaoAutomationAuditEvents({durableJob:baseJob({tool:'confirmed_reservation_commit',
+    operationId:REGISTRATION_OPERATION,receipt:confirmedRegistrationReceipt()})});
+  assert.equal(before.length,1);assert.equal(after.length,1);
+  assert.notEqual(before[0].event_key,after[0].event_key);
+});
+
 test('staff-authorized pending registration becomes one no-send owner-readable audit event', () => {
   const events = buildKakaoAutomationAuditEvents({
     durableJob: baseJob({

@@ -10,6 +10,7 @@ import {
 import path from 'node:path';
 
 import { normalizeKakaoAutomationAuditEvent } from './kakao-automation-audit.mjs';
+import { isZeroWriteRegistrationBusy, registrationRetryDelay } from './registration-busy-retry.mjs';
 import { MAX_REGISTERED_INPUT_CORRECTIONS, isProvenUnappliedRegisteredReceipt } from '../ai-browser-worker/registered-operation-recovery.mjs';
 
 const TERMINAL_STATES = new Set(['completed', 'superseded', 'failed']);
@@ -516,6 +517,14 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     if (!needsReconciliation) return;
     const reconcileRestartedOperations = needsStartupOperationReconciliation;
     for (const job of [...jobs.values()]) {
+      if (reconcileRestartedOperations && ['capturing', 'executing'].includes(job.registration_retry?.state)) {
+        const uncertain = job.registration_retry.state === 'executing';
+        await update(job, {
+          registration_retry: { ...job.registration_retry, state: uncertain ? 'blocked' : 'pending',
+            token: null, reason: uncertain ? 'restart_after_mutation_fence' : null },
+          ...(uncertain ? { human_review_required: true, failure_notification: pendingFailureNotification(job) } : {})
+        });
+      }
       if (job.state === 'retry_wait') await update(job, { state: 'ready' });
       if (job.application?.state === 'claimed') {
         await update(job, {
@@ -698,7 +707,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
 
   async function claimOnce(consumerId) {
     await reapExpiredLeasesInternal();
-    const activeRooms = new Set([...jobs.values()].filter((job) => job.state === 'claimed' && isAuthoritative(job)).map((job) => job.room_key));
+    const activeRooms = new Set([...jobs.values()].filter((job) => (job.state === 'claimed' && isAuthoritative(job))
+      || ['capturing','executing'].includes(job.registration_retry?.state)).map((job) => job.room_key));
     const candidate = [...jobs.values()]
       .filter((job) => job.state === 'ready' && isAuthoritative(job) && !activeRooms.has(job.room_key))
       .sort((left, right) => left.queue_order - right.queue_order)[0];
@@ -838,12 +848,105 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const completedAt = iso(currentTime());
         return clone(await update(job, {
           tool_receipts: [...job.tool_receipts, clone(receipt)],
+          ...(isZeroWriteRegistrationBusy(receipt) ? { registration_retry: {
+            state: 'pending', attempts: 0, token: null, due_at: iso(currentTime() + registrationRetryDelay()),
+            receipt_id: receipt.receipt_id, reason: null
+          } } : {}),
           tool_operation: {
             ...reservation,
             state: 'completed',
             receipt_id: receiptId,
             completed_at: completedAt
           }
+        }));
+      });
+    },
+
+    async claimRegistrationRetry() {
+      return mutate(async () => {
+        // One registration continuation at a time, independently of model concurrency.
+        if ([...jobs.values()].some(j => ['capturing', 'executing'].includes(j.registration_retry?.state))) return null;
+        for (const job of [...jobs.values()].sort((a,b) => a.queue_order - b.queue_order)) {
+          const retry = job.registration_retry;
+          if (retry?.state !== 'pending') continue;
+          if (!isAuthoritative(job)) {
+            await update(job, { registration_retry: { ...retry, state: 'superseded', token: null } });
+            continue;
+          }
+          if (job.state !== 'completed' || Date.parse(retry.due_at) > currentTime()
+            || job.application?.state !== 'finalized') continue;
+          if (!isZeroWriteRegistrationBusy(exactReceiptForToolOperation(job))) {
+            await update(job,{registration_retry:{...retry,state:'blocked',reason:'operation_changed',token:null},
+              human_review_required:true,failure_notification:pendingFailureNotification(job)});
+            continue;
+          }
+          return clone(await update(job, { registration_retry: { ...retry, state: 'capturing', token: randomUUID() } }));
+        }
+        return null;
+      });
+    },
+
+    async startRegistrationRetry({ jobId, token }) {
+      return mutate(async () => {
+        const job = jobs.get(jobId);
+        if (!job || job.registration_retry?.token !== token || job.registration_retry.state !== 'capturing'
+          || !isAuthoritative(job) || !isZeroWriteRegistrationBusy(exactReceiptForToolOperation(job))) {
+          throw channelError('stale_registration_retry', 'registration continuation is no longer current');
+        }
+        return clone(await update(job, { registration_retry: { ...job.registration_retry,
+          state: 'executing', attempts: job.registration_retry.attempts + 1 } }));
+      });
+    },
+
+    async assertRegistrationRetry({ jobId, token }) {
+      return mutate(async () => {
+        const job = jobs.get(jobId);
+        if (!job || job.registration_retry?.token !== token || job.registration_retry.state !== 'executing'
+          || !isAuthoritative(job)) throw channelError('stale_registration_retry', 'registration continuation is no longer current');
+      });
+    },
+
+    async finishRegistrationRetry({ jobId, token, receipt = null, reason = null, result = null }) {
+      return mutate(async () => {
+        const job = jobs.get(jobId);
+        if (!job || job.registration_retry?.token !== token || !['capturing','executing'].includes(job.registration_retry.state)) {
+          throw channelError('stale_registration_retry', 'registration continuation token mismatch');
+        }
+        const retry = job.registration_retry;
+        if (!receipt) {
+          const safeToRetryCapture = retry.state === 'capturing' && reason === 'capture_unavailable';
+          return clone(await update(job, { registration_retry: { ...retry, token: null,
+            state: safeToRetryCapture ? 'pending' : 'blocked', reason,
+            due_at: iso(currentTime() + registrationRetryDelay(retry.attempts)) },
+            ...(!safeToRetryCapture ? { human_review_required: true, failure_notification: pendingFailureNotification(job) } : {}) }));
+        }
+        validateReceipt(receipt);
+        const op = job.tool_operation;
+        if (retry.state !== 'executing' || op.operation_id !== receipt.operation_id
+          || !sameToolOperationEnvelope(op, normalizeToolOperation({...receipt,tool:op.tool}))
+          || !sameResult(exactReceiptForToolOperation(job)?.authorized_registration, receipt.authorized_registration)) {
+          throw channelError('operation_fence_mismatch', 'registration retry receipt does not match original approval');
+        }
+        const busy = isZeroWriteRegistrationBusy(receipt);
+        const success = receipt.status === 'ok';
+        const old = exactReceiptForToolOperation(job);
+        return clone(await update(job, {
+          registration_retry_history: [...(job.registration_retry_history || []), old],
+          tool_receipts: job.tool_receipts.map(r => r.receipt_id === old.receipt_id ? clone(receipt) : r),
+          tool_operation: {...op,receipt_id:receipt.receipt_id,completed_at:iso(currentTime())},
+          registration_retry: { ...retry, token:null, receipt_id:receipt.receipt_id,
+            state: busy ? 'pending' : success ? 'completed' : 'blocked', reason,
+            due_at:iso(currentTime()+registrationRetryDelay(retry.attempts)) },
+          human_review_required: !success || !result || !isAuthoritative(job),
+          ...(success ? {audit_projection:null,
+            registration_retry_work_items:job.application?.final_audit?.registration_retry_work_items || []} : {}),
+          ...(!busy && (!success || !result || !isAuthoritative(job)) ? {failure_notification:pendingFailureNotification(job),
+            ...(success ? {error:{type:!isAuthoritative(job) ? 'registration_retry_superseded_after_success' : 'registration_retry_projection_missing'}} : {})} : {}),
+          ...(success && result && isAuthoritative(job) ? {
+            result:clone(result), audit_projection:null,
+            application:{state:'pending',application_id:null,created_at:iso(currentTime()),claimed_at:null,
+              applying_at:null,applied_at:null,finalized_at:null,failed_at:null,applied_audit:null,final_audit:null,error:null,failure_notification:null}
+          } : {})
         }));
       });
     },
@@ -896,7 +999,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
-        if (job.state !== 'completed' || job.application?.state !== 'pending') {
+        if (job.state !== 'completed' || job.application?.state !== 'pending'
+          || ['capturing','executing'].includes(job.registration_retry?.state)) {
           return { claimed: false, job: await cloneHydrated(job) };
         }
         const applicationId = randomUUID();
@@ -1348,6 +1452,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           last_consumer_seen_at: lastConsumerSeenAt,
           registered_reservation_change: registeredReservationChange,
           audit_projection: auditProjection,
+          registration_retry: Object.fromEntries(['pending','capturing','executing','completed','blocked','superseded']
+            .map(state => [state,[...jobs.values()].filter(j => j.registration_retry?.state === state).length])),
           memory: {
             resident_jobs: residentJobs.length,
             compacted_terminal_jobs: residentJobs.filter((job) => TERMINAL_STATES.has(job.state)

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
 import fs from 'node:fs';
+import { isZeroWriteRegistrationBusy } from '../kakao-dom-bridge/registration-busy-retry.mjs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11137,13 +11138,14 @@ function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, 
   const receiptId = text(receipt?.receipt_id).trim();
   const status = text(receipt?.status).trim();
   const route = schedule ? 'schedule' : 'other';
+  const registrationOperation = isZeroWriteRegistrationBusy(receipt) ? receipt.operation_id : null;
   return {
     type: schedule ? 'schedule_check' : 'reply_needed',
     route,
-    taskKey: `gateway:${route}:${jobId || 'unknown'}`,
+    taskKey: registrationOperation ? `registration-lock:${registrationOperation}` : `gateway:${route}:${jobId || 'unknown'}`,
     requiresHumanAction: true,
     actionFamily: schedule ? 'reservation_change' : 'none',
-    businessKey: `gateway:${text(job.roomKey || job.room_key).trim() || jobId || 'unknown'}`,
+    businessKey: registrationOperation ? `registration-lock:${registrationOperation}` : `gateway:${text(job.roomKey || job.room_key).trim() || jobId || 'unknown'}`,
     priority: schedule || status === 'failed' ? 'high' : 'normal',
     status: 'open',
     customer_name: customerName,
@@ -11173,7 +11175,7 @@ function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason,
     return { ...withoutAgentAuthority, evidence: [] };
   });
   const hasScheduleFollowUp = originalFollowUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule');
-  const followUpItems = schedule && hasScheduleFollowUp
+  const followUpItems = schedule && hasScheduleFollowUp && !isZeroWriteRegistrationBusy(receipt)
     ? originalFollowUps
     : [...originalFollowUps, gatewayReviewFollowUpItem({ decision, job, schedule, reason, receipt })];
   const {
@@ -12177,7 +12179,7 @@ function automationResultEnvelope(resolution) {
   };
 }
 
-async function applyAutomationResolution({ config, job, resolution, dependencies }) {
+async function applyAutomationResolution({ config, job, resolution, dependencies, updateNotice = true }) {
   const result = automationResultEnvelope(resolution);
   if (config.workOrchestratorV2WorkItemsEnabled !== true) return { result, store: null };
 
@@ -12192,19 +12194,24 @@ async function applyAutomationResolution({ config, job, resolution, dependencies
 
   const workReference = automationWorkReference(job);
   if (resolution.state === 'succeeded') {
-    if (workReference) {
+    const references=[...(workReference ? [workReference] : []),
+      ...(Array.isArray(job.registrationRetryWorkItems) ? job.registrationRetryWorkItems
+        .map(workItem=>automationWorkReference({workItem})).filter(Boolean) : [])];
+    let workFailed=false;
+    for (const reference of [...new Map(references.map(ref=>[ref.id,ref])).values()]) {
       try {
         const resolved = await store.resolveWorkItem({
-          id: workReference.id, expectedVersion: workReference.version, resolution
+          id: reference.id, expectedVersion: reference.version, resolution
         });
-        result.work = resolved?.applied
-          ? { status: 'resolved' }
-          : { status: 'conflict', code: 'stale_work_version' };
+        if(!resolved?.applied) {workFailed=true;result.work={status:'conflict',code:'stale_work_version'};}
+        else if(!workFailed) result.work={status:'resolved'};
       } catch {
+        workFailed=true;
         result.work = { status: 'error', code: 'work_resolution_failed' };
       }
     }
 
+    if (!updateNotice) return { result, store };
     try {
       const sourceEventKey = canonicalSourceEventKey(job.sourceEventKey || job.eventHash || job.jobId || job.id);
       const clock = typeof dependencies.now === 'function' ? dependencies.now() : new Date();
@@ -12307,8 +12314,27 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
     }
   }
   const automationApplied = await applyAutomationResolution({
-    config, job, resolution: automationResolution, dependencies
+    config, job: { ...job, registrationRetryWorkItems: [] }, resolution: automationResolution, dependencies
   });
+  if (job.registrationRetryWorkItems?.length) {
+    const receipt = prepared.trustedToolReceipt;
+    const verifiedRegistration = (prepared.gatewaySafetyFailures || []).length === 0
+      && receipt?.schema === 'village-confirmed-reservation-commit-receipt/v1'
+      && receipt.status === 'ok' && receipt.error === null
+      && exactConfirmedRegistrationAuthoritativeReadback(receipt, receipt.authorized_registration)
+      && sameGatewayDecisionValue(prepared.decision?.confirmed_registration_readback, receipt.authoritative_result);
+    if (verifiedRegistration) {
+      // Finish only the exact lock-wait work, independently of another quote/reply task.
+      const registrationResolution = deriveAutomationResolution({sheetResult:{success:true},
+        operationReceipt:{state:'completed',authoritativeReadback:true,operationId:receipt.operation_id,
+          receiptId:receipt.receipt_id,readbackAt:receipt.created_at}});
+      const resolved = await applyAutomationResolution({config,job:{...job,workItem:null,work_item:null},
+        resolution:registrationResolution,dependencies,updateNotice:false});
+      automationApplied.result.registrationRetryWork = resolved.result.work;
+    } else {
+      automationApplied.result.registrationRetryWork = {status:'error',code:'registration_readback_unverified'};
+    }
+  }
   let workOrchestratorResult;
   if (automationApplied.result.state === 'succeeded') {
     workOrchestratorResult = emptyWorkOrchestratorResult(config.workOrchestratorV2WorkItemsEnabled !== true);

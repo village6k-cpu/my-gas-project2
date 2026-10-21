@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isZeroWriteRegistrationBusy } from './registration-busy-retry.mjs';
 
 const EVENT_FIELDS = Object.freeze([
   'event_key',
@@ -745,7 +746,9 @@ function buildConfirmedRegistrationEvent({ durableJob, operation, receipt, custo
     blocked: `예약 ${label} 등록이 차단되었습니다.`
   });
   return normalizeKakaoAutomationAuditEvent({
-    event_key: authorityEventKey('reservation_registration', operation.operation_id),
+    event_key: authorityEventKey('reservation_registration',
+      durableJob.registration_retry && isZeroWriteRegistrationBusy(receipt)
+        ? `${operation.operation_id}\nlock-wait:${receipt.receipt_id}` : operation.operation_id),
     job_id: durableJob.job_id,
     room_revision: durableJob.room_revision,
     operation_id: operation.operation_id,

@@ -1638,6 +1638,20 @@ test('exact confirmed registration receipt finalizes no-reply and removes duplic
   assert.deepEqual(prepared.gatewaySafetyFailures, []);
 });
 
+test('durable lock continuation restores sealed AI approval and finalizes exact readback without sending', async () => {
+  const {registrationRecoveryResult}=await import('../kakao-dom-bridge/registration-busy-retry.mjs');
+  const {job,turn}=gatewayTurnFixture();
+  const receipt=confirmedRegistrationReceiptFixture(job);
+  const decision=confirmedRegistrationDecisionFixture({staff_confirmed_registration:null,
+    inquiry_disposition:'pending_revision',owner_review_required:true});
+  const result=registrationRecoveryResult({result:{content:JSON.stringify(decision)}},receipt,workerModule.extractJsonObject);
+  const prepared=await workerModule.prepareKakaoGatewayDecision({config:{},job,turn,
+    finalText:result.content,trustedToolReceipts:[receipt]});
+  assert.equal(prepared.decision.owner_review_required,false);
+  assert.equal(prepared.decision.reply_decision.replyMode,'no_reply');
+  assert.deepEqual(prepared.gatewaySafetyFailures,[]);
+});
+
 test('successful registration retains the separate requested quote document until delivery is verified', async () => {
   const {job,turn}=gatewayTurnFixture();
   const quote=documentDecisionFixture().follow_up_items[0];
@@ -3583,6 +3597,59 @@ test('authoritative automation resolution resolves a referenced work CAS, reques
   assert.equal(calls[1][1].sourceEventKey, 'event-authoritative-31');
   assert.equal(calls[1][1].cleanupAfter, '2026-08-31T04:00:00.000Z');
   assert.equal(result.workOrchestratorResult.inserted, 0);
+});
+
+test('real busy preparation and recovery resolve only operation-bound work for existing and bootstrap requests', async () => {
+  const {registrationRetryWorkReferences}=await import('../kakao-dom-bridge/registration-busy-retry.mjs');
+  for (const bootstrap of [false,true]) {
+    const {job,turn}=gatewayTurnFixture();
+    const registration=bootstrap ? fastConfirmedRegistrationFixture() : confirmedRegistrationFixture();
+    const decision=confirmedRegistrationDecisionFixture({staff_confirmed_registration:registration,
+      follow_up_items:[documentDecisionFixture().follow_up_items[0]],
+      ...(bootstrap ? {existing_confirm_request_ids:[],sheet_row_candidate:{plan_complete:true,equipment_write_mode:'full_plan',
+        ...registration.pending_request_candidate,equipment:registration.desired_after.map(({name,quantity})=>({item:name,quantity})),
+        set_component_selections:[],start_date:registration.desired_period.start_date,pickup_time:registration.desired_period.start_time,
+        end_date:registration.desired_period.end_date,return_time:registration.desired_period.end_time}} : {})});
+    const success=confirmedRegistrationReceiptFixture(job,{authorized_registration:registration});
+    if(bootstrap) {
+      success.effective_request_id='RQ-260907-009';success.applied_stages=['pending_request_bootstrap','registration','authoritative_readback'];
+      success.authoritative_result.effective_request_id=success.effective_request_id;
+      success.authoritative_result.authoritative.request.reqID=success.effective_request_id;
+    }
+    const busy={...success,receipt_id:'busy',status:'blocked',error:{type:'registration_busy'},
+      attempted_stage:'preflight',applied_stages:[],effective_request_id:null,trade_id:null,
+      authoritative_result:{schema:'village-confirmed-reservation-commit-result/v1',success:false,status:'blocked',
+        error:{type:'registration_busy'},attempted_stage:'preflight',authoritative:null,request_id:null,
+        effective_request_id:null,trade_id:null,applied_stages:[],replaced_request_ids:[],
+        customerNotificationAttempted:false,customerNotificationSent:false}};
+    const saved=new Map([['unrelated-quote',{state:'open',work_type:'quote_send'}]]);let index=0;
+    const store={
+      upsertWorkItem:async candidate=>{const id=`11111111-1111-4111-8111-11111111111${++index}`;
+        const row={...candidate,id,version:1,state:'open'};saved.set(id,row);return {applied:true,created:true,row};},
+      markAutomationState:async({id,expectedVersion})=>{const row={...saved.get(id),version:expectedVersion+1};saved.set(id,row);return {applied:true,row};},
+      resolveWorkItem:async({id,expectedVersion})=>{const row=saved.get(id);assert.equal(row.version,expectedVersion);
+        saved.set(id,{...row,state:'resolved',version:row.version+1});return {applied:true,row:saved.get(id)};},
+      requestImmediateNoticeUpdate:async()=>assert.fail('registration-only completion must not close the original quote notice')
+    };
+    const config={followUpRowsEnabled:false,workOrchestratorV2WorkItemsEnabled:true};
+    const prepare=receipt=>workerModule.prepareKakaoGatewayDecision({config,job,turn,finalText:JSON.stringify(decision),trustedToolReceipts:[receipt]});
+    const prepared=await prepare(busy);
+    assert.ok(prepared.decision.follow_up_items.some(item=>item.businessKey===`registration-lock:${busy.operation_id}`));
+    const finalize=(prepared,job)=>finalizePreparedKakaoDecision({config,job,applied:{prepared,
+      autoReplyResult:{attempted:false,sent:false,reason:'no_reply'}},dependencies:{workOrchestratorStore:store}});
+    const first=await finalize(prepared,job);
+    const refs=registrationRetryWorkReferences({registration_retry:{state:'pending'},
+      tool_operation:{receipt_id:'busy'},tool_receipts:[busy]},first);
+    assert.equal(refs.length,1,JSON.stringify(first.workOrchestratorResult));
+    const recovered=await prepare(success);
+    assert.deepEqual(recovered.gatewaySafetyFailures,[]);
+    const second=await finalize(recovered,{...job,registrationRetryWorkItems:refs});
+    assert.equal(second.automationResolutionResult.registrationRetryWork.status,'resolved',JSON.stringify(second.automationResolutionResult));
+    assert.equal(saved.get(refs[0].id).state,'resolved');
+    assert.equal(saved.get('unrelated-quote').state,'open');
+    assert.ok([...saved.values()].some(row=>row.work_type==='quote_send' && row.state==='open'));
+    assert.equal(second.automationResolutionResult.noticeUpdate.status,'not_requested');
+  }
 });
 
 test('authoritative automation resolution leaves unverified work open and records needs_human without notice update', async () => {

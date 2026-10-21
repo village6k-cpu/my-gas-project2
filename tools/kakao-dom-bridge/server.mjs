@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
 import { isSharedHermesGatewayIdle } from '../ai-browser-worker/shared-hermes-browser.mjs';
+import { runRegistrationBusyRetry, registrationRecoveryResult, registrationRetryWorkReferences } from './registration-busy-retry.mjs';
 import { effectiveRegisteredOperationReceipts } from '../ai-browser-worker/registered-operation-recovery.mjs';
 import { deriveCustomerReplyOutcome } from '../work-orchestrator-v2/automation-resolution.mjs';
 import { spawn, spawnSync } from 'node:child_process';
@@ -15,6 +16,9 @@ import {
   applyPreparedKakaoDecision,
   buildKakaoGatewayTurn,
   captureKakaoRoomSnapshot,
+  extractJsonObject,
+  isUsableKakaoConversationEvidence,
+  kakaoConversationStillCurrent,
   executeVillageConfirmationRequest,
   fetchExistingConfirmRequestResultForDecision,
   finalizePreparedKakaoDecision,
@@ -2654,7 +2658,9 @@ export function createGatewayResultApplicationCoordinator({
   async function runApplication(claimed) {
     const durableJob = claimed.job;
     const localContext = durableJob?.local_context;
-    const job = localContext?.job;
+    const job = localContext?.job && {...localContext.job,
+      ...(durableJob.registration_retry?.state==='completed'
+        ? {registrationRetryWorkItems:durableJob.registration_retry_work_items || []} : {})};
     const internal = localContext?.turn_internal;
     const event = durableJob?.event;
     if (!job || !internal || !event) throw new Error('gateway_local_turn_context_missing');
@@ -2703,6 +2709,9 @@ export function createGatewayResultApplicationCoordinator({
     }
     const finalized = await finalize({ config, job, applied });
     assertGatewayFinalizationSucceeded(finalized, config, replyOutcome);
+    if(job.registrationRetryWorkItems?.length && finalized.automationResolutionResult?.registrationRetryWork?.status!=='resolved') {
+      throw new Error('gateway_registration_retry_owner_work_unresolved');
+    }
     const finishedAt = currentTimeMs();
     const elapsedMs = Math.max(0, finishedAt - elapsedBaselineAt);
     const localApplicationElapsedMs = Math.max(0, finishedAt - localStartedAt);
@@ -2714,6 +2723,8 @@ export function createGatewayResultApplicationCoordinator({
         status: String(finalized?.status || ''),
         follow_up_inserted: Number(finalized?.followUpResult?.inserted || 0),
         auto_reply_sent: finalized?.autoReplyResult?.sent === true,
+        ...(durableJob.registration_retry?.state==='pending'
+          ? {registration_retry_work_items:registrationRetryWorkReferences(durableJob,finalized)} : {}),
         reply_execution: replyOutcome
       }
     });
@@ -2827,6 +2838,35 @@ const gatewayConfirmedReservationCommitExecutor = gatewayTransportEnabled
       getConfig: () => getKakaoWorkerRuntimeConfigForTransport()
     })
   : null;
+let registrationRetryRunning = false;
+async function runRegistrationRetrySweep() {
+  if (!gatewayTransportEnabled || CONFIG.hermesTransport !== 'gateway' || registrationRetryRunning
+    || state.workerRunning || state.activeWorkerRuns > 0 || !isSharedHermesGatewayIdle()) return;
+  registrationRetryRunning = true;
+  try {
+    const status=await gatewayChannel.status();
+    if (status.counts.claimed || ['claimed','applying','applied'].some(k => status.application_counts[k])) return;
+    state.activeWorkerRuns += 1;
+    try {
+      await runRegistrationBusyRetry({channel:gatewayChannel,
+        capture: durable => captureKakaoRoomSnapshot({config:getKakaoWorkerRuntimeConfigForTransport(),
+          job:durable.local_context?.job || {jobId:durable.job_id,roomKey:durable.room_key,roomRevision:durable.room_revision}}),
+        isUsable: fresh => isUsableKakaoConversationEvidence(fresh?.snapshot?.navigation?.conversation_evidence),
+        isCurrent: (durable,fresh) => kakaoConversationStillCurrent(durable.local_context?.turn_internal?.snapshot,fresh?.snapshot),
+        execute:gatewayConfirmedReservationCommitExecutor,
+        buildResult:(durable,receipt) => registrationRecoveryResult(durable,receipt,extractJsonObject),
+        enqueue:durable => getGatewayResultApplicationCoordinator().enqueue(durable),
+        afterPersist:async durableJob => {
+          const audit=getKakaoAutomationAuditCoordinator();
+          await audit?.queueFromEvidence({durableJob,historicalImport:false});
+          await audit?.projectPending({limit:5});
+        }
+      });
+    } finally { state.activeWorkerRuns -= 1; }
+  } catch(error) {
+    appendNdjson('errors.ndjson',{at:nowIso(),type:'registration_retry',message:String(error.message).slice(0,500)});
+  } finally { registrationRetryRunning=false; }
+}
 const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
@@ -6862,6 +6902,8 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     console.info(`[dom-bridge] supabase: ${CONFIG.supabaseUrl && CONFIG.supabaseTable ? 'enabled' : 'disabled'}`);
     console.info(`[dom-bridge] worker: ${CONFIG.workerCommand ? CONFIG.workerCommand : 'disabled'}`);
     if (gatewayTransportEnabled) {
+      setTimeout(() => runRegistrationRetrySweep(),15_000).unref?.();
+      setInterval(() => runRegistrationRetrySweep(),30_000).unref?.();
       const coordinator = getGatewayResultApplicationCoordinator();
       (async () => {
         await coordinator.recoverPendingApplications();

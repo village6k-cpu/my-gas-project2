@@ -332,7 +332,8 @@ export function buildGatewayHealthReadback({
     },
     queue: {
       ready: safeNonNegativeInteger(counts.ready),
-      claimed: safeNonNegativeInteger(counts.claimed),
+      claimed: safeNonNegativeInteger(counts.claimed) + safeNonNegativeInteger(status.registration_retry?.capturing)
+        + safeNonNegativeInteger(status.registration_retry?.executing),
       retry: safeNonNegativeInteger(counts.retry_wait),
       failed: safeNonNegativeInteger(counts.failed),
       oldest_claim_age_ms: Number.isFinite(oldestClaimAge) && oldestClaimAge >= 0 ? oldestClaimAge : null,
@@ -346,6 +347,8 @@ export function buildGatewayHealthReadback({
       ['pending', 'delivered'].map((key) => [key, safeNonNegativeInteger(failureNotificationCounts[key])])
     ),
     unnotified_application_failures: safeNonNegativeInteger(status?.unnotified_application_failures),
+    ...(status.registration_retry ? {registration_retry:Object.fromEntries(
+      ['pending','capturing','executing','completed','blocked','superseded'].map(key => [key,safeNonNegativeInteger(status.registration_retry[key])]))} : {}),
     registered_reservation_change: {
       reserved: safeNonNegativeInteger(registeredReservationChange.reserved),
       completed: safeNonNegativeInteger(registeredReservationChange.completed),
