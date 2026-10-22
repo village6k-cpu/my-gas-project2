@@ -1641,6 +1641,7 @@ function runFunction(funcName, params) {
     "getInventoryConflictsSlackMessage",
     "retireInventoryStockReports",
     "applyInventorySemanticReview",
+    "auditInventorySemanticStorage",
     "setInventoryIncludedComponents",
     "getInventoryStockQuestions",
     "getInventoryResolutionContext",
@@ -1961,6 +1962,9 @@ function runFunction(funcName, params) {
     }
     if (funcName === 'getInventoryIdentityCatalog') {
       return {success:true,function:funcName,result:getInventoryIdentityCatalog(),executionTime:(new Date()-startTime)+'ms'};
+    }
+    if (funcName === 'auditInventorySemanticStorage') {
+      return {success:true,function:funcName,result:auditInventorySemanticStorage(),executionTime:(new Date()-startTime)+'ms'};
     }
     if (["retireInventoryStockReports", "applyInventorySemanticReview", "setInventoryIncludedComponents", "getInventoryStockQuestions", "getInventoryResolutionContext", "getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts", "setupPreRegistrationStockAlerts", "getPreRegistrationStockAlertStatus", "checkPreRegistrationStockAlert", "flushPreRegistrationStockAlerts", "claimPreRegistrationStockAlertRelay", "authorizePreRegistrationStockAlertRelay", "acknowledgePreRegistrationStockAlertRelay"].indexOf(funcName)>=0) {
       var inventoryArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];

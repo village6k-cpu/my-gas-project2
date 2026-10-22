@@ -6086,17 +6086,22 @@ end run
 `.trim();
 }
 
+function isKakaoChatListUrl(url = '') {
+  return /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats\/?(?:[?#]|$)/.test(String(url));
+}
+
 function isKakaoMainListTarget(target = {}) {
   const targetUrl = String(target.url || '');
   const targetTitle = String(target.title || '');
-  const isChatListUrl = /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats\/?(?:[?#]|$)/.test(targetUrl);
   const isMainTitle = targetTitle === '카카오비즈니스 파트너센터';
-  const isConversationPopup = targetTitle.includes(' - 빌리지 - 카카오비즈니스');
-  return target.type === 'page' && !isConversationPopup && (isChatListUrl || isMainTitle);
+  const isConversationPopup = targetTitle.includes(' - 빌리지 - 카카오비즈니스')
+    || /^https:\/\/(business|center-pf)\.kakao\.com(?:\/space\/[^/]+\/channel)?\/_[^/]+\/chats\/\d+(?:[/?#]|$)/.test(targetUrl);
+  return target.type === 'page' && !isConversationPopup && (isKakaoChatListUrl(targetUrl) || isMainTitle);
 }
 
 export function pickKakaoMainListTarget(targets = []) {
-  return targets.find(isKakaoMainListTarget) || null;
+  const candidates = targets.filter(isKakaoMainListTarget);
+  return candidates.find((target) => isKakaoChatListUrl(target.url)) || candidates[0] || null;
 }
 
 async function devtoolsFetchText(baseUrl, pathname, { method = 'GET', fetchImpl = fetch, timeoutMs = 10000 } = {}) {
@@ -6129,70 +6134,87 @@ async function devtoolsEvaluateOnTarget(target, expression, {
   if (!target?.webSocketDebuggerUrl) throw new Error('DevTools target is missing webSocketDebuggerUrl');
   if (!WebSocketImpl) throw new Error('WebSocket is unavailable for Chrome DevTools fallback');
   const ws = new WebSocketImpl(target.webSocketDebuggerUrl);
-  let nextId = 0;
-  const pending = new Map();
-  let closed = false;
-  const cleanup = () => {
-    if (closed) return;
-    closed = true;
-    try { ws.close?.(); } catch {}
-  };
-
-  const opened = new Promise((resolve, reject) => {
-    if (typeof ws.addEventListener === 'function') {
-      ws.addEventListener('open', resolve, { once: true });
-      ws.addEventListener('error', reject, { once: true });
-      ws.addEventListener('message', (event) => {
-        const message = JSON.parse(event.data);
-        if (message.id && pending.has(message.id)) {
-          pending.get(message.id)(message);
-          pending.delete(message.id);
-        }
-      });
-    } else {
-      ws.on('open', resolve);
-      ws.on('error', reject);
-      ws.on('message', (data) => {
-        const message = JSON.parse(String(data));
-        if (message.id && pending.has(message.id)) {
-          pending.get(message.id)(message);
-          pending.delete(message.id);
-        }
-      });
-    }
+  return new Promise((resolve, reject) => {
+    const eventTarget = typeof ws.addEventListener === 'function';
+    const listen = (name, listener) => eventTarget ? ws.addEventListener(name, listener) : ws.on(name, listener);
+    const remove = (name, listener) => eventTarget ? ws.removeEventListener?.(name, listener) : ws.removeListener?.(name, listener);
+    let settled = false;
+    let sent = false;
+    let socketClosed = false;
+    let timer;
+    const removeTerminalListeners = () => {
+      remove('error', onError);
+      remove('close', onClose);
+    };
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      remove('open', onOpen);
+      remove('message', onMessage);
+      // Closing an unopened ws-style socket may emit error before close. Keep
+      // these two handlers until close so cleanup cannot cause an uncaught error.
+      if (socketClosed || ws.readyState === 3) removeTerminalListeners();
+      try { ws.close?.(); } catch { removeTerminalListeners(); }
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const deadline = (stage) => {
+      clearTimeout(timer);
+      // An active request must keep the process alive until it has an outcome.
+      timer = setTimeout(() => finish(new Error(`Chrome DevTools ${stage} timed out after ${timeoutMs}ms`)), timeoutMs);
+    };
+    const malformed = () => finish(new Error('Chrome DevTools malformed Runtime.evaluate response'));
+    const onMessage = (eventOrData) => {
+      if (settled) return;
+      let response;
+      try { response = JSON.parse(eventTarget ? eventOrData.data : String(eventOrData)); }
+      catch { malformed(); return; }
+      if (!response || typeof response !== 'object' || Array.isArray(response)) { malformed(); return; }
+      if (response.id == null) {
+        if (typeof response.method !== 'string') malformed();
+        return;
+      }
+      if (response.id !== 1) return;
+      if (response.error && typeof response.error.message === 'string') {
+        finish(new Error(`Chrome DevTools Runtime.evaluate failed: ${response.error.message}`));
+        return;
+      }
+      if (response.result?.exceptionDetails && typeof response.result.exceptionDetails === 'object') {
+        const detail = response.result.exceptionDetails.exception?.description
+          || response.result.exceptionDetails.text
+          || JSON.stringify(response.result.exceptionDetails);
+        finish(new Error(`Chrome DevTools Runtime.evaluate exception: ${String(detail).slice(0, 800)}`));
+        return;
+      }
+      if (response.error || typeof response.result?.result?.type !== 'string') { malformed(); return; }
+      finish(null, response.result.result.value ?? null);
+    };
+    const onOpen = () => {
+      if (settled || sent) return;
+      sent = true;
+      deadline('Runtime.evaluate');
+      try {
+        ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: {
+          expression,
+          awaitPromise: true,
+          returnByValue: true,
+          userGesture: true
+        } }));
+      } catch (error) { finish(error); }
+    };
+    const onError = (event) => finish(new Error(`Chrome DevTools websocket error: ${event?.error?.message || event?.message || 'connection failed'}`));
+    const onClose = () => {
+      socketClosed = true;
+      if (settled) removeTerminalListeners();
+      else finish(new Error('Chrome DevTools websocket closed before Runtime.evaluate completed'));
+    };
+    listen('open', onOpen);
+    listen('message', onMessage);
+    listen('error', onError);
+    listen('close', onClose);
+    deadline('websocket open');
   });
-
-  const call = async (method, params = {}) => {
-    const id = ++nextId;
-    ws.send(JSON.stringify({ id, method, params }));
-    return Promise.race([
-      new Promise((resolve) => pending.set(id, resolve)),
-      timeoutPromise(timeoutMs, `Chrome DevTools ${method} timed out after ${timeoutMs}ms`)
-    ]);
-  };
-
-  try {
-    await Promise.race([
-      opened,
-      timeoutPromise(timeoutMs, `Chrome DevTools websocket open timed out after ${timeoutMs}ms`)
-    ]);
-    const response = await call('Runtime.evaluate', {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-      userGesture: true
-    });
-    if (response.error) throw new Error(`Chrome DevTools Runtime.evaluate failed: ${response.error.message || JSON.stringify(response.error)}`);
-    if (response.result?.exceptionDetails) {
-      const detail = response.result.exceptionDetails.exception?.description
-        || response.result.exceptionDetails.text
-        || JSON.stringify(response.result.exceptionDetails);
-      throw new Error(`Chrome DevTools Runtime.evaluate exception: ${String(detail).slice(0, 800)}`);
-    }
-    return response.result?.result?.value ?? null;
-  } finally {
-    cleanup();
-  }
 }
 
 async function devtoolsCdpCallOnTarget(target, method, params = {}, {

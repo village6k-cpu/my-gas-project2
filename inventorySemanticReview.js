@@ -8,6 +8,67 @@ function inventorySemanticScopes_(snapshot) {
  });});return scopes.filter(function(s,i){return scopes.findIndex(function(x){return x.setName===s.setName&&x.componentName===s.componentName&&x.sourceHash===s.sourceHash;})===i;});
 }
 function inventorySemanticKey_(scope){return INVENTORY_SEMANTIC_PREFIX_+inventoryRiskDigest_([scope.setName,scope.componentName]);}
+
+/** Internal metadata audit only. Stale AI evidence remains durable; nothing here expires or rewrites it. */
+function auditInventorySemanticStorage() {
+ var props=PropertiesService.getScriptProperties(),before=props.getProperties(),snapshot=null,sourceComplete=false;
+ try{snapshot=readInventoryRiskSnapshot_();sourceComplete=!!snapshot && !(snapshot.sourceIssues || []).length;}catch(sourceError){}
+ var scopes=sourceComplete?inventorySemanticScopes_(snapshot):[],byKey={},reasons=Object.create(null),bundle={};
+ scopes.forEach(function(scope){var key=inventorySemanticKey_(scope);(byKey[key] || (byKey[key]=[])).push(scope);});
+ var result={mode:'read_only',sourceComplete:sourceComplete,deletionCandidates:0,
+  records:{count:0,keyBytes:0,valueBytes:0},classifications:{},reviewedAtTimeZone:'UTC',reviewedAtDays:{},
+  reasonDuplication:{recordCount:0,distinctCount:0,totalBytes:0,distinctBytes:0,repeatedBytes:0},
+  compression:{encoding:'gzip_base64',excludesStorageEnvelope:true,roundTripVerifiedCount:0,failedCount:0,individualSourceBytes:0,individualBase64Bytes:0,individualSavedBytes:0,bundleInputBytes:null,bundleBase64Bytes:null,bundleSavedBytes:null},
+  otherProperties:{count:0,valueBytes:0,changedDuringRead:0}};
+ ['active','source_changed','equipment_identity_changed','missing_scope','ambiguous_scope','invalid_record','source_unavailable']
+  .forEach(function(kind){result.classifications[kind]={count:0,valueBytes:0};});
+ function bytes(text){return Utilities.newBlob(text).getBytes().length;}
+ function gzipBytes(text){
+  var compressed=Utilities.gzip(Utilities.newBlob(text,'application/json'));
+  if(Utilities.ungzip(compressed).getDataAsString('UTF-8')!==text)throw new Error('Compression round-trip mismatch');
+  return Utilities.base64Encode(compressed.getBytes()).length;
+ }
+ Object.keys(before).forEach(function(key){
+  var text=String(before[key]),size=bytes(text);
+  if(key.indexOf(INVENTORY_SEMANTIC_PREFIX_)!==0){result.otherProperties.count++;result.otherProperties.valueBytes+=size;return;}
+  result.records.count++;result.records.keyBytes+=bytes(key);result.records.valueBytes+=size;bundle[key]=text;
+  try{var compressedSize=gzipBytes(text);result.compression.roundTripVerifiedCount++;
+   result.compression.individualSourceBytes+=size;result.compression.individualBase64Bytes+=compressedSize;result.compression.individualSavedBytes+=size-compressedSize;
+  }catch(compressionError){result.compression.failedCount++;}
+  var review=null,kind='invalid_record',day='unknown';
+  try{review=JSON.parse(text);}catch(parseError){}
+  if(review && typeof review==='object' && !Array.isArray(review)){
+   var reviewedAt=Date.parse(review.reviewedAt);
+   if(Number.isFinite(reviewedAt))day=new Date(reviewedAt).toISOString().slice(0,10);
+   if(typeof review.reason==='string'){
+    var reasonBytes=bytes(review.reason);result.reasonDuplication.recordCount++;result.reasonDuplication.totalBytes+=reasonBytes;
+    if(!Object.prototype.hasOwnProperty.call(reasons,review.reason)){reasons[review.reason]=true;result.reasonDuplication.distinctCount++;result.reasonDuplication.distinctBytes+=reasonBytes;}
+   }
+   if(typeof review.setName==='string' && typeof review.componentName==='string' && typeof review.sourceHash==='string'
+      && ['included','stock'].indexOf(review.disposition)>=0 && Array.isArray(review.allocations)
+      && key===inventorySemanticKey_(review)){
+    var current=byKey[key] || [];
+    if(!sourceComplete)kind='source_unavailable';
+    else if(!current.length)kind='missing_scope';
+    else if(current.length!==1)kind='ambiguous_scope';
+    else if(review.sourceHash!==current[0].sourceHash)kind='source_changed';
+    else if(review.allocations.some(function(a){return !a || !snapshot.equipment.some(function(e){return e.id===a.equipmentId && e.name===a.equipmentName;});}))kind='equipment_identity_changed';
+    else kind='active';
+   }
+  }
+  result.classifications[kind].count++;result.classifications[kind].valueBytes+=size;
+  var dateGroup=result.reviewedAtDays[day] || (result.reviewedAtDays[day]={count:0,valueBytes:0});dateGroup.count++;dateGroup.valueBytes+=size;
+ });
+ result.reasonDuplication.repeatedBytes=result.reasonDuplication.totalBytes-result.reasonDuplication.distinctBytes;
+ try{var bundleText=JSON.stringify(bundle),bundleSize=gzipBytes(bundleText);result.compression.bundleInputBytes=bytes(bundleText);result.compression.bundleBase64Bytes=bundleSize;
+  result.compression.bundleSavedBytes=result.records.valueBytes-bundleSize;
+ }catch(bundleError){}
+ var after=props.getProperties(),changed=0,allKeys=Object.keys(before).concat(Object.keys(after).filter(function(key){return !Object.prototype.hasOwnProperty.call(before,key);}));
+ allKeys.forEach(function(key){if(before[key]!==after[key]){changed++;if(key.indexOf(INVENTORY_SEMANTIC_PREFIX_)!==0)result.otherProperties.changedDuringRead++;}});
+ result.propertiesStableDuringRead=changed===0;
+ return result;
+}
+
 function inventoryApplySemanticReviews_(snapshot) {
  // Observed replacement/packing rows are evidence, never new default kit contents.
  (snapshot.sets || []).forEach(function(set){if(!set.components.length)set.components.push({name:set.name,quantity:1,note:'',tracked:true,wholeItem:true});});
