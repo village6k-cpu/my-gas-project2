@@ -1901,6 +1901,27 @@ function auditDashboardPhotoUploadClaims_(all, now) {
     if (parseStatus === 'object' && !validObject) parseStatus = 'invalid_shape';
     var claim = validObject ? parsed : {};
     var state = ['pending', 'file', 'done'].indexOf(claim.state) >= 0 ? claim.state : 'unknown';
+    // Completed claims may omit exact duplicates already preserved in result.
+    // Expand only absent fields for readback; present conflicts remain evidence.
+    var compactResult = claim.result;
+    var compactPhoto = compactResult && compactResult.photo;
+    if (state === 'done' && compactResult && typeof compactResult === 'object' && !Array.isArray(compactResult)
+      && compactResult.success === true && typeof compactResult.tid === 'string' && compactResult.tid
+      && ['checkout', 'checkin'].indexOf(compactResult.phase) >= 0
+      && claim.scope === compactResult.tid + '|' + compactResult.phase
+      && compactPhoto && typeof compactPhoto === 'object' && !Array.isArray(compactPhoto)
+      && compactPhoto.phase === compactResult.phase && typeof compactPhoto.fileId === 'string' && compactPhoto.fileId
+      && typeof compactPhoto.sheetValue === 'string' && compactPhoto.sheetValue
+      && typeof compactPhoto.row === 'number' && isFinite(compactPhoto.row) && compactPhoto.row >= 2 && Math.floor(compactPhoto.row) === compactPhoto.row) {
+      var expandedClaim = Object.create(null);
+      Object.keys(claim).forEach(function(field) { expandedClaim[field] = claim[field]; });
+      var identityFields = { tid: compactResult.tid, phase: compactResult.phase, fileId: compactPhoto.fileId,
+        relativePath: compactPhoto.sheetValue, row: compactPhoto.row };
+      Object.keys(identityFields).forEach(function(field) {
+        if (!Object.prototype.hasOwnProperty.call(expandedClaim, field)) expandedClaim[field] = identityFields[field];
+      });
+      claim = expandedClaim;
+    }
     var at = typeof claim.at === 'number' || typeof claim.at === 'string' ? Number(claim.at) : NaN;
     var timestampStatus = !claim.at ? 'missing' : (!isFinite(at) || at <= 0 ? 'invalid' : (at > now ? 'future' : 'valid'));
     var knownAt = timestampStatus === 'valid' || timestampStatus === 'future';

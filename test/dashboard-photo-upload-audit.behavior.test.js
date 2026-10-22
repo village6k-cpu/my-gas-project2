@@ -149,3 +149,33 @@ test('photo audit eligibility agrees with the existing cleanup predicate without
   Object.keys(claims).forEach((key, index) => assert.equal(audit.entries[index].legacyCleanupEligible, !(prefix + key in values)));
   assert.equal(values.village_operation_receipt_v1_protected, 'protected receipt');
 });
+
+test('photo audit expands absent DONE duplicates from the scoped success receipt without changing stored bytes or expiry', () => {
+  const claim = { scope: identity.tid + '|' + identity.phase, state: 'done', at: now - ttl - 1,
+    photoId: identity.photoId, result: { ...receipt, photo: { ...receipt.photo, phase: identity.phase } } };
+  const { audit } = runAudit({ compact: claim });
+  assert.equal(audit.entries[0].receiptStatus, 'consistent_success');
+  assert.equal(audit.entries[0].ledgerStatus, 'matched');
+  assert.equal(audit.entries[0].legacyCleanupEligible, true);
+  assert.equal(audit.valueBytes, Buffer.byteLength(JSON.stringify(claim)));
+  assert.equal(audit.entries[0].safeToDelete, false);
+});
+
+test('photo audit never overwrites an existing conflicting duplicate while expanding compact DONE evidence', () => {
+  const claim = { scope: identity.tid + '|' + identity.phase, state: 'done', at: now,
+    photoId: identity.photoId, fileId: 'conflicting-file',
+    result: { ...receipt, photo: { ...receipt.photo, phase: identity.phase } } };
+  const { audit } = runAudit({ compact: claim });
+  assert.equal(audit.entries[0].receiptStatus, 'identity_mismatch');
+  assert.equal(audit.entries[0].ledgerStatus, 'conflict');
+});
+
+test('photo audit requires a matching scope and DONE state before deriving compact identity', () => {
+  const claim = { scope: identity.tid + '|' + identity.phase, state: 'done', at: now,
+    photoId: identity.photoId, result: { ...receipt, photo: { ...receipt.photo, phase: identity.phase } } };
+  const { audit } = runAudit({ wrongScope: { ...claim, scope: 'different|checkout' }, pending: { ...claim, state: 'pending' } });
+  for (const entry of audit.entries) {
+    assert.equal(entry.receiptStatus, 'identity_mismatch');
+    assert.equal(entry.ledgerStatus, 'incomplete_claim');
+  }
+});

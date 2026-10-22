@@ -3453,9 +3453,9 @@ function isScriptPropertiesQuotaError_(err) {
 }
 
 /**
- * 대시보드 운영용 휘발 속성 회수.
- * 설정값(API 키, 봇 계정 등)은 절대 삭제하지 않는다.
- * 완료 정본은 Supabase이므로 setupDone_/itemCheck_ 과거분은 안전하게 비울 수 있다.
+ * Supabase 정본이 있는 반출 체크 mirror와 폐기된 인덱스만 회수한다.
+ * 잠금 밖에서도 호출되므로 lease/operation receipt의 수명은 여기서 판단하지 않는다.
+ * 완료 응답·반납 검수 증거·복원 상태는 직접 참조되는 내구 데이터이므로 보존한다.
  */
 function reclaimDashboardScriptProperties_(props, options) {
   options = options || {};
@@ -3472,19 +3472,16 @@ function reclaimDashboardScriptProperties_(props, options) {
   var all;
   try { all = props.getProperties() || {}; } catch (readErr) { return { ok: false, error: String(readErr), deleted: 0 }; }
   var keys = Object.keys(all);
-  // Projection payloads are durable accepted work, not reconstructible cache.
-  // Keep their coordination records until the projection worker acknowledges them.
-  // 용량 정리에서도 미반영 추가/제외 ID와 반납 상태는 반드시 보존한다.
-  var queuedTrades = {};
+  // Projection payloads and their coordination records are never reclamation candidates.
+  // Also retain checkout mirrors while accepted structural work remains pending.
+  var queuedTrades = Object.create(null);
   keys.forEach(function(key) {
     if (!/^dashboardStructureQueue_/.test(key)) return;
-    var match = key.match(/(\d{6}-\d{3})$/);
+    var match = key.match(/(\d{6}-\d{3,})$/);
     if (match) queuedTrades[match[1]] = true;
   });
   function preservePendingProjection(key) {
-    if (/^dashboardStructureQueue_/.test(key)) return true;
-    if (!/^dashboard(?:MutationLog|StructureMutation|ReturnProjectionLease)_/.test(key)) return false;
-    var match = key.match(/(\d{6}-\d{3,})(?:_[A-Za-z0-9]+)?$/);
+    var match = key.match(/^(?:itemCheck|itemCheckQty)_(\d{6}-\d{3,})-.+_(?:checkout|checkin)$/);
     if (!match) return false;
     if (queuedTrades[match[1]]) return true;
     // A queue may arrive after the initial property snapshot.
@@ -3492,44 +3489,16 @@ function reclaimDashboardScriptProperties_(props, options) {
     catch (readPendingError) { return true; }
   }
   var toDelete = [];
-  var keepPrefixes = {
-    // 설정/인증 — 삭제 금지
-  };
   keys.forEach(function(k) {
-    if (preservePendingProjection(k)) return;
-    // 허용된 캐시 접두만 삭제. REG_ALIM_SENT/설정값은 절대 건드리지 않는다.
-    var reclaimable =
-      /^(itemCheck|itemCheckQty)_/.test(k) ||
-      /^(setupDone|setupDoneAt|returnDone|returnDoneAt)_/.test(k) ||
-      /^checkoutBaselineStarted_/.test(k) ||
-      /^returnForced_v1_/.test(k) ||
-      /^returnPrevContractStatus_/.test(k) ||
-      /^setupClosing_/.test(k) ||
-      /^setupMutation_/.test(k) ||
-      /^returnMutation_/.test(k) ||
-      /^checkoutItemMutation_/.test(k) ||
-      /^dashboardCompletionRevision_/.test(k) ||
-      /^dashboardMutationLog_/.test(k) ||
-      /^dashboardStructureMutation_/.test(k) ||
-      /^dashboardStructureQueue_/.test(k) ||
-      /^dashboardReturnProjectionLease_/.test(k) ||
+    var retiredIndex =
       k.indexOf(DASHBOARD_RETIRED_PHOTO_PROPERTY_CHUNK_PREFIX_ || 'dashboardRetiredPhotoChunk_') === 0 ||
       k === (DASHBOARD_RETIRED_PHOTO_PROPERTY_MANIFEST_KEY_ || 'dashboardRetiredPhotoManifest');
-    if (!reclaimable) return;
-
-    var always = (
-      /^dashboardMutationLog_/.test(k) ||
-      /^dashboardStructureMutation_/.test(k) ||
-      /^dashboardStructureQueue_/.test(k) ||
-      /^dashboardReturnProjectionLease_/.test(k) ||
-      /^setupClosing_/.test(k) ||
-      /^setupMutation_/.test(k) ||
-      /^returnMutation_/.test(k) ||
-      /^checkoutItemMutation_/.test(k) ||
-      k.indexOf(DASHBOARD_RETIRED_PHOTO_PROPERTY_CHUNK_PREFIX_ || 'dashboardRetiredPhotoChunk_') === 0 ||
-      k === (DASHBOARD_RETIRED_PHOTO_PROPERTY_MANIFEST_KEY_ || 'dashboardRetiredPhotoManifest')
-    );
-    if (always) {
+    // itemCheck_*_checkin contains identity-bound inspection evidence, not a mirror.
+    // itemCheckQty_*_checkin has no remaining readers/writers; only legacy cleanup uses it.
+    var disposableMirror = /^itemCheck_\d{6}-\d{3,}-.+_checkout$/.test(k) ||
+      /^itemCheckQty_\d{6}-\d{3,}-.+_checkin$/.test(k);
+    if ((!retiredIndex && !disposableMirror) || preservePendingProjection(k)) return;
+    if (retiredIndex) {
       toDelete.push(k);
       return;
     }
@@ -3545,7 +3514,7 @@ function reclaimDashboardScriptProperties_(props, options) {
       toDelete.push(k);
       return;
     }
-    if (options.aggressive === true && /^(itemCheck|itemCheckQty|setupDone|setupDoneAt|returnDone|returnDoneAt)_/.test(k)) {
+    if (options.aggressive === true && disposableMirror) {
       toDelete.push(k);
     }
   });

@@ -42,3 +42,21 @@ test('스킵 분기가 실제로 두 방향 모두 동작한다', () => {
   assert.equal(run('Pushed 9 files.'), 'DEPLOY');
   assert.equal(run(''), 'DEPLOY', '출력이 비면 안전하게 배포해야 한다');
 });
+
+test('endwork reads version capacity and skips only a proven full store', () => {
+  const source = read('scripts/endwork.sh');
+  const block = source.slice(source.indexOf('GAS_DEPLOY_PENDING=0'), source.indexOf('# 8. git commit'));
+  const run = (versions, listingStatus = '0') => execFileSync('bash', ['-c',
+    'set -euo pipefail\n' +
+    'clasp() { if [[ "$1" == "--json" ]]; then printf "%s" "$VERSIONS"; return "$LISTING_STATUS"; else echo DEPLOY_CALLED; fi; }\n' +
+    block + '\nprintf "PENDING=%s" "$GAS_DEPLOY_PENDING"\n'
+  ], { encoding: 'utf8', env: { ...process.env, PUSH_OUT: 'Pushed files.', DEPLOY_ID: 'fixture', MSG: 'fixture',
+    VERSIONS: versions, LISTING_STATUS: listingStatus } });
+  const full = JSON.stringify(Array.from({ length: 200 }, (_, i) => ({ versionNumber: i + 1 })));
+  const blocked = run(full);
+  assert.doesNotMatch(blocked, /DEPLOY_CALLED/);assert.match(blocked, /PENDING=1/);
+  assert.match(run('[{"versionNumber":804}]'), /DEPLOY_CALLED/);
+  assert.match(run('invalid json'), /DEPLOY_CALLED/);
+  assert.match(run(full, '1'), /DEPLOY_CALLED/, 'failed listing cannot establish a full store');
+  assert.match(run(JSON.stringify(Array.from({ length: 200 }, () => ({ versionNumber: 804 })))), /DEPLOY_CALLED/);
+});

@@ -11,7 +11,8 @@ function inventorySemanticKey_(scope){return INVENTORY_SEMANTIC_PREFIX_+inventor
 
 function inventorySemanticLegacyRecords_() {
  var values=PropertiesService.getScriptProperties().getProperties();
- if(values.inventorySemanticStore_v1_manifest)throw new Error('AI 판단 저장소 reader 확인 필요');
+ var documentStore=typeof PropertiesService.getDocumentProperties==='function'?PropertiesService.getDocumentProperties():null;
+ if(values.inventorySemanticStore_v1_manifest || documentStore?.getProperty('inventorySemanticStore_v1_manifest'))throw new Error('AI 판단 저장소 reader 확인 필요');
  return values;
 }
 
@@ -26,7 +27,8 @@ function auditInventorySemanticStorage() {
  var scopes=sourceComplete?inventorySemanticScopes_(snapshot):[],byKey={},reasons=Object.create(null),bundle={};
  scopes.forEach(function(scope){var key=inventorySemanticKey_(scope);(byKey[key] || (byKey[key]=[])).push(scope);});
  var result={mode:'read_only',sourceComplete:sourceComplete,deletionCandidates:0,
-  storage:{mode:before.inventorySemanticStore_v1_manifest?'drive':'legacy',legacyCount:legacyCount},
+  storage:typeof inventorySemanticStorageState_==='function'?inventorySemanticStorageStatus_(inventorySemanticStorageState_(true)):
+   {mode:before.inventorySemanticStore_v1_manifest?'drive':'legacy',legacyCount:legacyCount},
   records:{count:0,keyBytes:0,valueBytes:0},classifications:{},reviewedAtTimeZone:'UTC',reviewedAtDays:{},
   reasonDuplication:{recordCount:0,distinctCount:0,totalBytes:0,distinctBytes:0,repeatedBytes:0},
   compression:{encoding:'gzip_base64',excludesStorageEnvelope:true,roundTripVerifiedCount:0,failedCount:0,individualSourceBytes:0,individualBase64Bytes:0,individualSavedBytes:0,bundleInputBytes:null,bundleBase64Bytes:null,bundleSavedBytes:null},

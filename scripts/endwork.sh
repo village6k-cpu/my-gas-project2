@@ -113,22 +113,33 @@ echo "$PUSH_OUT"
 echo ""
 
 # 7. clasp deploy (기존 웹앱 URL 유지)
-# Apps Script는 프로젝트당 버전 200개가 상한이고 삭제가 안 된다. 앱(Next.js)만 고친
+# Apps Script는 프로젝트당 보존 버전 200개가 상한이다. 앱(Next.js)만 고친
 # 배포까지 매번 버전을 태우면 결국 한도에 걸려 모든 배포가 막힌다(2026-08 실제 발생).
 # GAS 코드가 그대로면 배포할 것도 없으므로 건너뛴다.
+GAS_DEPLOY_PENDING=0
 if grep -qi "already up to date" <<<"$PUSH_OUT"; then
   echo "▶ clasp deploy 생략 — GAS 코드 변경 없음 (버전 한도 200 보호)"
   echo ""
 else
-  echo "▶ clasp deploy..."
+  # 이미 확인 가능한 버전 포화 상태에서는 같은 실패 배포를 반복하지 않는다.
+  # 읽기 실패/구형 CLI는 unknown으로 두고 기존 배포 절차를 그대로 시도한다.
+  VERSION_COUNT="unknown"
+  if VERSION_LIST="$(clasp --json list-versions 2>/dev/null)"; then
+    VERSION_COUNT="$(node -e 'try { const v=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!Array.isArray(v)||v.some(x=>!Number.isInteger(x.versionNumber)||x.versionNumber<1)||new Set(v.map(x=>x.versionNumber)).size!==v.length) throw Error(); process.stdout.write(String(v.length)); } catch { process.stdout.write("unknown"); }' <<<"$VERSION_LIST")"
+  fi
   # 배포 실패(버전 200 한도 등)가 git push·Vercel 배포까지 막으면 수정이 통째로 묶인다.
   # 코드는 이미 GAS HEAD에 push됐으므로(시간 트리거는 HEAD로 실행) 경고만 남기고 진행한다.
-  if ! clasp deploy -i "$DEPLOY_ID" -d "$MSG"; then
+  if [[ "$VERSION_COUNT" =~ ^[0-9]+$ ]] && (( VERSION_COUNT >= 200 )); then
+    GAS_DEPLOY_PENDING=1
+    echo "⚠️ GAS 공개 배포 미완료 — 보존 버전 ${VERSION_COUNT}개로 새 버전 생성이 차단되어 있습니다."
+    echo "   HEAD와 공개 웹앱 버전은 다릅니다. 기존 버전 정리 후 공개 배포를 별도로 완료해야 합니다."
+  elif ! clasp deploy -i "$DEPLOY_ID" -d "$MSG"; then
+    GAS_DEPLOY_PENDING=1
     echo ""
     echo "⚠️ clasp deploy 실패 — 웹앱(doGet/doPost)은 이전 버전으로 남습니다."
     echo "   시간 트리거는 HEAD 코드로 실행되므로 flush/재생성 워커는 새 코드가 반영됩니다."
     echo "   버전 200 한도라면: GAS 편집기 → 프로젝트 기록에서 오래된 버전을 삭제한 뒤"
-    echo "   ./scripts/endwork.sh 를 다시 실행하세요."
+    echo "   기존 웹앱 URL을 유지하는 공개 배포를 별도로 완료해야 합니다."
   fi
   echo ""
 fi
@@ -158,4 +169,8 @@ VERCEL_PROJECT_ID="$VERCEL_TODAY_PROJECT_ID" \
   "$VERCEL_BIN" --prod --yes
 echo ""
 
-echo "✅ 완료. 다른 맥에서는 ./scripts/startwork.sh 실행."
+if [[ "$GAS_DEPLOY_PENDING" == "1" ]]; then
+  echo "⚠️ Git/Vercel 반영 완료, GAS 공개 웹앱 배포 미완료. 운영 수정 완료로 판단하면 안 됩니다."
+else
+  echo "✅ 완료. 다른 맥에서는 ./scripts/startwork.sh 실행."
+fi
