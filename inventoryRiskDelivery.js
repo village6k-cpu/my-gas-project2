@@ -197,6 +197,11 @@ function recordInventoryPropertyCapacityDiagnostic_() {
     var build='capacity-20261023-v1',p=PropertiesService.getScriptProperties();
     var key=INVENTORY_RISK_PREFIX_+'lastScan',raw=p.getProperty(key),scan=JSON.parse(raw || '{}');
     if(!scan || typeof scan!=='object' || Array.isArray(scan) || scan.propertyCapacity?.build===build)return;
+    var errorKey=INVENTORY_RISK_PREFIX_+'lastError',priorError=p.getProperty(errorKey);
+    if(String(priorError || '').indexOf('capacity-v1|')===0)return;
+    // Incident-only CAS target; its full original is preserved in the incident audit artifact.
+    // Never replace a different/newer error or create a new property for this fallback.
+    var preservedError='{"at":"2026-10-21T22:54:33.712Z","message":"재고 경보 전송·상태 확인 필요"}';
     var lease=JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lease') || '{}');
     if(Number(lease.until || 0)>Date.now())return;
     var all=p.getProperties(),keys=Object.keys(all),categories=Object.create(null),largest=[];
@@ -217,13 +222,25 @@ function recordInventoryPropertyCapacityDiagnostic_() {
     var diagnostic={build:build,at:new Date().toISOString(),propertyCount:keys.length,totalBytes:totalBytes,
       valueBytes:valueBytes,categoryCount:grouped.length,categories:grouped.slice(0,10),largest:largest.slice(0,5)};
     var next=Object.assign({},scan,{propertyCapacity:diagnostic}),text=JSON.stringify(next);
+    var top=grouped[0] || {prefix:'none',totalBytes:0,count:0};
+    var compact=['capacity-v1',keys.length,totalBytes,top.prefix.replace(/[^A-Za-z0-9_.*-]/g,'_').slice(0,32),top.totalBytes,top.count].join('|');
+    var canUseCompact=priorError===preservedError && Utilities.newBlob(compact).getBytes().length<=Utilities.newBlob(priorError).getBytes().length;
     // Calculate outside ScriptLock. Never remove records to make room for diagnostics.
     if(Utilities.newBlob(JSON.stringify(diagnostic)).getBytes().length>3000 || Utilities.newBlob(text).getBytes().length>8500)return;
     lock=LockService.getScriptLock();held=lock.tryLock(500);if(!held)return;
     if(p.getProperty(key)!==raw)return;
     lease=JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lease') || '{}');
     if(Number(lease.until || 0)>Date.now())return;
-    p.setProperty(key,text);
+    try {p.setProperty(key,text);}
+    catch(writeError) {
+      if(!canUseCompact || !/(?:속성 저장용량|property storage quota)/i.test(String(writeError && writeError.message || writeError)))return;
+      if(p.getProperty(key)!==raw || p.getProperty(errorKey)!==priorError)return;
+      lease=JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lease') || '{}');
+      if(Number(lease.until || 0)>Date.now())return;
+      try{CacheService.getScriptCache().put(INVENTORY_RISK_PREFIX_+'capacityPreviousError',priorError,21600);}catch(cacheError){}
+      if(p.getProperty(errorKey)!==priorError)return;
+      p.setProperty(errorKey,compact);
+    }
   } catch(error) {
     // This diagnostic metadata capture must never block the existing heartbeat.
   } finally {if(held)try{lock.releaseLock();}catch(releaseError){}}
