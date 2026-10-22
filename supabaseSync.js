@@ -515,31 +515,63 @@ function supaSetTradeReturnDone_(tid, done, doneAt, contractStatus, expectedRetu
   }
 }
 
-/** A returned row is evidence only for this exact item and a recognized canonical state. */
+/** Read-only server code contract marker; not proof of database health or frontend deployment. */
+function getCheckoutMutationProtocol() {
+  return { protocol: 'checkout_updated_at_cas_v1', expectedUpdatedAtRequired: true };
+}
+
+/** Preserve PostgreSQL microseconds and timezone verbatim; never round through Date. */
+function validCheckoutVersion_(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value);
+}
+
+function checkoutVersionRequired_() {
+  return { ok: false, applied: false, code: 'CHECKOUT_REFRESH_REQUIRED', outcomeUnknown: false,
+    error: '반출 품목의 기준 정보가 없습니다. 새로고침 후 다시 선택해주세요.' };
+}
+
+/** A returned row is evidence only for this exact item, version and canonical state. */
 function supaCheckoutAuthorityRow_(rows, tid, scheduleId) {
   if (!Array.isArray(rows) || rows.length !== 1) return null;
   var row = rows[0];
   return row && row.trade_id === tid && row.schedule_id === scheduleId &&
+    validCheckoutVersion_(row.updated_at) && Object.prototype.hasOwnProperty.call(row, 'removed_at') &&
     ['pending', 'taken', 'excluded'].indexOf(row.checkout_state) >= 0 ? row : null;
+}
+
+function supaCheckoutResult_(row, scheduleId, targetState, applied) {
+  if (!row) return { ok: false, applied: false, scheduleId: scheduleId, outcomeUnknown: true,
+    code: 'OUTCOME_UNKNOWN', error: '반출 체크 정본 조회가 필요합니다.' };
+  if (row.missing || row.removed_at !== null) return { ok: false, applied: false, scheduleId: scheduleId,
+    outcomeUnknown: false, code: 'CHECKOUT_ITEM_UNAVAILABLE', error: '품목이 삭제 또는 제외되었습니다. 새로고침해주세요.' };
+  var matched = row.checkout_state === targetState;
+  return { ok: matched, applied: matched && applied === true, scheduleId: scheduleId,
+    checked: matched ? targetState === 'taken' : undefined, updatedAt: row.updated_at,
+    canonicalState: row.checkout_state, outcomeUnknown: false,
+    deduped: matched && applied !== true, confirmedAfterError: matched && applied !== true,
+    code: matched ? undefined : 'CHECKOUT_CONFLICT',
+    error: matched ? undefined : '다른 변경이 먼저 저장되었습니다. 현재 상태를 확인 후 다시 선택해주세요.' };
 }
 
 function supaReadCheckoutAuthority_(cfg, token, tid, scheduleId) {
   if (!cfg || !token) return null;
   try {
     var response = UrlFetchApp.fetch(cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
-      + '&schedule_id=eq.' + encodeURIComponent(scheduleId) + '&select=trade_id,schedule_id,checkout_state', {
+      + '&schedule_id=eq.' + encodeURIComponent(scheduleId) + '&select=trade_id,schedule_id,checkout_state,updated_at,removed_at', {
       method: 'get', headers: { apikey: cfg.apikey, Authorization: 'Bearer ' + token, 'Accept-Profile': 'village' }, muteHttpExceptions: true
     });
     if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) return null;
-    return supaCheckoutAuthorityRow_(JSON.parse(response.getContentText()), tid, scheduleId);
+    var rows = JSON.parse(response.getContentText());
+    return Array.isArray(rows) && !rows.length ? { missing: true } : supaCheckoutAuthorityRow_(rows, tid, scheduleId);
   } catch (readError) { return null; }
 }
 
 /** 품목 반출 체크도 전용 부분 PATCH + 정본 readback으로 멱등 확정한다. */
-function supaSetScheduleItemCheckoutState_(tid, scheduleId, done) {
+function supaSetScheduleItemCheckoutState_(tid, scheduleId, done, expectedUpdatedAt) {
   tid = String(tid || '').trim();
   scheduleId = String(scheduleId || '').trim();
   if (!tid || !scheduleId) return { ok: false, error: '거래ID/스케줄ID 없음' };
+  if (!validCheckoutVersion_(expectedUpdatedAt)) return checkoutVersionRequired_();
   var cfg = null;
   var token = null;
   var targetState = done === true ? 'taken' : 'pending';
@@ -549,7 +581,8 @@ function supaSetScheduleItemCheckoutState_(tid, scheduleId, done) {
     if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음' };
     var res = UrlFetchApp.fetch(
       cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
-        + '&schedule_id=eq.' + encodeURIComponent(scheduleId) + '&select=trade_id,schedule_id,checkout_state',
+        + '&schedule_id=eq.' + encodeURIComponent(scheduleId) + '&updated_at=eq.' + encodeURIComponent(expectedUpdatedAt)
+        + '&removed_at=is.null&select=trade_id,schedule_id,checkout_state,updated_at,removed_at',
       {
         method: 'patch',
         contentType: 'application/json',
@@ -568,22 +601,13 @@ function supaSetScheduleItemCheckoutState_(tid, scheduleId, done) {
     var rows = null;
     try { rows = JSON.parse(res.getContentText() || '[]'); } catch (parseErr) {}
     var returned = supaCheckoutAuthorityRow_(rows, tid, scheduleId);
-    if (code >= 200 && code < 300 && returned && returned.checkout_state === targetState) return { ok: true, scheduleId: scheduleId };
+    if (code >= 200 && code < 300 && returned && returned.checkout_state === targetState && returned.removed_at === null)
+      return supaCheckoutResult_(returned, scheduleId, targetState, true);
     var canonical = supaReadCheckoutAuthority_(cfg, token, tid, scheduleId);
-    if (canonical && canonical.checkout_state === targetState) {
-      return { ok: true, scheduleId: scheduleId, deduped: true, confirmedAfterError: true };
-    }
-    return {
-      ok: false,
-      outcomeUnknown: code >= 500 || !canonical || !rows,
-      error: canonical ? 'Supabase 품목 체크 정본이 요청 상태와 다릅니다.' : 'Supabase 품목 체크 저장 확인 실패 (' + code + ')'
-    };
+    return supaCheckoutResult_(canonical, scheduleId, targetState, false);
   } catch (err) {
     var afterError = supaReadCheckoutAuthority_(cfg, token, tid, scheduleId);
-    if (afterError && afterError.checkout_state === targetState) {
-      return { ok: true, scheduleId: scheduleId, deduped: true, confirmedAfterError: true };
-    }
-    return { ok: false, outcomeUnknown: true, error: 'Supabase 품목 체크 저장 오류: ' + (err && err.message ? err.message : String(err)) };
+    return supaCheckoutResult_(afterError, scheduleId, targetState, false);
   }
 }
 
@@ -603,7 +627,7 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
   var requests = [];
   var normalized = items.map(function(item) {
     return { scheduleId: String(item && item.scheduleId || '').trim(), done: item && item.done === true,
-      targetState: item && item.done === true ? 'taken' : 'pending' };
+      targetState: item && item.done === true ? 'taken' : 'pending', expectedUpdatedAt: item && item.expectedUpdatedAt };
   });
   var seen = Object.create(null);
   if (normalized.some(function(item) {
@@ -612,6 +636,8 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
     return false;
   }))
     return { ok: false, results: [], error: '품목 ID 누락 또는 중복' };
+  if (normalized.some(function(item) { return !validCheckoutVersion_(item.expectedUpdatedAt); }))
+    return { ok: false, results: normalized.map(function(item) { return Object.assign({ scheduleId: item.scheduleId }, checkoutVersionRequired_()); }) };
   var results = null;
   try {
     cfg = SUPA_CFG_();
@@ -627,7 +653,8 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
     requests = normalized.map(function(item) {
       return {
         url: cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
-          + '&schedule_id=eq.' + encodeURIComponent(item.scheduleId) + '&select=trade_id,schedule_id,checkout_state',
+          + '&schedule_id=eq.' + encodeURIComponent(item.scheduleId) + '&updated_at=eq.' + encodeURIComponent(item.expectedUpdatedAt)
+          + '&removed_at=is.null&select=trade_id,schedule_id,checkout_state,updated_at,removed_at',
         method: 'patch',
         contentType: 'application/json',
         headers: headers,
@@ -643,14 +670,8 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
       var rows = null;
       try { rows = JSON.parse(response && response.getContentText() || '[]'); } catch (parseErr) {}
       var returned = supaCheckoutAuthorityRow_(rows, tid, item.scheduleId);
-      var matched = !!(code >= 200 && code < 300 && returned && returned.checkout_state === item.targetState);
-      return {
-        scheduleId: item.scheduleId,
-        checked: matched ? item.done : undefined,
-        ok: matched,
-        code: code,
-        outcomeUnknown: code >= 500 || !rows
-      };
+      var matched = !!(code >= 200 && code < 300 && returned && returned.checkout_state === item.targetState && returned.removed_at === null);
+      return supaCheckoutResult_(matched ? returned : null, item.scheduleId, item.targetState, matched);
     });
     var unresolved = results.filter(function(result) { return !result.ok; });
     if (unresolved.length) {
@@ -658,13 +679,15 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
       var read = UrlFetchApp.fetch(
         cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
           + '&schedule_id=in.' + encodeURIComponent('(' + ids.join(',') + ')')
-          + '&select=trade_id,schedule_id,checkout_state',
+          + '&select=trade_id,schedule_id,checkout_state,updated_at,removed_at',
         { method: 'get', headers: headers, muteHttpExceptions: true }
       );
       var readRows = null;
       try { readRows = JSON.parse(read.getContentText() || '[]'); } catch (readParseErr) {}
       var canonical = Object.create(null);
-      if (read.getResponseCode() >= 200 && read.getResponseCode() < 300 && Array.isArray(readRows)) {
+      var readKnown = read.getResponseCode() >= 200 && read.getResponseCode() < 300 && Array.isArray(readRows)
+        && readRows.every(function(row) { return row && ids.indexOf(row.schedule_id) >= 0 && !!supaCheckoutAuthorityRow_([row], tid, row.schedule_id); });
+      if (readKnown) {
         readRows.forEach(function(row) {
           if (!row || typeof row.schedule_id !== 'string') return;
           (canonical[row.schedule_id] || (canonical[row.schedule_id] = [])).push(row);
@@ -673,17 +696,9 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
       results.forEach(function(result, index) {
         if (result.ok) return;
         var target = normalized[index].targetState;
-        var verified = supaCheckoutAuthorityRow_(canonical[result.scheduleId], tid, result.scheduleId);
-        if (verified && verified.checkout_state === target) {
-          result.ok = true;
-          result.checked = normalized[index].done;
-          result.deduped = true;
-          result.confirmedAfterError = true;
-          result.outcomeUnknown = false;
-        } else {
-          result.error = verified ? 'Supabase 품목 체크 정본이 요청 상태와 다릅니다.' : 'Supabase 품목 체크 저장 확인 실패 (' + result.code + ')';
-          result.outcomeUnknown = result.outcomeUnknown || !verified;
-        }
+        var verified = readKnown && !canonical[result.scheduleId] ? { missing: true }
+          : supaCheckoutAuthorityRow_(canonical[result.scheduleId], tid, result.scheduleId);
+        results[index] = supaCheckoutResult_(verified, result.scheduleId, target, false);
       });
     }
     return {
@@ -695,16 +710,7 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
     var fallback = normalized.map(function(item, index) {
       if (results && results[index] && results[index].ok) return results[index];
       var canonical = supaReadCheckoutAuthority_(cfg, token, tid, item.scheduleId);
-      var matched = !!(canonical && canonical.checkout_state === item.targetState);
-      return {
-        scheduleId: item.scheduleId,
-        checked: matched ? item.done : undefined,
-        ok: matched,
-        deduped: matched,
-        confirmedAfterError: matched,
-        outcomeUnknown: !matched,
-        error: matched ? '' : 'Supabase 품목 체크 저장 오류: ' + (err && err.message ? err.message : String(err))
-      };
+      return supaCheckoutResult_(canonical, item.scheduleId, item.targetState, false);
     });
     return { ok: fallback.length > 0 && fallback.every(function(result) { return result.ok; }), results: fallback };
   }
@@ -718,6 +724,7 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
  */
 function supaGetScheduleItemCheckoutStateMap_(tradeIds) {
   var byScheduleId = {};
+  var byUpdatedAt = {};
   var ids = [];
   var seen = {};
   (tradeIds || []).forEach(function(tid) {
@@ -744,7 +751,7 @@ function supaGetScheduleItemCheckoutStateMap_(tradeIds) {
         return '"' + String(tid).replace(/"/g, '') + '"';
       }).join(',') + ')';
       var res = UrlFetchApp.fetch(
-        cfg.url + '/rest/v1/schedule_items?select=schedule_id,checkout_state'
+        cfg.url + '/rest/v1/schedule_items?select=trade_id,schedule_id,checkout_state,updated_at,removed_at&removed_at=is.null'
           + '&trade_id=in.' + encodeURIComponent(inList)
           + '&limit=2000',
         { method: 'get', headers: headers, muteHttpExceptions: true }
@@ -763,9 +770,10 @@ function supaGetScheduleItemCheckoutStateMap_(tradeIds) {
         var sid = String(row && row.schedule_id || '').trim();
         if (!sid) return;
         byScheduleId[sid] = String(row.checkout_state || '').trim();
+        if (ids.indexOf(row.trade_id) >= 0 && validCheckoutVersion_(row.updated_at)) byUpdatedAt[sid] = row.updated_at;
       });
     }
-    return { ok: true, byScheduleId: byScheduleId };
+    return { ok: true, byScheduleId: byScheduleId, byUpdatedAt: byUpdatedAt };
   } catch (err) {
     return {
       ok: false,

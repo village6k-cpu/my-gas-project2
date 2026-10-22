@@ -7,6 +7,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const gas = fs.readFileSync(path.join(__dirname, '..', 'checkAvailability.js'), 'utf8');
 const tid = '261022-001', sid = tid + '-01';
+const version = '2026-10-23T00:00:00.123456+00:00';
 function section(start, end) { return gas.slice(gas.indexOf(start), gas.indexOf(end, gas.indexOf(start))); }
 
 function harness({ mirrorQuota = false, authorityUnavailable = false, fullQuota = false, commitQuota = false } = {}) {
@@ -25,6 +26,8 @@ function harness({ mirrorQuota = false, authorityUnavailable = false, fullQuota 
   };
   const lock = { tryLock() { if (held) return false; held = true; return true; }, releaseLock() { held = false; } };
   const context = {
+    validCheckoutVersion_: value => value === version,
+    checkoutVersionRequired_: () => ({ok:false,code:'CHECKOUT_REFRESH_REQUIRED',error:'refresh',outcomeUnknown:false}),
     DASHBOARD_MUTATION_LOG_PREFIX_: 'dashboardMutationLog_v2_',
     DASHBOARD_MUTATION_LOG_TTL_MS_: 1800000,
     PropertiesService: { getScriptProperties: () => props },
@@ -37,14 +40,15 @@ function harness({ mirrorQuota = false, authorityUnavailable = false, fullQuota 
     clearDashboardMutationLease_: (_props, key, token) => {
       if (JSON.parse(props.getProperty(key) || 'null')?.token === token) props.deleteProperty(key);
     },
-    supaSetScheduleItemCheckoutState_: (_tid, id, checked) => {
+    supaSetScheduleItemCheckoutState_: (_tid, id, checked, expectedUpdatedAt) => {
+      assert.equal(expectedUpdatedAt, version);
       assert.equal(_tid, tid); writes++; ledger.set(id, checked ? 'taken' : 'pending');
       return { ok: true, scheduleId: id };
     },
     supaSetScheduleItemCheckoutStatesBatch_: (_tid, items) => ({
       ok: true,
       results: items.map((item) => {
-        context.supaSetScheduleItemCheckoutState_(_tid, item.scheduleId, item.done);
+        context.supaSetScheduleItemCheckoutState_(_tid, item.scheduleId, item.done, item.expectedUpdatedAt);
         return { scheduleId: item.scheduleId, checked: item.done, ok: true };
       }),
     }),
@@ -67,13 +71,13 @@ function harness({ mirrorQuota = false, authorityUnavailable = false, fullQuota 
 
 test('a confirmed single checkout survives mirror quota and duplicate retry reads the canonical checked state', () => {
   const h = harness({ mirrorQuota: true });
-  const first = h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'checkout-one' });
+  const first = h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'checkout-one' });
   assert.equal(first.checked, true);
   assert.equal(first.error, undefined);
   assert.equal(first.cachePending, true);
   assert.equal(h.ledger.get(sid), 'taken');
   assert.equal(h.values.has('itemCheck_' + sid + '_checkout'), false);
-  const replay = h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'checkout-one' });
+  const replay = h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'checkout-one' });
   assert.equal(replay.checked, true);
   assert.equal(replay.deduped, true);
   assert.equal(h.writes(), 1);
@@ -81,7 +85,7 @@ test('a confirmed single checkout survives mirror quota and duplicate retry read
 
 test('batch replay reads canonical state after missing mirrors without issuing another PATCH', () => {
   const h = harness({ mirrorQuota: true });
-  const items = [{ scheduleId: sid, done: true, mutationId: 'batch-one' }];
+  const items = [{ scheduleId: sid, done: true, expectedUpdatedAt: version, mutationId: 'batch-one' }];
   assert.equal(h.context.toggleItemChecksBatch(tid, items).success, true);
   const replay = h.context.toggleItemChecksBatch(tid, items);
   assert.equal(replay.success, true);
@@ -91,8 +95,8 @@ test('batch replay reads canonical state after missing mirrors without issuing a
 
 for (const batch of [false, true]) test(`${batch ? 'batch' : 'single'} replay cannot report stale cache as canonical when readback is unavailable`, () => {
   const h = harness({ authorityUnavailable: true });
-  const run = () => batch ? h.context.toggleItemChecksBatch(tid, [{ scheduleId: sid, done: true, mutationId: 'same' }])
-    : h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'same' });
+  const run = () => batch ? h.context.toggleItemChecksBatch(tid, [{ scheduleId: sid, done: true, expectedUpdatedAt: version, mutationId: 'same' }])
+    : h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'same' });
   run();
   h.values.delete('itemCheck_' + sid + '_checkout');
   const replay = run();
@@ -105,22 +109,22 @@ for (const batch of [false, true]) test(`${batch ? 'batch' : 'single'} replay ca
 
 test('a replay reports a newer canonical uncheck instead of a stale checked mirror', () => {
   const h = harness();
-  h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'old' });
+  h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'old' });
   h.ledger.set(sid, 'pending');
-  const replay = h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'old' });
+  const replay = h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'old' });
   assert.equal(replay.checked, false);
   assert.equal(h.writes(), 1);
 });
 
 test('a mixed batch rechecks only prior mutations and writes each new item once', () => {
   const h = harness({ mirrorQuota: true });
-  h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'prior' });
+  h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'prior' });
   h.ledger.set(sid, 'pending');
   const other = tid + '-02';
   h.ledger.set(other, 'pending');
   const result = h.context.toggleItemChecksBatch(tid, [
-    { scheduleId: sid, done: true, mutationId: 'prior' },
-    { scheduleId: other, done: true, mutationId: 'new' }
+    { scheduleId: sid, done: true, expectedUpdatedAt: version, mutationId: 'prior' },
+    { scheduleId: other, done: true, expectedUpdatedAt: version, mutationId: 'new' }
   ]);
   assert.equal(result.success, true);
   assert.equal(result.results[0].checked, false);
@@ -133,9 +137,9 @@ test('a mixed batch rechecks only prior mutations and writes each new item once'
 
 test('a disappeared canonical row is unknown, never inferred unchecked from an empty mirror', () => {
   const h = harness();
-  h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'prior' });
+  h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'prior' });
   h.ledger.delete(sid);
-  const result = h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'prior' });
+  const result = h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'prior' });
   assert.equal(result.code, 'AUTHORITATIVE_READBACK_REQUIRED');
   assert.equal(result.checked, undefined);
   assert.equal(h.writes(), 1);
@@ -143,8 +147,8 @@ test('a disappeared canonical row is unknown, never inferred unchecked from an e
 
 for (const batch of [false, true]) test(`${batch ? 'batch' : 'single'} still fails closed before a business write when durable preflight storage is full`, () => {
   const h = harness({ fullQuota: true });
-  const run = () => batch ? h.context.toggleItemChecksBatch(tid, [{ scheduleId: sid, done: true, mutationId: 'full' }])
-    : h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'full' });
+  const run = () => batch ? h.context.toggleItemChecksBatch(tid, [{ scheduleId: sid, done: true, expectedUpdatedAt: version, mutationId: 'full' }])
+    : h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'full' });
   assert.throws(run, /property storage quota/);
   assert.equal(h.writes(), 0);
   assert.equal(h.ledger.get(sid), 'pending');
@@ -154,8 +158,8 @@ for (const batch of [false, true]) {
   for (const canonical of ['same', 'changed', 'unavailable', 'missing']) {
     test(`${batch ? 'batch' : 'single'} pending completion marker retry is read-only when canonical state is ${canonical}`, () => {
       const h = harness({ commitQuota: true, authorityUnavailable: canonical === 'unavailable' });
-      const run = () => batch ? h.context.toggleItemChecksBatch(tid, [{ scheduleId: sid, done: true, mutationId: 'pending' }])
-        : h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'pending' });
+      const run = () => batch ? h.context.toggleItemChecksBatch(tid, [{ scheduleId: sid, done: true, expectedUpdatedAt: version, mutationId: 'pending' }])
+        : h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'pending' });
       const first = run();
       assert.equal(batch ? first.success : first.checked, true);
       const log = [...h.values].find(([key]) => key.startsWith('dashboardMutationLog_v2_'));
@@ -184,11 +188,11 @@ for (const batch of [false, true]) {
 
 test('a mixed batch reconciles a pending receipt and applies only its new item', () => {
   const h = harness({ commitQuota: true }), other = tid + '-02';
-  h.context.toggleItemCheck(sid, 'checkout', true, { mutationId: 'pending' });
+  h.context.toggleItemCheck(sid, 'checkout', true, { expectedUpdatedAt: version, mutationId: 'pending' });
   h.ledger.set(other, 'pending');
   const result = h.context.toggleItemChecksBatch(tid, [
-    { scheduleId: sid, done: true, mutationId: 'pending' },
-    { scheduleId: other, done: true, mutationId: 'fresh' }
+    { scheduleId: sid, done: true, expectedUpdatedAt: version, mutationId: 'pending' },
+    { scheduleId: other, done: true, expectedUpdatedAt: version, mutationId: 'fresh' }
   ]);
   assert.equal(result.success, true);
   assert.equal(result.results[0].reconciled, true);
@@ -199,7 +203,7 @@ test('a mixed batch reconciles a pending receipt and applies only its new item',
 test('pending uncheck requires canonical pending, not merely a false checked value for an excluded item', () => {
   const h = harness({ commitQuota: true });
   h.ledger.set(sid, 'taken');
-  const run = () => h.context.toggleItemCheck(sid, 'checkout', false, { mutationId: 'uncheck' });
+  const run = () => h.context.toggleItemCheck(sid, 'checkout', false, { expectedUpdatedAt: version, mutationId: 'uncheck' });
   run();
   const matched = run();
   assert.equal(matched.checked, false);
@@ -211,3 +215,5 @@ test('pending uncheck requires canonical pending, not merely a false checked val
   assert.equal(h.ledger.get(sid), 'excluded');
   assert.equal(h.writes(), 1);
 });
+
+test('tokenless checkout fails before admission or a canonical PATCH', () => { const h=harness(); const one=h.context.toggleItemCheck(sid,'checkout',true,{}); assert.equal(one.code,'CHECKOUT_REFRESH_REQUIRED'); const batch=h.context.toggleItemChecksBatch(tid,[{scheduleId:sid,done:true}]); assert.equal(batch.code,'CHECKOUT_REFRESH_REQUIRED'); assert.equal(h.writes(),0);assert.equal(h.values.size,0); });

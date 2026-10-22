@@ -64,6 +64,8 @@ export interface EquipmentItem {
   synthetic?: boolean;
 
   checkoutState: CheckoutState;
+  /** Exact observed schedule_items.updated_at; a read token, never an item metadata write. */
+  checkoutVersion?: string;
   /** (레거시) 품목별 반납 상태. 반납은 returnCounts(종류별 합산) 사용 */
   returnState?: ReturnState;
   /** 이 품목에 한정된 메모 (반출/반납 분리) */

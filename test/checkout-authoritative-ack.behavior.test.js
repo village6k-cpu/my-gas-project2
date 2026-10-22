@@ -2,7 +2,8 @@
 const test = require('node:test'), assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../supabaseSync.js'), 'utf8');
 const tid = '261023-001', sid = tid + '-01', sid2 = tid + '-02';
-const row = (id = sid, state = 'taken') => ({ trade_id: tid, schedule_id: id, checkout_state: state });
+const version = '2026-10-23T00:00:00.123456+00:00';
+const row = (id = sid, state = 'taken') => ({ trade_id: tid, schedule_id: id, checkout_state: state, updated_at: version, removed_at: null });
 const response = (rows, status = 200) => ({ getResponseCode: () => status, getContentText: () => JSON.stringify(rows) });
 function harness(options = {}) {
   const calls = [];
@@ -22,6 +23,9 @@ function harness(options = {}) {
   vm.runInNewContext(source, c);
   c.SUPA_CFG_ = () => { if (options.configThrow) throw Error('config unavailable');return { url: 'https://example.invalid', apikey: 'test' }; };
   c.supaToken_ = () => 'test-token';
+  const single=c.supaSetScheduleItemCheckoutState_,batch=c.supaSetScheduleItemCheckoutStatesBatch_;
+  c.supaSetScheduleItemCheckoutState_=(tid,id,done)=>single(tid,id,done,version);
+  c.supaSetScheduleItemCheckoutStatesBatch_=(tid,items)=>batch(tid,items.map(item=>({...item,expectedUpdatedAt:version})));
   return { c, calls };
 }
 

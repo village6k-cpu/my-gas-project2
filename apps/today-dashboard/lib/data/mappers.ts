@@ -86,6 +86,7 @@ export function itemFromRow(r: any): EquipmentItem {
     onsite: r.onsite || undefined,
     settlement: r.settlement ?? undefined,
     checkoutState: r.checkout_state ?? "pending",
+    checkoutVersion: typeof r.updated_at === "string" ? r.updated_at : undefined,
     startShiftDays: r.start_shift_days || undefined,
     endShiftDays: r.end_shift_days || undefined,
     memoCheckout: r.memo_checkout ?? undefined,

@@ -4884,10 +4884,12 @@ function toggleItemChecksBatch(tid, entries) {
     if (!prefix || prefix[1] !== tid) {
       return { error: '다른 거래의 품목이 섞였습니다: ' + scheduleId };
     }
+    if (!validCheckoutVersion_(raw.expectedUpdatedAt)) return checkoutVersionRequired_();
     if (!Object.prototype.hasOwnProperty.call(bySchedule, scheduleId)) order.push(scheduleId);
     bySchedule[scheduleId] = {
       scheduleId: scheduleId,
       done: raw.done === true || raw.done === 'true' || raw.done === '1' || raw.done === 1,
+      expectedUpdatedAt: raw.expectedUpdatedAt,
       mutationId: normalizeDashboardMutationId_(raw.mutationId || raw.mutation_id || '')
     };
   }
@@ -4898,7 +4900,7 @@ function toggleItemChecksBatch(tid, entries) {
   cleanupRetiredDashboardPhotoIndexProperties_(props);
 
   var fingerprint = items.map(function(item) {
-    return item.scheduleId + ':' + (item.done ? '1' : '0') + ':' + item.mutationId;
+    return item.scheduleId + ':' + (item.done ? '1' : '0') + ':' + item.expectedUpdatedAt + ':' + item.mutationId;
   }).join('|');
   var leaseKey = 'checkoutItemMutation_' + tid;
   var leaseToken = '';
@@ -4924,7 +4926,7 @@ function toggleItemChecksBatch(tid, entries) {
     items.forEach(function(item) {
       if (resultsById.__error) return;
       var scope = 'item:checkout:' + item.scheduleId;
-      var mutation = beginDashboardMutation_(props, tid, item.mutationId, scope, item.done ? '1' : '0');
+      var mutation = beginDashboardMutation_(props, tid, item.mutationId, scope, (item.done ? '1' : '0') + ':' + item.expectedUpdatedAt);
       if (mutation.error) {
         resultsById.__error = mutation.error;
         return;
@@ -4934,6 +4936,7 @@ function toggleItemChecksBatch(tid, entries) {
         if (!mutation.skip) pendingReplayTargets[item.scheduleId] = item.done;
         resultsById[item.scheduleId] = {
           scheduleId: item.scheduleId,
+          expectedUpdatedAt: item.expectedUpdatedAt,
           ok: true,
           deduped: true,
           superseded: !!mutation.pendingLater
@@ -4992,7 +4995,7 @@ function toggleItemChecksBatch(tid, entries) {
         // 동일 요청이 겹쳐 끝났거나 그 사이 더 최신 클릭이 들어온 경우, 최신 log가 있으면
         // 이 오래된 응답은 캐시를 되돌리지 않고 잠금 밖에서 정본을 다시 읽는다.
         var finalMutation = beginDashboardMutation_(
-          props, tid, item.mutationId, 'item:checkout:' + item.scheduleId, item.done ? '1' : '0'
+          props, tid, item.mutationId, 'item:checkout:' + item.scheduleId, (item.done ? '1' : '0') + ':' + item.expectedUpdatedAt
         );
         if (finalMutation.pendingLater) {
           checkoutReplayIds[item.scheduleId] = true;
@@ -5033,6 +5036,8 @@ function toggleItemCheck(scheduleId, phase, done, options) {
   if (!scheduleId || !phase) return { error: "scheduleId/phase 필수" };
   if (phase !== 'checkout' && phase !== 'checkin') return { error: "phase는 checkout/checkin" };
   scheduleId = String(scheduleId).trim();
+  var expectedUpdatedAt = options && options.expectedUpdatedAt;
+  if (phase === 'checkout' && !validCheckoutVersion_(expectedUpdatedAt)) return checkoutVersionRequired_();
 
   var key = 'itemCheck_' + scheduleId + '_' + phase;
   var checkinQtyKey = 'itemCheckQty_' + scheduleId + '_checkin'; // 레거시 정리용
@@ -5149,6 +5154,7 @@ function toggleItemCheck(scheduleId, phase, done, options) {
         var sameCheckoutLease = mutationId &&
           String(existingCheckoutLease.mutationId || '') === mutationId &&
           String(existingCheckoutLease.scheduleId || '') === scheduleId &&
+          existingCheckoutLease.expectedUpdatedAt === expectedUpdatedAt &&
           String(existingCheckoutLease.target || '') === (isDone ? '1' : '0');
         if (!sameCheckoutLease) {
           return { error: '같은 거래의 다른 품목 체크를 저장 중입니다.', code: 'BUSY', retryable: true };
@@ -5160,7 +5166,7 @@ function toggleItemCheck(scheduleId, phase, done, options) {
       );
       if (checkoutLeaseBlock) return checkoutLeaseBlock;
       var checkoutMutation = beginDashboardMutation_(
-        props, checkoutTid, mutationId, 'item:checkout:' + scheduleId, isDone ? '1' : '0'
+        props, checkoutTid, mutationId, 'item:checkout:' + scheduleId, (isDone ? '1' : '0') + ':' + expectedUpdatedAt
       );
       if (checkoutMutation.error) return { error: checkoutMutation.error };
       if (checkoutMutation.skip || checkoutMutation.duplicate) {
@@ -5184,6 +5190,7 @@ function toggleItemCheck(scheduleId, phase, done, options) {
         token: checkoutLeaseToken,
         mutationId: mutationId,
         scheduleId: scheduleId,
+        expectedUpdatedAt: expectedUpdatedAt,
         target: isDone ? '1' : '0',
         at: Date.now()
       }));
@@ -5192,7 +5199,7 @@ function toggleItemCheck(scheduleId, phase, done, options) {
     }
 
     var checkoutSaved = typeof supaSetScheduleItemCheckoutState_ === 'function'
-      ? supaSetScheduleItemCheckoutState_(checkoutTid, scheduleId, isDone)
+      ? supaSetScheduleItemCheckoutState_(checkoutTid, scheduleId, isDone, expectedUpdatedAt)
       : { ok: false, error: 'Supabase 품목 체크 저장 함수 없음' };
     if (!checkoutSaved || !checkoutSaved.ok) {
       if (!(checkoutSaved && checkoutSaved.outcomeUnknown)) {
@@ -5207,7 +5214,8 @@ function toggleItemCheck(scheduleId, phase, done, options) {
       }
       return {
         error: '반출 체크 저장 실패: ' + String(checkoutSaved && checkoutSaved.error || '저장 실패'),
-        code: checkoutSaved && checkoutSaved.outcomeUnknown ? 'OUTCOME_UNKNOWN' : 'MUTATION_FAILED',
+        code: checkoutSaved && checkoutSaved.code || (checkoutSaved && checkoutSaved.outcomeUnknown ? 'OUTCOME_UNKNOWN' : 'MUTATION_FAILED'),
+        applied: false, updatedAt: checkoutSaved && checkoutSaved.updatedAt, canonicalState: checkoutSaved && checkoutSaved.canonicalState,
         retryable: !!(checkoutSaved && checkoutSaved.outcomeUnknown),
         outcomeUnknown: !!(checkoutSaved && checkoutSaved.outcomeUnknown)
       };
@@ -5229,7 +5237,8 @@ function toggleItemCheck(scheduleId, phase, done, options) {
         Logger.log('품목 체크 mutation 완료표시 실패(정본 유지): ' + mutationCommitErr.message);
       }
       clearDashboardMutationLease_(props, checkoutLeaseKey, checkoutLeaseToken);
-      return { scheduleId: scheduleId, phase: phase, checked: isDone, tradeId: checkoutTid || '', cachePending: checkoutCachePending };
+      return { scheduleId: scheduleId, phase: phase, checked: isDone, tradeId: checkoutTid || '', cachePending: checkoutCachePending,
+        applied: checkoutSaved.applied === true, updatedAt: checkoutSaved.updatedAt, canonicalState: checkoutSaved.canonicalState };
     } finally {
       if (checkoutCommitLocked) try { checkoutCommitLock.releaseLock(); } catch (checkoutCommitReleaseErr) {}
     }
@@ -5334,6 +5343,8 @@ function readDashboardCheckoutReplayResults_(tid, results, pendingTargets) {
   } catch (error) { canonical = null; }
   return results.map(function(result) {
     var next = Object.assign({}, result);
+    next.applied = false;
+    next.updatedAt = canonical && canonical.ok && canonical.byUpdatedAt && canonical.byUpdatedAt[result.scheduleId];
     var state = canonical && canonical.ok && canonical.byScheduleId && canonical.byScheduleId[result.scheduleId];
     if (state === 'taken' || state === 'pending' || state === 'excluded') {
       next.ok = true;next.checked = state === 'taken';
