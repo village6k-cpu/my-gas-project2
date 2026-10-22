@@ -24,14 +24,15 @@ function probe(options = {}, bytes) {
     setProperty(name, value) {
       assert.equal(locked, true);
       calls.set.push({ name, value });
+      if (Object.prototype.hasOwnProperty.call(options, 'writeError')) throw options.writeError;
       if (options.quota) throw new Error('You have exceeded the property storage quota. Please remove some properties and try again.');
       values.set(name, value);
-      if (options.uncertainWrite) throw new Error('private transport detail');
+      if (options.uncertainWrite) throw new Error('Unexpected transport outcome token=private-transport-detail');
     },
     deleteProperty(name) {
       assert.equal(locked, true);
       calls.deleted.push(name);
-      if (options.cleanupFailure) throw new Error('private cleanup detail');
+      if (options.cleanupFailure) throw new Error('Unexpected cleanup failure token=private-cleanup-detail');
       if (!options.deleteNoop) values.delete(name);
     },
   };
@@ -140,4 +141,75 @@ test('capacity probe rejects unbounded or invalid requests before acquiring a lo
     assert.equal(calls.locks, 0);
     assert.equal(calls.set.length, 0);
   }
+});
+
+test('capacity probe classifies English, Korean, and string-only storage exceptions', () => {
+  for (const error of [
+    new Error('You have exceeded the property storage quota.'),
+    new Error('속성 저장용량 한도를 초과했습니다. 일부 속성을 삭제하고 다시 시도해 주세요.'),
+    'Exception: 속성 저장소에 대한 할당량을 초과했습니다.',
+    { name: 'Exception', toString: () => 'You have exceeded the property storage quota.' },
+  ]) {
+    const { result, calls } = probe({ writeError: error });
+    assert.equal(result.capacity, 'quota_exceeded');
+    assert.equal(result.error.category, 'property_storage_quota');
+    assert.equal(result.error.stage, 'write');
+    assert.equal(result.error.type, typeof error);
+    assert.equal(calls.set.length, 1);
+    assert.equal(result.cleanup, 'absent');
+  }
+});
+
+test('capacity probe separates value-size, rate, service, permission, and unknown failures from storage exhaustion', () => {
+  for (const [message, category] of [
+    ['Argument too large: value', 'property_value_limit'],
+    ['속성 값이 너무 큽니다.', 'property_value_limit'],
+    ['Service invoked too many times for one day: properties.', 'daily_rate'],
+    ['서비스를 너무 많이 호출했습니다.', 'daily_rate'],
+    ['Service unavailable: properties', 'service_unavailable'],
+    ['You do not have permission to call setProperty.', 'permission'],
+    ['Permission denied while inspecting property storage quota.', 'permission'],
+    ['예상하지 못한 속성 오류입니다.', 'unknown'],
+  ]) {
+    const { result } = probe({ writeError: new Error(message) });
+    assert.equal(result.capacity, 'unknown');
+    assert.equal(result.error.category, category);
+    assert.equal(result.error.name, 'Error');
+    assert.equal(result.error.message, message);
+  }
+});
+
+test('capacity probe returns a bounded useful unknown error while redacting URLs, secrets, names, and stacks', () => {
+  const error = { name: 'private-name-should-hide', message:
+    'Unknown adapter failure url=https://private.example/?key=private-url-secret token=private-token api_key="private key" '
+    + 'Authorization: Bearer private-bearer-token password=private-pass email=private@example.test '
+    + 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwcml2YXRlIn0.privateSignatureLongEnough12345 '
+    + 'x'.repeat(1000) + '\n    at privateStackFrame (private.js:1:2)' };
+  const { result } = probe({ writeError: error });
+  assert.equal(result.error.category, 'unknown');
+  assert.equal(result.error.name, 'unknown');
+  assert.equal(result.error.type, 'object');
+  assert.match(result.error.message, /^Unknown adapter failure/);
+  assert.ok(result.error.message.length <= 320);
+  assert.ok(!JSON.stringify(result.error).includes('private'));
+  assert.ok(!result.error.message.includes('\n'));
+  assert.ok(!('stack' in result.error));
+});
+
+test('capacity probe reports sanitized cleanup exceptions without changing ownership or retry policy', () => {
+  const { result, calls } = probe({ cleanupFailure: true });
+  assert.equal(result.cleanup, 'failed');
+  assert.equal(result.cleanupError.stage, 'cleanup');
+  assert.equal(result.cleanupError.category, 'unknown');
+  assert.match(result.cleanupError.message, /^Unexpected cleanup failure/);
+  assert.equal(calls.deleted.length, 1);
+});
+
+test('capacity probe error observation cannot fail on an unreadable thrown object', () => {
+  const error = { get message() { throw new Error('private getter'); }, toString() { throw new Error('private coercion'); } };
+  const { result } = probe({ writeError: error });
+  assert.equal(result.error.category, 'unknown');
+  assert.equal(result.error.type, 'object');
+  assert.equal(result.error.message, 'unreadable_error');
+  assert.equal(result.cleanup, 'absent');
 });
