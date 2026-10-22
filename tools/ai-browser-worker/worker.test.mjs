@@ -6699,6 +6699,139 @@ test('pickKakaoMainListTarget selects list tab and avoids customer popup', () =>
   assert.equal(target.id, 'main');
 });
 
+test('Kakao list targeting excludes generic-title conversations on both route formats', () => {
+  for (const prefix of ['https://business.kakao.com/_x/chats', 'https://business.kakao.com/space/123/channel/_x/chats']) {
+    const popup = { id: 'popup', type: 'page', url: `${prefix}/456`, title: '카카오비즈니스 파트너센터' };
+    const main = { id: 'main', type: 'page', url: `${prefix}/?tab=all`, title: 'Kakao channel manager' };
+    assert.equal(pickKakaoMainListTarget([popup, main])?.id, 'main');
+    assert.equal(pickKakaoMainListTarget([popup]), null);
+  }
+});
+
+test('Kakao list targeting prefers an exact list URL over the generic-title fallback', () => {
+  const fallback = { id: 'fallback', type: 'page', url: 'https://business.kakao.com/', title: '카카오비즈니스 파트너센터' };
+  const main = { id: 'main', type: 'page', url: 'https://center-pf.kakao.com/_x/chats', title: 'Loading...' };
+  assert.equal(pickKakaoMainListTarget([fallback, main])?.id, 'main');
+  assert.equal(pickKakaoMainListTarget([fallback])?.id, 'fallback');
+});
+
+// The subprocess has no live browser/network and no keepalive other than the
+// worker's own deadline. This catches the observed silent exit after a close.
+function createCaptureSocketFixture(mode, eventTarget) {
+  return class CaptureSocket extends EventEmitter {
+    constructor() {
+      super();
+      CaptureSocket.instance = this;
+      this.requests = [];
+      this.closeCalls = 0;
+      if (eventTarget) {
+        this.addEventListener = (name, listener, options) => options?.once ? this.once(name, listener) : this.on(name, listener);
+        this.removeEventListener = (name, listener) => this.off(name, listener);
+      }
+      queueMicrotask(() => {
+        if (mode === 'close-before-open') this.notifyClose();
+        else if (mode === 'open-timeout') return;
+        else this.emit('open');
+      });
+    }
+    notifyClose() {
+      if (eventTarget) this.emit('close', { code: 1000 });
+      else this.emit('close', 1000, Buffer.from('fixture close'));
+    }
+    send(payload) {
+      const request = JSON.parse(payload);
+      this.requests.push(request.method);
+      queueMicrotask(() => {
+        if (mode === 'close') return this.notifyClose();
+        if (mode === 'error') return this.emit('error', new Error('fixture connection error'));
+        if (mode === 'timeout') return;
+        let response = { id: request.id, result: { result: { type: 'object', value: { ok: false, status: 'fixture_no_room' } } } };
+        if (mode === 'malformed-shape') response = { id: request.id, result: {} };
+        if (mode === 'protocol-error') response = { id: request.id, error: { code: -32000, message: 'fixture protocol rejection' } };
+        if (mode === 'exception') response = { id: request.id, result: { exceptionDetails: { text: 'fixture script exception' } } };
+        const data = mode === 'malformed-json' ? '{invalid' : JSON.stringify(response);
+        if (eventTarget) this.emit('message', { data });
+        else this.emit('message', Buffer.from(data));
+      });
+    }
+    close() {
+      this.closeCalls += 1;
+      queueMicrotask(() => {
+        // ws-style sockets may report an error while closing a connection that
+        // never opened. The worker must still finish without an unhandled error.
+        if (mode === 'open-timeout') this.emit('error', new Error('closing unopened fixture'));
+        this.notifyClose();
+      });
+    }
+  };
+}
+
+function runCaptureSocketFixture(mode, eventTarget = true) {
+  const script = `
+    import { EventEmitter } from 'node:events';
+    import { openKakaoTargetChatViaDevtools } from './worker.mjs';
+    const Socket = (${createCaptureSocketFixture.toString()})(${JSON.stringify(mode)}, ${eventTarget});
+    globalThis.WebSocket = Socket;
+    const targets = [{ id: 'fixture-list', type: 'page', title: 'Kakao',
+      url: 'https://business.kakao.com/_fixture/chats', webSocketDebuggerUrl: 'ws://fixture.invalid' }];
+    const finish = async (status, value) => {
+      await new Promise(setImmediate);
+      const socket = Socket.instance;
+      console.log(JSON.stringify({ status, value, requests: socket?.requests,
+        closeCalls: socket?.closeCalls,
+        listeners: socket?.eventNames().reduce((sum, name) => sum + socket.listenerCount(name), 0) }));
+      process.exitCode = status === 'rejected' ? 1 : 0;
+    };
+    openKakaoTargetChatViaDevtools({ customer_name: 'Fixture' }, {
+      cdpBaseUrl: 'http://fixture.invalid', timeoutMs: ${mode.includes('timeout') ? 40 : 5000},
+      fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify(targets) })
+    }).then(result => finish('resolved', result.status), error => finish('rejected', error.message));
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1')),
+    timeout: 2000,
+    encoding: 'utf8'
+  });
+  assert.equal(child.error, undefined, child.error?.message);
+  assert.notEqual(child.stdout.trim(), '', `capture must return a result instead of silently exiting: ${child.stderr}`);
+  return { child, result: JSON.parse(child.stdout) };
+}
+
+for (const eventTarget of [true, false]) {
+  const transport = eventTarget ? 'EventTarget' : 'EventEmitter';
+  for (const [mode, expectedError] of [
+    ['close-before-open', /websocket.*closed/i],
+    ['close', /websocket.*closed/i],
+    ['error', /fixture connection error/],
+    ['malformed-json', /malformed.*response/i],
+    ['malformed-shape', /malformed.*response/i],
+    ['open-timeout', /websocket open timed out/],
+    ['timeout', /Runtime.evaluate timed out/],
+    ['protocol-error', /fixture protocol rejection/],
+    ['exception', /fixture script exception/]
+  ]) {
+    test(`DevTools capture ${transport} ${mode} rejects explicitly and cleans up`, () => {
+      const { child, result } = runCaptureSocketFixture(mode, eventTarget);
+      assert.equal(child.status, 1, child.stderr);
+      assert.equal(result.status, 'rejected');
+      assert.match(result.value, expectedError);
+      assert.equal(result.closeCalls, 1);
+      assert.equal(result.listeners, 0);
+      assert.deepEqual(result.requests, mode === 'close-before-open' || mode === 'open-timeout' ? [] : ['Runtime.evaluate']);
+    });
+  }
+
+  test(`DevTools capture ${transport} success clears its active deadline`, () => {
+    const { child, result } = runCaptureSocketFixture('success', eventTarget);
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(result.status, 'resolved');
+    assert.equal(result.value, 'fixture_no_room');
+    assert.equal(result.closeCalls, 1);
+    assert.equal(result.listeners, 0);
+    assert.deepEqual(result.requests, ['Runtime.evaluate']);
+  });
+}
+
 test('ensureKakaoChannelManagerTabViaDevtools reuses automation profile tab without activating it', async () => {
   const requests = [];
   const fetchImpl = async (url, init = {}) => {
