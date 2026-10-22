@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
@@ -51,7 +52,8 @@ test('endwork reads version capacity and skips only a proven full store', () => 
     'clasp() { if [[ "$1" == "--json" ]]; then printf "%s" "$VERSIONS"; return "$LISTING_STATUS"; else echo DEPLOY_CALLED; fi; }\n' +
     block + '\nprintf "PENDING=%s" "$GAS_DEPLOY_PENDING"\n'
   ], { encoding: 'utf8', env: { ...process.env, PUSH_OUT: 'Pushed files.', DEPLOY_ID: 'fixture', MSG: 'fixture',
-    VERSIONS: versions, LISTING_STATUS: listingStatus } });
+    VERSIONS: versions, LISTING_STATUS: listingStatus,
+    GAS_DEPLOY_STATE_FILE: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gas-version-test-')), 'state').replaceAll('\\', '/') } });
   const full = JSON.stringify(Array.from({ length: 200 }, (_, i) => ({ versionNumber: i + 1 })));
   const blocked = run(full);
   assert.doesNotMatch(blocked, /DEPLOY_CALLED/);assert.match(blocked, /PENDING=1/);
@@ -59,4 +61,27 @@ test('endwork reads version capacity and skips only a proven full store', () => 
   assert.match(run('invalid json'), /DEPLOY_CALLED/);
   assert.match(run(full, '1'), /DEPLOY_CALLED/, 'failed listing cannot establish a full store');
   assert.match(run(JSON.stringify(Array.from({ length: 200 }, () => ({ versionNumber: 804 })))), /DEPLOY_CALLED/);
+});
+
+test('failed public GAS deployment persists across an unchanged HEAD and prevents incompatible frontend deployment', () => {
+  const source = read('scripts/endwork.sh');
+  const backend = source.slice(source.indexOf('GAS_DEPLOY_PENDING=0'), source.indexOf('# 8. git commit'));
+  const frontend = source.slice(source.indexOf('# 9. 실제 직원용'));
+  const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gas-rollout-test-')), 'state').replaceAll('\\', '/');
+  const run = (pushOut, versions) => execFileSync('bash', ['-c',
+    'set -euo pipefail\n' +
+    'clasp() { if [[ "$1" == "--json" ]]; then printf "%s" "$VERSIONS"; else echo PUBLIC_DEPLOY_CALLED; fi; }\n' +
+    'fixture_vercel() { echo FRONTEND_DEPLOY_CALLED; }\n' + backend + frontend
+  ], { encoding: 'utf8', env: { ...process.env, PUSH_OUT: pushOut, DEPLOY_ID: 'fixture', MSG: 'fixture',
+    GAS_DEPLOY_STATE_FILE: stateFile, VERSIONS: versions, VERCEL_BIN: 'fixture_vercel',
+    VERCEL_ORG_ID: 'fixture', VERCEL_TODAY_PROJECT_ID: 'fixture' } });
+  const full = JSON.stringify(Array.from({ length: 200 }, (_, i) => ({ versionNumber: i + 1 })));
+  assert.doesNotMatch(run('Pushed files.', full), /FRONTEND_DEPLOY_CALLED/);
+  assert.equal(fs.readFileSync(stateFile, 'utf8').trim(), 'pending');
+  assert.doesNotMatch(run('Script is already up to date.', full), /PUBLIC_DEPLOY_CALLED|FRONTEND_DEPLOY_CALLED/);
+  const resumed = run('Script is already up to date.', '[{"versionNumber":804}]');
+  assert.match(resumed, /PUBLIC_DEPLOY_CALLED/);
+  assert.match(resumed, /FRONTEND_DEPLOY_CALLED/);
+  assert.equal(fs.readFileSync(stateFile, 'utf8').trim(), 'published');
+  assert.match(run('Script is already up to date.', full), /FRONTEND_DEPLOY_CALLED/);
 });

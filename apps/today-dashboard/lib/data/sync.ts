@@ -255,6 +255,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
     // 합성 행·새 품목·제외 후 복구는 위의 원장 초기값을 그대로 사용한다.
     if (prev && !prev.synthetic && prev.checkoutState !== "excluded" && sameReturnEvidenceIdentity(prev, next)) {
       next.checkoutState = prev.checkoutState;
+      next.checkoutVersion = prev.checkoutVersion;
     }
     return next;
   });

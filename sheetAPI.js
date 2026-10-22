@@ -721,7 +721,8 @@ function handleRequestCore_(e) {
           params.scheduleId || postBody.scheduleId,
           params.phase || postBody.phase,
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1),
-          { mutationId: params.mutationId || postBody.mutationId || '' }
+          { mutationId: params.mutationId || postBody.mutationId || '',
+            expectedUpdatedAt: params.expectedUpdatedAt || postBody.expectedUpdatedAt }
         ));
 
       case "toggleItems":
@@ -1645,6 +1646,7 @@ function runFunction(funcName, params) {
     "getInventorySemanticStorageStatus",
     "migrateInventorySemanticStorage",
     "probeScriptPropertiesCapacity",
+    "getCheckoutMutationProtocol",
     "compactDashboardPhotoUploadClaims",
     "setInventoryIncludedComponents",
     "getInventoryStockQuestions",
@@ -1980,6 +1982,9 @@ function runFunction(funcName, params) {
       var capacityArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
       if(!Array.isArray(capacityArgs))capacityArgs=[capacityArgs];
       return {success:true,function:funcName,result:probeScriptPropertiesCapacity.apply(null,capacityArgs),executionTime:(new Date()-startTime)+'ms'};
+    }
+    if (funcName === 'getCheckoutMutationProtocol') {
+      return {success:true,function:funcName,result:getCheckoutMutationProtocol(),executionTime:(new Date()-startTime)+'ms'};
     }
     if (funcName === 'compactDashboardPhotoUploadClaims') {
       var photoClaimArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];

@@ -10,6 +10,9 @@ ROOT="$(pwd)"
 BRANCH="$(git branch --show-current)"
 DEPLOY_ID="AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT"
 SCRIPT_ID="$(node -e "console.log(require('./.clasp.json').scriptId)")"
+# HEAD 업로드와 공개 배포 사이의 실패는 다음 실행에도 남겨야 한다.
+# 모든 worktree가 같은 실제 GAS 프로젝트를 쓰므로 공용 git 디렉터리에 보존한다.
+GAS_DEPLOY_STATE_FILE="$(git rev-parse --path-format=absolute --git-common-dir)/gas-public-deploy-state-$DEPLOY_ID"
 BACKUP_DIR="$HOME/gas-project-backups"
 VERCEL_ORG_ID="team_c5g0hY4e26h7Aha85tslGSRr"
 VERCEL_TODAY_PROJECT_ID="prj_saeOBufXl2hCBDurWbd4wWCQLYqF"
@@ -117,18 +120,23 @@ echo ""
 # 배포까지 매번 버전을 태우면 결국 한도에 걸려 모든 배포가 막힌다(2026-08 실제 발생).
 # GAS 코드가 그대로면 배포할 것도 없으므로 건너뛴다.
 GAS_DEPLOY_PENDING=0
-if grep -qi "already up to date" <<<"$PUSH_OUT"; then
+if [[ -f "$GAS_DEPLOY_STATE_FILE" ]] && [[ "$(cat "$GAS_DEPLOY_STATE_FILE")" != "published" ]]; then
+  GAS_DEPLOY_PENDING=1
+fi
+if grep -qi "already up to date" <<<"$PUSH_OUT" && [[ "$GAS_DEPLOY_PENDING" == "0" ]]; then
   echo "▶ clasp deploy 생략 — GAS 코드 변경 없음 (버전 한도 200 보호)"
   echo ""
 else
+  # 배포 중 프로세스가 끝나도 새 HEAD를 공개 버전으로 오인하지 않는다.
+  printf 'pending\n' > "$GAS_DEPLOY_STATE_FILE"
+  GAS_DEPLOY_PENDING=1
   # 이미 확인 가능한 버전 포화 상태에서는 같은 실패 배포를 반복하지 않는다.
   # 읽기 실패/구형 CLI는 unknown으로 두고 기존 배포 절차를 그대로 시도한다.
   VERSION_COUNT="unknown"
   if VERSION_LIST="$(clasp --json list-versions 2>/dev/null)"; then
     VERSION_COUNT="$(node -e 'try { const v=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!Array.isArray(v)||v.some(x=>!Number.isInteger(x.versionNumber)||x.versionNumber<1)||new Set(v.map(x=>x.versionNumber)).size!==v.length) throw Error(); process.stdout.write(String(v.length)); } catch { process.stdout.write("unknown"); }' <<<"$VERSION_LIST")"
   fi
-  # 배포 실패(버전 200 한도 등)가 git push·Vercel 배포까지 막으면 수정이 통째로 묶인다.
-  # 코드는 이미 GAS HEAD에 push됐으므로(시간 트리거는 HEAD로 실행) 경고만 남기고 진행한다.
+  # Git 백업과 HEAD 워커 수정은 보존하되, 공개 API가 바뀌기 전 새 UI는 배포하지 않는다.
   if [[ "$VERSION_COUNT" =~ ^[0-9]+$ ]] && (( VERSION_COUNT >= 200 )); then
     GAS_DEPLOY_PENDING=1
     echo "⚠️ GAS 공개 배포 미완료 — 보존 버전 ${VERSION_COUNT}개로 새 버전 생성이 차단되어 있습니다."
@@ -140,11 +148,17 @@ else
     echo "   시간 트리거는 HEAD 코드로 실행되므로 flush/재생성 워커는 새 코드가 반영됩니다."
     echo "   버전 200 한도라면: GAS 편집기 → 프로젝트 기록에서 오래된 버전을 삭제한 뒤"
     echo "   기존 웹앱 URL을 유지하는 공개 배포를 별도로 완료해야 합니다."
+  else
+    printf 'published\n' > "$GAS_DEPLOY_STATE_FILE"
+    GAS_DEPLOY_PENDING=0
   fi
   echo ""
 fi
 
 # 8. git commit + push
+# Git 연동의 main 자동 배포도 같은 GAS 경계를 지켜야 한다. 운영 배포는
+# 아래 명시적 CLI 한 경로가 담당하고, feature 브랜치 preview는 계속 허용한다.
+node -e 'const c=require("./apps/today-dashboard/vercel.json"); const d=c.git&&c.git.deploymentEnabled; if(!d||d.main!==false||Object.keys(d).some(k=>k!=="main")){throw new Error("Today Dashboard main Git 자동 배포 차단 설정을 확인하세요.");}'
 echo "▶ git commit + push..."
 git add -A
 git commit -m "$MSG"
@@ -152,6 +166,11 @@ git push origin "$BRANCH"
 echo ""
 
 # 9. 실제 직원용 헤이빌리 프로젝트 배포
+if [[ "$GAS_DEPLOY_PENDING" == "1" ]]; then
+  echo "⚠️ Git 백업/HEAD 반영 완료. GAS 공개 배포가 미완료라 Vercel 운영 배포도 보류합니다."
+  echo "   공개 API와 새 화면의 계약이 다를 수 있으므로 운영 수정 완료로 판단하면 안 됩니다."
+  exit 0
+fi
 # 저장소 루트의 .vercel 링크는 별도 정적 프로젝트를 가리키므로 프로젝트 ID를 명시한다.
 VERCEL_BIN="${VERCEL_BIN:-$(command -v vercel || true)}"
 if [[ -z "$VERCEL_BIN" && -x "$HOME/.hermes/node/bin/vercel" ]]; then
@@ -169,8 +188,4 @@ VERCEL_PROJECT_ID="$VERCEL_TODAY_PROJECT_ID" \
   "$VERCEL_BIN" --prod --yes
 echo ""
 
-if [[ "$GAS_DEPLOY_PENDING" == "1" ]]; then
-  echo "⚠️ Git/Vercel 반영 완료, GAS 공개 웹앱 배포 미완료. 운영 수정 완료로 판단하면 안 됩니다."
-else
-  echo "✅ 완료. 다른 맥에서는 ./scripts/startwork.sh 실행."
-fi
+echo "✅ 완료. 다른 맥에서는 ./scripts/startwork.sh 실행."

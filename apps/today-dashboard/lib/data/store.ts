@@ -2455,6 +2455,9 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
 const ITEM_CHECK_RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
 const itemCheckTargets: Record<string, boolean | undefined> = {};
 const itemCheckMutationIds: Record<string, string | undefined> = {};
+const itemCheckVersions: Record<string, string | undefined> = {};
+const itemCheckPredecessors: Record<string, string | undefined> = {};
+const itemCheckDispatches: Record<string, { mutationId: string; expectedUpdatedAt: string } | undefined> = {};
 const itemCheckInFlight: Record<string, Promise<void> | undefined> = {};
 const itemCheckRetryTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
 const itemCheckAttempts: Record<string, number> = {};
@@ -2472,7 +2475,37 @@ type ItemCheckOutboxEntry = {
   scheduleId: string;
   done: boolean;
   mutationId: string;
+  expectedUpdatedAt?: string;
+  predecessorMutationId?: string;
+  blocked?: string;
 };
+
+function isItemCheckoutVersion(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value);
+}
+
+/** Keep unresolved intent evidence, but never acquire a new baseline on its behalf. */
+async function blockItemCheckIntent(key: string, mutationId: string, reason: string): Promise<void> {
+  if (itemCheckMutationIds[key] !== mutationId) return;
+  const outbox = readItemCheckOutbox();
+  const entry = outbox[key];
+  if (entry?.mutationId === mutationId) {
+    outbox[key] = { ...entry, blocked: reason };
+    writeItemCheckOutbox(outbox);
+  }
+  delete itemCheckTargets[key];delete itemCheckMutationIds[key];delete itemCheckVersions[key];delete itemCheckPredecessors[key];
+  delete itemCheckAttempts[key];
+  if (itemCheckRetryTimers[key]) clearTimeout(itemCheckRetryTimers[key]);
+  delete itemCheckRetryTimers[key];
+  const message = "반출 선택을 자동 재시도하지 않았습니다. 현재 상태를 확인 후 다시 선택해주세요";
+  itemCheckTerminalErrors[key] = new Error(message);
+  showTransientError(`⚠️ ${message}`, 6_000);
+  const separator = key.indexOf("|");
+  const tradeId = key.slice(0, separator), scheduleId = key.slice(separator + 1);
+  if (!await reconcileItemCheckCanonical(tradeId, scheduleId, key)) {
+    scheduleItemCheckCanonicalReconcile(tradeId, scheduleId, key, 0, itemCheckReconcileGenerations[key] ?? 0);
+  }
+}
 
 function readItemCheckOutbox(): Record<string, ItemCheckOutboxEntry> {
   if (typeof window === "undefined") return {};
@@ -2535,6 +2568,14 @@ async function gasMutationRetrying(
 function queueItemCheckWrite(tradeId: string, scheduleId: string, done: boolean, previousDone: boolean): void {
   if (!isSupabase) return;
   const key = `${tradeId}|${scheduleId}`;
+  const dispatch = itemCheckDispatches[key];
+  const observed = state.trades.find((trade) => trade.tradeId === tradeId)?.equipments.find((item) => item.scheduleId === scheduleId)?.checkoutVersion;
+  const expectedUpdatedAt = dispatch?.expectedUpdatedAt ?? itemCheckVersions[key] ?? observed;
+  if (!isItemCheckoutVersion(expectedUpdatedAt)) {
+    mutateTrade(tradeId, (trade) => mapItem(trade, scheduleId, (item) => ({ ...item, checkoutState: previousDone ? "taken" : "pending" })), false);
+    showTransientError("⚠️ 반출 품목의 기준 정보가 없습니다. 새로고침 후 다시 선택해주세요", 6_000);
+    return;
+  }
   itemCheckReconcileGenerations[key] = (itemCheckReconcileGenerations[key] ?? 0) + 1;
   if (itemCheckReconcileTimers[key]) {
     clearTimeout(itemCheckReconcileTimers[key]);
@@ -2543,11 +2584,15 @@ function queueItemCheckWrite(tradeId: string, scheduleId: string, done: boolean,
   if (itemCheckConfirmedValues[key] === undefined) itemCheckConfirmedValues[key] = previousDone;
   itemCheckTargets[key] = done;
   itemCheckMutationIds[key] = createLedgerMutationId("item");
+  itemCheckVersions[key] = expectedUpdatedAt;
+  itemCheckPredecessors[key] = dispatch?.mutationId;
   putItemCheckOutboxTarget(key, {
     tradeId,
     scheduleId,
     done,
     mutationId: itemCheckMutationIds[key]!,
+    expectedUpdatedAt,
+    predecessorMutationId: dispatch?.mutationId,
   });
   itemCheckAttempts[key] = 0;
   delete itemCheckTerminalErrors[key];
@@ -2578,20 +2623,24 @@ async function commitItemCheckBatch(tradeId: string): Promise<void> {
       scheduleId: key.slice(prefix.length),
       target: itemCheckTargets[key]!,
       mutationId: itemCheckMutationIds[key] || createLedgerMutationId("item"),
+      expectedUpdatedAt: itemCheckVersions[key]!,
     }));
   if (!snapshots.length) return;
+  snapshots.forEach(({ key, mutationId, expectedUpdatedAt }) => { itemCheckDispatches[key] = { mutationId, expectedUpdatedAt }; });
 
   const task = (async () => {
     let batchError: unknown = null;
     let resultsById = new Map<string, any>();
     try {
       if (!writeBackEnabled) throw new Error(writeBackDisabledReason);
+      if (snapshots.some(({ expectedUpdatedAt }) => !isItemCheckoutVersion(expectedUpdatedAt))) throw new Error("반출 기준 정보가 없어 새로고침이 필요합니다");
       const res = await gasMutation("toggleItems", {
         tid: tradeId,
-        items: JSON.stringify(snapshots.map(({ scheduleId, target, mutationId }) => ({
+        items: JSON.stringify(snapshots.map(({ scheduleId, target, mutationId, expectedUpdatedAt }) => ({
           scheduleId,
           done: target,
           mutationId,
+          expectedUpdatedAt,
         }))),
       });
       if (!Array.isArray(res?.results)) throw new Error("GAS 품목 체크 배치 결과가 없습니다");
@@ -2602,8 +2651,14 @@ async function commitItemCheckBatch(tradeId: string): Promise<void> {
 
     for (const snapshot of snapshots) {
       const { key, scheduleId, target, mutationId } = snapshot;
+      // This item's ACK is being handled now; a sibling may still await readback.
+      // A later click must not depend on a predecessor whose result was already consumed.
+      delete itemCheckDispatches[key];
       const result = resultsById.get(scheduleId);
       let error: unknown = batchError;
+      if (!error && result?.ok === true && (typeof result.checked !== "boolean" || typeof result.applied !== "boolean" || !isItemCheckoutVersion(result.updatedAt))) {
+        error = new Error("반출 기준 응답을 확인할 수 없습니다. 새로고침 후 확인해주세요");
+      }
       if (!error && (!result || result.ok !== true)) {
         const resultError = new Error(String(result?.error || "품목 체크 배치 결과 누락")) as Error & {
           retryable?: boolean;
@@ -2613,6 +2668,21 @@ async function commitItemCheckBatch(tradeId: string): Promise<void> {
         resultError.retryable = resultError.outcomeUnknown || result?.retryable === true;
         error = resultError;
       }
+      // Only a direct applied ACK may advance the latest unsent dependent click.
+      // GET convergence, lost responses and restored outboxes never grant this permission.
+      if (itemCheckMutationIds[key] !== mutationId && itemCheckPredecessors[key] === mutationId) {
+        if (!error && result.applied === true && result.checked === target && result.updatedAt !== snapshot.expectedUpdatedAt
+            && itemCheckVersions[key] === snapshot.expectedUpdatedAt) {
+          itemCheckVersions[key] = result.updatedAt;
+          delete itemCheckPredecessors[key];
+          putItemCheckOutboxTarget(key, { tradeId, scheduleId, done: itemCheckTargets[key]!,
+            mutationId: itemCheckMutationIds[key]!, expectedUpdatedAt: result.updatedAt });
+          mutateTrade(tradeId, (trade) => mapItem(trade, scheduleId, (item) => ({ ...item, checkoutVersion: result.updatedAt })), false);
+        } else {
+          await blockItemCheckIntent(key, itemCheckMutationIds[key]!, "predecessor_unconfirmed");
+        }
+        continue;
+      }
       if (!error) {
         const confirmed = typeof result?.checked === "boolean" ? result.checked : target;
         itemCheckConfirmedValues[key] = confirmed;
@@ -2621,9 +2691,11 @@ async function commitItemCheckBatch(tradeId: string): Promise<void> {
           mutateTrade(tradeId, (t) => mapItem(t, scheduleId, (e) => ({
             ...e,
             checkoutState: confirmed ? "taken" : "pending",
+            checkoutVersion: result.updatedAt,
           })), false);
           delete itemCheckTargets[key];
           delete itemCheckMutationIds[key];
+          delete itemCheckVersions[key];delete itemCheckPredecessors[key];
           delete itemCheckConfirmedValues[key];
         }
         delete itemCheckAttempts[key];
@@ -2647,21 +2719,7 @@ async function commitItemCheckBatch(tradeId: string): Promise<void> {
         continue;
       }
 
-      delete itemCheckTargets[key];
-      delete itemCheckMutationIds[key];
-      delete itemCheckAttempts[key];
-      acknowledgeItemCheckOutboxTarget(key, target, mutationId);
-      const message = error instanceof Error ? error.message : String(error);
-      const terminalError = error instanceof Error ? error : new Error(message);
-      console.error("[write-back] 품목 반출 체크 원장 반영 실패:", error);
-      showTransientError(`⚠️ 품목 반출 체크 원장 반영 실패 — ${message}`, 6_000);
-      const reconciled = await reconcileItemCheckCanonical(tradeId, scheduleId, key);
-      if (!reconciled && itemCheckTargets[key] === undefined) {
-        itemCheckTerminalErrors[key] = terminalError;
-        scheduleItemCheckCanonicalReconcile(
-          tradeId, scheduleId, key, 0, itemCheckReconcileGenerations[key] ?? 0,
-        );
-      }
+      await blockItemCheckIntent(key, mutationId, "terminal_reconciliation_required");
     }
   })();
 
@@ -2673,6 +2731,7 @@ async function commitItemCheckBatch(tradeId: string): Promise<void> {
     if (itemCheckTradeInFlight[tradeId] === task) delete itemCheckTradeInFlight[tradeId];
     snapshots.forEach(({ key }) => {
       if (itemCheckInFlight[key] === task) delete itemCheckInFlight[key];
+      delete itemCheckDispatches[key];
     });
     if (Object.keys(itemCheckTargets).some((key) => key.startsWith(prefix) && !itemCheckRetryTimers[key])) {
       armItemCheckBatch(tradeId, 0);
@@ -2692,7 +2751,8 @@ async function reconcileItemCheckCanonical(tradeId: string, scheduleId: string, 
     if (canonical === undefined || itemCheckTargets[key] !== undefined) return false;
     mutateTrade(tradeId, (trade) => mapItem(trade, scheduleId, (item) => ({
       ...item,
-      checkoutState: canonical ? "taken" : "pending",
+      checkoutState: serverItem?.checkoutState ?? (canonical ? "taken" : "pending"),
+      checkoutVersion: serverItem?.checkoutVersion,
     })), false);
     delete itemCheckTerminalErrors[key];
     delete itemCheckConfirmedValues[key];
@@ -3781,6 +3841,14 @@ function replayDurableMutationOutboxes(): void {
 
     for (const [key, entry] of Object.entries(itemCheckOutbox)) {
       if (entry.tradeId !== trade.tradeId || !key.startsWith(`${trade.tradeId}|`)) continue;
+      const alreadyQueued = itemCheckMutationIds[key] === entry.mutationId && itemCheckTargets[key] !== undefined;
+      if (entry.blocked || !isItemCheckoutVersion(entry.expectedUpdatedAt) || (!alreadyQueued && entry.predecessorMutationId)) {
+        if (!entry.blocked) {
+          putItemCheckOutboxTarget(key, { ...entry, blocked: "restored_baseline_unverified" });
+          showTransientError("⚠️ 이전 반출 선택은 자동 재시도하지 않았습니다. 현재 상태를 확인 후 다시 선택해주세요", 6_000);
+        }
+        continue;
+      }
       const item = nextTrade.equipments.find((candidate) => candidate.scheduleId === entry.scheduleId);
       if (!item) {
         // 제외/삭제된 품목의 체크 목표는 terminal 처리 (영구 잔존·ID 재사용 재생 방지)
@@ -3792,6 +3860,7 @@ function replayDurableMutationOutboxes(): void {
       }
       itemCheckTargets[key] = entry.done;
       itemCheckMutationIds[key] = entry.mutationId || createLedgerMutationId("item");
+      itemCheckVersions[key] = entry.expectedUpdatedAt;
       itemCheckAttempts[key] = 0;
       nextTrade = mapItem(nextTrade, entry.scheduleId, (candidate) => ({
         ...candidate,
