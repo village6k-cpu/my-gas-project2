@@ -155,8 +155,14 @@ function flushInventoryRiskAlerts(event) {
       p.setProperty(INVENTORY_RISK_PREFIX_+'lastScanError','시트·보조 데이터 조회 확인 필요');
     }
     if(!report.sourceUnavailable)p.deleteProperty(INVENTORY_RISK_PREFIX_+'lastScanError');
-    p.setProperty(INVENTORY_RISK_PREFIX_+'lastScan',JSON.stringify({at:report.generatedAt,elapsedMs:Date.now()-started,
-      coverage:report.coverage,conflicts:report.conflictCount,risks:report.riskCount,sourceUnavailable:!!report.sourceUnavailable}));
+    var lastScan={at:report.generatedAt,elapsedMs:Date.now()-started,
+      coverage:report.coverage,conflicts:report.conflictCount,risks:report.riskCount,sourceUnavailable:!!report.sourceUnavailable};
+    try {
+      var priorScan=JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lastScan') || '{}');
+      if(priorScan.propertyCapacity && Utilities.newBlob(JSON.stringify(priorScan.propertyCapacity)).getBytes().length<=3000)
+        lastScan.propertyCapacity=priorScan.propertyCapacity;
+    }catch(diagnosticError){/* Optional metadata must not block normal scans. */}
+    p.setProperty(INVENTORY_RISK_PREFIX_+'lastScan',JSON.stringify(lastScan));
     schedule=inventoryRiskNotificationSchedule_(state,Date.now());
     if(!state.pending && !inventoryRiskDailyDraft_(report,state).text)return {status:'identity_review_queued'};
     if(state.pending && !inventoryRiskDeliver_(state,{allowSend:schedule.due,draft:schedule.due?inventoryRiskDailyDraft_(report,state):null})){
@@ -184,7 +190,47 @@ function flushInventoryRiskAlerts(event) {
   }finally{inventoryRiskRelease_(owner);}
 }
 
+/** One bounded metadata snapshot, readable through the existing monitor-status API. */
+function recordInventoryPropertyCapacityDiagnostic_() {
+  var lock, held=false;
+  try {
+    var build='capacity-20261023-v1',p=PropertiesService.getScriptProperties();
+    var key=INVENTORY_RISK_PREFIX_+'lastScan',raw=p.getProperty(key),scan=JSON.parse(raw || '{}');
+    if(!scan || typeof scan!=='object' || Array.isArray(scan) || scan.propertyCapacity?.build===build)return;
+    var lease=JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lease') || '{}');
+    if(Number(lease.until || 0)>Date.now())return;
+    var all=p.getProperties(),keys=Object.keys(all),categories=Object.create(null),largest=[];
+    var totalBytes=0,valueBytes=0;
+    keys.forEach(function(name) {
+      var group=name.replace(/_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(?:_.*)?$/i, '_*')
+        .replace(/(?:RQ-)?\d{6}[-_]\d{3,}.*$/, '*')
+        .replace(/_[a-f0-9]{16,}$/i, '_*').replace(/_\d{6}$/, '_*');
+      var vb=Utilities.newBlob(String(all[name] || '')).getBytes().length;
+      var bytes=Utilities.newBlob(name).getBytes().length+vb;
+      var category=categories[group] || (categories[group]={prefix:group.slice(0,64),count:0,totalBytes:0});
+      category.count++;category.totalBytes+=bytes;totalBytes+=bytes;valueBytes+=vb;
+      largest.push({key:name.slice(0,96),totalBytes:bytes});
+    });
+    var grouped=Object.keys(categories).map(function(name){return categories[name];})
+      .sort(function(a,b){return b.totalBytes-a.totalBytes;});
+    largest.sort(function(a,b){return b.totalBytes-a.totalBytes;});
+    var diagnostic={build:build,at:new Date().toISOString(),propertyCount:keys.length,totalBytes:totalBytes,
+      valueBytes:valueBytes,categoryCount:grouped.length,categories:grouped.slice(0,10),largest:largest.slice(0,5)};
+    var next=Object.assign({},scan,{propertyCapacity:diagnostic}),text=JSON.stringify(next);
+    // Calculate outside ScriptLock. Never remove records to make room for diagnostics.
+    if(Utilities.newBlob(JSON.stringify(diagnostic)).getBytes().length>3000 || Utilities.newBlob(text).getBytes().length>8500)return;
+    lock=LockService.getScriptLock();held=lock.tryLock(500);if(!held)return;
+    if(p.getProperty(key)!==raw)return;
+    lease=JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lease') || '{}');
+    if(Number(lease.until || 0)>Date.now())return;
+    p.setProperty(key,text);
+  } catch(error) {
+    // This diagnostic metadata capture must never block the existing heartbeat.
+  } finally {if(held)try{lock.releaseLock();}catch(releaseError){}}
+}
+
 function inventoryRiskHeartbeat(){
+  recordInventoryPropertyCapacityDiagnostic_();
   if(typeof flushPreRegistrationStockAlerts==='function')flushPreRegistrationStockAlerts();
   return flushInventoryRiskAlerts();
 }

@@ -4935,6 +4935,7 @@ function toggleItemChecksBatch(tid, entries) {
   var leaseToken = '';
   var pending = [];
   var resultsById = {};
+  var checkoutReplayIds = {};
   var lock = LockService.getScriptLock();
   var locked = false;
   try {
@@ -4959,9 +4960,9 @@ function toggleItemChecksBatch(tid, entries) {
         return;
       }
       if (mutation.skip) {
+        checkoutReplayIds[item.scheduleId] = true;
         resultsById[item.scheduleId] = {
           scheduleId: item.scheduleId,
-          checked: props.getProperty('itemCheck_' + item.scheduleId + '_checkout') === '1',
           ok: true,
           deduped: true,
           superseded: !!mutation.pendingLater
@@ -4972,7 +4973,10 @@ function toggleItemChecksBatch(tid, entries) {
     });
     if (resultsById.__error) return { error: resultsById.__error };
     if (!pending.length) {
-      return { success: true, tradeId: tid, results: items.map(function(item) { return resultsById[item.scheduleId]; }), deduped: true };
+      lock.releaseLock();locked = false;
+      var replayResults = readDashboardCheckoutReplayResults_(tid, items.map(function(item) { return resultsById[item.scheduleId]; }));
+      return { success: replayResults.every(function(result) { return result.ok; }), tradeId: tid,
+        results: replayResults, deduped: true, retryable: replayResults.some(function(result) { return result.outcomeUnknown; }) };
     }
     if (!leaseToken) leaseToken = 'batch:' + Date.now() + ':' + String(Math.random()).slice(2);
     props.setProperty(leaseKey, JSON.stringify({
@@ -5015,17 +5019,16 @@ function toggleItemChecksBatch(tid, entries) {
       };
       if (result.ok) {
         // 동일 요청이 겹쳐 끝났거나 그 사이 더 최신 클릭이 들어온 경우, 최신 log가 있으면
-        // 이 오래된 응답은 속성 정본을 되돌리지 않는다.
+        // 이 오래된 응답은 캐시를 되돌리지 않고 잠금 밖에서 정본을 다시 읽는다.
         var finalMutation = beginDashboardMutation_(
           props, tid, item.mutationId, 'item:checkout:' + item.scheduleId, item.done ? '1' : '0'
         );
         if (finalMutation.pendingLater) {
-          result.checked = props.getProperty('itemCheck_' + item.scheduleId + '_checkout') === '1';
+          checkoutReplayIds[item.scheduleId] = true;
           result.superseded = true;
         } else {
           var propertyKey = 'itemCheck_' + item.scheduleId + '_checkout';
-          if (item.done) trySetScriptProperty_(props, propertyKey, '1');
-          else tryDeleteScriptProperty_(props, propertyKey);
+          result.cachePending = !cacheDashboardCheckoutState_(props, propertyKey, item.done);
           try { commitDashboardMutation_(props, tid, item.mutationId, 'item:checkout:' + item.scheduleId); } catch (commitErr) {}
           result.checked = item.done;
         }
@@ -5038,6 +5041,9 @@ function toggleItemChecksBatch(tid, entries) {
   }
 
   var finalResults = items.map(function(item) { return resultsById[item.scheduleId]; });
+  var replays = readDashboardCheckoutReplayResults_(tid, finalResults.filter(function(result) { return checkoutReplayIds[result.scheduleId]; }));
+  replays.forEach(function(result) { resultsById[result.scheduleId] = result; });
+  finalResults = items.map(function(item) { return resultsById[item.scheduleId]; });
   return {
     success: finalResults.every(function(result) { return result && result.ok; }),
     tradeId: tid,
@@ -5190,13 +5196,13 @@ function toggleItemCheck(scheduleId, phase, done, options) {
         if (checkoutMutation.pendingLater) {
           return { error: '더 최신 품목 체크를 처리 중입니다.', code: 'BUSY', retryable: true };
         }
-        return {
+        checkoutMutationLock.releaseLock();checkoutMutationLocked = false;
+        return readDashboardCheckoutReplayResults_(checkoutTid, [{
           scheduleId: scheduleId,
           phase: phase,
-          checked: props.getProperty(key) === '1',
           tradeId: checkoutTid,
           deduped: true
-        };
+        }])[0];
       }
       if (!checkoutLeaseToken) {
         checkoutLeaseToken = (mutationId || String(Math.random()).slice(2)) + ':' + scheduleId + ':' + Date.now();
@@ -5245,13 +5251,12 @@ function toggleItemCheck(scheduleId, phase, done, options) {
       if (!finalCheckoutLease || String(finalCheckoutLease.token || '') !== checkoutLeaseToken) {
         return { error: '품목 체크 최종 반영 순서가 바뀌었습니다.', code: 'BUSY', retryable: true };
       }
-      if (isDone) props.setProperty(key, '1');
-      else props.deleteProperty(key);
+      var checkoutCachePending = !cacheDashboardCheckoutState_(props, key, isDone);
       try { commitDashboardMutation_(props, checkoutTid, mutationId, 'item:checkout:' + scheduleId); } catch (mutationCommitErr) {
         Logger.log('품목 체크 mutation 완료표시 실패(정본 유지): ' + mutationCommitErr.message);
       }
       clearDashboardMutationLease_(props, checkoutLeaseKey, checkoutLeaseToken);
-      return { scheduleId: scheduleId, phase: phase, checked: isDone, tradeId: checkoutTid || '' };
+      return { scheduleId: scheduleId, phase: phase, checked: isDone, tradeId: checkoutTid || '', cachePending: checkoutCachePending };
     } finally {
       if (checkoutCommitLocked) try { checkoutCommitLock.releaseLock(); } catch (checkoutCommitReleaseErr) {}
     }
@@ -5331,6 +5336,40 @@ function toggleItemCheck(scheduleId, phase, done, options) {
     if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
     if (checkinProjectionQueued) ensureDashboardStructureProjectionTrigger_();
   }
+}
+
+function cacheDashboardCheckoutState_(props, key, checked) {
+  try {
+    if (checked) props.setProperty(key, '1');
+    else props.deleteProperty(key);
+    return true;
+  } catch (error) {
+    // Supabase already acknowledged the state. A disposable mirror cannot undo it.
+    if (!isScriptPropertiesQuotaError_(error)) throw error;
+    return false;
+  }
+}
+
+/** Call only outside ScriptLock; retries read the current canonical state without another PATCH. */
+function readDashboardCheckoutReplayResults_(tid, results) {
+  if (!results.length) return results;
+  var canonical;
+  try {
+    canonical = typeof supaGetScheduleItemCheckoutStateMap_ === 'function'
+      ? supaGetScheduleItemCheckoutStateMap_([tid]) : null;
+  } catch (error) { canonical = null; }
+  return results.map(function(result) {
+    var next = Object.assign({}, result);
+    var state = canonical && canonical.ok && canonical.byScheduleId && canonical.byScheduleId[result.scheduleId];
+    if (state === 'taken' || state === 'pending' || state === 'excluded') {
+      next.ok = true;next.checked = state === 'taken';
+    } else {
+      delete next.checked;next.ok = false;
+      next.error = '반출 체크 정본 조회가 필요합니다. 잠시 후 다시 확인해주세요.';
+      next.code = 'AUTHORITATIVE_READBACK_REQUIRED';next.retryable = true;next.outcomeUnknown = true;
+    }
+    return next;
+  });
 }
 
 /**
@@ -13452,6 +13491,11 @@ function _insertAndCheckRequest(req) {
       cutoverFence.group
     );
     var expectedReplacedRows = cutoverFence.group.rows.length;
+    // Persist notification ancestry before the destructive cutover. If storage
+    // fails, the catch below removes only staged rows and keeps the original RQ.
+    // An uncertain later cutover keeps this link with the surviving staged RQ.
+    if (typeof linkPreRegistrationStockReplacement_ === 'function')
+      linkPreRegistrationStockReplacement_(cutoverFence.group.reqID, reqID);
     replacementCutoverAttempted = true;
     replacedRows = _deleteConfirmRequestGroups_(sheet, [cutoverFence.group]);
     if (replacedRows !== expectedReplacedRows) {
@@ -13462,8 +13506,6 @@ function _insertAndCheckRequest(req) {
     SpreadsheetApp.flush();
     response.replacedReqIDs = replacedReqIDs;
     response.replacedRows = replacedRows;
-    if (typeof linkPreRegistrationStockReplacement_ === 'function')
-      linkPreRegistrationStockReplacement_(cutoverFence.group.reqID, reqID);
   }
   if (staffConfirmedPendingFence) {
     response.staff_confirmed_pending_mutation = {

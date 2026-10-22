@@ -74,6 +74,7 @@ class Sheet {
 function harness({
   failProcess = false,
   failFlushAfterOldDelete = false,
+  stockLinkError = null,
   mutateOldDuringProcess = null,
   customerDbDiscount = '',
   sanitizeFreeText = (value) => String(value || '')
@@ -181,6 +182,10 @@ function harness({
       if (failProcess) throw new Error('synthetic availability failure');
       if (typeof mutateOldDuringProcess === 'function') mutateOldDuringProcess(sheet.rows);
     },
+    linkPreRegistrationStockReplacement_: () => {
+      events.push('stock-link');
+      if (stockLinkError) throw stockLinkError;
+    },
     console,
     isFinite
   };
@@ -224,6 +229,18 @@ test('staff-confirmed replacement deletes the old RQ only after staged process a
   assert.deepEqual(deletions, ['RQ-old']);
   assert.ok(events.indexOf('process') >= 0 && events.indexOf('delete:RQ-old') > events.indexOf('process'));
   assert.equal(getFenceCalls(), 2, 'the old RQ must be fenced again immediately before cutover');
+  assert.ok(events.indexOf('stock-link') < events.indexOf('delete:RQ-old'));
+});
+
+test('property quota before replacement cutover preserves the original RQ and removes only staged rows', () => {
+  const { context, sheet, deletions } = harness({ stockLinkError: new Error('속성 저장용량 한도를 초과했습니다') });
+  let caught;
+  try { context.insert(replacementRequest()); } catch (error) { caught = error; }
+  assert.match(caught.message, /속성 저장용량/);
+  assert.deepEqual(sheet.rows.map((value) => value[0]), ['RQ-old']);
+  assert.deepEqual(deletions, ['RQ-new']);
+  assert.equal(caught.effectiveRequestId, undefined);
+  assert.equal(caught.appliedStages, undefined);
 });
 
 test('ambiguous flush after old-RQ cutover never cleans the staged replacement too', () => {

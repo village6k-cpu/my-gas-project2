@@ -106,12 +106,16 @@ function preRegistrationStockText_(result,previous) {
   return lines.join('\n').slice(0,2200);
 }
 
-// Called only by the exact, validated RQ cutover while its writer owns UserLock.
+// Called before the exact, validated RQ cutover while its writer owns UserLock.
 // Never infer booking identity from a customer's name or a matching rental date.
 function linkPreRegistrationStockReplacement_(previousId,requestId) {
   if(!/^RQ-\d{6}-\d{3}$/.test(previousId) || !/^RQ-\d{6}-\d{3}$/.test(requestId) || previousId===requestId)
     throw new Error('재고 알림 예약 교체 연결 확인 필요');
-  PropertiesService.getScriptProperties().setProperty(PREREG_STOCK_PREFIX_+'predecessor_'+requestId,previousId);
+  var props=PropertiesService.getScriptProperties(),key=PREREG_STOCK_PREFIX_+'predecessor_'+requestId;
+  var existing=props.getProperty(key);
+  if(existing && existing!==previousId)throw new Error('재고 알림 예약 교체 연결 충돌');
+  if(existing!==previousId)props.setProperty(key,previousId);
+  if(props.getProperty(key)!==previousId)throw new Error('재고 알림 예약 교체 연결 저장 확인 필요');
 }
 
 function preRegistrationStockInherit_(requestId,state) {

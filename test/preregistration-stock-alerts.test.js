@@ -96,12 +96,17 @@ test('a reduced shortage stays quiet but a worsening shortage and a recurrence a
  assert.equal(c.preRegistrationStockDeliver_(base).status,'sent');assert.equal(messages.length,3);
 });
 
-test('replacement history is linked only after successful exact cutover',()=>{
- const source=fs.readFileSync(path.join(__dirname,'../checkAvailability.js'),'utf8');
- const start=source.indexOf('var expectedReplacedRows = cutoverFence.group.rows.length;');
- const block=source.slice(start,source.indexOf('if (staffConfirmedPendingFence)',start));
- assert.ok(block.indexOf('linkPreRegistrationStockReplacement_')>block.indexOf('replacedRows !== expectedReplacedRows'));
- assert.match(block,/linkPreRegistrationStockReplacement_\(cutoverFence\.group\.reqID, reqID\)/);
+test('replacement history must be read back before the caller can remove its old request',()=>{
+ const {c,props}=env();
+ props.setProperty=()=>{};
+ assert.throws(()=>c.linkPreRegistrationStockReplacement_('RQ-260913-004','RQ-260913-005'),/저장 확인/);
+});
+
+test('replacement history cannot overwrite a conflicting predecessor',()=>{
+ const {c,props}=env(),key='preRegStock_v1_predecessor_RQ-260913-005';
+ props.setProperty(key,'RQ-260913-003');
+ assert.throws(()=>c.linkPreRegistrationStockReplacement_('RQ-260913-004','RQ-260913-005'),/교체 연결/);
+ assert.equal(props.getProperty(key),'RQ-260913-003');
 });
 
 test('existing verified receipts learn their risk baseline without another Slack post',()=>{
