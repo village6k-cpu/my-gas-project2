@@ -1766,10 +1766,33 @@ function auditScriptProperties() {
   var all = PropertiesService.getScriptProperties().getProperties();
   var keys = Object.keys(all);
   var cat = {};
+  // Metadata only: values may contain credentials or customer notification receipts.
+  var storage = { keyBytes: 0, valueBytes: 0, totalBytes: 0, categories: [], largest: [] };
+  var storageCategories = {};
   keys.forEach(function (k) {
     var pre = /^(itemCheck|setupDone|setupDoneAt)_/.test(k) ? k.split('_')[0] + '_*' : k;
     cat[pre] = (cat[pre] || 0) + 1;
+    var prefix = k.replace(/(?:RQ-)?\d{6}-\d{3,}.*$/, '*');
+    if (prefix === k) prefix = k.replace(/_[a-f0-9-]{16,}$/i, '_*');
+    var keyBytes = Utilities.newBlob(k).getBytes().length;
+    var valueBytes = Utilities.newBlob(String(all[k] || '')).getBytes().length;
+    var totalBytes = keyBytes + valueBytes;
+    var category = storageCategories[prefix] || (storageCategories[prefix] = {
+      prefix: prefix, count: 0, keyBytes: 0, valueBytes: 0, totalBytes: 0
+    });
+    category.count++;
+    category.keyBytes += keyBytes;
+    category.valueBytes += valueBytes;
+    category.totalBytes += totalBytes;
+    storage.keyBytes += keyBytes;
+    storage.valueBytes += valueBytes;
+    storage.totalBytes += totalBytes;
+    storage.largest.push({ key: k, keyBytes: keyBytes, valueBytes: valueBytes, totalBytes: totalBytes });
   });
+  storage.categories = Object.keys(storageCategories).map(function(prefix) { return storageCategories[prefix]; })
+    .sort(function(a, b) { return b.totalBytes - a.totalBytes; });
+  storage.largest.sort(function(a, b) { return b.totalBytes - a.totalBytes; });
+  storage.largest = storage.largest.slice(0, 30);
   Logger.log('총 속성: ' + keys.length + '개');
   Logger.log('── 종류별 ──');
   Object.keys(cat).sort(function (a, b) { return cat[b] - cat[a]; }).forEach(function (pre) {
@@ -1792,7 +1815,7 @@ function auditScriptProperties() {
       lastError: String(state.lastError || '').replace(/https?:\/\/\S+/g, '[url]').slice(0, 1000)
     };
   });
-  return { propertyCount: keys.length, cancellations: cancellations,
+  return { propertyCount: keys.length, storage: storage, cancellations: cancellations,
     cancellationTriggerAt: Number(all.cancelCleanupTriggerAt_v1 || 0),
     cancellationDirty: cancellations.filter(function(s) {
       return !!all[SUPA_DIRTY_PREFIX_ + s.tradeId];
