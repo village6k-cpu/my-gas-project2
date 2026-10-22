@@ -246,7 +246,10 @@ function recordInventoryPropertyCapacityDiagnostic_() {
   } finally {if(held)try{lock.releaseLock();}catch(releaseError){}}
 }
 
-function inventoryRiskHeartbeat(){
+function inventoryRiskHeartbeat(event){
+  try {
+    if(typeof inventorySemanticStorageObserveTrigger_==='function')inventorySemanticStorageObserveTrigger_(event);
+  } catch(observationError) { /* Optional migration evidence must not block the existing monitor. */ }
   recordInventoryPropertyCapacityDiagnostic_();
   if(typeof flushPreRegistrationStockAlerts==='function')flushPreRegistrationStockAlerts();
   return flushInventoryRiskAlerts();

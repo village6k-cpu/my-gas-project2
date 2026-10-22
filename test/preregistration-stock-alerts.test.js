@@ -297,7 +297,7 @@ test('entry points queue checks and inventory review is prepared before schedule
  assert.ok(process.indexOf('queuePreRegistrationStockCheck_')>process.lastIndexOf('SpreadsheetApp.flush()'));
  const hook=register.indexOf('prepareRegistrationInventoryReview_');
  assert.ok(hook>0);assert.ok(hook<register.indexOf('schedSheet.getRange('));
- const delivery=fs.readFileSync(path.join(__dirname,'../inventoryRiskDelivery.js'),'utf8');assert.match(delivery,/function inventoryRiskHeartbeat\(\)[\s\S]*?flushPreRegistrationStockAlerts/);
+ const delivery=fs.readFileSync(path.join(__dirname,'../inventoryRiskDelivery.js'),'utf8');assert.match(delivery,/function inventoryRiskHeartbeat\(event\)[\s\S]*?flushPreRegistrationStockAlerts/);
 });
 
 test('Google quota exhaustion keeps a durable notice that an authenticated relay can acknowledge with a matching lease',()=>{

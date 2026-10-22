@@ -1645,6 +1645,7 @@ function runFunction(funcName, params) {
     "getInventorySemanticStorageStatus",
     "migrateInventorySemanticStorage",
     "probeScriptPropertiesCapacity",
+    "compactDashboardPhotoUploadClaims",
     "setInventoryIncludedComponents",
     "getInventoryStockQuestions",
     "getInventoryResolutionContext",
@@ -1979,6 +1980,11 @@ function runFunction(funcName, params) {
       var capacityArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
       if(!Array.isArray(capacityArgs))capacityArgs=[capacityArgs];
       return {success:true,function:funcName,result:probeScriptPropertiesCapacity.apply(null,capacityArgs),executionTime:(new Date()-startTime)+'ms'};
+    }
+    if (funcName === 'compactDashboardPhotoUploadClaims') {
+      var photoClaimArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
+      if(!Array.isArray(photoClaimArgs))photoClaimArgs=[photoClaimArgs];
+      return {success:true,function:funcName,result:compactDashboardPhotoUploadClaims.apply(null,photoClaimArgs),executionTime:(new Date()-startTime)+'ms'};
     }
     if (["retireInventoryStockReports", "applyInventorySemanticReview", "setInventoryIncludedComponents", "getInventoryStockQuestions", "getInventoryResolutionContext", "getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts", "setupPreRegistrationStockAlerts", "getPreRegistrationStockAlertStatus", "checkPreRegistrationStockAlert", "flushPreRegistrationStockAlerts", "claimPreRegistrationStockAlertRelay", "authorizePreRegistrationStockAlertRelay", "acknowledgePreRegistrationStockAlertRelay"].indexOf(funcName)>=0) {
       var inventoryArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
