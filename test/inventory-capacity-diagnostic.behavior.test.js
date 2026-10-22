@@ -6,6 +6,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'inventoryRiskDelivery.js'), 'utf8');
 const prefix = 'inventoryRisk_v1_', scanKey = prefix + 'lastScan';
+const preservedIncidentError = JSON.stringify({ at: '2026-10-21T22:54:33.712Z', message: '재고 경보 전송·상태 확인 필요' });
 
 function env(options = {}) {
   const original = { at: '2026-10-22T00:00:00Z', coverage: { complete: true }, conflicts: 4, risks: 2 };
@@ -13,18 +14,25 @@ function env(options = {}) {
     'preRegStock_v1_state_RQ-261022-001': '한글', 'preRegStock_v1_state_RQ-261022-002': 'abc',
     ...(options.values || {}) };
   let held = false, writes = 0, scans = 0, pendingChecks = 0;
+  const cache = {};
   const props = { getProperty: (key) => values[key] ?? null, getProperties: () => ({ ...values }), deleteProperty: (key) => { delete values[key]; },
-    setProperty(key, value) { writes++; if (options.quota) throw Error('property storage quota'); values[key] = value; } };
+    setProperty(key, value) {
+      writes++;
+      if (options.beforeSet) options.beforeSet(key, value, values);
+      if (options.quota || options.scanWriteError && key === scanKey) throw Error(options.scanWriteError || 'property storage quota');
+      values[key] = value;
+    } };
   const lock = { tryLock() { if (options.lockBusy) return false; if (options.beforeLock) options.beforeLock(values); held = true; return true; },
     releaseLock() { held = false; } };
   const c = { INVENTORY_RISK_PREFIX_: prefix, PropertiesService: { getScriptProperties: () => props },
+    CacheService: { getScriptCache: () => ({ put: (key, value) => { if (options.cacheError) throw Error('cache unavailable'); cache[key] = value; } }) },
     Utilities: { newBlob: (text) => { assert.equal(held, false, 'byte calculation must not hold ScriptLock'); return { getBytes: () => [...Buffer.from(text)] }; } },
     LockService: { getScriptLock: () => lock } };
   vm.runInNewContext(source, c);
   const flush = c.flushInventoryRiskAlerts;
   c.flushPreRegistrationStockAlerts = () => { pendingChecks++; return { status: 'pending' }; };
   c.flushInventoryRiskAlerts = () => { scans++; return { status: 'scheduled' }; };
-  return { c, flush, values, original, writes: () => writes, scans: () => scans, pendingChecks: () => pendingChecks };
+  return { c, flush, values, original, cache, writes: () => writes, scans: () => scans, pendingChecks: () => pendingChecks };
 }
 
 test('heartbeat stores one bounded value-free capacity snapshot while preserving prior scan fields', () => {
@@ -115,4 +123,53 @@ test('a later normal scan retains the existing diagnostic without another captur
   const writes = e.writes();
   e.c.inventoryRiskHeartbeat();
   assert.equal(e.writes(), writes);
+});
+
+test('only actual storage quota replaces the preserved incident error with a smaller ASCII capacity snapshot', () => {
+  const e = env({ scanWriteError: 'You have exceeded property storage quota', values: {
+    [prefix + 'lastError']: preservedIncidentError,
+    'GUIDE_DELIVERY_V3_out_261023_001': 'x'.repeat(250),
+    'GUIDE_DELIVERY_V3_out_261022_002': 'x'.repeat(250)
+  } });
+  const before = { ...e.values }, total = Object.entries(before).reduce((sum, [key, value]) => sum + Buffer.byteLength(key) + Buffer.byteLength(value), 0);
+  assert.equal(e.c.inventoryRiskHeartbeat().status, 'scheduled');
+  const compact = e.values[prefix + 'lastError'], fields = compact.split('|');
+  assert.equal(fields[0], 'capacity-v1');
+  assert.equal(Number(fields[1]), Object.keys(before).length);
+  assert.equal(Number(fields[2]), total);
+  assert.equal(fields[3], 'GUIDE_DELIVERY_V3_out_*');
+  assert.equal(Number(fields[5]), 2);
+  assert.ok(/^[\x20-\x7e]+$/.test(compact));
+  assert.ok(Buffer.byteLength(compact) <= Buffer.byteLength(preservedIncidentError));
+  assert.deepEqual(Object.keys(e.values).sort(), Object.keys(before).sort());
+  for (const key of Object.keys(before)) if (key !== prefix + 'lastError') assert.equal(e.values[key], before[key]);
+  assert.ok(Object.values(e.cache).includes(preservedIncidentError));
+  const writes = e.writes();e.c.inventoryRiskHeartbeat();
+  assert.equal(e.writes(), writes, 'completed compact diagnostic is captured only once');
+});
+
+for (const scenario of ['absent', 'different', 'newer', 'race', 'nonquota', 'lease', 'scanrace']) {
+  test('compact quota fallback preserves unrelated/newer error and active work: ' + scenario, () => {
+    const errorKey = prefix + 'lastError';
+    const options = { scanWriteError: 'property storage quota', values: { [errorKey]: preservedIncidentError } };
+    if (scenario === 'absent') options.values = {};
+    if (scenario === 'different') options.values[errorKey] = JSON.stringify({ at: '2026-10-21T22:54:33.712Z', message: 'different' });
+    if (scenario === 'newer') options.values[errorKey] = JSON.stringify({ at: '2026-10-23T00:00:00Z', message: '재고 경보 전송·상태 확인 필요' });
+    if (scenario === 'race') options.beforeLock = (values) => { values[errorKey] = 'new concurrent failure'; };
+    if (scenario === 'nonquota') options.scanWriteError = 'Service invoked too many times';
+    if (scenario === 'lease') options.beforeSet = (key, _value, values) => { if (key === scanKey) values[prefix + 'lease'] = JSON.stringify({ until: Date.now() + 60000 }); };
+    if (scenario === 'scanrace') options.beforeSet = (key, _value, values) => { if (key === scanKey) values[scanKey] = '{"at":"newer"}'; };
+    const e = env(options);
+    e.c.inventoryRiskHeartbeat();
+    assert.ok(!(e.values[errorKey] || '').startsWith('capacity-v1|'));
+    assert.equal(e.scans(), 1);
+    assert.equal(e.pendingChecks(), 1);
+    if (scenario === 'race') assert.equal(e.values[errorKey], 'new concurrent failure');
+  });
+}
+
+test('optional cache preservation failure never blocks the bounded fallback or heartbeat', () => {
+  const e = env({ scanWriteError: 'property storage quota', cacheError: true, values: { [prefix + 'lastError']: preservedIncidentError } });
+  assert.equal(e.c.inventoryRiskHeartbeat().status, 'scheduled');
+  assert.match(e.values[prefix + 'lastError'], /^capacity-v1\|/);
 });

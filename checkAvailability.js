@@ -4936,6 +4936,7 @@ function toggleItemChecksBatch(tid, entries) {
   var pending = [];
   var resultsById = {};
   var checkoutReplayIds = {};
+  var pendingReplayTargets = {};
   var lock = LockService.getScriptLock();
   var locked = false;
   try {
@@ -4959,8 +4960,9 @@ function toggleItemChecksBatch(tid, entries) {
         resultsById.__error = mutation.error;
         return;
       }
-      if (mutation.skip) {
+      if (mutation.skip || mutation.duplicate) {
         checkoutReplayIds[item.scheduleId] = true;
+        if (!mutation.skip) pendingReplayTargets[item.scheduleId] = item.done;
         resultsById[item.scheduleId] = {
           scheduleId: item.scheduleId,
           ok: true,
@@ -4974,7 +4976,7 @@ function toggleItemChecksBatch(tid, entries) {
     if (resultsById.__error) return { error: resultsById.__error };
     if (!pending.length) {
       lock.releaseLock();locked = false;
-      var replayResults = readDashboardCheckoutReplayResults_(tid, items.map(function(item) { return resultsById[item.scheduleId]; }));
+      var replayResults = readDashboardCheckoutReplayResults_(tid, items.map(function(item) { return resultsById[item.scheduleId]; }), pendingReplayTargets);
       return { success: replayResults.every(function(result) { return result.ok; }), tradeId: tid,
         results: replayResults, deduped: true, retryable: replayResults.some(function(result) { return result.outcomeUnknown; }) };
     }
@@ -5041,7 +5043,7 @@ function toggleItemChecksBatch(tid, entries) {
   }
 
   var finalResults = items.map(function(item) { return resultsById[item.scheduleId]; });
-  var replays = readDashboardCheckoutReplayResults_(tid, finalResults.filter(function(result) { return checkoutReplayIds[result.scheduleId]; }));
+  var replays = readDashboardCheckoutReplayResults_(tid, finalResults.filter(function(result) { return checkoutReplayIds[result.scheduleId]; }), pendingReplayTargets);
   replays.forEach(function(result) { resultsById[result.scheduleId] = result; });
   finalResults = items.map(function(item) { return resultsById[item.scheduleId]; });
   return {
@@ -5192,17 +5194,19 @@ function toggleItemCheck(scheduleId, phase, done, options) {
         props, checkoutTid, mutationId, 'item:checkout:' + scheduleId, isDone ? '1' : '0'
       );
       if (checkoutMutation.error) return { error: checkoutMutation.error };
-      if (checkoutMutation.skip) {
+      if (checkoutMutation.skip || checkoutMutation.duplicate) {
         if (checkoutMutation.pendingLater) {
           return { error: '더 최신 품목 체크를 처리 중입니다.', code: 'BUSY', retryable: true };
         }
         checkoutMutationLock.releaseLock();checkoutMutationLocked = false;
+        var pendingCheckoutTarget = {};
+        if (!checkoutMutation.skip) pendingCheckoutTarget[scheduleId] = isDone;
         return readDashboardCheckoutReplayResults_(checkoutTid, [{
           scheduleId: scheduleId,
           phase: phase,
           tradeId: checkoutTid,
           deduped: true
-        }])[0];
+        }], pendingCheckoutTarget)[0];
       }
       if (!checkoutLeaseToken) {
         checkoutLeaseToken = (mutationId || String(Math.random()).slice(2)) + ':' + scheduleId + ':' + Date.now();
@@ -5351,8 +5355,9 @@ function cacheDashboardCheckoutState_(props, key, checked) {
 }
 
 /** Call only outside ScriptLock; retries read the current canonical state without another PATCH. */
-function readDashboardCheckoutReplayResults_(tid, results) {
+function readDashboardCheckoutReplayResults_(tid, results, pendingTargets) {
   if (!results.length) return results;
+  pendingTargets = pendingTargets || {};
   var canonical;
   try {
     canonical = typeof supaGetScheduleItemCheckoutStateMap_ === 'function'
@@ -5363,6 +5368,16 @@ function readDashboardCheckoutReplayResults_(tid, results) {
     var state = canonical && canonical.ok && canonical.byScheduleId && canonical.byScheduleId[result.scheduleId];
     if (state === 'taken' || state === 'pending' || state === 'excluded') {
       next.ok = true;next.checked = state === 'taken';
+      if (Object.prototype.hasOwnProperty.call(pendingTargets, result.scheduleId)) {
+        // A pending marker cannot prove whether an earlier PATCH ran. Read only:
+        // never replay it over a different, potentially newer canonical state.
+        if (state === (pendingTargets[result.scheduleId] ? 'taken' : 'pending')) next.reconciled = true;
+        else {
+          next.canonicalChecked = next.checked;delete next.checked;next.ok = false;
+          next.error = '이전 반출 체크 결과가 현재 정본과 다릅니다. 상태 확인이 필요합니다.';
+          next.code = 'MUTATION_RECONCILIATION_REQUIRED';next.retryable = true;next.outcomeUnknown = true;
+        }
+      }
     } else {
       delete next.checked;next.ok = false;
       next.error = '반출 체크 정본 조회가 필요합니다. 잠시 후 다시 확인해주세요.';
