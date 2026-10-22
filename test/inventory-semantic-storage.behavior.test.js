@@ -179,3 +179,45 @@ test('public catalog credential cannot read storage metadata, probe capacity or 
   }
   assert.equal(h.files.size, 0);assert.equal(h.events.length, 0);
 });
+
+test('default status and migration never access the optional document store', () => {
+  const h = harness();h.add();let calls = 0;
+  h.c.PropertiesService.getDocumentProperties = () => { calls++;throw Error('document permission secret'); };
+  for (const input of [undefined, {}, { includeDocumentStore: false }, { includeDocumentStore: 'true' }]) {
+    assert.equal(h.c.getInventorySemanticStorageStatus(input).documentStore, undefined);
+  }
+  assert.equal(h.c.migrateInventorySemanticStorage().documentStore, undefined);
+  assert.equal(h.migrate().mode, 'drive');assert.equal(calls, 0);
+});
+
+test('optional document metadata reads only the existing manifest and returns its hash without raw contents', () => {
+  const h = harness();h.add();const raw = '{"fileId":"private-evidence-file","secret":"fixture-only"}', keys = [], before = { ...h.values };
+  h.c.PropertiesService.getDocumentProperties = () => ({ getProperty(key) { keys.push(key);return raw; } });
+  const result = h.c.getInventorySemanticStorageStatus({ includeDocumentStore: true, nonce: 'metadata' });
+  assert.deepEqual(JSON.parse(JSON.stringify(result.documentStore)), {
+    available: true, readable: true, manifestHash: crypto.createHash('sha256').update(raw).digest('hex'), identityVerified: false
+  });
+  assert.equal(result.nonce, 'metadata');assert.deepEqual(keys, [pointer]);assert.deepEqual(h.values, before);
+  assert.equal(h.events.length, 0);assert.equal(h.files.size, 0);
+  assert.ok(!JSON.stringify(result).includes('private-evidence-file'));assert.ok(!JSON.stringify(result).includes('fixture-only'));
+});
+
+test('an empty document store is readable but never evidence of shared store identity', () => {
+  const h = harness();h.c.PropertiesService.getDocumentProperties = () => ({ getProperty: () => null });
+  const result = h.c.getInventorySemanticStorageStatus({ includeDocumentStore: true }).documentStore;
+  assert.equal(result.available, true);assert.equal(result.readable, true);assert.equal(result.manifestHash, null);assert.equal(result.identityVerified, false);
+  assert.equal(h.events.length, 0);
+});
+
+for (const failure of ['null', 'acquire-throws', 'read-throws', 'api-missing']) test('optional document metadata contains access uncertainty without leaking details: ' + failure, () => {
+  const h = harness();
+  if (failure !== 'api-missing') h.c.PropertiesService.getDocumentProperties = () => {
+    if (failure === 'null') return null;
+    if (failure === 'acquire-throws') throw Error('permission denied for private-secret');
+    return { getProperty() { throw Error('read failed for private-secret'); } };
+  };
+  const result = h.c.getInventorySemanticStorageStatus({ includeDocumentStore: true });
+  assert.equal(result.documentStore.available, failure === 'null' ? false : failure === 'read-throws' ? true : null);
+  assert.equal(result.documentStore.readable, false);assert.equal(result.documentStore.manifestHash, null);assert.equal(result.documentStore.identityVerified, false);
+  assert.ok(!JSON.stringify(result).includes('private-secret'));assert.equal(h.events.length, 0);assert.equal(h.files.size, 0);
+});

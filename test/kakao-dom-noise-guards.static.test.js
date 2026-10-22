@@ -411,7 +411,7 @@ assert.match(
 // 정규식 리터럴을 그대로 문자열 대조하면 사소한 수정(끝 슬래시 허용 등)마다 깨지면서
 // 정작 보호가 살아 있는지는 알려주지 않는다. 코드에서 정규식을 꺼내 실제 URL로 검증한다.
 {
-  const hit = worker.match(/const isChatListUrl = (\/\^https:[^\n]+?\/)\.test\(targetUrl\);/);
+  const hit = worker.match(/function isKakaoChatListUrl\(url = ''\) \{\s*return (\/\^https:[^\n]+?\/)\.test\(String\(url\)\);/);
   assert.ok(hit, 'AI worker must keep an explicit chat-list URL matcher for DevTools tab targeting');
   const source = hit[1].replace(/^\//, '').replace(/\/$/, '');
   const isChatListUrl = new RegExp(source);

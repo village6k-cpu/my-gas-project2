@@ -70,8 +70,26 @@ function inventorySemanticStorageStatus_(state, nonce) {
     snapshotHash: state.snapshotHash, manifestHash: inventorySemanticStorageDigest_(state.manifestText), nonce: String(nonce || '').slice(0, 100) };
 }
 
+/** Read-only availability evidence; even identical/empty hashes do not prove shared store identity. */
+function inventorySemanticDocumentStoreMetadata_() {
+  var result = { available: null, readable: false, manifestHash: null, identityVerified: false };
+  try {
+    if (typeof PropertiesService.getDocumentProperties !== 'function') return result;
+    var props = PropertiesService.getDocumentProperties();
+    result.available = !!props;
+    if (!props) return result;
+    var raw = props.getProperty(INVENTORY_SEMANTIC_STORAGE_MANIFEST_);
+    if (raw !== null && typeof raw !== 'string') return result;
+    result.manifestHash = raw ? inventorySemanticStorageDigest_(raw) : null;
+    result.readable = true;
+  } catch (unavailable) { /* Optional metadata remains unknown; never expose exception details. */ }
+  return result;
+}
+
 function getInventorySemanticStorageStatus(input) {
-  return inventorySemanticStorageStatus_(inventorySemanticStorageState_(true), input && input.nonce);
+  var result = inventorySemanticStorageStatus_(inventorySemanticStorageState_(true), input && input.nonce);
+  if (input && input.includeDocumentStore === true) result.documentStore = inventorySemanticDocumentStoreMetadata_();
+  return result;
 }
 
 function inventorySemanticStorageVerifyPublic_(state) {
