@@ -9,13 +9,24 @@ function inventorySemanticScopes_(snapshot) {
 }
 function inventorySemanticKey_(scope){return INVENTORY_SEMANTIC_PREFIX_+inventoryRiskDigest_([scope.setName,scope.componentName]);}
 
+function inventorySemanticLegacyRecords_() {
+ var values=PropertiesService.getScriptProperties().getProperties();
+ if(values.inventorySemanticStore_v1_manifest)throw new Error('AI 판단 저장소 reader 확인 필요');
+ return values;
+}
+
 /** Internal metadata audit only. Stale AI evidence remains durable; nothing here expires or rewrites it. */
 function auditInventorySemanticStorage() {
  var props=PropertiesService.getScriptProperties(),before=props.getProperties(),snapshot=null,sourceComplete=false;
+ var legacyCount=Object.keys(before).filter(function(key){return key.indexOf(INVENTORY_SEMANTIC_PREFIX_)===0;}).length;
+ var audited=Object.assign({},before),stored=typeof inventorySemanticStorageRead_==='function'?inventorySemanticStorageRead_():inventorySemanticLegacyRecords_();
+ Object.keys(audited).forEach(function(key){if(key.indexOf(INVENTORY_SEMANTIC_PREFIX_)===0)delete audited[key];});
+ Object.keys(stored).forEach(function(key){if(key.indexOf(INVENTORY_SEMANTIC_PREFIX_)===0)audited[key]=stored[key];});
  try{snapshot=readInventoryRiskSnapshot_();sourceComplete=!!snapshot && !(snapshot.sourceIssues || []).length;}catch(sourceError){}
  var scopes=sourceComplete?inventorySemanticScopes_(snapshot):[],byKey={},reasons=Object.create(null),bundle={};
  scopes.forEach(function(scope){var key=inventorySemanticKey_(scope);(byKey[key] || (byKey[key]=[])).push(scope);});
  var result={mode:'read_only',sourceComplete:sourceComplete,deletionCandidates:0,
+  storage:{mode:before.inventorySemanticStore_v1_manifest?'drive':'legacy',legacyCount:legacyCount},
   records:{count:0,keyBytes:0,valueBytes:0},classifications:{},reviewedAtTimeZone:'UTC',reviewedAtDays:{},
   reasonDuplication:{recordCount:0,distinctCount:0,totalBytes:0,distinctBytes:0,repeatedBytes:0},
   compression:{encoding:'gzip_base64',excludesStorageEnvelope:true,roundTripVerifiedCount:0,failedCount:0,individualSourceBytes:0,individualBase64Bytes:0,individualSavedBytes:0,bundleInputBytes:null,bundleBase64Bytes:null,bundleSavedBytes:null},
@@ -28,8 +39,8 @@ function auditInventorySemanticStorage() {
   if(Utilities.ungzip(compressed).getDataAsString('UTF-8')!==text)throw new Error('Compression round-trip mismatch');
   return Utilities.base64Encode(compressed.getBytes()).length;
  }
- Object.keys(before).forEach(function(key){
-  var text=String(before[key]),size=bytes(text);
+ Object.keys(audited).forEach(function(key){
+  var text=String(audited[key]),size=bytes(text);
   if(key.indexOf(INVENTORY_SEMANTIC_PREFIX_)!==0){result.otherProperties.count++;result.otherProperties.valueBytes+=size;return;}
   result.records.count++;result.records.keyBytes+=bytes(key);result.records.valueBytes+=size;bundle[key]=text;
   try{var compressedSize=gzipBytes(text);result.compression.roundTripVerifiedCount++;
@@ -79,7 +90,7 @@ function inventoryApplySemanticReviews_(snapshot) {
   if(!set||inventoryRiskNameKey_(row.name)===inventoryRiskNameKey_(set.name)||set.components.some(function(c){return inventoryRiskNameKey_(c.name)===inventoryRiskNameKey_(row.name);}))return;
   set.components.push({name:row.name,quantity:1,note:'',tracked:true,observedOnly:true});
  });
- var props=PropertiesService.getScriptProperties().getProperties(),scopes=inventorySemanticScopes_(snapshot);
+ var props=typeof inventorySemanticStorageRead_==='function'?inventorySemanticStorageRead_():inventorySemanticLegacyRecords_(),scopes=inventorySemanticScopes_(snapshot);
  snapshot.semanticScopes=scopes;
  (snapshot.sets || []).forEach(function(set){(set.components || []).forEach(function(c){
   var matches=scopes.filter(function(s){return s.setName===set.name&&s.componentName===c.name;});if(matches.length!==1)return;
@@ -106,8 +117,12 @@ function applyInventorySemanticReview(input) {
    return Object.assign({},r,{reason:input.reason,decidedBy:'native_ai',reviewedAt:new Date().toISOString()});
   });
   if(input.execute===false)return {success:true,dryRun:true,resolutions:validated};
-  var props=PropertiesService.getScriptProperties();validated.forEach(function(r){var text=JSON.stringify(r);if(Utilities.newBlob && Utilities.newBlob(text).getBytes().length>8500)throw new Error('재고 판단 근거 크기 초과');props.setProperty(inventorySemanticKey_(r),text);});
-  validated.forEach(function(r){if(JSON.parse(props.getProperty(inventorySemanticKey_(r))).sourceHash!==r.sourceHash)throw new Error('AI 구성품 판단 저장 확인 필요');});
+  if(typeof inventorySemanticStorageWrite_==='function')inventorySemanticStorageWrite_(validated);
+  else {
+   inventorySemanticLegacyRecords_();
+   var props=PropertiesService.getScriptProperties();validated.forEach(function(r){var text=JSON.stringify(r);if(Utilities.newBlob && Utilities.newBlob(text).getBytes().length>8500)throw new Error('재고 판단 근거 크기 초과');props.setProperty(inventorySemanticKey_(r),text);});
+   validated.forEach(function(r){if(JSON.parse(props.getProperty(inventorySemanticKey_(r))).sourceHash!==r.sourceHash)throw new Error('AI 구성품 판단 저장 확인 필요');});
+  }
   if(typeof requestInventoryRiskScan_==='function')requestInventoryRiskScan_();
   return {success:true,action:'classify_component',verified:true,effective:true,resolutions:validated};
  }finally{lock.releaseLock();}

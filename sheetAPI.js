@@ -1642,6 +1642,9 @@ function runFunction(funcName, params) {
     "retireInventoryStockReports",
     "applyInventorySemanticReview",
     "auditInventorySemanticStorage",
+    "getInventorySemanticStorageStatus",
+    "migrateInventorySemanticStorage",
+    "probeScriptPropertiesCapacity",
     "setInventoryIncludedComponents",
     "getInventoryStockQuestions",
     "getInventoryResolutionContext",
@@ -1965,6 +1968,17 @@ function runFunction(funcName, params) {
     }
     if (funcName === 'auditInventorySemanticStorage') {
       return {success:true,function:funcName,result:auditInventorySemanticStorage(),executionTime:(new Date()-startTime)+'ms'};
+    }
+    if (funcName === 'getInventorySemanticStorageStatus' || funcName === 'migrateInventorySemanticStorage') {
+      var semanticArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
+      if(!Array.isArray(semanticArgs))semanticArgs=[semanticArgs];
+      var semanticFunction=funcName==='getInventorySemanticStorageStatus'?getInventorySemanticStorageStatus:migrateInventorySemanticStorage;
+      return {success:true,function:funcName,result:semanticFunction.apply(null,semanticArgs),executionTime:(new Date()-startTime)+'ms'};
+    }
+    if (funcName === 'probeScriptPropertiesCapacity') {
+      var capacityArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
+      if(!Array.isArray(capacityArgs))capacityArgs=[capacityArgs];
+      return {success:true,function:funcName,result:probeScriptPropertiesCapacity.apply(null,capacityArgs),executionTime:(new Date()-startTime)+'ms'};
     }
     if (["retireInventoryStockReports", "applyInventorySemanticReview", "setInventoryIncludedComponents", "getInventoryStockQuestions", "getInventoryResolutionContext", "getInventorySupplyPolicy", "setScheduleSupplyAllocation", "getInventoryRiskReport", "getInventoryRiskMonitorStatus", "setupInventoryRiskMonitor", "flushInventoryRiskAlerts", "setupPreRegistrationStockAlerts", "getPreRegistrationStockAlertStatus", "checkPreRegistrationStockAlert", "flushPreRegistrationStockAlerts", "claimPreRegistrationStockAlertRelay", "authorizePreRegistrationStockAlertRelay", "acknowledgePreRegistrationStockAlertRelay"].indexOf(funcName)>=0) {
       var inventoryArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];

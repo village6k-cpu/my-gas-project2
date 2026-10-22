@@ -32,8 +32,14 @@ function supaToken_(cfg) {
   });
   if (res.getResponseCode() >= 300) { Logger.log('봇 로그인 실패: ' + res.getContentText().slice(0, 200)); return null; }
   var j = JSON.parse(res.getContentText());
-  p.setProperty('SUPA_TOKEN', j.access_token);
-  p.setProperty('SUPA_TOKEN_EXP', String(Date.now() + ((j.expires_in || 3600) * 1000)));
+  try {
+    p.setProperty('SUPA_TOKEN', j.access_token);
+    p.setProperty('SUPA_TOKEN_EXP', String(Date.now() + ((j.expires_in || 3600) * 1000)));
+  } catch (cacheError) {
+    // A successful login is authoritative; a full optional cache must not block ledger access.
+    // Keep both writes in order: never extend the old token's expiry if replacing it failed.
+    if (!/exceeded the property storage quota/i.test(String(cacheError && cacheError.message || ''))) throw cacheError;
+  }
   return j.access_token;
 }
 
@@ -1817,11 +1823,196 @@ function auditScriptProperties() {
     };
   });
   return { propertyCount: keys.length, storage: storage, cancellations: cancellations,
+    dashboardPhotoUploads: auditDashboardPhotoUploadClaims_(all, Date.now()),
     cancellationTriggerAt: Number(all.cancelCleanupTriggerAt_v1 || 0),
     cancellationDirty: cancellations.filter(function(s) {
       return !!all[SUPA_DIRTY_PREFIX_ + s.tradeId];
     }).map(function(s) { return s.tradeId; }) };
 
+}
+
+/** Read-only photo-claim metadata. Expiry eligibility is not deletion authority. */
+function auditDashboardPhotoUploadClaims_(all, now) {
+  var prefix = 'dashboardPhotoUpload_v2_';
+  var ttlMs = 24 * 60 * 60 * 1000;
+  var keys = Object.keys(all).filter(function(key) { return key.indexOf(prefix) === 0; });
+  var audit = {
+    namespace: prefix, auditedAt: now, count: keys.length,
+    keyBytes: 0, valueBytes: 0, totalBytes: 0, invalidJsonCount: 0,
+    legacyCleanupEligibleCount: 0, legacyCleanupEligibleBytes: 0, legacyCleanupEvaluationErrors: 0,
+    policy: { source: 'cleanupDashboardPhotoUploadClaims_', ttlMs: ttlMs,
+      stateIndependent: true, deletionExecuted: false, backupRequired: true },
+    ledgerReadback: keys.length ? 'unavailable' : 'not_needed',
+    driveReadback: 'not_checked', ledgerStatusCounts: {}, byState: {},
+    entries: [], entriesTruncated: Math.max(0, keys.length - 200)
+  };
+  var rows = [];
+  var schema = null;
+  if (keys.length) {
+    try {
+      var sheet = getDashboardPhotoSheet_(true);
+      schema = getDashboardPhotoSchema_(sheet);
+      if (!schema.tradeIdCol) throw new Error('missing_trade_column');
+      var rowCount = Math.max(0, sheet.getLastRow() - 1);
+      if (rowCount) rows = sheet.getRange(2, 1, rowCount, Math.max(sheet.getLastColumn(), schema.maxCol || 1)).getDisplayValues();
+      audit.ledgerReadback = 'read';
+      audit.ledgerRowCount = rows.length;
+    } catch (readError) {
+      // Do not return raw errors: they can contain spreadsheet URLs or tokens.
+      audit.ledgerReadback = 'unavailable';
+    }
+  }
+  keys.forEach(function(key, index) {
+    var raw = String(all[key] || '');
+    var parsed = null;
+    var parseStatus = 'object';
+    try { parsed = JSON.parse(raw); } catch (parseError) { parseStatus = 'invalid_json'; audit.invalidJsonCount++; }
+    var validObject = parsed && typeof parsed === 'object' && !Array.isArray(parsed);
+    if (parseStatus === 'object' && !validObject) parseStatus = 'invalid_shape';
+    var claim = validObject ? parsed : {};
+    var state = ['pending', 'file', 'done'].indexOf(claim.state) >= 0 ? claim.state : 'unknown';
+    var at = typeof claim.at === 'number' || typeof claim.at === 'string' ? Number(claim.at) : NaN;
+    var timestampStatus = !claim.at ? 'missing' : (!isFinite(at) || at <= 0 ? 'invalid' : (at > now ? 'future' : 'valid'));
+    var knownAt = timestampStatus === 'valid' || timestampStatus === 'future';
+    var ageMs = knownAt ? now - at : null;
+    // Match the current cleanup predicate exactly, including its NaN behavior.
+    var eligible = null;
+    try { eligible = !parsed || !parsed.at || now - Number(parsed.at) > ttlMs; }
+    catch (cleanupEvaluationError) { audit.legacyCleanupEvaluationErrors++; }
+    var keyBytes = Utilities.newBlob(key).getBytes().length;
+    var valueBytes = Utilities.newBlob(raw).getBytes().length;
+    var totalBytes = keyBytes + valueBytes;
+    var bucket = audit.byState[state] || (audit.byState[state] = {
+      count: 0, keyBytes: 0, valueBytes: 0, totalBytes: 0, legacyCleanupEligibleCount: 0,
+      oldestAgeMs: null, newestAgeMs: null, invalidTimestampCount: 0
+    });
+    bucket.count++;
+    bucket.keyBytes += keyBytes; bucket.valueBytes += valueBytes; bucket.totalBytes += totalBytes;
+    if (eligible) { bucket.legacyCleanupEligibleCount++; audit.legacyCleanupEligibleCount++; audit.legacyCleanupEligibleBytes += totalBytes; }
+    if (knownAt) {
+      bucket.oldestAgeMs = bucket.oldestAgeMs === null ? ageMs : Math.max(bucket.oldestAgeMs, ageMs);
+      bucket.newestAgeMs = bucket.newestAgeMs === null ? ageMs : Math.min(bucket.newestAgeMs, ageMs);
+    } else bucket.invalidTimestampCount++;
+    audit.keyBytes += keyBytes; audit.valueBytes += valueBytes; audit.totalBytes += totalBytes;
+    var receipt = claim.result;
+    var receiptStatus = 'absent';
+    if (receipt != null) {
+      var receiptRow = receipt && receipt.photo && (typeof receipt.photo.row === 'number' || typeof receipt.photo.row === 'string') ? Number(receipt.photo.row) : 0;
+      var claimRow = typeof claim.row === 'number' || typeof claim.row === 'string' ? Number(claim.row) : 0;
+      if (!receipt || typeof receipt !== 'object' || !receipt.photo || typeof receipt.tid !== 'string' || !receipt.tid
+        || typeof receipt.phase !== 'string' || !receipt.phase || typeof receipt.photo.fileId !== 'string' || !receipt.photo.fileId
+        || !isFinite(receiptRow) || receiptRow <= 0) receiptStatus = 'invalid_shape';
+      else if (receipt.success !== true) receiptStatus = 'not_success';
+      else if (receipt.tid !== claim.tid || receipt.phase !== claim.phase || receipt.photo.fileId !== claim.fileId
+        || (receipt.photo.sheetValue || '') !== (claim.relativePath || '') || receiptRow !== claimRow) receiptStatus = 'identity_mismatch';
+      else receiptStatus = 'consistent_success';
+    }
+    var ledgerStatus = audit.ledgerReadback === 'read'
+      ? auditDashboardPhotoUploadLedger_(claim, schema, rows) : 'unavailable';
+    audit.ledgerStatusCounts[ledgerStatus] = (audit.ledgerStatusCounts[ledgerStatus] || 0) + 1;
+    if (index < 200) {
+      var keyHash = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, key).map(function(byte) {
+        return ('0' + ((byte + 256) % 256).toString(16)).slice(-2);
+      }).join('');
+      audit.entries.push({ keyHash: keyHash, state: state, parseStatus: parseStatus,
+        at: knownAt ? at : null, ageMs: ageMs, timestampStatus: timestampStatus,
+        keyBytes: keyBytes, valueBytes: valueBytes, totalBytes: totalBytes,
+        legacyCleanupEligible: eligible, legacyCleanupEvaluation: eligible === null ? 'error' : 'evaluated',
+        receiptStatus: receiptStatus, ledgerStatus: ledgerStatus,
+        safeToDelete: false });
+    }
+  });
+  return audit;
+}
+
+/** Match identity and phase against one sheet snapshot; never touch Drive or claims. */
+function auditDashboardPhotoUploadLedger_(claim, schema, rows) {
+  if (typeof claim.tid !== 'string') return 'incomplete_claim';
+  var tid = normalizeEquipmentCheckTradeId_(claim.tid.trim());
+  if (!tid || ['checkout', 'checkin'].indexOf(claim.phase) < 0) return 'incomplete_claim';
+  var targetCol = getDashboardPhotoWriteCol_(schema, claim.phase);
+  var identities = [[schema.keyCol, claim.photoId], [schema.fileIdCol, claim.fileId], [targetCol, claim.relativePath]]
+    .filter(function(pair) { return pair[0] && typeof pair[1] === 'string' && pair[1].trim(); });
+  if (!identities.length) return 'incomplete_claim';
+  if (!schema.phaseCol && (!targetCol || targetCol === schema.photoCol)) return 'unverifiable_schema';
+  var matches = rows.filter(function(row) {
+    return normalizeEquipmentCheckTradeId_(String(row[schema.tradeIdCol - 1] || '').trim()) === tid
+      && identities.some(function(pair) { return String(row[pair[0] - 1] || '').trim() === String(pair[1]).trim(); });
+  });
+  if (!matches.length) return 'missing';
+  if (matches.length > 1) return 'ambiguous';
+  var row = matches[0];
+  if (identities.some(function(pair) { return String(row[pair[0] - 1] || '').trim() !== String(pair[1]).trim(); })) return 'conflict';
+  if (schema.phaseCol && normalizeDashboardPhotoPhase_(row[schema.phaseCol - 1]) !== claim.phase) return 'conflict';
+  return 'matched';
+}
+
+/** Explicit internal diagnostic only. One 64..128-byte value, no retries or business writes.
+ * A successful probe proves this tiny write at this instant, not total free capacity.
+ * Cleanup compares its exact value under ScriptLock; unrelated keys are never touched.
+ */
+function probeScriptPropertiesCapacity(bytes) {
+  var size = bytes === undefined ? 128 : (typeof bytes === 'number' || typeof bytes === 'string' ? Number(bytes) : NaN);
+  var result = { ok: false, capacity: 'unknown', valueBytes: null, keyBytes: null,
+    probeKey: null, write: 'not_attempted', readback: 'not_attempted',
+    cleanup: 'not_needed', otherKeysDeleted: 0 };
+  if (!isFinite(size) || Math.floor(size) !== size || size < 64 || size > 128) {
+    result.reason = 'invalid_probe_size';
+    return result;
+  }
+  result.valueBytes = size;
+  var lock = null;
+  var locked = false;
+  var props = null;
+  var value = '';
+  var attempted = false;
+  var stage = 'lock';
+  try {
+    lock = LockService.getScriptLock();
+    locked = lock.tryLock(1000);
+    if (!locked) { result.reason = 'busy'; return result; }
+    stage = 'collision_check';
+    props = PropertiesService.getScriptProperties();
+    var uuid = Utilities.getUuid();
+    result.probeKey = 'scriptPropertiesCapacityProbe_v1_' + uuid;
+    result.keyBytes = result.probeKey.length;
+    if (props.getProperty(result.probeKey) !== null) { result.reason = 'key_collision'; return result; }
+    value = 'capacity-probe:' + uuid;
+    value += new Array(size - value.length + 1).join('x');
+    stage = 'write';
+    attempted = true;
+    result.write = 'attempted';
+    props.setProperty(result.probeKey, value);
+    stage = 'readback';
+    if (props.getProperty(result.probeKey) === value) {
+      result.write = 'verified'; result.readback = 'matched'; result.capacity = 'available';
+    } else {
+      result.readback = 'mismatch'; result.reason = 'write_not_verified';
+    }
+  } catch (probeError) {
+    var quota = stage === 'write' && /exceeded the property storage quota/i.test(String(probeError && probeError.message || ''));
+    result.capacity = quota ? 'quota_exceeded' : 'unknown';
+    result.reason = quota ? 'storage_quota_rejected' : stage + '_failed';
+  } finally {
+    if (attempted) {
+      try {
+        var current = props.getProperty(result.probeKey);
+        if (current === null) result.cleanup = 'absent';
+        else if (current !== value) result.cleanup = 'ownership_changed';
+        else {
+          if (result.capacity === 'quota_exceeded') { result.capacity = 'unknown'; result.reason = 'quota_write_inconsistent'; }
+          props.deleteProperty(result.probeKey);
+          var after = props.getProperty(result.probeKey);
+          result.cleanup = after === null ? 'deleted_verified' : (after === value ? 'delete_not_confirmed' : 'ownership_changed');
+        }
+      } catch (cleanupError) { result.cleanup = 'failed'; }
+    }
+    if (locked) {
+      try { lock.releaseLock(); } catch (releaseError) { result.lockRelease = 'failed'; }
+    }
+  }
+  result.ok = result.capacity === 'available' && result.cleanup === 'deleted_verified' && result.lockRelease !== 'failed';
+  return result;
 }
 
 /**
