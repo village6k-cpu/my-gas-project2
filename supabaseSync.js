@@ -16,6 +16,11 @@ function SUPA_CFG_() {
   };
 }
 
+function supaTokenCacheStorageQuota_(error) {
+  var message = String(error && error.message || error || '');
+  return /exceeded\s+(?:the\s+)?property\s+storage\s+quota|속성\s*저장\s*용량\s*한도(?:를|가)?\s*초과/i.test(message);
+}
+
 // 봇 계정으로 로그인해 access_token 획득 (캐시 + 만료 시 재로그인). user JWT라 secret-키 차단에 안 걸림.
 function supaToken_(cfg) {
   var p = PropertiesService.getScriptProperties();
@@ -38,7 +43,7 @@ function supaToken_(cfg) {
   } catch (cacheError) {
     // A successful login is authoritative; a full optional cache must not block ledger access.
     // Keep both writes in order: never extend the old token's expiry if replacing it failed.
-    if (!/exceeded the property storage quota/i.test(String(cacheError && cacheError.message || ''))) throw cacheError;
+    if (!supaTokenCacheStorageQuota_(cacheError)) throw cacheError;
   }
   return j.access_token;
 }
@@ -510,6 +515,26 @@ function supaSetTradeReturnDone_(tid, done, doneAt, contractStatus, expectedRetu
   }
 }
 
+/** A returned row is evidence only for this exact item and a recognized canonical state. */
+function supaCheckoutAuthorityRow_(rows, tid, scheduleId) {
+  if (!Array.isArray(rows) || rows.length !== 1) return null;
+  var row = rows[0];
+  return row && row.trade_id === tid && row.schedule_id === scheduleId &&
+    ['pending', 'taken', 'excluded'].indexOf(row.checkout_state) >= 0 ? row : null;
+}
+
+function supaReadCheckoutAuthority_(cfg, token, tid, scheduleId) {
+  if (!cfg || !token) return null;
+  try {
+    var response = UrlFetchApp.fetch(cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
+      + '&schedule_id=eq.' + encodeURIComponent(scheduleId) + '&select=trade_id,schedule_id,checkout_state', {
+      method: 'get', headers: { apikey: cfg.apikey, Authorization: 'Bearer ' + token, 'Accept-Profile': 'village' }, muteHttpExceptions: true
+    });
+    if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) return null;
+    return supaCheckoutAuthorityRow_(JSON.parse(response.getContentText()), tid, scheduleId);
+  } catch (readError) { return null; }
+}
+
 /** 품목 반출 체크도 전용 부분 PATCH + 정본 readback으로 멱등 확정한다. */
 function supaSetScheduleItemCheckoutState_(tid, scheduleId, done) {
   tid = String(tid || '').trim();
@@ -524,7 +549,7 @@ function supaSetScheduleItemCheckoutState_(tid, scheduleId, done) {
     if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음' };
     var res = UrlFetchApp.fetch(
       cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
-        + '&schedule_id=eq.' + encodeURIComponent(scheduleId) + '&select=schedule_id',
+        + '&schedule_id=eq.' + encodeURIComponent(scheduleId) + '&select=trade_id,schedule_id,checkout_state',
       {
         method: 'patch',
         contentType: 'application/json',
@@ -542,23 +567,20 @@ function supaSetScheduleItemCheckoutState_(tid, scheduleId, done) {
     var code = res.getResponseCode();
     var rows = null;
     try { rows = JSON.parse(res.getContentText() || '[]'); } catch (parseErr) {}
-    if (code < 300 && rows && rows.length === 1) return { ok: true, scheduleId: scheduleId };
-    var canonical = supaReadAuthorityRow_(
-      cfg, token, 'schedule_items', { trade_id: tid, schedule_id: scheduleId }, 'schedule_id,checkout_state'
-    );
-    if (canonical.ok && String(canonical.row.checkout_state || '') === targetState) {
+    var returned = supaCheckoutAuthorityRow_(rows, tid, scheduleId);
+    if (code >= 200 && code < 300 && returned && returned.checkout_state === targetState) return { ok: true, scheduleId: scheduleId };
+    var canonical = supaReadCheckoutAuthority_(cfg, token, tid, scheduleId);
+    if (canonical && canonical.checkout_state === targetState) {
       return { ok: true, scheduleId: scheduleId, deduped: true, confirmedAfterError: true };
     }
     return {
       ok: false,
-      outcomeUnknown: code >= 500 || !canonical.ok || !rows,
-      error: 'Supabase 품목 체크 저장 실패 (' + code + ')'
+      outcomeUnknown: code >= 500 || !canonical || !rows,
+      error: canonical ? 'Supabase 품목 체크 정본이 요청 상태와 다릅니다.' : 'Supabase 품목 체크 저장 확인 실패 (' + code + ')'
     };
   } catch (err) {
-    var afterError = supaReadAuthorityRow_(
-      cfg, token, 'schedule_items', { trade_id: tid, schedule_id: scheduleId }, 'schedule_id,checkout_state'
-    );
-    if (afterError.ok && String(afterError.row.checkout_state || '') === targetState) {
+    var afterError = supaReadCheckoutAuthority_(cfg, token, tid, scheduleId);
+    if (afterError && afterError.checkout_state === targetState) {
       return { ok: true, scheduleId: scheduleId, deduped: true, confirmedAfterError: true };
     }
     return { ok: false, outcomeUnknown: true, error: 'Supabase 품목 체크 저장 오류: ' + (err && err.message ? err.message : String(err)) };
@@ -579,7 +601,18 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
   var token = null;
   var headers = null;
   var requests = [];
-  var normalized = [];
+  var normalized = items.map(function(item) {
+    return { scheduleId: String(item && item.scheduleId || '').trim(), done: item && item.done === true,
+      targetState: item && item.done === true ? 'taken' : 'pending' };
+  });
+  var seen = Object.create(null);
+  if (normalized.some(function(item) {
+    if (!item.scheduleId || seen[item.scheduleId]) return true;
+    seen[item.scheduleId] = true;
+    return false;
+  }))
+    return { ok: false, results: [], error: '품목 ID 누락 또는 중복' };
+  var results = null;
   try {
     cfg = SUPA_CFG_();
     token = supaToken_(cfg);
@@ -591,17 +624,10 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
       'Accept-Profile': 'village',
       Prefer: 'return=representation'
     };
-    normalized = items.map(function(item) {
-      return {
-        scheduleId: String(item && item.scheduleId || '').trim(),
-        done: item && item.done === true,
-        targetState: item && item.done === true ? 'taken' : 'pending'
-      };
-    });
     requests = normalized.map(function(item) {
       return {
         url: cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
-          + '&schedule_id=eq.' + encodeURIComponent(item.scheduleId) + '&select=schedule_id,checkout_state',
+          + '&schedule_id=eq.' + encodeURIComponent(item.scheduleId) + '&select=trade_id,schedule_id,checkout_state',
         method: 'patch',
         contentType: 'application/json',
         headers: headers,
@@ -611,15 +637,17 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
     });
 
     var responses = UrlFetchApp.fetchAll(requests);
-    var results = normalized.map(function(item, index) {
+    results = normalized.map(function(item, index) {
       var response = responses[index];
       var code = response ? response.getResponseCode() : 0;
       var rows = null;
       try { rows = JSON.parse(response && response.getContentText() || '[]'); } catch (parseErr) {}
+      var returned = supaCheckoutAuthorityRow_(rows, tid, item.scheduleId);
+      var matched = !!(code >= 200 && code < 300 && returned && returned.checkout_state === item.targetState);
       return {
         scheduleId: item.scheduleId,
-        checked: item.done,
-        ok: code > 0 && code < 300 && rows && rows.length === 1,
+        checked: matched ? item.done : undefined,
+        ok: matched,
         code: code,
         outcomeUnknown: code >= 500 || !rows
       };
@@ -630,28 +658,31 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
       var read = UrlFetchApp.fetch(
         cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
           + '&schedule_id=in.' + encodeURIComponent('(' + ids.join(',') + ')')
-          + '&select=schedule_id,checkout_state',
+          + '&select=trade_id,schedule_id,checkout_state',
         { method: 'get', headers: headers, muteHttpExceptions: true }
       );
       var readRows = null;
       try { readRows = JSON.parse(read.getContentText() || '[]'); } catch (readParseErr) {}
-      var canonical = {};
-      if (read.getResponseCode() < 300 && Array.isArray(readRows)) {
+      var canonical = Object.create(null);
+      if (read.getResponseCode() >= 200 && read.getResponseCode() < 300 && Array.isArray(readRows)) {
         readRows.forEach(function(row) {
-          canonical[String(row.schedule_id || '').trim()] = String(row.checkout_state || '');
+          if (!row || typeof row.schedule_id !== 'string') return;
+          (canonical[row.schedule_id] || (canonical[row.schedule_id] = [])).push(row);
         });
       }
       results.forEach(function(result, index) {
         if (result.ok) return;
         var target = normalized[index].targetState;
-        if (canonical[result.scheduleId] === target) {
+        var verified = supaCheckoutAuthorityRow_(canonical[result.scheduleId], tid, result.scheduleId);
+        if (verified && verified.checkout_state === target) {
           result.ok = true;
+          result.checked = normalized[index].done;
           result.deduped = true;
           result.confirmedAfterError = true;
           result.outcomeUnknown = false;
         } else {
-          result.error = 'Supabase 품목 체크 저장 실패 (' + result.code + ')';
-          result.outcomeUnknown = result.outcomeUnknown || !Array.isArray(readRows);
+          result.error = verified ? 'Supabase 품목 체크 정본이 요청 상태와 다릅니다.' : 'Supabase 품목 체크 저장 확인 실패 (' + result.code + ')';
+          result.outcomeUnknown = result.outcomeUnknown || !verified;
         }
       });
     }
@@ -661,14 +692,13 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
     };
   } catch (err) {
     // fetchAll 자체가 예외를 던진 경우에도 단건 helper처럼 서버 정본을 확인한다.
-    var fallback = normalized.map(function(item) {
-      var canonical = cfg && token
-        ? supaReadAuthorityRow_(cfg, token, 'schedule_items', { trade_id: tid, schedule_id: item.scheduleId }, 'schedule_id,checkout_state')
-        : { ok: false };
-      var matched = canonical.ok && String(canonical.row.checkout_state || '') === item.targetState;
+    var fallback = normalized.map(function(item, index) {
+      if (results && results[index] && results[index].ok) return results[index];
+      var canonical = supaReadCheckoutAuthority_(cfg, token, tid, item.scheduleId);
+      var matched = !!(canonical && canonical.checkout_state === item.targetState);
       return {
         scheduleId: item.scheduleId,
-        checked: item.done,
+        checked: matched ? item.done : undefined,
         ok: matched,
         deduped: matched,
         confirmedAfterError: matched,
@@ -676,7 +706,7 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
         error: matched ? '' : 'Supabase 품목 체크 저장 오류: ' + (err && err.message ? err.message : String(err))
       };
     });
-    return { ok: fallback.every(function(result) { return result.ok; }), results: fallback };
+    return { ok: fallback.length > 0 && fallback.every(function(result) { return result.ok; }), results: fallback };
   }
 }
 

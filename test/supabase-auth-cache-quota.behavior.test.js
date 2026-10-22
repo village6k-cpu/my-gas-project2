@@ -14,7 +14,10 @@ function run(options = {}) {
       getProperty: key => values[key],
       setProperty(key, value) {
         calls.push(key);
-        if (key === options.failKey) throw new Error(options.error || 'You have exceeded the property storage quota. Please remove some properties and try again.');
+        if (key === options.failKey) {
+          if (options.rawError !== undefined) throw options.rawError;
+          throw new Error(options.error || 'You have exceeded the property storage quota. Please remove some properties and try again.');
+        }
         values[key] = value;
       }
     }) },
@@ -58,4 +61,24 @@ test('normal login still persists both token and expiry for subsequent calls', (
   assert.equal(h.invoke(), 'fresh-valid-token');
   assert.equal(h.invoke(), 'fresh-valid-token');
   assert.deepEqual(h.calls, ['SUPA_TOKEN', 'SUPA_TOKEN_EXP']);
+});
+
+const koreanQuota = '속성 저장용량 한도를 초과했습니다. 일부 속성을 삭제하고 다시 시도해 보세요.';
+for (const failKey of ['SUPA_TOKEN', 'SUPA_TOKEN_EXP']) {
+  for (const form of ['message', 'string', 'string-fallback']) test('observed Korean storage quota preserves fresh login and write order: ' + failKey + '/' + form, () => {
+    const failure = form === 'message' ? { error: koreanQuota }
+      : { rawError: form === 'string' ? koreanQuota : { message: '', toString: () => 'Exception: ' + koreanQuota } };
+    const h = run({ failKey, ...failure });
+    assert.equal(h.invoke(), 'fresh-valid-token');assert.equal(h.values.SUPA_TOKEN_EXP, '1');
+    assert.deepEqual(h.calls, failKey === 'SUPA_TOKEN' ? ['SUPA_TOKEN'] : ['SUPA_TOKEN', 'SUPA_TOKEN_EXP']);
+    assert.equal(h.values.SUPA_TOKEN, failKey === 'SUPA_TOKEN' ? 'old-expired-token' : 'fresh-valid-token');
+  });
+}
+
+test('English thrown string is classified without broadening to unrelated quotas or argument size errors', () => {
+  const h = run({ failKey: 'SUPA_TOKEN', rawError: 'You have exceeded the property storage quota.' });
+  assert.equal(h.invoke(), 'fresh-valid-token');
+  for (const error of ['Argument too large', 'LIMIT_EXCEEDED', 'Service invoked too many times: PropertiesService', 'Drive storage quota exceeded', '속성 읽기 권한이 없습니다', '일일 속성 호출 한도를 초과했습니다']) {
+    assert.throws(run({ failKey: 'SUPA_TOKEN', error }).invoke, value => value.message === error);
+  }
 });
