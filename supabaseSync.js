@@ -1990,7 +1990,8 @@ function probeScriptPropertiesCapacity(bytes) {
       result.readback = 'mismatch'; result.reason = 'write_not_verified';
     }
   } catch (probeError) {
-    var quota = stage === 'write' && /exceeded the property storage quota/i.test(String(probeError && probeError.message || ''));
+    result.error = scriptPropertiesProbeError_(probeError, stage);
+    var quota = stage === 'write' && result.error.category === 'property_storage_quota';
     result.capacity = quota ? 'quota_exceeded' : 'unknown';
     result.reason = quota ? 'storage_quota_rejected' : stage + '_failed';
   } finally {
@@ -2005,14 +2006,46 @@ function probeScriptPropertiesCapacity(bytes) {
           var after = props.getProperty(result.probeKey);
           result.cleanup = after === null ? 'deleted_verified' : (after === value ? 'delete_not_confirmed' : 'ownership_changed');
         }
-      } catch (cleanupError) { result.cleanup = 'failed'; }
+      } catch (cleanupError) {
+        result.cleanup = 'failed';
+        result.cleanupError = scriptPropertiesProbeError_(cleanupError, 'cleanup');
+      }
     }
     if (locked) {
-      try { lock.releaseLock(); } catch (releaseError) { result.lockRelease = 'failed'; }
+      try { lock.releaseLock(); } catch (releaseError) {
+        result.lockRelease = 'failed';
+        result.lockReleaseError = scriptPropertiesProbeError_(releaseError, 'lock_release');
+      }
     }
   }
   result.ok = result.capacity === 'available' && result.cleanup === 'deleted_verified' && result.lockRelease !== 'failed';
   return result;
+}
+
+/** Bounded diagnostics for this nonce-only probe; never expose stacks or credentials. */
+function scriptPropertiesProbeError_(error, stage) {
+  var raw = 'unreadable_error';
+  try { raw = String(error && error.message || error || '').slice(0, 4096).split(/[\r\n]/)[0]; } catch (readError) {}
+  var category = 'unknown';
+  if ((/property\s+storage\s+quota/i.test(raw) && /\b(?:exceed\w*|reach\w*|exhaust\w*|full)\b/i.test(raw))
+    || /속성\s*저장\s*(?:소|용량|공간)?[^\n]{0,80}(?:초과|가득|부족)/i.test(raw)) category = 'property_storage_quota';
+  else if (/argument too large|property value[^\n]{0,80}(?:too large|maximum|limit)|속성\s*값[^\n]{0,50}(?:너무\s*[크큽]|최대|한도)/i.test(raw)) category = 'property_value_limit';
+  else if (/service invoked too many times|too many (?:calls|requests)|(?:rate|daily) limit|per day|너무 많이 호출|호출[^\n]{0,50}한도/i.test(raw)) category = 'daily_rate';
+  else if (/permission|not authorized|unauthorized|access denied|권한|접근[^\n]{0,30}거부/i.test(raw)) category = 'permission';
+  else if (/service unavailable|temporarily unavailable|server error|internal error|timed? out|timeout|서비스[^\n]{0,30}(?:사용할 수 없|일시)|시간[^\n]{0,30}초과/i.test(raw)) category = 'service_unavailable';
+  var name = 'unknown';
+  try {
+    if (['Error', 'Exception', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'EvalError', 'URIError', 'AggregateError', 'ServiceError'].indexOf(error && error.name) >= 0) name = error.name;
+  } catch (nameError) {}
+  var safe = raw
+    .replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gi, '[url]')
+    .replace(/\bBearer\s+[^\s,;}]+/gi, 'Bearer [redacted]')
+    .replace(/(["']?\b(?:api[_-]?key|key|(?:access[_-]?|refresh[_-]?)?token|secret|authorization|password|credential)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi, '$1[redacted]')
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted]')
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
+    .replace(/[A-Za-z0-9_-]{24,}/g, '[redacted]')
+    .slice(0, 320);
+  return { stage: stage, category: category, name: name, type: typeof error, message: safe };
 }
 
 /**
