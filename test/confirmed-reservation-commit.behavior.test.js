@@ -234,6 +234,7 @@ function productionCommitContext(overrides = {}) {
     _confirmedReservationPeriodEquivalent_: () => true,
     _confirmedReservationRegisteredMatchRequest_: () => ({ 예약자명: '테스트 고객' }),
     _findRegisteredTradesForConfirmRequest_: () => [],
+    _findConfirmedBillingMergeCandidates_: () => [],
     _buildConfirmRequestGroups_: () => [{ reqID: 'RQ-260907-002', rows: [2], setComponentItems: [] }],
     _confirmedReservationReplacementRequest_: () => ({ typed: true }),
     _insertAndCheckRequest: () => ({
@@ -261,6 +262,23 @@ function productionNormalizeContext() {
   vm.runInNewContext(gas + '\nthis.normalize = _normalizeConfirmedReservationCommit_;', context);
   return context;
 }
+
+test('confirmed commit transfers the approved rounds only with its exact registration lock capability', () => {
+  const h = productionCommitContext();
+  h.normalized.billing_rounds = 2.5;
+  let registered = 0;
+  h.context.registerByReqID = (_sheet, _row, options) => {
+    registered++;
+    assert.equal(h.scriptLock.held, true);
+    assert.equal(options.billingRounds, 2.5);
+    assert.equal(options.confirmedReservationLockCapability, h.capability);
+    h.scriptLock.releaseLock();
+    return { success: true };
+  };
+  const result = h.context.commitConfirmedReservation({ registration: {}, operation_id: '11111111-2222-4333-8444-555555555555' });
+  assert.equal(result.success, true);
+  assert.equal(registered, 1);
+});
 
 function confirmedRegistrationFixture(evidenceOverrides = {}) {
   const period = {
@@ -583,6 +601,17 @@ test('fast registration authoritative readback proves the selected set component
   assert.equal(result.success, true);
   assert.equal(result.effective_request_id, 'RQ-260907-009');
 
+  // A completed/partial recovery cannot acknowledge legacy three rounds or an
+  // unmarked I-only value as the newly approved 2.5-round contract.
+  normalized.billing_rounds = 2.5;
+  state.contract.rounds = 2.5;
+  assert.throws(() => context.readback(normalized, 'RQ-260907-009', [], {}, exactFinalComponents), /승인회차/);
+  state.contract.billingRounds = 3;
+  assert.throws(() => context.readback(normalized, 'RQ-260907-009', [], {}, exactFinalComponents), /승인회차/);
+  state.contract.billingRounds = 2.5;
+  assert.equal(context.readback(normalized, 'RQ-260907-009', [], {}, exactFinalComponents).success, true);
+  delete normalized.billing_rounds;
+
   group.extraRequest = '시트에서 달라진 추가요청';
   assert.throws(
     () => context.readback(normalized, 'RQ-260907-009', [], {
@@ -694,6 +723,7 @@ test('confirmed registration blocks every matching active registered trade befor
     _insertAndCheckRequest: () => { insertCalls += 1; throw new Error('must not insert'); },
     registerByReqID: () => { registerCalls += 1; throw new Error('must not register'); }
   });
+  harness.normalized.billing_rounds = 2.5;
 
   const result = harness.context.commitConfirmedReservation({
     registration: {}, operation_id: '11111111-2222-4333-8444-555555555555'
@@ -707,6 +737,23 @@ test('confirmed registration blocks every matching active registered trade befor
   assert.equal(harness.scriptLock.releases, 1);
   assert.equal(harness.userLock.acquisitions, 1);
   assert.equal(harness.userLock.releases, 1);
+});
+
+test('approved rounds reject a schedule-only merge match before replacing the RQ even when master periods drifted', () => {
+  let replacements = 0, registrations = 0;
+  const h = productionCommitContext({
+    _findRegisteredTradesForConfirmRequest_: () => [],
+    _findConfirmedBillingMergeCandidates_: () => ['260907-001'],
+    _insertAndCheckRequest: () => { replacements++; return {}; },
+    registerByReqID: () => { registrations++; return {}; }
+  });
+  h.normalized.billing_rounds = 2.5;
+  const result = h.context.commitConfirmedReservation({ registration: {}, operation_id: '11111111-2222-4333-8444-555555555555' });
+  assert.equal(result.success, false);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.error.type, 'registered_trade_exists');
+  assert.equal(replacements, 0);
+  assert.equal(registrations, 0);
 });
 
 test('confirmed registration keeps replacement and registration in one transferred ScriptLock transaction', () => {

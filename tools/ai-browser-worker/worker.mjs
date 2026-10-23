@@ -7239,37 +7239,90 @@ function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allow
           return text && safeTerms.some((term) => text.includes(term));
         });
     };
+    const ownerKey = '__villageKakaoSearchOwner';
+    if (window[ownerKey]) return { ok: false, status: 'chat_search_owned_elsewhere' };
+    // An existing filter may belong to an operator. Only an initially unfiltered
+    // collector list can be borrowed; do not erase an unowned prior search.
+    if (input && String(input.value || '')) return { ok: false, status: 'chat_search_existing_query_preserved' };
+    if (!input) return { ok: false, status: 'chat_search_input_not_found' };
+    const initialHref = String(location.href);
+    const owner = {};
+    window[ownerKey] = owner;
+    let ownedQuery = '';
+    let queryChanged = false;
+    const ownsInput = () => window[ownerKey] === owner && String(location.href) === initialHref
+      && deepQueryAll('input[placeholder*="채팅방 이름"], input[name="keyword"], input.tf_g')[0] === input
+      && String(input.value || '') === ownedQuery;
     const allTerms = [...new Set([...(searchTermsArg || []), ...(hintsArg || [])].map(normalize).filter(Boolean))];
-    let row = findRow(allTerms);
     let usedSearchTerm = null;
     const tried = [];
-    if (!row) {
-      if (!allowSearchArg) return { ok: false, status: 'visible_chat_row_not_found_search_disabled', tried };
-      if (!input) return { ok: false, status: 'chat_search_input_not_found' };
-      for (const term of (searchTermsArg || [])) {
-        const cleanTerm = normalize(term);
-        if (!cleanTerm) continue;
-        tried.push(cleanTerm);
-        usedSearchTerm = cleanTerm;
-        input.focus();
-        setInputValue(input, cleanTerm);
-        button?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-        await sleep(1200);
-        row = findRow([cleanTerm, ...(hintsArg || [])]);
-        if (row) break;
+    let result;
+    try {
+      let row = findRow(allTerms);
+      if (!row) {
+        if (!allowSearchArg) return (result = { ok: false, status: 'visible_chat_row_not_found_search_disabled', tried });
+        for (const term of (searchTermsArg || [])) {
+          if (!ownsInput()) return (result = { ok: false, status: 'chat_search_ownership_changed', tried });
+          const cleanTerm = normalize(term);
+          if (!cleanTerm) continue;
+          tried.push(cleanTerm);
+          usedSearchTerm = cleanTerm;
+          input.focus();
+          ownedQuery = cleanTerm;
+          queryChanged = true;
+          setInputValue(input, cleanTerm);
+          button?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+          await sleep(1200);
+          if (!ownsInput()) return (result = { ok: false, status: 'chat_search_ownership_changed', tried });
+          row = findRow([cleanTerm, ...(hintsArg || [])]);
+          if (row) break;
+        }
+      }
+      if (!row) return (result = { ok: false, status: 'chat_row_not_found_after_devtools_search', tried });
+      if (!ownsInput()) return (result = { ok: false, status: 'chat_search_ownership_changed', tried });
+      const clickedText = normalize(row.innerText || row.textContent || '').slice(0, 500);
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      row.click();
+      await sleep(300);
+      return (result = { ok: true, status: 'clicked_chat_row_via_devtools', searchTerm: usedSearchTerm, tried, clickedText });
+    } catch (error) {
+      return (result = { ok: false, status: 'chat_search_exception', tried, error: String(error?.message || error).slice(0, 300) });
+    } finally {
+      const restoration = { attempted: queryChanged, restored: !queryChanged, reason: 'query_unchanged', listRows: 0 };
+      try {
+        if (queryChanged) {
+          restoration.reason = 'ownership_changed';
+          if (ownsInput()) {
+            ownedQuery = '';
+            setInputValue(input, '');
+            button?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            restoration.reason = 'list_rows_not_ready';
+            for (let attempt = 0; attempt < 10; attempt += 1) {
+              await sleep(200);
+              if (!ownsInput()) { restoration.reason = 'ownership_changed'; break; }
+              restoration.listRows = deepQueryAll('a.link_chat').length;
+              if (restoration.listRows > 0) {
+                restoration.restored = true;
+                restoration.reason = 'unfiltered_list_verified';
+                break;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        restoration.restored = false;
+        restoration.reason = 'restoration_exception';
+        restoration.error = String(error?.message || error).slice(0, 300);
+      } finally {
+        if (window[ownerKey] === owner) delete window[ownerKey];
+      }
+      result.collectorRestoration = restoration;
+      if (queryChanged && !restoration.restored) {
+        result.originalStatus = result.status;
+        result.ok = false;
+        result.status = 'chat_list_restore_failed';
       }
     }
-    if (!row) return { ok: false, status: 'chat_row_not_found_after_devtools_search', tried };
-    const clickedText = normalize(row.innerText || row.textContent || '').slice(0, 500);
-    row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-    row.click();
-    await sleep(300);
-    if (input && input.value) {
-      setInputValue(input, '');
-      button?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-    }
-    await sleep(1500);
-    return { ok: true, status: 'clicked_chat_row_via_devtools', searchTerm: usedSearchTerm, tried, clickedText };
   }.toString()})(${JSON.stringify(searchTerms)}, ${JSON.stringify(hints)}, ${JSON.stringify(Boolean(allowSearch))})`;
 }
 
@@ -7426,6 +7479,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
   timeoutMs = 20000,
   fetchImpl = fetch,
   evaluateImpl = devtoolsEvaluateOnTarget,
+  sharedGatewayIdle = isSharedHermesGatewayIdle,
   allowSearch = process.env.KAKAO_WORKER_SEARCH_TARGET_CHAT !== '0',
   evidenceMaxAttempts = 40,
   evidencePollMs = 200,
@@ -7467,6 +7521,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
 
   const mainTarget = pickKakaoMainListTarget(targetList);
   if (!mainTarget) return { status: 'main_list_target_not_found', hints };
+  if (!sharedGatewayIdle()) return { status: 'shared_browser_active_or_unknown', hints, via_devtools: true };
   const searchTerms = buildKakaoChatSearchTerms(hints);
   const openResult = await evaluateImpl(mainTarget, buildKakaoSearchAndOpenExpression(searchTerms, hints, { allowSearch }), { timeoutMs });
   if (!openResult?.ok) {
@@ -7478,7 +7533,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
         searched: Boolean(allowSearch),
         disabled: !allowSearch,
         search_terms: searchTerms,
-        tried: openResult?.tried || []
+        tried: openResult?.tried || [],
+        collector_restoration: openResult?.collectorRestoration || null
       }
     };
   }
@@ -7494,7 +7550,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
         disabled: !allowSearch,
         search_term: openResult.searchTerm || null,
         search_terms: searchTerms,
-        tried: openResult.tried || []
+        tried: openResult.tried || [],
+        collector_restoration: openResult.collectorRestoration || null
       },
       conversation_evidence: {
         source: 'live_kakao_dom_after_navigation',
@@ -7531,7 +7588,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
       disabled: !allowSearch,
       search_term: openResult.searchTerm || null,
       search_terms: searchTerms,
-      tried: openResult.tried || []
+      tried: openResult.tried || [],
+      collector_restoration: openResult.collectorRestoration || null
     },
     conversation_evidence: evidenceRead.evidence
   };
@@ -8780,6 +8838,13 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   return result;
 }
 
+function isKakaoNavigationSafetyStop(result) {
+  return [
+    'chat_search_owned_elsewhere', 'chat_search_existing_query_preserved',
+    'chat_search_ownership_changed', 'chat_list_restore_failed', 'shared_browser_active_or_unknown'
+  ].includes(result?.status);
+}
+
 export async function openKakaoTargetChatFromList(job, {
   timeoutMs = 20000,
   spawnImpl = spawn,
@@ -8787,6 +8852,7 @@ export async function openKakaoTargetChatFromList(job, {
   cdpBaseUrl = kakaoDevtoolsBaseUrlFromEnv(),
   fetchImpl = fetch,
   evaluateImpl = devtoolsEvaluateOnTarget,
+  sharedGatewayIdle = isSharedHermesGatewayIdle,
   controlMode = process.env.KAKAO_WORKER_CONTROL_MODE,
   cuaMinIdleSeconds = numberFromEnv(process.env.KAKAO_CUA_MIN_IDLE_SECONDS, 0),
   execFileImpl = execFile,
@@ -8797,11 +8863,12 @@ export async function openKakaoTargetChatFromList(job, {
   if (!hints.length) return { status: 'no_navigation_hints' };
   let devtoolsFirst = null;
   if (preferDevtools) {
-    devtoolsFirst = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch }).catch((error) => ({
+    devtoolsFirst = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch, sharedGatewayIdle }).catch((error) => ({
       status: 'devtools_first_failed',
       error: error.message.slice(0, 500)
     }));
     if (devtoolsFirst?.status === 'opened_target_chat') return devtoolsFirst;
+    if (isKakaoNavigationSafetyStop(devtoolsFirst)) return devtoolsFirst;
     if (!cuaDriverCommand) return { status: 'cua_driver_unavailable', hints, devtoolsFirst };
   }
   if (!cuaDriverCommand) return { status: 'cua_driver_unavailable', hints };
@@ -8844,8 +8911,9 @@ export async function openKakaoTargetChatFromList(job, {
     };
   }
   if (offscreenExistingConversationWindow) {
-    const devtoolsExisting = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch }).catch(() => null);
+    const devtoolsExisting = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch, sharedGatewayIdle }).catch(() => null);
     if (devtoolsExisting?.status === 'opened_target_chat') return devtoolsExisting;
+    if (isKakaoNavigationSafetyStop(devtoolsExisting)) return devtoolsExisting;
   }
   const verifiedMain = await pickVerifiedKakaoAutomationCuaWindow(rankKakaoMainListWindows(windows), {
     cuaDriverCommand,
@@ -8855,7 +8923,7 @@ export async function openKakaoTargetChatFromList(job, {
   });
   const win = verifiedMain.ok ? verifiedMain.win : null;
   if (!win) {
-    return openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch }).catch((error) => ({
+    return openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch, sharedGatewayIdle }).catch((error) => ({
       status: 'main_list_window_not_found',
       hints,
       rejected_cua_windows: verifiedMain.rejected || [],
@@ -12414,11 +12482,17 @@ export async function processProvidedJob(stdinJob, { dryRun = false, fakeDecisio
   return runAiAndMaybeWrite({ config, job: stdinJob, dryRun, fakeDecisionPath });
 }
 
-export async function processManualSend({ customerName = '', roomTitle = '', text: replyText = '', followUpId = '', attachmentPaths = [], customerDocumentAssets = false } = {}) {
-  loadEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'));
-  loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
-  loadEnvFile(path.resolve(__dirname, '.env'));
-  const config = requireConfig();
+export async function processManualSend({ customerName = '', roomTitle = '', text: replyText = '', followUpId = '', attachmentPaths = [], customerDocumentAssets = false } = {}, {
+  config: configOverride,
+  ensureTab = ensureKakaoChannelManagerTab,
+  openViaDevtools = openKakaoTargetChatViaDevtools
+} = {}) {
+  if (!configOverride) {
+    loadEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'));
+    loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
+    loadEnvFile(path.resolve(__dirname, '.env'));
+  }
+  const config = configOverride || requireConfig();
   const cleanText = text(replyText).trim();
   const cleanCustomer = text(customerName).trim();
   const cleanRoomTitle = text(roomTitle).trim();
@@ -12431,8 +12505,8 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
 
   const hints = [cleanCustomer, cleanRoomTitle].filter(Boolean);
   let navigationContext = null;
-  await ensureKakaoChannelManagerTab({ url: config.kakaoChannelManagerUrl });
-  navigationContext = await openKakaoTargetChatViaDevtools({
+  await ensureTab({ url: config.kakaoChannelManagerUrl });
+  navigationContext = await openViaDevtools({
     customer_name: cleanCustomer,
     room_title: cleanRoomTitle,
     preview_text: [cleanCustomer || cleanRoomTitle, cleanText].filter(Boolean).join(' '),
@@ -12442,6 +12516,10 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
     reason: error.message.slice(0, 500)
   }));
 
+  if (isKakaoNavigationSafetyStop(navigationContext)) {
+    return { attempted: false, sent: false, reason: navigationContext.status, navigationContext,
+      customerName: cleanCustomer, followUpId: text(followUpId).trim() || null };
+  }
   if (navigationContext?.status !== 'opened_target_chat') {
     const cuaPermission = await checkKakaoCuaFallbackAllowed({
       mode: config.workerControlMode,
@@ -12497,6 +12575,10 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
     }
   }
 
+  if (isKakaoNavigationSafetyStop(navigationContext)) {
+    return { attempted: false, sent: false, reason: navigationContext.status, navigationContext,
+      customerName: cleanCustomer, followUpId: text(followUpId).trim() || null };
+  }
   let sendResult;
   let closeResult = null;
   try {

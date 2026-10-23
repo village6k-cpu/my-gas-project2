@@ -818,6 +818,18 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices, expectedTrad
     // Date 객체를 쓰면 표시 포맷이 달라져 displayValue 완전일치 기반 대시보드/검색 매칭에서 누락됨
     var startDateStr = Utilities.formatDate(startDate, 'Asia/Seoul', 'yyyy-MM-dd');
     var endDateStr = Utilities.formatDate(endDate, 'Asia/Seoul', 'yyyy-MM-dd');
+    var billingMaster = ss.getSheetByName('계약마스터');
+    if (billingMaster && billingMaster.getLastRow() >= 2) {
+      var billingTargets = {};
+      rows.forEach(function(r) { billingTargets[String(sheet.getRange(r, 2).getDisplayValue() || '').trim()] = true; });
+      var billingRange = billingMaster.getRange(2, 1, billingMaster.getLastRow() - 1, 12);
+      var billingDisplayRows = billingRange.getDisplayValues();
+      billingRange.getValues().forEach(function(contractRow, index) {
+        if (billingTargets[String(contractRow[0] || '').trim()] && String(contractRow[11] || '').indexOf('[승인회차') !== -1) {
+          assertApprovedBillingDateChange_(contractRow, { startDate: startDateStr, startTime: startTime, endDate: endDateStr, endTime: endTime }, billingDisplayRows[index]);
+        }
+      });
+    }
     rows.forEach(function(r) {
       sheet.getRange(r, 6).setNumberFormat("@").setValue(startDateStr); // F: 반출일
       sheet.getRange(r, 7).setNumberFormat("@").setValue(startTime);    // G: 반출시간
@@ -5669,6 +5681,10 @@ function dashboardUpdateTradeDetails(tradeId, input) {
       }
     }
 
+    var billingContractRow = contractSheet.getRange(row, 1, 1, 12).getValues()[0];
+    if (String(billingContractRow[11] || '').indexOf('[승인회차') !== -1) {
+      assertApprovedBillingDateChange_(billingContractRow, { startDate: checkoutDate, startTime: checkoutTime, endDate: returnDate, endTime: returnTime }, contractSheet.getRange(row, 1, 1, 12).getDisplayValues()[0]);
+    }
     // B:H = 예약자명, 연락처, 업체명, 반출일, 반출시간, 반납일, 반납시간.
     contractSheet.getRange(row, 2, 1, 7).setValues([[
       customerName, customerPhone, company, checkoutDate, checkoutTime, returnDate, returnTime
@@ -16281,7 +16297,7 @@ function _normalizeConfirmedReservationCommit_(input) {
     confirmed: true, target_scope: true, request_id: true, source_evidence: true,
     expected_before: true, expected_period: true, desired_after: true, desired_period: true,
     expected_set_components: true, set_component_selections: true,
-    pending_request_candidate: true, customer_identity_update: true
+    pending_request_candidate: true, customer_identity_update: true, billing_rounds: true
   };
   Object.keys(input).forEach(function(key) {
     if (!allowed[key]) throw new Error("unsupported confirmed registration field: " + key);
@@ -16433,6 +16449,9 @@ function _normalizeConfirmedReservationCommit_(input) {
     throw new Error("desired_period end must be after start");
   }
   var identityUpdate = input.customer_identity_update;
+  if (input.billing_rounds !== undefined && !isApprovedBillingRounds_(input.billing_rounds)) {
+    throw new Error('billing_rounds는 1~99 사이 0.5 단위 숫자여야 합니다');
+  }
   if (identityUpdate) {
     if (requestId === null) throw new Error("customer_identity_update requires an existing pending RQ");
     _assertPendingCustomerIdentityUpdate_({name: identityUpdate.expected_name, phone: identityUpdate.expected_phone},
@@ -16444,6 +16463,7 @@ function _normalizeConfirmedReservationCommit_(input) {
     request_id: requestId,
     pending_request_candidate: pendingRequestCandidate,
     ...(identityUpdate ? {customer_identity_update: identityUpdate} : {}),
+    ...(input.billing_rounds !== undefined ? {billing_rounds: input.billing_rounds} : {}),
     source_evidence: {
       customer_request: customerRequest,
       ...(roomMemo ? {room_memo: roomMemo} : {}),
@@ -16757,6 +16777,29 @@ function _confirmedReservationRegisteredMatchRequest_(sheet, fence, period) {
   };
 }
 
+// The registration merge detector uses schedule dates, whereas the ordinary
+// duplicate guard uses contract dates. Explicit billing must also fence a drifted
+// master before replacing its pending request.
+function _findConfirmedBillingMergeCandidates_(ss, req) {
+  var master = ss.getSheetByName('계약마스터'), schedule = ss.getSheetByName('스케줄상세');
+  if (!master || !schedule) throw new Error('승인회차 등록의 계약/스케줄 사전조회가 필요합니다');
+  var contracts = {};
+  if (master.getLastRow() >= 2) master.getRange(2, 1, master.getLastRow() - 1, 10).getDisplayValues().forEach(function(row) {
+    contracts[String(row[0] || '').trim()] = { phone: _confirmRequestPhoneKey_(row[2]), status: String(row[9] || '').trim() };
+  });
+  var expected = {
+    customerName: String(req.예약자명 || '').trim(), requestPhoneKey: _confirmRequestPhoneKey_(req.연락처),
+    checkoutDate: _confirmRequestDateKey_(req.반출일), checkoutTime: _confirmRequestTimeKey_(req.반출시간),
+    returnDate: _confirmRequestDateKey_(req.반납일), returnTime: _confirmRequestTimeKey_(req.반납시간)
+  };
+  var found = {};
+  if (schedule.getLastRow() >= 2) schedule.getRange(2, 1, schedule.getLastRow() - 1, 13).getDisplayValues().forEach(function(row) {
+    var tid = String(row[1] || '').trim();
+    if (isRegisterMergeCandidate_(row, contracts[tid], expected)) found[tid] = true;
+  });
+  return Object.keys(found);
+}
+
 function _confirmedReservationResult_(normalized, effectiveRequestId, replacedReqIDs, registrationOutcome, expectedFinalSetComponents) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("확인요청");
@@ -16836,6 +16879,10 @@ function _confirmedReservationResult_(normalized, effectiveRequestId, replacedRe
     expectedFinalSetComponents
   );
   var expectedDiscount = _normalizeDiscountTypeOrBlank_(group.discount);
+  if (normalized.billing_rounds !== undefined &&
+      (state.contract.rounds !== normalized.billing_rounds || state.contract.billingRounds !== normalized.billing_rounds)) {
+    throw new Error('registered reservation authoritative readback mismatch: 승인회차');
+  }
   if (expectedDiscount && state.contract.discountType !== expectedDiscount) {
     throw new Error('registered reservation authoritative readback mismatch: 할인유형');
   }
@@ -16908,6 +16955,15 @@ function commitConfirmedReservation(args) {
     var catalogReviewIssues = _collectConfirmedReservationCatalogIssues_(ss, normalized.desired_after);
     var initialFence;
     if (normalized.request_id === null) {
+      if (normalized.billing_rounds !== undefined) {
+        var billingBootstrap = _confirmedReservationBootstrapRequest_(normalized);
+        if (_findRegisteredTradesForConfirmRequest_(ss, billingBootstrap).length ||
+            _findConfirmedBillingMergeCandidates_(ss, billingBootstrap).length) {
+          var billingBootstrapError = new Error('승인회차는 기존 거래와 합치지 않습니다. 기존 거래 회차 정정 경로를 사용하세요');
+          billingBootstrapError.code = 'registered_trade_exists';
+          throw billingBootstrapError;
+        }
+      }
       stage = "pending_request_bootstrap";
       var bootstrap = _insertAndCheckRequest(_confirmedReservationBootstrapRequest_(normalized));
       effectiveRequestId = String(bootstrap && bootstrap.reqID || "").trim().toUpperCase();
@@ -16953,6 +17009,14 @@ function commitConfirmedReservation(args) {
       normalized.set_component_selections
     );
     var registeredTradeIds = [];
+    if (normalized.billing_rounds !== undefined) {
+      var billingRequest = _confirmedReservationRegisteredMatchRequest_(sheet, initialFence, normalized.desired_period);
+      if (normalized.customer_identity_update) {
+        billingRequest.예약자명 = normalized.customer_identity_update.name;
+        billingRequest.연락처 = normalized.customer_identity_update.phone;
+      }
+      registeredTradeIds = _findConfirmedBillingMergeCandidates_(ss, billingRequest);
+    }
     [normalized.expected_period, normalized.desired_period].forEach(function(period) {
       _findRegisteredTradesForConfirmRequest_(
         ss,
@@ -17035,7 +17099,8 @@ function commitConfirmedReservation(args) {
         expected_set_components: current.expectedSetComponents,
         expected_period: normalized.desired_period
       },
-      confirmedReservationOperationId: operationId
+      confirmedReservationOperationId: operationId,
+      ...(normalized.billing_rounds !== undefined ? { billingRounds: normalized.billing_rounds } : {})
     });
     appliedStages.push("registration");
     stage = "authoritative_readback";
@@ -17125,6 +17190,10 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     typeof registerOptions.preAcquiredScriptLock.releaseLock === "function";
   var suppressCustomerNotification = hasTransferredConfirmedLock &&
     registerOptions.suppressCustomerNotification === true;
+  if (registerOptions.billingRounds !== undefined &&
+      (!hasTransferredConfirmedLock || !isApprovedBillingRounds_(registerOptions.billingRounds))) {
+    throw new Error('승인회차는 검증된 confirmed 등록 경로에서만 지정할 수 있습니다');
+  }
   var confirmedReservationOperationId = hasTransferredConfirmedLock
     ? String(registerOptions.confirmedReservationOperationId || "").trim().toLowerCase()
     : "";
@@ -17636,6 +17705,13 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     }
   } catch (e) { }
 
+  var approvedBillingNote = '';
+  if (hasTransferredConfirmedLock && registerOptions.billingRounds !== undefined) {
+    회차 = registerOptions.billingRounds;
+    approvedBillingNote = writeApprovedBillingRoundsNote_('', 회차, {
+      startDate: 반출일str, startTime: 반출시간str, endDate: 반납일str, endTime: 반납시간str
+    });
+  }
   var registrationSupplyNotes = {};
   if(typeof inventorySupplyApplyRows_ === 'function') {
     var supplyRows=mergeSchedulePlan.writeSourceIndexes.map(function(i){var d=allData[i];return ['',거래ID,String(d[16]||'').indexOf('[세트]')===0?String(d[16]).slice(4):d[5],d[5],d[6]||1,반출일str,반출시간str,반납일str,반납시간str,'대기','',0,예약자명];});
@@ -17656,7 +17732,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   contractSheet.getRange(newContractRow, 1, 1, 12).setValues([[
     거래ID, 예약자명, 연락처 || "", "",    // D 업체명/별명은 공란 (필요 시 수동)
     반출일str, 반출시간str, 반납일str, 반납시간str,
-    회차, "예약", 할인유형 || "일반", ""
+    회차, "예약", 할인유형 || "일반", approvedBillingNote
   ]]);
     } else if (mergeTargetTID) {
       // 합침 등록: 카톡 확정 할인유형이 기존 거래와 다르면 K열을 갱신해
@@ -18358,6 +18434,11 @@ function extendRegisteredTrade(args) {
   }
   if (contractRow < 0) throw new Error('계약마스터에 거래ID가 없습니다: ' + tradeId);
   if (!startDate || !startTime || !currentEndDate || !currentEndTime) throw new Error('기존 대여일시를 읽을 수 없습니다: ' + tradeId);
+  if (String(contractData[ci][11] || '').indexOf('[승인회차') >= 0) {
+    assertApprovedBillingDateChange_(contractData[ci], {
+      startDate: startDate, startTime: startTime, endDate: endDate, endTime: endTime
+    }, contractDisplay[ci]);
+  }
 
   // 이미 확정된 기존 대여 구간은 다시 검사하지 않고, 실제로 늘어나는 구간만 검사한다.
   // 기존 가용확인 엔진과 같은 파서로 비교해, 스프레드시트 시간대 차이에 영향을 받지 않는다.
@@ -18480,9 +18561,6 @@ function changeDatesForContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
-  supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
-  try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {} // 영향 날짜 캐시 무효화
-
   if (!새반출일Raw || !새반납일Raw) {
     sheet.getRange(row, 15).setValue("❌ B~E열에 새 반출/반납 일시 입력 필요");
     sheet.getRange(row, 14).clearContent();
@@ -18509,6 +18587,12 @@ function changeDatesForContract(sheet, row) {
     return;
   }
 
+  var billingContractRow = contractSheet.getRange(contractRowIndex, 1, 1, 12).getValues()[0];
+  if (String(billingContractRow[11] || '').indexOf('[승인회차') !== -1) {
+    assertApprovedBillingDateChange_(billingContractRow, { startDate: 새반출일str, startTime: 새반출시간str, endDate: 새반납일str, endTime: 새반납시간str }, contractSheet.getRange(contractRowIndex, 1, 1, 12).getDisplayValues()[0]);
+  }
+  supaMarkTradeDirty_(거래ID);
+  try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {}
   contractSheet.getRange(contractRowIndex, 5).setValue(새반출일str);
   contractSheet.getRange(contractRowIndex, 6).setValue(새반출시간str);
   contractSheet.getRange(contractRowIndex, 7).setValue(새반납일str);
@@ -21232,9 +21316,8 @@ function normalizeRegisteredTradeCorrection_(args) {
     if (!args.roundsChange || typeof args.roundsChange !== 'object' || Array.isArray(args.roundsChange) ||
         Object.keys(args.roundsChange).some(function(key) { return key !== 'expectedRounds' && key !== 'rounds'; }) ||
         Object.keys(args.roundsChange).length !== 2 ||
-        !Number.isSafeInteger(args.roundsChange.expectedRounds) || args.roundsChange.expectedRounds < 1 || args.roundsChange.expectedRounds > 99 ||
-        !Number.isSafeInteger(args.roundsChange.rounds) || args.roundsChange.rounds < 1 || args.roundsChange.rounds > 99) {
-      throw new Error('roundsChange expectedRounds/rounds는 각각 1~99 정수여야 합니다');
+        !isApprovedBillingRounds_(args.roundsChange.expectedRounds) || !isApprovedBillingRounds_(args.roundsChange.rounds)) {
+      throw new Error('roundsChange expectedRounds/rounds는 각각 1~99 사이 0.5 단위 숫자여야 합니다');
     }
     if (args.roundsChange.expectedRounds === args.roundsChange.rounds) throw new Error('roundsChange는 실제 회차 변경이어야 합니다');
     roundsChange = { expectedRounds: args.roundsChange.expectedRounds, rounds: args.roundsChange.rounds };
@@ -21564,8 +21647,8 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
   if (!contractSheet || !scheduleSheet) throw new Error('계약마스터/스케줄상세 중 일부가 없습니다');
 
   var contractLast = contractSheet.getLastRow();
-  var contractRaw = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 11).getValues() : [];
-  var contractDisplay = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 11).getDisplayValues() : [];
+  var contractRaw = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 12).getValues() : [];
+  var contractDisplay = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 12).getDisplayValues() : [];
   var contractMatches = [];
   for (var ci = 0; ci < contractRaw.length; ci++) {
     if (String(contractRaw[ci][0] || '').trim() === tradeId) contractMatches.push(ci);
@@ -21581,6 +21664,10 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
     status: String(contractDisplay[cidx][9] || contractRaw[cidx][9] || '').trim(),
     discountType: _normalizeDiscountTypeOrBlank_(contractDisplay[cidx][10] || contractRaw[cidx][10])
   };
+  var billingNote = String(contractRaw[cidx][11] || '');
+  if (billingNote.indexOf('[승인회차') !== -1) {
+    contract.billingRounds = readApprovedBillingRounds_(billingNote, contractRaw[cidx][8], contract);
+  }
 
   var scheduleLast = scheduleSheet.getLastRow();
   var scheduleRaw = scheduleLast >= 2 ? scheduleSheet.getRange(2, 1, scheduleLast - 1, 13).getValues() : [];
@@ -22196,6 +22283,7 @@ function registeredTradeRoundsResult_(correction, receipt, snapshot, replayed) {
   }
   var state = readRegisteredTradeCorrectionState_(correction.tradeId);
   var expectedContract = Object.assign({}, receipt.beforeState.contract, { rounds: correction.roundsChange.rounds });
+  if (receipt.billingRounds !== undefined) expectedContract.billingRounds = receipt.billingRounds;
   if (JSON.stringify(state.contract) !== JSON.stringify(expectedContract) ||
       JSON.stringify(state.schedule) !== JSON.stringify(receipt.beforeState.schedule)) {
     throw new Error('rounds correction unrelated state changed');
@@ -22235,7 +22323,7 @@ function registeredTradeRoundsResult_(correction, receipt, snapshot, replayed) {
 }
 
 // A rounds operation owns one permanent receipt. Once claimed, neither its exact
-// I-cell write nor its strict regeneration is ever replayed after an interruption.
+// I/L write nor its strict regeneration is ever replayed after an interruption.
 function correctRegisteredTradeRounds_(correction) {
   var props = PropertiesService.getScriptProperties(), lock = LockService.getScriptLock();
   var key = 'registeredTradeRoundsReceipt_v1_' + correction.operationId;
@@ -22268,12 +22356,14 @@ function correctRegisteredTradeRounds_(correction) {
     readRegisteredTradePriceLedger_(correction.tradeId);
     var expected = JSON.parse(JSON.stringify(snapshot));
     expected.contract[8] = correction.roundsChange.rounds;
+    expected.contract[11] = writeApprovedBillingRoundsNote_(snapshot.contract[11], correction.roundsChange.rounds, beforeState.contract);
     receipt = {
       version: 1,
       tradeId: correction.tradeId,
       requestDigest: digest,
       phase: 'claimed',
       beforeState: beforeState,
+      billingRounds: correction.roundsChange.rounds,
       beforeDigest: registeredTradePriceSnapshotDigest_(snapshot),
       afterDigest: registeredTradePriceSnapshotDigest_(expected),
       stages: []
@@ -22284,7 +22374,9 @@ function correctRegisteredTradeRounds_(correction) {
       throw new Error('rounds correction baseline drifted before write');
     }
     SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터')
-      .getRange(snapshot.contractRow, 9).setValue(correction.roundsChange.rounds);
+      .getRange(snapshot.contractRow, 9, 1, 4).setValues([[
+        correction.roundsChange.rounds, snapshot.contract[9], snapshot.contract[10], expected.contract[11]
+      ]]);
     SpreadsheetApp.flush();
     if (registeredTradePriceSnapshotDigest_(readRegisteredTradeRoundsSnapshot_(correction.tradeId)) !== receipt.afterDigest) {
       throw new Error('rounds correction immediate I열 readback mismatch');
@@ -22403,6 +22495,15 @@ function correctRegisteredTrade(args) {
   var failure = null;
   try {
     lockedBaseline = readRegisteredTradeCorrectionState_(correction.tradeId, false);
+    if (correction.dateChange && lockedBaseline.contract.billingRounds !== undefined) {
+      var approvedPeriod = lockedBaseline.contract;
+      var nextPeriod = correction.dateChange;
+      if (nextPeriod.newStartDate !== approvedPeriod.startDate || nextPeriod.newEndDate !== approvedPeriod.endDate ||
+          (nextPeriod.startTime !== undefined && nextPeriod.startTime !== approvedPeriod.startTime) ||
+          (nextPeriod.endTime !== undefined && nextPeriod.endTime !== approvedPeriod.endTime)) {
+        throw new Error('승인회차가 있는 계약의 기간 변경은 회차 재승인이 필요합니다');
+      }
+    }
     if (correction.expectedPeriod && (
       lockedBaseline.contract.startDate !== correction.expectedPeriod.startDate ||
       lockedBaseline.contract.startTime !== correction.expectedPeriod.startTime ||
@@ -22926,7 +23027,7 @@ function changeRegisteredTradeDates(args, options) {
     }
 
     var contractLast = contractSheet.getLastRow();
-    var contractValues = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 8).getValues() : [];
+    var contractValues = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 12).getValues() : [];
     var contractDisplays = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 8).getDisplayValues() : [];
     var contractRows = [];
     for (var ci = 0; ci < contractValues.length; ci++) {
@@ -22952,6 +23053,11 @@ function changeRegisteredTradeDates(args, options) {
     var endMs = new Date(newEndDate + 'T' + endTime + ':00+09:00').getTime();
     if (isNaN(startMs) || isNaN(endMs) || endMs <= startMs) throw new Error('새 반납일시는 새 반출일시 이후여야 합니다');
     var requestedRounds = calcRentalDays(newStartDate, startTime, newEndDate, endTime);
+    if (String(contractValues[contractIndex][11] || '').indexOf('[승인회차') !== -1) {
+      requestedRounds = assertApprovedBillingDateChange_(contractValues[contractIndex], {
+        startDate: newStartDate, startTime: startTime, endDate: newEndDate, endTime: endTime
+      }, contractDisplays[contractIndex]);
+    }
 
     var scheduleLast = scheduleSheet.getLastRow();
     var scheduleValues = scheduleLast >= 2 ? scheduleSheet.getRange(2, 1, scheduleLast - 1, 13).getValues() : [];

@@ -516,6 +516,10 @@ function handleRequestCore_(e) {
         var runParams = Object.assign({}, params);
         if (postBody.args) runParams.args = postBody.args;
         var runFuncName = String(params.func || postBody.func || "");
+        if (runFuncName === "reconcilePendingRequest") {
+          var reconciliationMethodError = requireVillagePost_(e, "reconcilePendingRequest");
+          if (reconciliationMethodError) return reconciliationMethodError;
+        }
         // 확인요청을 바꾸는 run 함수들은 목록 캐시를 무효화한다
         if (/Request|commitConfirmedReservation|deleteTrade|recoverPending/i.test(runFuncName)) invalidateConfirmListCache_();
         return jsonResponse(runFunction(runFuncName, runParams));
@@ -1600,6 +1604,7 @@ function runFunction(funcName, params) {
     "syncAuditFromMaster",
     "insertAndCheckRequest",
     "commitConfirmedReservation",
+    "reconcilePendingRequest",
     "updateRequest",
     "lookupConfirmRequestCustomer",
     "updateRequestItem",
@@ -1769,6 +1774,11 @@ function runFunction(funcName, params) {
         result: confirmedResult,
         executionTime: (new Date() - startTime) + "ms"
       };
+    }
+    if (funcName === "reconcilePendingRequest") {
+      var reconcileArgs = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : null;
+      var reconcileResult = reconcilePendingRequest(reconcileArgs);
+      return { success: reconcileResult.ok === true, function: funcName, result: reconcileResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "updateRequest" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;

@@ -356,7 +356,7 @@ console.log('audit-round-5 checks OK');
 // ── 감사 6차: 드래그 날짜 텍스트 포맷·다중행 dirty ──
 const backend6 = read('checkAvailability.js');
 assert(
-  /updateScheduleTime[\s\S]{0,2600}setNumberFormat\("@"\)\.setValue\(startDateStr\)/.test(backend6),
+  /setNumberFormat\("@"\)\.setValue\(startDateStr\)/.test(backend6.slice(backend6.indexOf('function updateScheduleTime('), backend6.indexOf('\nfunction ', backend6.indexOf('function updateScheduleTime(') + 1))),
   'timeline drag must write dates as text-formatted strings like registration does'
 );
 assert(

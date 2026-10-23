@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { isApprovedBillingRounds_ } = require('../../approvedBillingRounds.js');
 const { normalizePendingCustomerIdentity, normalizePendingBaselinePeriod, normalizeRoomMemoEvidence } = require('./pending-customer-identity.js');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 const { validateVillageRentalTimeSource } = require('./village-time-contract.js');
@@ -339,7 +340,7 @@ function normalizeConfirmationRequest(request) {
 const CONFIRMED_REGISTRATION_FIELDS = new Set([
   'confirmed', 'target_scope', 'request_id', 'source_evidence',
   'expected_before', 'expected_period', 'desired_after', 'desired_period',
-  'expected_set_components', 'set_component_selections', 'pending_request_candidate', 'customer_identity_update'
+  'expected_set_components', 'set_component_selections', 'pending_request_candidate', 'customer_identity_update', 'billing_rounds'
 ]);
 const CONFIRMED_REGISTRATION_EVIDENCE_FIELDS = new Set([
   'customer_request', 'staff_confirmation', 'conversation_revision',
@@ -470,6 +471,7 @@ function normalizeConfirmedRegistrationSetSelections(value) {
 
 function normalizeConfirmedReservationCommit(value) {
   assertOnlyAllowedFields(value, CONFIRMED_REGISTRATION_FIELDS, 'confirmed registration');
+  if (value.billing_rounds !== undefined && !isApprovedBillingRounds_(value.billing_rounds)) throw new Error('billing_rounds must be a number from 1 to 99 in 0.5 increments');
   if (value.confirmed !== true) throw new Error('confirmed must be exactly true');
   if (value.target_scope !== 'pending_request') throw new Error('target_scope must be pending_request');
   let requestId = null;
@@ -565,6 +567,7 @@ function normalizeConfirmedReservationCommit(value) {
     target_scope: 'pending_request',
     request_id: requestId,
     ...(identityUpdate ? { customer_identity_update: identityUpdate } : {}),
+    ...(value.billing_rounds !== undefined ? { billing_rounds: value.billing_rounds } : {}),
     ...(requestId === null ? { pending_request_candidate: pendingRequestCandidate } : {}),
     source_evidence: {
       ...(roomMemo ? { room_memo: roomMemo } : {}),
