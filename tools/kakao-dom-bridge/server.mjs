@@ -377,6 +377,7 @@ export function buildHealthConfig(config = {}) {
     workerDryRun: Boolean(config.workerDryRun),
     windowsWritesEnabled: Boolean(config.windowsWritesEnabled),
     startupCatchupSupported: Boolean(config.startupCatchupSupported),
+    startupBackgroundWorkHeld: config.hermesTransport === 'gateway_no_send',
     scheduleOwnerReviewRequired: true,
     killSwitchPolicyEnforced: true
   };
@@ -6861,6 +6862,12 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     console.info(`[dom-bridge] queue dir: ${CONFIG.queueDir}`);
     console.info(`[dom-bridge] supabase: ${CONFIG.supabaseUrl && CONFIG.supabaseTable ? 'enabled' : 'disabled'}`);
     console.info(`[dom-bridge] worker: ${CONFIG.workerCommand ? CONFIG.workerCommand : 'disabled'}`);
+    // No-send startup must not replay historical applications or emit Slack notifications.
+    // Leave durable obligations pending; this is not a blanket guard on explicit HTTP actions.
+    if (CONFIG.hermesTransport === 'gateway_no_send') {
+      console.info('[dom-bridge] startup background work held in gateway_no_send mode');
+      return;
+    }
     if (gatewayTransportEnabled) {
       const coordinator = getGatewayResultApplicationCoordinator();
       (async () => {
