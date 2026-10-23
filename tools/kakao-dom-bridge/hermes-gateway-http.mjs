@@ -391,7 +391,7 @@ export function createHermesGatewayHttpHandler({
   const confirmedReservationCommitInFlight = new Map();
 
   function triggerOptionalAuditProjectionRecovery() {
-    if (typeof recoverAuditProjections !== 'function') return;
+    if (transport === 'gateway_no_send' || typeof recoverAuditProjections !== 'function') return;
     Promise.resolve()
       .then(() => recoverAuditProjections())
       .catch(() => {});
@@ -414,7 +414,7 @@ export function createHermesGatewayHttpHandler({
         const consumerId = String(url.searchParams.get('consumer_id') || '').trim();
         if (!consumerId) throw requestError(400, 'consumer_id_required');
         const claimed = await channel.claim({ consumerId, waitMs: parseWaitMs(url.searchParams.get('wait_ms') || '0') });
-        if (typeof recoverFailureNotifications === 'function') {
+        if (transport !== 'gateway_no_send' && typeof recoverFailureNotifications === 'function') {
           await Promise.resolve(recoverFailureNotifications()).catch(() => {});
         }
         triggerOptionalAuditProjectionRecovery();
@@ -448,7 +448,7 @@ export function createHermesGatewayHttpHandler({
         const body = await readJsonBody(req);
         requiredLeaseId(body);
         const completed = await channel.complete(body);
-        if (typeof enqueueResultApplication === 'function') {
+        if (transport !== 'gateway_no_send' && typeof enqueueResultApplication === 'function') {
           try {
             await enqueueResultApplication(completed);
           } catch {
@@ -463,7 +463,7 @@ export function createHermesGatewayHttpHandler({
         const body = await readJsonBody(req);
         requiredLeaseId(body);
         await channel.recordOutcome(body);
-        if (typeof recoverFailureNotifications === 'function') {
+        if (transport !== 'gateway_no_send' && typeof recoverFailureNotifications === 'function') {
           await Promise.resolve(recoverFailureNotifications()).catch(() => {});
         }
         triggerOptionalAuditProjectionRecovery();
@@ -965,7 +965,7 @@ export function createHermesGatewayHttpHandler({
       }
 
       if (req.method === 'GET' && url.pathname === '/hermes/v1/status') {
-        const status = await channel.status();
+        const status = await channel.status({ readOnly: true });
         const current = now();
         const currentMs = current instanceof Date ? current.getTime() : Number(current);
         sendJson(res, 200, buildGatewayHealthReadback({

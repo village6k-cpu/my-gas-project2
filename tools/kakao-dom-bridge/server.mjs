@@ -6672,13 +6672,18 @@ const server = http.createServer(async (req, res) => {
 
     if (await gatewayHttpHandler(req, res, url)) return;
 
+    // Gateway dry-run decisions remain available; general operational POSTs can send or write.
+    if (CONFIG.hermesTransport === 'gateway_no_send' && req.method === 'POST') {
+      return json(res, 403, { ok: false, error: 'writes_disabled' });
+    }
+
     if (req.method === 'GET' && url.pathname === '/health') {
       await workOrchestratorImmediateRuntime.refreshBacklogHealth();
       const workOrchestratorInvariantHealth = await readBridgeWorkOrchestratorHealth({
         store: workOrchestratorStore,
         reportOnly: CONFIG.workOrchestrator.reportOnlyEnabled
       });
-      const gatewayStatus = gatewayChannel ? await gatewayChannel.status() : {};
+      const gatewayStatus = gatewayChannel ? await gatewayChannel.status({ readOnly: true }) : {};
       const documentExecutionConfig = gatewayTransportEnabled
         ? resolveGatewayDocumentConfig(CONFIG, getKakaoWorkerRuntimeConfigForTransport())
         : {};

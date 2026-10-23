@@ -182,7 +182,7 @@ test('apply requires explicit service-role config and inserts bounded historical
 });
 
 test('backfill source has no business executor, messaging, browser, or worker dependency', async () => {
-  const source = await readFile(path.resolve('scripts/windows/backfill-kakao-automation-audit.mjs'), 'utf8');
+  const source = await readFile(new URL('../../scripts/windows/backfill-kakao-automation-audit.mjs', import.meta.url), 'utf8');
   for (const forbidden of [
     'worker.mjs', 'server.mjs', 'checkAvailability', 'sheetAPI', 'playwright', 'puppeteer',
     'sendKakao', 'sendSlack', 'appendToSheet', 'executeVillage', 'prepareKakao',

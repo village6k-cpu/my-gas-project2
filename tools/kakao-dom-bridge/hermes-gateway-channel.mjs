@@ -401,6 +401,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   };
   const jobs = new Map();
   let initialized = false;
+  let directoryReady = false;
   let needsReconciliation = false;
   let needsStartupOperationReconciliation = false;
   let queueOrder = 0;
@@ -447,10 +448,19 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     }
   }
 
-  async function initialize() {
+  async function initialize({ readOnly = false } = {}) {
+    if (!readOnly && !directoryReady) {
+      await fs.mkdir(queueDirectory, { recursive: true });
+      directoryReady = true;
+    }
     if (initialized) return;
-    await fs.mkdir(queueDirectory, { recursive: true });
-    for (const name of await fs.readdir(queueDirectory)) {
+    let names;
+    try { names = await fs.readdir(queueDirectory); }
+    catch (error) {
+      if (!readOnly || error.code !== 'ENOENT') throw error;
+      return;
+    }
+    for (const name of names) {
       if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
       const job = JSON.parse(await fs.readFile(path.join(queueDirectory, name), 'utf8'));
       if (!JOB_STATES.has(job.state) || !job.job_id || path.basename(fileFor(job.job_id)) !== name) {
@@ -593,14 +603,14 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     needsStartupOperationReconciliation = false;
   }
 
-  async function mutate(operation) {
+  async function mutate(operation, { readOnly = false } = {}) {
     const previous = mutationTail;
     let release;
     mutationTail = new Promise((resolve) => { release = resolve; });
     await previous;
     try {
-      await initialize();
-      await reconcilePending();
+      await initialize({ readOnly });
+      if (!readOnly) await reconcilePending();
       return await operation();
     } finally {
       release();
@@ -1249,7 +1259,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         return job ? cloneHydrated(job) : null;
       });
     },
-    async status() {
+    async status({ readOnly = false } = {}) {
       return mutate(async () => {
         const counts = Object.fromEntries([...JOB_STATES].map((state) => [state, 0]));
         const applicationCounts = Object.fromEntries([...APPLICATION_STATES].map((state) => [state, 0]));
@@ -1356,7 +1366,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
             resident_local_context_jobs: residentJobs.filter((job) => Object.hasOwn(job, 'local_context')).length
           }
         };
-      });
+      }, { readOnly });
     }
   };
 }
