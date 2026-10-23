@@ -1076,6 +1076,7 @@ test('confirmed registration receipt preserves authoritative partial-write stage
 
 test('confirmed registration executor rejects success when the authoritative request readback is incomplete', async () => {
   const registration = confirmedRegistrationFixture();
+  let commitCalls = 0;
   const gatewayJob = { jobId: 'job-request-readback', roomKey: 'room-request-readback', roomRevision: 7 };
   const result = structuredClone(confirmedRegistrationReceiptFixture(gatewayJob).authoritative_result);
   result.authoritative.request.topLevelEquipItems[0].qty = 2;
@@ -1088,12 +1089,14 @@ test('confirmed registration executor rejects success when the authoritative req
       randomUUID: () => 'receipt-request-readback',
       now: () => new Date('2026-09-07T00:00:00.000Z'),
       assertCurrentClaim: async () => {},
-      commitConfirmedReservation: async () => result
+      commitConfirmedReservation: async () => { commitCalls += 1; return result; }
     }
   }, {
     operationFence: { operation_id: '11111111-2222-4333-8444-555555555555' }
   });
-  assert.equal(receipt.status, 'failed');
+  assert.equal(commitCalls, 1, 'an applied registration must never be replayed');
+  assert.equal(receipt.status, 'partial_success');
+  assert.ok(receipt.applied_stages.includes('registration'));
   assert.equal(receipt.error.type, 'invalid_authoritative_result');
 });
 
@@ -6783,7 +6786,7 @@ function runCaptureSocketFixture(mode, eventTarget = true) {
       process.exitCode = status === 'rejected' ? 1 : 0;
     };
     openKakaoTargetChatViaDevtools({ customer_name: 'Fixture' }, {
-      cdpBaseUrl: 'http://fixture.invalid', timeoutMs: ${mode.includes('timeout') ? 40 : 5000},
+      sharedGatewayIdle: () => true, cdpBaseUrl: 'http://fixture.invalid', timeoutMs: ${mode.includes('timeout') ? 40 : 5000},
       fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify(targets) })
     }).then(result => finish('resolved', result.status), error => finish('rejected', error.message));
   `;
@@ -6849,7 +6852,7 @@ test('ensureKakaoChannelManagerTabViaDevtools reuses automation profile tab with
   };
 
   const result = await ensureKakaoChannelManagerTabViaDevtools({
-    cdpBaseUrl: 'http://127.0.0.1:9223',
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
     fetchImpl
   });
 
@@ -6965,7 +6968,7 @@ test('same-target Kakao navigation is marked unsafe to close', async () => {
   const result = await openKakaoTargetChatViaDevtools({
     room_key: 'chat:123', customer_name: 'Customer', preview_text: 'Customer reservation request'
   }, {
-    cdpBaseUrl: 'http://127.0.0.1:9223',
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
     fetchImpl,
     evaluateImpl: async (target) => target.url.endsWith('/chats/')
       ? { ok: true, status: 'clicked_chat_row_via_devtools', searchTerm: 'Customer', tried: ['Customer'] }
@@ -6993,7 +6996,7 @@ test('openKakaoTargetChatViaDevtools selects the exact room target when the popu
     room_key: 'chat:4977448429395319',
     customer_name: '한강희',
     preview_text: '한강희 죄송합니다 사장님 감사드립니다'
-  }, { cdpBaseUrl: 'http://127.0.0.1:9223', fetchImpl, evaluateImpl });
+  }, { sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223', fetchImpl, evaluateImpl });
 
   assert.equal(result.status, 'opened_target_chat');
   assert.equal(result.already_open, true);
@@ -7028,7 +7031,7 @@ test('openKakaoTargetChatViaDevtools waits past a header-only Kakao render until
     customer_name: '이상율',
     preview_text: '예약 양식'
   }, {
-    cdpBaseUrl: 'http://127.0.0.1:9223',
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
     fetchImpl,
     evaluateImpl,
     evidenceMaxAttempts: 2,
@@ -7048,7 +7051,7 @@ test('openKakaoTargetChatViaDevtools preserves DOM-side message roles and order 
   const result = await openKakaoTargetChatViaDevtools({
     room_key: 'chat:4981161999642866', customer_name: '테스트 고객'
   }, {
-    cdpBaseUrl: 'http://127.0.0.1:9223',
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
     fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify(targets) }),
     evaluateImpl: async () => ({
       title: targets[0].title,
@@ -7083,7 +7086,7 @@ test('openKakaoTargetChatViaDevtools fails closed when Kakao stays header-only',
     customer_name: '이상율',
     preview_text: '예약 양식'
   }, {
-    cdpBaseUrl: 'http://127.0.0.1:9223',
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
     fetchImpl,
     evaluateImpl: async () => {
       evidenceReads += 1;
@@ -7416,6 +7419,143 @@ test('openKakaoTargetChatFromList skips Kakao search typing when search fallback
   assert.ok(!calls.some((c) => c.args.includes('type_text')));
 });
 
+async function runKakaoSearchExpressionFixture(options = {}) {
+  let value = options.initialQuery || '';
+  const events = [], location = { href: 'https://business.kakao.com/space/123/channel/_xhPMls/chats' };
+  let timers = 0, clicks = 0, errorThrown = false, expressionResult;
+  class Input {
+    get value() { return value; }
+    set value(next) { value = next; }
+    focus() { events.push('focus'); }
+    dispatchEvent(event) { events.push('input:' + event.type + ':' + value); }
+  }
+  class DomEvent { constructor(type) { this.type = type; } }
+  const input = new Input();
+  const row = { innerText: 'target customer', dispatchEvent() { clicks++; }, click() { clicks++; } };
+  const ordinary = { innerText: 'another customer' };
+  const button = { dispatchEvent() {
+    events.push('search:' + value);
+    if (options.throwDuringSearch && value && !errorThrown) { errorThrown = true; throw Error('search dispatch failed'); }
+  } };
+  const document = { querySelectorAll(selector) {
+    if (selector.startsWith('input[')) return [input];
+    if (selector.startsWith('button.')) return [button];
+    if (selector === 'iframe' || selector === '*') return [];
+    if (selector.startsWith('a.link_chat')) {
+      if (!value) return options.neverRestoreRows ? [] : [ordinary];
+      return options.found && value === 'target customer' ? [row] : [];
+    }
+    return [];
+  } };
+  const window = { HTMLInputElement: Input, location };
+  if (options.otherOwner) window.__villageKakaoSearchOwner = options.otherOwner;
+  const context = { window, document, location, Event: DomEvent, InputEvent: DomEvent, MouseEvent: DomEvent,
+    setTimeout(fn) { timers++; options.onTimer?.({ input, window, location, timers }); Promise.resolve().then(fn); } };
+  const target = { id: 'list', type: 'page', title: '카카오비즈니스 파트너센터', url: location.href, webSocketDebuggerUrl: 'ws://fixture' };
+  await openKakaoTargetChatViaDevtools({ customer_name: 'target customer', preview_text: 'target customer' }, {
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
+    allowSearch: options.allowSearch !== false,
+    sharedGatewayIdle: () => options.sharedIdle !== false,
+    fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify([target]) }),
+    evaluateImpl: async (_target, expression) => {
+      expressionResult = await vm.runInNewContext(expression, context);
+      return expressionResult;
+    }
+  });
+  return { value, events, clicks, timers, expressionResult, owner: window.__villageKakaoSearchOwner };
+}
+
+const KAKAO_NAVIGATION_SAFETY_STOPS = [
+  'chat_search_owned_elsewhere', 'chat_search_existing_query_preserved',
+  'chat_search_ownership_changed', 'chat_list_restore_failed', 'shared_browser_active_or_unknown'
+];
+
+test('Kakao navigation safety stops never fall through to CUA spawning', async () => {
+  for (const status of KAKAO_NAVIGATION_SAFETY_STOPS) {
+    let spawnCalls = 0;
+    const result = await openKakaoTargetChatFromList({ customer_name: 'target customer' }, {
+      cdpBaseUrl: 'http://fixture', controlMode: 'devtools_first', sharedGatewayIdle: () => true,
+      fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify([
+        { id: 'list', type: 'page', title: '카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats', webSocketDebuggerUrl: 'ws://fixture' }
+      ]) }),
+      evaluateImpl: async () => ({ ok: false, status }),
+      spawnImpl() { spawnCalls++; throw new Error('CUA must not bypass a navigation safety stop'); }
+    });
+    assert.equal(result.status, status);
+    assert.equal(spawnCalls, 0);
+  }
+});
+
+test('manual send returns shared navigation safety stops before CUA or send', async () => {
+  for (const status of KAKAO_NAVIGATION_SAFETY_STOPS) {
+    const navigation = { status, via_devtools: true };
+    const result = await workerModule.processManualSend({ customerName: 'fixture', text: 'fixture message' }, {
+      config: { autoSendTimeoutMs: 10, customerDocumentAssetPaths: [] },
+      ensureTab: async () => {}, openViaDevtools: async () => navigation
+    });
+    assert.equal(result.attempted, false);
+    assert.equal(result.sent, false);
+    assert.equal(result.reason, status);
+    assert.equal(result.navigationContext, navigation);
+  }
+});
+
+test('Kakao search failure restores and verifies the collector list before returning', async () => {
+  const result = await runKakaoSearchExpressionFixture();
+  assert.equal(result.expressionResult.status, 'chat_row_not_found_after_devtools_search');
+  assert.equal(result.value, '');
+  assert.equal(result.expressionResult.collectorRestoration.restored, true);
+  assert.ok(result.expressionResult.collectorRestoration.listRows > 0);
+  assert.equal(result.owner, undefined);
+});
+
+test('Kakao search exceptions restore only the query owned by this operation', async () => {
+  const result = await runKakaoSearchExpressionFixture({ throwDuringSearch: true });
+  assert.equal(result.expressionResult.status, 'chat_search_exception');
+  assert.equal(result.value, '');
+  assert.equal(result.expressionResult.collectorRestoration.restored, true);
+  assert.equal(result.owner, undefined);
+});
+
+test('Kakao search preserves pre-existing operator query and refuses another owner', async () => {
+  for (const options of [{ initialQuery: 'operator search' }, { otherOwner: { token: 'another operation' } }]) {
+    const result = await runKakaoSearchExpressionFixture(options);
+    assert.equal(result.clicks, 0);
+    assert.equal(result.events.length, 0);
+    assert.equal(result.value, options.initialQuery || '');
+    assert.equal(result.expressionResult.ok, false);
+  }
+});
+
+test('Kakao search ownership drift preserves changed query and never clicks a stale row', async () => {
+  const result = await runKakaoSearchExpressionFixture({ found: true, onTimer({ input, timers }) {
+    if (timers === 1) input.value = 'new operator query';
+  } });
+  assert.equal(result.value, 'new operator query');
+  assert.equal(result.clicks, 0);
+  assert.equal(result.expressionResult.collectorRestoration.restored, false);
+  assert.equal(result.owner, undefined);
+});
+
+test('Kakao search success requires bounded unfiltered-list restoration proof', async () => {
+  const found = await runKakaoSearchExpressionFixture({ found: true });
+  assert.equal(found.expressionResult.ok, true);
+  assert.equal(found.value, '');
+  assert.equal(found.expressionResult.collectorRestoration.restored, true);
+  const missing = await runKakaoSearchExpressionFixture({ found: true, neverRestoreRows: true });
+  assert.equal(missing.expressionResult.ok, false);
+  assert.equal(missing.expressionResult.status, 'chat_list_restore_failed');
+  assert.equal(missing.expressionResult.collectorRestoration.restored, false);
+  assert.ok(missing.timers <= 20);
+});
+
+test('Kakao search performs no main-list mutation when another shared browser owner is active', async () => {
+  const result = await runKakaoSearchExpressionFixture({ sharedIdle: false });
+  assert.equal(result.expressionResult, undefined);
+  assert.equal(result.events.length, 0);
+  assert.equal(result.clicks, 0);
+});
+
 test('openKakaoTargetChatViaDevtools searches list DOM when CUA cannot see off-space Chrome body', async () => {
   const evalCalls = [];
   let listCalls = 0;
@@ -7438,7 +7578,7 @@ test('openKakaoTargetChatViaDevtools searches list DOM when CUA cannot see off-s
   const result = await openKakaoTargetChatViaDevtools({
     customer_name: '오래된고객',
     preview_text: '오래된고객 지난 문의 이어서 확인 부탁드립니다'
-  }, { cdpBaseUrl: 'http://127.0.0.1:9223', fetchImpl, evaluateImpl });
+  }, { sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223', fetchImpl, evaluateImpl });
 
   assert.equal(result.status, 'opened_target_chat');
   assert.equal(result.via_devtools, true);
@@ -7472,7 +7612,7 @@ test('openKakaoTargetChatViaDevtools can avoid visible Kakao search fallback', a
     customer_name: '오래된고객',
     preview_text: '오래된고객 지난 문의 이어서 확인 부탁드립니다'
   }, {
-    cdpBaseUrl: 'http://127.0.0.1:9223',
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
     fetchImpl,
     evaluateImpl,
     allowSearch: false
@@ -11985,7 +12125,7 @@ test('closeKakaoConversationTargetViaDevtools closes only the target id', async 
   let requestedUrl = '';
   const target = { type: 'page', id: 'target-1', url: 'https://business.kakao.com/space/test/channel/_test/chats/123', close_safe: true };
   const result = await closeKakaoConversationTargetViaDevtools(target, {
-    cdpBaseUrl: 'http://127.0.0.1:9223',
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
     sharedGatewayIdle: () => true,
     fetchImpl: async (url) => {
       requestedUrl = String(url);
@@ -12013,7 +12153,7 @@ test('owned CDP cleanup preserves Slack work and a changed or last control targe
     let reads = 0;
     const closed = [];
     await closeKakaoConversationTargetViaDevtools(target, {
-      cdpBaseUrl: 'http://127.0.0.1:9223',
+      sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
       sharedGatewayIdle: () => fixture.idle[Math.min(reads++, fixture.idle.length - 1)],
       fetchImpl: async (url) => {
         if (String(url).includes('/json/close/')) closed.push(String(url));
@@ -12029,7 +12169,7 @@ test('owned CDP cleanup does not retry a failed close without a new ownership ch
   const main = { type: 'page', id: 'main', url: 'https://business.kakao.com/space/test/channel/_test/chats' };
   let attempts = 0;
   await assert.rejects(closeKakaoConversationTargetViaDevtools(target, {
-    cdpBaseUrl: 'http://127.0.0.1:9223', sharedGatewayIdle: () => true,
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223', sharedGatewayIdle: () => true,
     fetchImpl: async (url) => {
       if (String(url).endsWith('/json/list')) return { ok: true, text: async () => JSON.stringify([main, target]) };
       if (++attempts === 1) throw new Error('transient disconnect');
@@ -12658,7 +12798,7 @@ test('buildHermesPrompt wires Village Brain owner context as advisory read-only 
 test('closeKakaoConversationTargetViaDevtools never closes the sole main tab after same-target navigation', async () => {
   let fetchCalls = 0;
   const result = await closeKakaoConversationTargetViaDevtools({ id: 'only-tab', close_safe: false }, {
-    cdpBaseUrl: 'http://127.0.0.1:9223',
+    sharedGatewayIdle: () => true, cdpBaseUrl: 'http://127.0.0.1:9223',
     fetchImpl: async () => {
       fetchCalls += 1;
       throw new Error('must not close');

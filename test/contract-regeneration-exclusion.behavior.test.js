@@ -10,14 +10,14 @@ function fixture(){
  return {ctx,props,tid,events};
 }
 test('direct and queued regeneration publish exclusion before any document/ledger mutation without holding global lock',()=>{
- const f=fixture();f.ctx.deleteAndRegenerateContract({},f.tid,'');
+ const f=fixture();f.ctx.deleteAndRegenerateContract({getSheetByName:()=>null},f.tid,'');
  assert.deepEqual(f.events.map(e=>e.claim),[true,true]);assert.deepEqual(f.events.map(e=>e.held),[false,false]);assert.equal(f.props.has('contractDirectRegen_v1_'+f.tid),false);
 });
 test('concurrent direct regeneration is rejected before trashing any document',()=>{
  const f=fixture();f.props.set('contractDirectRegen_v1_'+f.tid,JSON.stringify({at:Date.now(),token:'other'}));
- assert.throws(()=>f.ctx.deleteAndRegenerateContract({},f.tid,''),/진행|busy/);assert.equal(f.events.length,0);
+ assert.throws(()=>f.ctx.deleteAndRegenerateContract({getSheetByName:()=>null},f.tid,''),/진행|busy/);assert.equal(f.events.length,0);
 });
 test('generation error releases only its own exclusion marker',()=>{
  const f=fixture();f.ctx.throwDuringGenerate=true;
- assert.throws(()=>f.ctx.deleteAndRegenerateContract({},f.tid,''),/generation failure/);assert.equal(f.props.has('contractDirectRegen_v1_'+f.tid),false);
+ assert.throws(()=>f.ctx.deleteAndRegenerateContract({getSheetByName:()=>null},f.tid,''),/generation failure/);assert.equal(f.props.has('contractDirectRegen_v1_'+f.tid),false);
 });

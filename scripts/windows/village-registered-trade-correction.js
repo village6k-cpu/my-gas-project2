@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { isApprovedBillingRounds_ } = require('../../approvedBillingRounds.js');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 
 const ALLOWED_INPUT_FIELDS = new Set([
@@ -181,9 +182,8 @@ function normalizeRoundsChange(value) {
       || Object.keys(value).some(field => field !== 'expectedRounds' && field !== 'rounds')) {
     throw new Error('roundsChange must contain only expectedRounds and rounds');
   }
-  if (!Number.isSafeInteger(value.expectedRounds) || value.expectedRounds < 1 || value.expectedRounds > 99
-      || !Number.isSafeInteger(value.rounds) || value.rounds < 1 || value.rounds > 99) {
-    throw new Error('roundsChange expectedRounds and rounds must be integers from 1 to 99');
+  if (!isApprovedBillingRounds_(value.expectedRounds) || !isApprovedBillingRounds_(value.rounds)) {
+    throw new Error('roundsChange expectedRounds and rounds must be numbers from 1 to 99 in 0.5 increments');
   }
   if (value.expectedRounds === value.rounds) throw new Error('roundsChange must change the rounds value');
   return { expectedRounds: value.expectedRounds, rounds: value.rounds };
@@ -492,7 +492,7 @@ function verifyRoundsCorrectionReadback(normalized, payload) {
       || !before?.contract || !after?.contract || !before?.schedule || !after?.schedule
       || before.contract.rounds !== normalized.roundsChange.expectedRounds
       || after.contract.rounds !== normalized.roundsChange.rounds
-      || JSON.stringify({...before.contract, rounds: normalized.roundsChange.rounds}) !== JSON.stringify(after.contract)
+      || JSON.stringify({...before.contract, rounds: normalized.roundsChange.rounds, billingRounds: normalized.roundsChange.rounds}) !== JSON.stringify(after.contract)
       || JSON.stringify(before.schedule) !== JSON.stringify(after.schedule)
       || proof.expectedRounds !== normalized.roundsChange.expectedRounds || proof.rounds !== normalized.roundsChange.rounds
       || !Number.isSafeInteger(proof.contractAmount) || proof.contractAmount < 0

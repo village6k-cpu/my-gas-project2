@@ -14,10 +14,10 @@ function functionBody(name, nextName) {
   return gas.slice(start, end);
 }
 
-test('rounds correction is narrow, lock-scoped to the exact I-cell, and regenerates strictly after unlock', () => {
+test('rounds correction is narrow, lock-scoped to I:L, and regenerates strictly after unlock', () => {
   const body = functionBody('correctRegisteredTradeRounds_', 'repairRegisteredTradeCatalogPrices');
   const lockAt = body.indexOf('lock.tryLock(');
-  const writeAt = body.indexOf('getRange(snapshot.contractRow, 9).setValue(correction.roundsChange.rounds)');
+  const writeAt = body.indexOf('getRange(snapshot.contractRow, 9, 1, 4).setValues(');
   const releaseAt = body.indexOf('lock.releaseLock()');
   const regenAt = body.indexOf("regenerateContractById(correction.tradeId, undefined, { strictLedgerLink: true })");
   assert.ok(lockAt >= 0 && writeAt > lockAt && releaseAt > writeAt && regenAt > releaseAt,

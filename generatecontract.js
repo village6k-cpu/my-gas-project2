@@ -125,12 +125,21 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
         반출시간: contractDisplay[i][5],   // 문자열로 읽어서 1899 타임존 버그 방지
         반납일: contractData[i][6],
         반납시간: contractDisplay[i][7],   // 문자열로 읽어서 1899 타임존 버그 방지
-        할인유형: String(contractData[i][10] || "").trim()  // K열
+        할인유형: String(contractData[i][10] || "").trim(), // K열
+        회차: contractData[i][8],
+        비고: String(contractData[i][11] || "")
       };
       break;
     }
   }
   if (!contract) throw new Error(`거래ID "${거래ID}"를 계약마스터에서 찾을 수 없습니다.`);
+
+  // Only explicit, period-bound approval overrides the legacy date policy.
+  // Validate before copying or changing a document; stale approval is not a default.
+  var approvedRounds = contract.비고.indexOf('[승인회차') === -1 ? null : readApprovedBillingRounds_(contract.비고, contract.회차, {
+    startDate: contract.반출일, startTime: contract.반출시간,
+    endDate: contract.반납일, endTime: contract.반납시간
+  });
 
   // ── 스케줄상세에서 품목 조회 (단가 포함) ──
   const schedSheet = ss.getSheetByName("스케줄상세");
@@ -213,7 +222,9 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   ws.getRange(rows.rentalStart, rentalStartCol).setValue(반출일시);
 
   // 대여일수 계산 (24시간=1일, 3시간 이내 초과는 같은 일수, 초과 시 +1일)
-  const 일수 = calcRentalDays(contract.반출일, contract.반출시간, contract.반납일, contract.반납시간);
+  const 일수 = approvedRounds === null
+    ? calcRentalDays(contract.반출일, contract.반출시간, contract.반납일, contract.반납시간)
+    : approvedRounds;
 
   // 반납일자(예정) — rentalStart+1
   ws.getRange(rows.rentalStart + 1, rentalEndCol).setValue(반납일시);
@@ -1107,6 +1118,18 @@ function deleteAndRegenerateContract(ss, 거래ID, 추가요청, options) {
 
   try {
 
+  // An invalid/stale approved period must not destroy the previous document or
+  // clear its ledger link before generateContractFile gets a chance to reject it.
+  var billingMaster = ss.getSheetByName('계약마스터');
+  if (billingMaster && billingMaster.getLastRow() >= 2) {
+    var billingRange = billingMaster.getRange(2, 1, billingMaster.getLastRow() - 1, 12);
+    var billingRows = billingRange.getValues(), billingDisplays = billingRange.getDisplayValues();
+    billingRows.forEach(function(row, index) {
+      if (String(row[0] || '').trim() === String(거래ID).trim() && String(row[11] || '').indexOf('[승인회차') !== -1) {
+        readApprovedBillingRounds_(row[11], row[8], { startDate: row[4], startTime: billingDisplays[index][5], endDate: row[6], endTime: billingDisplays[index][7] });
+      }
+    });
+  }
   // 기존 파일 휴지통으로 이동
   trashContractFilesForTrade_(거래ID);
 

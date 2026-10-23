@@ -41,6 +41,13 @@ function harness(options = {}) {
             if (options.afterWrite) options.afterWrite({ schedule, contract, ledger });
             return this;
           },
+          setValues(values) {
+            assert.equal(calls.lockHeld, true, 'rounds and approval note are written under one ScriptLock');
+            calls.writes.push({ name, row, col, values: copy(values) });
+            values.forEach((record, i) => record.forEach((value, j) => { data[row + i - 1][col + j - 1] = value; }));
+            if (options.afterWrite) options.afterWrite({ schedule, contract, ledger });
+            return this;
+          },
         };
       },
     };
@@ -114,6 +121,7 @@ function harness(options = {}) {
   };
   const source = fs.readFileSync(path.resolve(__dirname, '../checkAvailability.js'), 'utf8').replace(/\r\n/g, '\n');
   vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../approvedBillingRounds.js'), 'utf8'), context);
   const pendingStart = source.indexOf('function hasPendingSchedulePrice_(');
   if (pendingStart >= 0) vm.runInContext(source.slice(pendingStart, source.indexOf('\nfunction ', pendingStart + 1)), context);
   vm.runInContext(source.slice(source.indexOf('function readDashboardMutationLease_'), source.indexOf('var DASHBOARD_STRUCTURE_QUEUE_PREFIX_')), context);
@@ -123,15 +131,17 @@ function harness(options = {}) {
   return { run: value => copy(context.correctRegisteredTrade(value || copy(input))), context, calls, props, schedule, contract, ledger };
 }
 
-test('rounds-only correction CAS-writes exactly 계약마스터 I and verifies one regenerated contract and ledger amount', () => {
+test('rounds-only correction CAS-writes I and approval L, preserves J/K, and verifies one regenerated contract', () => {
   const h = harness();
   const beforeSchedule = copy(h.schedule.data);
   const beforeContract = copy(h.contract.data);
   const result = h.run();
   assert.equal(result.success, true, result.error);
   assert.equal(result.customerNotificationSent, false);
-  assert.deepEqual(h.calls.writes, [{ name: '계약마스터', row: 2, col: 9, value: 1 }]);
+  const note = '[승인회차:v1 회차=1 기간=2026-10-14T18:00/2026-10-17T18:00]';
+  assert.deepEqual(h.calls.writes, [{ name: '계약마스터', row: 2, col: 9, values: [[1, '반납완료', '일반', note]] }]);
   beforeContract[1][8] = 1;
+  beforeContract[1][11] = note;
   assert.deepEqual(h.contract.data, beforeContract);
   assert.deepEqual(h.schedule.data, beforeSchedule);
   assert.equal(h.calls.regenerations, 1);
@@ -145,6 +155,20 @@ test('rounds-only correction CAS-writes exactly 계약마스터 I and verifies o
   assert.equal(h.props.has('registeredTradeRoundsMutation_' + input.tradeId), false);
 });
 
+test('approved half-round correction retains note text and binds the new billed rounds to the exact current period', () => {
+  const h = harness();
+  h.contract.data[1][11] = '인수 메모 유지';
+  const result = h.run({ ...input, roundsChange: { expectedRounds: 3, rounds: 2.5 } });
+  assert.equal(result.success, true, result.error);
+  assert.equal(h.contract.data[1][8], 2.5);
+  assert.equal(h.contract.data[1][11], '인수 메모 유지\n[승인회차:v1 회차=2.5 기간=2026-10-14T18:00/2026-10-17T18:00]');
+  assert.equal(result.readback.contract.billingRounds, 2.5);
+  assert.equal(h.calls.regenerations, 1);
+  const replay = h.run({ ...input, roundsChange: { expectedRounds: 3, rounds: 2.5 } });
+  assert.equal(replay.success, true);
+  assert.equal(h.calls.regenerations, 1);
+});
+
 test('rounds-only correction rejects stale CAS, invalid bounds, no-op, and mixed changes before writes', () => {
   const h = harness();
   const stale = h.run({ ...input, roundsChange: { expectedRounds: 2, rounds: 1 } });
@@ -154,7 +178,7 @@ test('rounds-only correction rejects stale CAS, invalid bounds, no-op, and mixed
   assert.equal(h.calls.regenerations, 0);
   for (const roundsChange of [
     { expectedRounds: 0, rounds: 1 }, { expectedRounds: 3, rounds: 0 },
-    { expectedRounds: 3, rounds: 100 }, { expectedRounds: 3, rounds: 1.5 },
+    { expectedRounds: 3, rounds: 100 }, { expectedRounds: 3, rounds: 1.25 },
     { expectedRounds: '3', rounds: 1 }, { expectedRounds: 3, rounds: 3 },
   ]) assert.throws(() => h.context.normalizeRegisteredTradeCorrection_({ ...input, roundsChange }));
   for (const mixed of [

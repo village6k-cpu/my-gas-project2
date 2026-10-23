@@ -383,6 +383,14 @@ test('a preflight rejection carries operation-bound zero-write evidence for AI i
   assertNoWriteSideEffects(calls);
 });
 
+test('a date plus equipment correction cannot mutate any stage of a contract with period-bound approved rounds', () => {
+  const { context, calls, baseline } = harness();
+  baseline.contract.rounds = 2.5;
+  baseline.contract.billingRounds = 2.5;
+  assertPreflightRejected(() => context.correct(input), /승인회차/);
+  assertNoWriteSideEffects(calls);
+});
+
 test('a removal quantity baseline mismatch fails before every write', () => {
   const { context, calls } = harness({ useRealRemovalPreflight: true });
 

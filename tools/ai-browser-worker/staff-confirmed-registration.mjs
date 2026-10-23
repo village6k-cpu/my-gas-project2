@@ -2,13 +2,14 @@ import { createHash, randomUUID as defaultRandomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const { isApprovedBillingRounds_ } = require('../../approvedBillingRounds.js');
 const { normalizePendingCustomerIdentity, normalizePendingBaselinePeriod, normalizeRoomMemoEvidence } = require('../../scripts/windows/pending-customer-identity.js');
 const { commitConfirmedReservation: defaultCommitConfirmedReservation } = require('../../scripts/windows/village-confirm-request.js');
 
 const REGISTRATION_FIELDS = new Set([
   'confirmed', 'target_scope', 'request_id', 'source_evidence',
   'expected_before', 'expected_period', 'desired_after', 'desired_period',
-  'expected_set_components', 'set_component_selections', 'pending_request_candidate', 'customer_identity_update'
+  'expected_set_components', 'set_component_selections', 'pending_request_candidate', 'customer_identity_update', 'billing_rounds'
 ]);
 const EVIDENCE_FIELDS = new Set([
   'customer_request', 'staff_confirmation', 'conversation_revision',
@@ -338,6 +339,7 @@ export function validateStaffConfirmedRegistration(value, { roomRevision, roomSn
   const errors = objectErrors(value, REGISTRATION_FIELDS, 'staff_confirmed_registration');
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, errors };
   if (value.confirmed !== true) errors.push('confirmed must be exactly true');
+  if (value.billing_rounds !== undefined && !isApprovedBillingRounds_(value.billing_rounds)) errors.push('billing_rounds must be a number from 1 to 99 in 0.5 increments');
   if (value.target_scope !== 'pending_request') errors.push('target_scope must be pending_request');
   const requestId = normalizedText(value.request_id).toUpperCase();
   if (REQUEST_ID.test(requestId)) {
@@ -599,6 +601,9 @@ export async function executeVillageConfirmedReservationCommit(request = {}, opt
       && /^\d{6}-\d{3}$/.test(normalizedText(result.trade_id))
       && sameCanonicalValue(result.final_plan, registration.desired_after)
       && sameCanonicalValue(result.final_period, registration.desired_period)
+      && (registration.billing_rounds === undefined ||
+        (result.authoritative?.registered_trade?.contract?.rounds === registration.billing_rounds &&
+         result.authoritative?.registered_trade?.contract?.billingRounds === registration.billing_rounds))
       && exactComponentReadback(result, registration)
       && exactAuthoritativeRequestReadback(result, registration)
       && result.customerNotificationAttempted === false
@@ -607,7 +612,7 @@ export async function executeVillageConfirmedReservationCommit(request = {}, opt
     if (exactSuccess) {
       return buildReceipt({ status: 'ok', authoritativeResult: result, appliedStages });
     }
-    const status = result?.status === 'partial_success' || replacedIds.length
+    const status = result?.success === true || result?.status === 'partial_success' || replacedIds.length
       ? 'partial_success'
       : result?.status === 'blocked' ? 'blocked' : 'failed';
     return buildReceipt({

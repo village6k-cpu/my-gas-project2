@@ -12,6 +12,11 @@ const input = {
   roundsChange: { expectedRounds: 3, rounds: 1 },
   sendEstimate: false,
 };
+
+test('Windows accepts explicit numeric half rounds without coercion or quarter-round expansion', () => {
+  assert.equal(normalizeCorrectionInput({ ...input, roundsChange: { expectedRounds: 3, rounds: 2.5 } }).roundsChange.rounds, 2.5);
+  for (const rounds of ['2.5', 2.25, 0.5, Infinity, null]) assert.throws(() => normalizeCorrectionInput({ ...input, roundsChange: { expectedRounds: 3, rounds } }));
+});
 const config = {
   VILLAGE2_API_URL: 'https://script.google.com/macros/s/synthetic/exec',
   VILLAGE2_API_KEY: 'synthetic',
@@ -25,7 +30,7 @@ function payload() {
     ledger: null,
   };
   const after = {
-    contract: { ...before.contract, rounds: 1 },
+    contract: { ...before.contract, rounds: 1, billingRounds: 1 },
     schedule: copy(before.schedule),
     ledger: { rows: 1, amount: 120000, startDate: '2026-10-14', dates: ['2026-10-14'], contractLink: 'https://docs.example/contract', links: ['https://docs.example/contract'] },
   };
@@ -73,6 +78,7 @@ test('Windows runner requires authoritative rounds, unchanged unrelated state, a
     value => { value.readback.contract.rounds = 2; value.authoritativeReadback.after.contract.rounds = 2; },
     value => { value.roundsReadback.ledgerAmount += 1; },
     value => { value.roundsReadback.contractAmount += 1; },
+    value => { delete value.readback.contract.billingRounds; },
     value => { value.readback.schedule.rows[0].qty = 3; value.authoritativeReadback.after.schedule.rows[0].qty = 3; },
     value => { delete value.roundsReadback; },
   ]) {

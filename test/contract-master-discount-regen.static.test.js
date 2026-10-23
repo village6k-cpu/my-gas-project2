@@ -26,13 +26,13 @@ assert.match(
 
 assert.match(
   availabilitySource,
-  /contractSheet\.getRange\(newContractRow,\s*1,\s*1,\s*12\)\.setValues\(\[\[[\s\S]{0,260}회차,\s*"예약",\s*할인유형\s*\|\|\s*"일반",\s*""/,
+  /contractSheet\.getRange\(newContractRow,\s*1,\s*1,\s*12\)\.setValues\(\[\[[\s\S]{0,260}회차,\s*"예약",\s*할인유형\s*\|\|\s*"일반",\s*approvedBillingNote/,
   'new contract rows must write 확인요청 할인유형 into 계약마스터 K열'
 );
 
 assert.match(
   contractSource,
-  /할인유형:\s*String\(contractData\[i\]\[10\]\s*\|\|\s*""\)\.trim\(\)\s*\/\/ K열/,
+  /할인유형:\s*String\(contractData\[i\]\[10\]\s*\|\|\s*""\)\.trim\(\),?\s*\/\/ K열/,
   'contract regeneration must read 계약마스터 K열 할인유형'
 );
 
