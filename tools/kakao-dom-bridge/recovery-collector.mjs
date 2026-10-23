@@ -75,7 +75,7 @@ export function createRecoveryCollector({
       runId, pid: process.pid, startedAt, received, bytes, lastReceivedAt, storageError
     });
     if (req.method === 'OPTIONS' && pathname === '/events') return reply(200, { ok: true });
-    if (req.method !== 'POST' || pathname !== '/events') {
+    if (req.method !== 'POST' || !['/events', '/recovery-events'].includes(pathname)) {
       return reply(503, { ok: false, error: 'recovery_collect_only', processed: false });
     }
     let size = 0;
@@ -94,7 +94,7 @@ export function createRecoveryCollector({
         return reply(400, { ok: false, persisted: false, error: 'event_object_required' });
       }
       const receipt = persist(event);
-      return reply(200, { ok: true, persisted: true, processed: false, mode: 'recovery_collect_only', ...receipt });
+      return reply(200, { ok: true, persisted: true, processed: false, mode: 'recovery_collect_only', runId, ...receipt });
     } catch (error) {
       return reply(507, { ok: false, persisted: false, processed: false, error: String(error.message) });
     }

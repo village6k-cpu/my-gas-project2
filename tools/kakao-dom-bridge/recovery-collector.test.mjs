@@ -76,3 +76,11 @@ test('an existing recovery ownership lock prevents a second collector; history i
     assert.equal((await readdir(f.directory)).length, 2);
   } finally { await f.close(); }
 });
+
+test('dedicated relay endpoint acknowledges the exact recovery owner', async () => {
+  const f = await fixture(); try {
+    const h = await (await fetch(f.url + '/health')).json();
+    const r = await fetch(f.url + '/recovery-events', { method: 'POST', body: '{"source":"synthetic"}' });
+    assert.equal(r.status, 200); assert.equal((await r.json()).runId, h.runId);
+  } finally { await f.close(); }
+});
