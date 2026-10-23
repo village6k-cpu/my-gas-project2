@@ -14,7 +14,7 @@ const input = {
 };
 const copy = value => JSON.parse(JSON.stringify(value));
 function harness(options = {}) {
-  const calls = { writes: [], regenerations: 0, lockHeld: false, flushes: 0 };
+  const calls = { authorityReads: 0, writes: [], regenerations: 0, lockHeld: false, flushes: 0 };
   const props = new Map([['개고생2_URL', 'https://docs.example/ledger']]);
   const properties = { getProperty: key => props.get(key) || '', setProperty(key,value) { props.set(key,value); return this; }, deleteProperty: key => props.delete(key) };
   function sheet(name, data) {
@@ -36,6 +36,7 @@ function harness(options = {}) {
   ]);
   const contract = sheet('계약마스터', [Array(13).fill('header'), ['260914-002','테스트 예약자','synthetic-phone','','2026-09-14','18:00','2026-09-17','18:00',3,'','학생','','보존']]);
   const ledger = sheet('거래내역', [Array(9).fill('header'), ['2026-09-14','','https://docs.example/old','','260914-002','','','',528000]]);
+  if(options.contractStatus) contract.data[1][9]=options.contractStatus;
   let generated = null;
   const context = {
     Date, JSON, Object, Array, String, Number, Math, RegExp, Error,
@@ -50,6 +51,7 @@ function harness(options = {}) {
       flush() { calls.flushes++; }
     },
     isDashboardTradeCheckoutStarted_: () => options.checkoutStarted === true,
+    supaGetCheckoutBaselineState_: tid => { assert.equal(calls.lockHeld,false); assert.equal(tid,input.tradeId); calls.authorityReads++; if(options.afterAuthority) options.afterAuthority({contract}); return options.returnedAuthority || {ok:false,error:'not configured'}; },
     findSetPrice: () => options.catalogPrice === undefined ? 80000 : options.catalogPrice,
     activeDashboardReturnProjectionLease_: () => null,
     invalidateContractSheetScan_() {},
@@ -303,4 +305,40 @@ test('blank ledger is not accepted for an established contract or unresolved rem
     const result=h.run(value);
     assert.equal(result.noMutationPerformed,true,mode);assert.equal(h.calls.writes.length,0);
   }
+});
+
+test('staff-approved returned price correction requires independent returned authority and preserves contract state',()=>{
+  const authority={ok:true,tradeFound:true,returnDone:true,contractStatus:'반납완료',items:[]};
+  const h=harness({checkoutStarted:true,contractStatus:'반납완료',returnedAuthority:authority});
+  const before=copy(h.schedule.data), master=copy(h.contract.data);
+  const r=h.run();assert.equal(r.success,true,r.error);
+  before[1][11]=80000;assert.deepEqual(h.schedule.data,before);assert.deepEqual(h.contract.data,master);
+  assert.equal(h.calls.authorityReads,1);assert.equal(h.calls.regenerations,1);
+  assert.equal(r.customerNotificationSent,false);
+  const replay=h.run();assert.equal(replay.success,true,replay.error);assert.equal(replay.replayed,true);
+  assert.equal(h.calls.authorityReads,1,'completed receipt must not call external authority again');
+  assert.equal(h.calls.writes.length,1);assert.equal(h.calls.regenerations,1);
+});
+test('returned price correction fails closed for missing or conflicting authority',()=>{
+  for(const authority of [{ok:false,error:'offline'},{ok:true,tradeFound:false,returnDone:true,contractStatus:'반납완료'},{ok:true,tradeFound:true,returnDone:false,contractStatus:'반납완료'},{ok:true,tradeFound:true,returnDone:true,contractStatus:'예약'}]){
+    const h=harness({checkoutStarted:true,contractStatus:'반납완료',returnedAuthority:authority}),r=h.run();
+    assert.equal(r.success,false);assert.equal(r.noMutationPerformed,true);
+    assert.equal(h.calls.writes.length,0);assert.equal(h.calls.regenerations,0);
+  }
+});
+test('returned price authority cannot override a changed sheet or replace staff approval',()=>{
+  const authority={ok:true,tradeFound:true,returnDone:true,contractStatus:'반납완료'};
+  const h=harness({checkoutStarted:true,contractStatus:'반납완료',returnedAuthority:authority,afterAuthority:({contract})=>{contract.data[1][9]='예약';}});
+  assert.equal(h.run().success,false);assert.equal(h.calls.writes.length,0);
+  const catalog=harness({checkoutStarted:true,contractStatus:'반납완료',returnedAuthority:authority});
+  catalog.schedule.data[1][11]=0;
+  const r=catalog.context.repairRegisteredTradeCatalogPrices({tradeId:input.tradeId,operationId:input.operationId,expectedPeriod:copy(input.expectedPeriod),priceChanges:[{scheduleId:input.priceChanges[0].scheduleId,expectedName:'XEEN CF 세트',expectedQty:1,expectedUnitPrice:0}]});
+  assert.equal(r.success,false);assert.equal(catalog.calls.writes.length,0);
+  assert.equal(catalog.calls.authorityReads,0,'catalog repair has no staff approval');
+});
+
+test('a stale unlocked structure cache cannot bypass a returned sheet baseline',()=>{
+  const h=harness({checkoutStarted:false,contractStatus:'반납완료'});
+  const r=h.run();assert.equal(r.success,false);assert.equal(r.noMutationPerformed,true);
+  assert.equal(h.calls.writes.length,0);assert.equal(h.calls.regenerations,0);
 });

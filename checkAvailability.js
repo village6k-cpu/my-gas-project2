@@ -22169,7 +22169,17 @@ function correctRegisteredTradePrices_(correction) {
   var key = 'registeredTradePriceReceipt_v1_' + correction.operationId;
   var leaseKey = 'registeredTradePriceMutation_' + correction.tradeId;
   var digest = registeredTradePriceDigest_(correction), held = false, claimed = false, ownsLease = false, receipt = null, stages = [];
+  var returnedPriceAuthority = null;
   try {
+    // The shared structure guard means fully returned, not active checkout.
+    // Read independent authority outside ScriptLock; the locked sheet and lease
+    // below still fence status drift. Completed receipts remain read-only.
+    if (correction.staffApproval && !props.getProperty(key) &&
+        isDashboardTradeCheckoutStarted_(SpreadsheetApp.getActiveSpreadsheet(), correction.tradeId)) {
+      returnedPriceAuthority = typeof supaGetCheckoutBaselineState_ === 'function'
+        ? supaGetCheckoutBaselineState_(correction.tradeId)
+        : { ok: false };
+    }
     if (!lock.tryLock(1500)) return { success: false, code: 'BUSY', noMutationPerformed: true, customerNotificationSent: false };
     held = true;
     var block = dashboardTradeMutationLeaseError_(props, correction.tradeId, 'registeredTradePrice', correction.operationId);
@@ -22185,7 +22195,13 @@ function correctRegisteredTradePrices_(correction) {
     }
     var baseline = readRegisteredTradeCorrectionState_(correction.tradeId, false);
     Object.keys(correction.expectedPeriod).forEach(function(key) { if (baseline.contract[key] !== correction.expectedPeriod[key]) throw new Error('price correction baseline period mismatch'); });
-    if (isDashboardTradeCheckoutStarted_(SpreadsheetApp.getActiveSpreadsheet(), correction.tradeId)) throw new Error('price correction cannot change an active checkout');
+    if (baseline.contract.status === '반납완료' ||
+        isDashboardTradeCheckoutStarted_(SpreadsheetApp.getActiveSpreadsheet(), correction.tradeId)) {
+      var returnedPriceApproved = correction.staffApproval && baseline.contract.status === '반납완료' &&
+        returnedPriceAuthority && returnedPriceAuthority.ok === true && returnedPriceAuthority.tradeFound === true &&
+        returnedPriceAuthority.returnDone === true && returnedPriceAuthority.contractStatus === '반납완료';
+      if (!returnedPriceApproved) throw new Error('반납완료 거래의 단가 정정은 직원 승인과 일치하는 정본 반납 상태가 필요합니다');
+    }
     var snapshot = readRegisteredTradePriceSnapshot_(correction.tradeId), expected = JSON.parse(JSON.stringify(snapshot));
     if (correction.catalogPriceRepair === true) {
       SET_MASTER_SCAN_ = null;
