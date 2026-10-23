@@ -84,3 +84,57 @@ test('dedicated relay endpoint acknowledges the exact recovery owner', async () 
     assert.equal(r.status, 200); assert.equal((await r.json()).runId, h.runId);
   } finally { await f.close(); }
 });
+
+test('a pre-write disk reserve pause resumes the same journal only after 16 MiB headroom returns', async () => {
+  const reserve = 256 * 1024 * 1024;
+  let free = reserve - 1;
+  const f = await fixture({ availableBytes: () => free });
+  const post = () => fetch(f.url + '/recovery-events', { method: 'POST', body: '{"source":"synthetic-resume"}' });
+  try {
+    assert.equal((await post()).status, 507);
+    const paused = await (await fetch(f.url + '/health')).json();
+    free = reserve + 1024;
+    assert.equal((await post()).status, 507, 'avoid oscillating at the reserve boundary');
+    free = reserve + 16 * 1024 * 1024;
+    const resumed = await post();
+    assert.equal(resumed.status, 200);
+    const ack = await resumed.json();
+    const health = await (await fetch(f.url + '/health')).json();
+    assert.equal(ack.runId, paused.runId); assert.equal(ack.sequence, 1);
+    assert.equal(health.capacityRecoveries, 1); assert.equal(health.storageError, null);
+    const records = (await readFile(f.collector.journalPath, 'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(records.length, 1); assert.equal(records[0].event.source, 'synthetic-resume');
+  } finally { await f.close(); }
+});
+test('full journal is not rearmed by more free disk', async () => {
+  let free = 1024 * 1024 * 1024;
+  const f = await fixture({ availableBytes: () => free, maxJournalBytes: 1 });
+  try {
+    const post = () => fetch(f.url + '/events', { method: 'POST', body: '{}' });
+    assert.equal((await post()).status, 507);
+    free *= 2;
+    assert.equal((await post()).status, 507);
+    const health = await (await fetch(f.url + '/health')).json();
+    assert.equal(health.capacityReason, 'journal_limit'); assert.equal(health.received, 0);
+  } finally { await f.close(); }
+});
+test('a partial journal write remains fenced after disk space returns', async () => {
+  const fsSync = (await import('node:fs')).default;
+  const original = fsSync.writeSync;
+  const f = await fixture({ availableBytes: () => 1024 * 1024 * 1024 });
+  let writes = 0;
+  try {
+    fsSync.writeSync = (fd, buffer, offset, length) => {
+      if (writes++ === 0) return original(fd, buffer, offset, 10);
+      const error = new Error('synthetic partial I/O failure'); error.code = 'EIO'; throw error;
+    };
+    const failed = await fetch(f.url + '/events', { method: 'POST', body: '{"source":"synthetic-partial"}' });
+    fsSync.writeSync = original;
+    assert.equal(failed.status, 507);
+    assert.equal((await fetch(f.url + '/events', { method: 'POST', body: '{}' })).status, 507);
+    assert.equal((await readFile(f.collector.journalPath)).length, 10);
+    const health = await (await fetch(f.url + '/health')).json();
+    assert.equal(health.storageError, 'EIO'); assert.equal(health.capacityRecoveries, 0);
+    assert.equal(health.received, 0);
+  } finally { fsSync.writeSync = original; await f.close(); }
+});

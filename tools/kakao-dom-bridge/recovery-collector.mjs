@@ -24,6 +24,7 @@ export function createRecoveryCollector({
   let journalFd;
   try { journalFd = fs.openSync(journalPath, 'wx'); } catch (error) { fs.unlinkSync(lockPath); throw error; }
   let received = 0, bytes = 0, lastReceivedAt = null, storageError = null, closed = false;
+  let capacityReason = null, capacityRecoveries = 0;
   function closeStorage() {
     if (closed) return;
     closed = true;
@@ -32,6 +33,11 @@ export function createRecoveryCollector({
     if (JSON.parse(fs.readFileSync(lockPath, 'utf8')).runId === runId) fs.unlinkSync(lockPath);
   }
   function persist(event) {
+    // Only a pre-write disk-reserve pause is safe to resume; partial writes stay fenced.
+    if (storageError === 'storage_capacity' && capacityReason === 'disk_reserve'
+      && availableBytes() >= RESERVE_BYTES + 16 * 1024 * 1024) {
+      storageError = null; capacityReason = null; capacityRecoveries++;
+    }
     if (storageError) throw new Error('storage_fault_requires_review');
     const receivedAt = new Date().toISOString(), sequence = received + 1;
     const source = JSON.stringify(event);
@@ -40,6 +46,7 @@ export function createRecoveryCollector({
       processed: false, sourceSha256: createHash('sha256').update(source).digest('hex'), event
     }) + '\n');
     if (availableBytes() - line.length < RESERVE_BYTES || bytes + line.length > maxJournalBytes) {
+      capacityReason = bytes + line.length > maxJournalBytes ? 'journal_limit' : 'disk_reserve';
       storageError = 'storage_capacity';
       throw new Error('storage_capacity');
     }
@@ -72,7 +79,7 @@ export function createRecoveryCollector({
     if (req.method === 'GET' && pathname === '/health') return reply(200, {
       ok: !storageError, mode: 'recovery_collect_only', businessAutomationReady: false,
       customerSendingEnabled: false, workerEnabled: false, gatewayRecoveryEnabled: false,
-      runId, pid: process.pid, startedAt, received, bytes, lastReceivedAt, storageError
+      runId, pid: process.pid, startedAt, received, bytes, lastReceivedAt, storageError, capacityReason, capacityRecoveries
     });
     if (req.method === 'OPTIONS' && pathname === '/events') return reply(200, { ok: true });
     if (req.method !== 'POST' || !['/events', '/recovery-events'].includes(pathname)) {
