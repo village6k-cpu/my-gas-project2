@@ -97,6 +97,19 @@ function Get-UnhealthyComponents {
     return $unhealthy
 }
 
+function Assert-KakaoBroadRestartSafe {
+    param([Parameter(Mandatory = $true)][string[]]$UnhealthyComponents)
+
+    # A failed bridge does not authorize replacing a healthy shared browser.
+    # Re-read ownership and port immediately before the destructive branch;
+    # the earlier component snapshot may already be stale after another repair.
+    $chromeFailures = @(Get-UnhealthyComponents -Names @('chrome') | Where-Object { $_ })
+    if ($chromeFailures.Count -eq 0) {
+        Write-WatchdogLog ("healthy Chrome preserved; guarded component recovery required: {0}" -f ($UnhealthyComponents -join ', '))
+        throw 'Healthy owned Chrome preserved; refusing broad runtime restart for another failed component.'
+    }
+}
+
 function Get-KakaoDirectProbe {
     $probeOutput = & $resolvedHermesPythonPath $watcherInjector --port 9223 --wait 3 --probe-only 2>$null
     try {
@@ -243,6 +256,8 @@ if ($unhealthy.Count -eq 0) {
     Write-WatchdogLog 'live authentication/watcher evaluation completed'
     return
 }
+
+Assert-KakaoBroadRestartSafe -UnhealthyComponents $unhealthy
 
 if (-not $PSCmdlet.ShouldProcess('Windows Kakao production runtime', 'Restart dead owned runtime with writes enabled')) {
     return
