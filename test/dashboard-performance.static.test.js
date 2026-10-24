@@ -99,8 +99,8 @@ assert.match(
 
 assert.match(
   backend,
-  /checkoutList\.sort\(compareDashboardItemsByTime_\);[\s\S]*checkinList\.sort\(compareDashboardItemsByTime_\);[\s\S]*attachDashboardCardCautions_\(checkoutList,\s*checkinList\);/,
-  'date dashboard payload must attach card cautions after checkout/checkin cards are built'
+  /function finishDashboardCautions_[\s\S]*attachDashboardCardCautions_\(result\.checkout \|\| \[\], result\.checkin \|\| \[\]\)/,
+  'staff response must attach cautions after core-cache construction'
 );
 
 assert.doesNotMatch(
