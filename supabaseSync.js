@@ -1235,6 +1235,8 @@ function flushDirtyToSupabase() {
     lock.releaseLock();
   }
 
+  var deferredTradeIds = built.deferredTradeIds || [];
+  var eligibleTids = tids.filter(function(tid) { return deferredTradeIds.indexOf(tid) < 0; });
   var ok = true;
   try {
     // 취소는 일반 구조 upsert로 복구되지 않는다. contract_status는 평소 앱/GAS
@@ -1260,10 +1262,10 @@ function flushDirtyToSupabase() {
         // 신규 INSERT가 반납 검증을 무력화한다. 이 경우 존재하는 행만 PATCH하고,
         // 누락 행 복구는 repairTradeProjection의 불변 기준선 검증 경로로 한정한다.
         var propSnapshot = p.getProperties();
-        var durableAuthority = supaGetCheckoutAuthorityStates_(tids);
+        var durableAuthority = supaGetCheckoutAuthorityStates_(eligibleTids);
         var ssForAuthority = SpreadsheetApp.getActiveSpreadsheet();
         var localAuthority = {};
-        tids.forEach(function(tid) {
+        eligibleTids.forEach(function(tid) {
           localAuthority[tid] = typeof isDashboardTradeCheckoutStarted_ === 'function'
             ? isDashboardTradeCheckoutStarted_(ssForAuthority, tid)
             : false;
@@ -1295,7 +1297,7 @@ function flushDirtyToSupabase() {
         // keep-set으로 가지치기하면 동기화 빌드 뒤 다른 직원이 추가한 행까지 지울 수 있다.
       }
     }
-    if (typeof flushPaymentLedgerMirror_ === 'function' && !flushPaymentLedgerMirror_(tids)) ok = false;
+    if (eligibleTids.length && typeof flushPaymentLedgerMirror_ === 'function' && !flushPaymentLedgerMirror_(eligibleTids)) ok = false;
   } catch (err) {
     Logger.log('flushDirty 오류: ' + err);
     return;
@@ -1312,7 +1314,10 @@ function flushDirtyToSupabase() {
       if (cleanupLocked) {
         for (var i = 0; i < dirtyKeys.length; i++) {
           var dirtyKey = dirtyKeys[i];
-          if (p.getProperty(dirtyKey) === snapshot[dirtyKey]) p.deleteProperty(dirtyKey);
+          var dirtyTid = dirtyKey.substring(SUPA_DIRTY_PREFIX_.length);
+          if (deferredTradeIds.indexOf(dirtyTid) < 0) {
+            if (p.getProperty(dirtyKey) === snapshot[dirtyKey]) p.deleteProperty(dirtyKey);
+          }
         }
       }
     } catch (cleanupErr) {
@@ -1362,6 +1367,21 @@ function buildSupabaseTrades_(tids) {
       if (want[t.tradeId] && !detail[t.tradeId]) detail[t.tradeId] = t;
     });
   }
+
+  // Contract/amount are ledger authority, not date-wide display-cache authority.
+  // forceFresh uses the existing sheet reader and adds no UrlFetch request.
+  var financialById = {};
+  var financialIds = Object.keys(dates);
+  if (financialIds.length && typeof getTradeExtrasForIds_ === 'function') {
+    try { financialById = getTradeExtrasForIds_(financialIds, null, { forceFresh: true }) || {}; }
+    catch (financialReadErr) { financialById = {}; }
+  }
+  function applyFinancialAuthority_(row, financial) {
+    row.contract_url = financial.contractUrl || null;
+    row.contract_regen_pending = !!financial.contractRegenPending;
+    if (typeof financial.actualAmount === 'number') row.amount = financial.actualAmount;
+  }
+  var deferredTradeIds = [];
 
   // 계약마스터 폴백/취소 판정용 — tid -> {name, status, discountType, startISO, endISO}
   var master = {};
@@ -1465,6 +1485,11 @@ function buildSupabaseTrades_(tids) {
     // 취소 원본이 stale timeline/dashboard보다 우선한다. 옛 캐시의 장비를
     // fallback으로 되살리지 않고 전용 취소 투영에 맡긴다.
     if (cancelledTradeIds.indexOf(tid2) >= 0) continue;
+    var financial = financialById[tid2];
+    if (!financial || financial.tradeRowFound !== true) {
+      deferredTradeIds.push(tid2);
+      continue; // Retain the dirty marker; no stale/null projection HTTP for this trade.
+    }
     var d = detail[tid2] || null;
     var m = master[tid2] || {};
     var startISO = new Date(dates[tid2].start).toISOString();
@@ -1476,6 +1501,7 @@ function buildSupabaseTrades_(tids) {
       var skeleton = { trade_id: tid2, checkout_at: startISO, return_at: endISO };
       if (m.name) skeleton.customer_name = m.name;
       if (m.discountType) skeleton.discount_type = m.discountType;
+      applyFinancialAuthority_(skeleton, financial);
       trades.push(skeleton);
       items = items.concat(buildItemsForTrade_(tid2, null));
       continue;
@@ -1487,9 +1513,7 @@ function buildSupabaseTrades_(tids) {
       company: d.company || null,
       checkout_at: startISO,
       return_at: endISO,
-      discount_type: d.discountType || m.discountType || null,
-      contract_url: d.contractUrl || null,
-      contract_regen_pending: !!d.contractRegenPending
+      discount_type: d.discountType || m.discountType || null
     };
     // GAS paymentWarning은 '거래내역 조회 실패' 에러 문자열 — 실패 시 결제 필드를 보내지 않아 기존값 보존.
     // payment_warning 플래그는 앱 전용이라 flush가 관리하지 않음 (에러를 경고로 둔갑시키지 않음).
@@ -1504,7 +1528,7 @@ function buildSupabaseTrades_(tids) {
     // 빈 값으로 기존 데이터를 지우지 않는 필드는 값이 있을 때만 포함 (부분 upsert)
     var rowName = d.name || m.name || '';
     if (rowName) row.customer_name = rowName;
-    if (typeof d.actualAmount === 'number') row.amount = d.actualAmount;
+    applyFinancialAuthority_(row, financial);
     if (d.returnMemo) row.note_checkin = d.returnMemo; // 앱 입력 메모를 null로 지우지 않음
     trades.push(row);
 
@@ -1580,7 +1604,7 @@ function buildSupabaseTrades_(tids) {
     trades.push(cancelled);
   }
 
-  return { trades: trades, items: items, cancelledTradeIds: cancelledTradeIds };
+  return { trades: trades, items: items, cancelledTradeIds: cancelledTradeIds, deferredTradeIds: deferredTradeIds };
 }
 
 /** payload 키 구성이 같은 행끼리 묶어 upsert — PostgREST는 배치 내 키 불일치를 거부하므로.
@@ -1783,6 +1807,9 @@ function fullSyncToSupabase() {
   var cfg = SUPA_CFG_();
   if (!cfg.url || !cfg.apikey) { Logger.log('Supabase 설정 없음'); return; }
   var built = buildSupabaseTrades_(Object.keys(tids));
+  if ((built.deferredTradeIds || []).length) {
+    throw new Error('계약 원장 조회 보류: 전체 동기화를 완료할 수 없습니다');
+  }
   supaUpsert_(cfg, 'trades', built.trades, 'trade_id');
   supaUpsert_(cfg, 'schedule_items', built.items, 'schedule_id');
   Logger.log('전체 동기화: ' + built.trades.length + '건');

@@ -386,7 +386,7 @@ function exactReplyReadbackForAudit(job) {
     : null;
 }
 
-export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAttempts = 2, now = Date.now, storage = {} } = {}) {
+export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAttempts = 2, now = Date.now, storage = {}, heldJobs = [], freezeBefore = null } = {}) {
   const queueDirectory = path.join(requiredString(directory, 'directory'), 'hermes-gateway');
   const leaseDuration = Number(leaseMs);
   const maximumAttempts = Number(maxAttempts);
@@ -399,8 +399,28 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     mkdir: defaultMkdir, readFile: defaultReadFile, readdir: defaultReaddir, rename: defaultRename,
     unlink: defaultUnlink, writeFile: defaultWriteFile, ...storage
   };
+  // An operator-reviewed recovery fence is external to historical job JSON.
+  // Keep frozen jobs resident for exact-ID dedupe and room revision authority.
+  if (!Array.isArray(heldJobs)) throw channelError('invalid_config', 'recovery hold must be an array');
+  const recoveryHolds = new Map();
+  for (const entry of heldJobs) {
+    if (!entry || typeof entry.jobId !== 'string' || !entry.jobId.trim()
+      || entry.jobId.length > 240 || !/^[a-f0-9]{64}$/.test(String(entry.sha256 || ''))
+      || recoveryHolds.has(entry.jobId)) throw channelError('invalid_config', 'invalid or duplicate recovery hold');
+    recoveryHolds.set(entry.jobId, entry.sha256);
+  }
+  const freezeBeforeMs = freezeBefore === null ? null : Date.parse(freezeBefore);
+  if (freezeBefore !== null && (!isValidIso(freezeBefore) || !Number.isFinite(freezeBeforeMs))) {
+    throw channelError('invalid_config', 'invalid recovery hold cutoff');
+  }
+  const isHeldJob = (job) => Boolean(job && (recoveryHolds.has(job.job_id)
+    || (freezeBeforeMs !== null && (!isValidIso(job.created_at) || Date.parse(job.created_at) <= freezeBeforeMs))));
+  function assertNotHeld(job) {
+    if (isHeldJob(job)) throw channelError('recovery_job_held', 'historical job is held for reviewed recovery');
+  }
   const jobs = new Map();
   let initialized = false;
+  let initializationFailure = null;
   let directoryReady = false;
   let needsReconciliation = false;
   let needsStartupOperationReconciliation = false;
@@ -437,6 +457,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   }
 
   async function persist(nextJob) {
+    assertNotHeld(nextJob);
     const target = fileFor(nextJob.job_id);
     const temporary = target + '.' + process.pid + '.' + randomUUID() + '.tmp';
     try {
@@ -449,6 +470,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   }
 
   async function initialize({ readOnly = false } = {}) {
+    if (initializationFailure) throw initializationFailure;
     if (!readOnly && !directoryReady) {
       await fs.mkdir(queueDirectory, { recursive: true });
       directoryReady = true;
@@ -462,7 +484,12 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     }
     for (const name of names) {
       if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
-      const job = JSON.parse(await fs.readFile(path.join(queueDirectory, name), 'utf8'));
+      const raw = await fs.readFile(path.join(queueDirectory, name), 'utf8');
+      const job = JSON.parse(raw);
+      if (recoveryHolds.has(job.job_id) && digest(raw) !== recoveryHolds.get(job.job_id)) {
+        initializationFailure = channelError('recovery_hold_mismatch', 'held job bytes changed: ' + job.job_id);
+        throw initializationFailure;
+      }
       if (!JOB_STATES.has(job.state) || !job.job_id || path.basename(fileFor(job.job_id)) !== name) {
         throw channelError('invalid_persisted_job', 'invalid persisted Hermes Gateway job: ' + name);
       }
@@ -472,6 +499,12 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       validatePersistedAuditProjection(job);
       jobs.set(job.job_id, residentJob(job, { startup: true }));
       queueOrder = Math.max(queueOrder, Number(job.queue_order) || 0);
+    }
+    for (const jobId of recoveryHolds.keys()) {
+      if (!jobs.has(jobId)) {
+        initializationFailure = channelError('recovery_hold_mismatch', 'held job is missing: ' + jobId);
+        throw initializationFailure;
+      }
     }
     initialized = true;
     needsReconciliation = true;
@@ -504,6 +537,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     const authoritative = authoritativeJob(roomKey);
     if (!authoritative) return;
     for (const older of roomJobs(roomKey)) {
+      if (isHeldJob(older)) continue;
       if (older.job_id === authoritative.job_id || TERMINAL_STATES.has(older.state)) continue;
       await update(older, {
         state: 'superseded', superseded_by: authoritative.job_id, superseded_lease_id: older.lease_id,
@@ -526,6 +560,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     if (!needsReconciliation) return;
     const reconcileRestartedOperations = needsStartupOperationReconciliation;
     for (const job of [...jobs.values()]) {
+      if (isHeldJob(job)) continue;
       if (job.state === 'retry_wait') await update(job, { state: 'ready' });
       if (job.application?.state === 'claimed') {
         await update(job, {
@@ -621,6 +656,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     const nowMs = currentTime();
     const reaped = [];
     for (const job of [...jobs.values()]) {
+      if (isHeldJob(job)) continue;
       if (job.state !== 'claimed' || Number(job.lease_expires_at_ms) > nowMs) continue;
       const next = job.tool_operation
         ? await update(job, {
@@ -710,7 +746,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     await reapExpiredLeasesInternal();
     const activeRooms = new Set([...jobs.values()].filter((job) => job.state === 'claimed' && isAuthoritative(job)).map((job) => job.room_key));
     const candidate = [...jobs.values()]
-      .filter((job) => job.state === 'ready' && isAuthoritative(job) && !activeRooms.has(job.room_key))
+      .filter((job) => !isHeldJob(job) && job.state === 'ready' && isAuthoritative(job) && !activeRooms.has(job.room_key))
       .sort((left, right) => left.queue_order - right.queue_order)[0];
     if (!candidate) return null;
     const nowMs = currentTime();
@@ -776,6 +812,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(envelope?.job_id, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         assertEnvelope(job, envelope);
         assertCurrentLease(job, envelope);
         // Renewal belongs to the running native turn, never a new attempt. In
@@ -793,6 +830,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const auditTarget = normalizeToolOperationAuditTarget(operation?.audit_target, normalized);
         const job = jobs.get(normalized.job_id);
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         assertEnvelope(job, normalized);
         const existing = toolOperationForRequest(job, normalized.tool, normalized.request_digest);
         if (existing) {
@@ -828,6 +866,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         validateReceipt(receipt);
         const job = jobs.get(requiredString(receipt?.job_id ?? receipt?.jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         assertEnvelope(job, receipt);
         const receiptId = requiredString(receipt?.receipt_id ?? receipt?.receiptId, 'receipt_id', 'invalid_receipt');
         const existing = job.tool_receipts.find((item) => item.receipt_id === receiptId);
@@ -862,6 +901,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(result?.job_id ?? result?.jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         assertEnvelope(job, result);
         if (job.tool_operation && !exactReceiptForToolOperation(job)) {
           assertToolOperationLease(job, result);
@@ -906,6 +946,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         if (job.state !== 'completed' || job.application?.state !== 'pending') {
           return { claimed: false, job: await cloneHydrated(job) };
         }
@@ -925,6 +966,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
 
     async listPendingApplications() {
       return mutate(async () => Promise.all([...jobs.values()]
+        .filter((job) => !isHeldJob(job))
         .filter((job) => job.state === 'completed' && job.application?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
         .map(cloneHydrated)));
@@ -932,6 +974,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
 
     async listPendingApplicationFailureNotifications() {
       return mutate(async () => Promise.all([...jobs.values()]
+        .filter((job) => !isHeldJob(job))
         .filter((job) => job.application?.state === 'failed'
           && job.application?.failure_notification?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
@@ -942,6 +985,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
         if (job.application?.state !== 'claimed' || job.application.application_id !== suppliedId) {
           throw channelError('stale_application', 'application claim is no longer current');
@@ -960,6 +1004,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
         if (job.application?.state !== 'applying' || job.application.application_id !== suppliedId) {
           throw channelError('stale_application', 'application claim is no longer current');
@@ -979,6 +1024,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
         if (job.application?.state !== 'applied' || job.application.application_id !== suppliedId) {
           throw channelError('stale_application', 'application claim is no longer current');
@@ -998,6 +1044,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
         if (!['claimed', 'applying', 'applied'].includes(job.application?.state) || job.application.application_id !== suppliedId) {
           throw channelError('stale_application', 'application claim is no longer current');
@@ -1025,6 +1072,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
         const notification = job.application?.failure_notification;
         if (job.application?.state !== 'failed' || job.application.application_id !== suppliedId || !notification) {
@@ -1052,6 +1100,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(outcome?.job_id ?? outcome?.jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         assertEnvelope(job, outcome);
         const kind = requiredString(outcome?.outcome, 'outcome');
         if (job.outcome && sameResult(job.outcome, outcome)) return cloneHydrated(job);
@@ -1087,6 +1136,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id', 'invalid_audit_projection'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const normalizedEvents = normalizeAuditProjectionEvents(events, job);
         if (job.audit_projection) {
           if (!sameResult(job.audit_projection.events, normalizedEvents)) {
@@ -1112,6 +1162,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
 
     async listPendingAuditProjections({ limit } = {}) {
       return mutate(async () => Promise.all([...jobs.values()]
+        .filter((job) => !isHeldJob(job))
         .filter((job) => job.audit_projection?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
         .slice(0, boundedListLimit(limit))
@@ -1120,6 +1171,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
 
     async listAuditProjectionCandidates({ limit } = {}) {
       return mutate(async () => Promise.all([...jobs.values()]
+        .filter((job) => !isHeldJob(job))
         .filter((job) => (job.audit_projection === undefined || job.audit_projection === null)
           && Boolean(exactReceiptForToolOperation(job)
             || unresolvedToolOperationForAudit(job)
@@ -1139,6 +1191,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id', 'stale_audit_projection'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const projection = job.audit_projection;
         exactProjectionKeys(projection, eventKeys ?? camelEventKeys);
         const auditKeys = audit && typeof audit === 'object' && !Array.isArray(audit)
@@ -1181,6 +1234,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id', 'stale_audit_projection'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const projection = job.audit_projection;
         exactProjectionKeys(projection, eventKeys ?? camelEventKeys);
         const normalizedError = requiredString(errorType ?? camelErrorType, 'error_type', 'invalid_audit_projection');
@@ -1210,6 +1264,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id', 'stale_audit_projection'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const projection = job.audit_projection;
         exactProjectionKeys(projection, eventKeys ?? camelEventKeys);
         if (projection.state === 'conflict') return cloneHydrated(job);
@@ -1231,6 +1286,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     async reapExpiredLeases() { return mutate(reapExpiredLeasesInternal); },
     async listPendingFailureNotifications() {
       return mutate(async () => Promise.all([...jobs.values()]
+        .filter((job) => !isHeldJob(job))
         .filter((job) => job.failure_notification?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
         .map(cloneHydrated)));
@@ -1239,6 +1295,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertNotHeld(job);
         const notification = job.failure_notification;
         if (!notification) throw channelError('stale_notification', 'Gateway failure notification is not pending');
         if (notification.state === 'delivered') return cloneHydrated(job);
@@ -1349,6 +1406,14 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const residentJobs = [...jobs.values()];
         return {
           counts,
+          ...((recoveryHolds.size || freezeBeforeMs !== null) ? {
+            recovery_hold: { jobs: [...jobs.values()].filter(isHeldJob).length,
+              preserved: true, ...(freezeBefore !== null ? { freeze_before: freezeBefore } : {}) },
+            execution_counts: Object.fromEntries([...JOB_STATES].map(state => [state,
+              [...jobs.values()].filter(job => !isHeldJob(job) && job.state === state).length])),
+            execution_application_counts: Object.fromEntries([...APPLICATION_STATES].map(state => [state,
+              [...jobs.values()].filter(job => !isHeldJob(job) && job.application?.state === state).length]))
+          } : {}),
           application_counts: applicationCounts,
           failure_notification_counts: failureNotificationCounts,
           unnotified_application_failures: [...jobs.values()].filter(hasPendingApplicationFailureNotification).length,

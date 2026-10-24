@@ -301,10 +301,10 @@ export function buildGatewayHealthReadback({
     ? Math.max(0, currentMs - seenAtMs)
     : null;
   const consumerFresh = Boolean(consumerId) && consumerAgeMs !== null && consumerAgeMs <= freshnessMs;
-  const counts = status?.counts && typeof status.counts === 'object' ? status.counts : {};
-  const applicationCounts = status?.application_counts && typeof status.application_counts === 'object'
+  const counts = status?.execution_counts || (status?.counts && typeof status.counts === 'object' ? status.counts : {});
+  const applicationCounts = status?.execution_application_counts || (status?.application_counts && typeof status.application_counts === 'object'
     ? status.application_counts
-    : {};
+    : {});
   const failureNotificationCounts = status?.failure_notification_counts && typeof status.failure_notification_counts === 'object'
     ? status.failure_notification_counts
     : {};
@@ -324,6 +324,7 @@ export function buildGatewayHealthReadback({
     transport: String(transport || 'cli'),
     gatewayConfigured: Boolean(gatewayConfigured),
     gatewayReady: Boolean(gatewayConfigured) && consumerFresh,
+    ...(status?.recovery_hold ? { recovery_hold: status.recovery_hold, historical_counts: status.counts, historical_application_counts: status.application_counts } : {}),
     consumer: {
       id: consumerId,
       last_seen_at: Number.isFinite(seenAtMs) ? seenAt : null,
@@ -382,7 +383,7 @@ export function createHermesGatewayHttpHandler({
   token, channel, executeConfirmation, validateConfirmation, executeDocument, validateDocument, executeRead,
   executeRegisteredReservationChange, executeConfirmedReservationCommit,
   enqueueResultApplication, recoverFailureNotifications, recoverAuditProjections,
-  transport = 'cli', now = Date.now, consumerFreshnessMs = 600_000
+  transport = 'cli', now = Date.now, consumerFreshnessMs = 600_000, recoveryHoldMode = false
 } = {}) {
   const gatewayConfigured = GATEWAY_TRANSPORTS.has(transport) && Boolean(String(token || '').trim()) && Boolean(channel);
   const confirmationInFlight = new Map();
@@ -391,7 +392,7 @@ export function createHermesGatewayHttpHandler({
   const confirmedReservationCommitInFlight = new Map();
 
   function triggerOptionalAuditProjectionRecovery() {
-    if (transport === 'gateway_no_send' || typeof recoverAuditProjections !== 'function') return;
+    if (transport === 'gateway_no_send' || recoveryHoldMode || typeof recoverAuditProjections !== 'function') return;
     Promise.resolve()
       .then(() => recoverAuditProjections())
       .catch(() => {});
@@ -414,7 +415,7 @@ export function createHermesGatewayHttpHandler({
         const consumerId = String(url.searchParams.get('consumer_id') || '').trim();
         if (!consumerId) throw requestError(400, 'consumer_id_required');
         const claimed = await channel.claim({ consumerId, waitMs: parseWaitMs(url.searchParams.get('wait_ms') || '0') });
-        if (transport !== 'gateway_no_send' && typeof recoverFailureNotifications === 'function') {
+        if (transport !== 'gateway_no_send' && !recoveryHoldMode && typeof recoverFailureNotifications === 'function') {
           await Promise.resolve(recoverFailureNotifications()).catch(() => {});
         }
         triggerOptionalAuditProjectionRecovery();
@@ -463,7 +464,7 @@ export function createHermesGatewayHttpHandler({
         const body = await readJsonBody(req);
         requiredLeaseId(body);
         await channel.recordOutcome(body);
-        if (transport !== 'gateway_no_send' && typeof recoverFailureNotifications === 'function') {
+        if (transport !== 'gateway_no_send' && !recoveryHoldMode && typeof recoverFailureNotifications === 'function') {
           await Promise.resolve(recoverFailureNotifications()).catch(() => {});
         }
         triggerOptionalAuditProjectionRecovery();
@@ -884,6 +885,7 @@ export function createHermesGatewayHttpHandler({
       }
 
       if (req.method === 'POST' && url.pathname === '/hermes/v1/tools/document-send') {
+        if (recoveryHoldMode) throw requestError(403, 'recovery_sending_held');
         const body = await readJsonBody(req);
         const leaseId = requiredLeaseId(body);
         if (transport === 'gateway_no_send') throw requestError(403, 'writes_disabled');

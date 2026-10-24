@@ -25,6 +25,7 @@ import {
 } from '../ai-browser-worker/worker.mjs';
 import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
+import { loadRecoveryHoldManifest, recoveryRuntimeConfig, recoveryGeneralPostAllowed } from './recovery-hold-policy.mjs';
 import { buildGatewayHealthReadback, createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 import {
   buildKakaoAutomationAuditEvents,
@@ -296,6 +297,7 @@ const CONFIG = {
   startupMutationIgnoreMs: Number(process.env.STARTUP_MUTATION_IGNORE_MS || 4000),
   queueDir: path.resolve(process.env.QUEUE_DIR || './queue'),
   hermesTransport: resolveHermesTransport(process.env.KAKAO_HERMES_TRANSPORT),
+  recoveryHoldFile: String(process.env.KAKAO_GATEWAY_RECOVERY_MANIFEST || '').trim(),
   hermesBridgeToken: String(process.env.KAKAO_HERMES_BRIDGE_TOKEN || '').trim(),
   hermesLeaseMs: Number(process.env.KAKAO_HERMES_LEASE_MS || 300_000),
   hermesMaxAttempts: resolveHermesMaxAttempts(process.env.KAKAO_HERMES_MAX_ATTEMPTS),
@@ -370,6 +372,14 @@ const CONFIG = {
     .filter(Boolean)
 };
 
+const recoveryHold = loadRecoveryHoldManifest(CONFIG.recoveryHoldFile, { directory: CONFIG.queueDir });
+if (recoveryHold) {
+  if (CONFIG.slackCardDeliveryEnabled || CONFIG.workOrchestrator.immediateEnabled) {
+    throw new Error('Recovery hold requires the existing no-immediate-notification runtime contract');
+  }
+  CONFIG.autoSendEnabled = false;
+}
+
 export function buildHealthConfig(config = {}) {
   const health = {
     workerLive: Boolean(config.workerLive),
@@ -377,7 +387,8 @@ export function buildHealthConfig(config = {}) {
     workerDryRun: Boolean(config.workerDryRun),
     windowsWritesEnabled: Boolean(config.windowsWritesEnabled),
     startupCatchupSupported: Boolean(config.startupCatchupSupported),
-    startupBackgroundWorkHeld: config.hermesTransport === 'gateway_no_send',
+    startupBackgroundWorkHeld: config.hermesTransport === 'gateway_no_send' || Boolean(config.recoveryHoldFile),
+    ...(config.recoveryHoldFile ? { incidentRecovery: { historicalJobsPreserved: true, outboundSendingHeld: true } } : {}),
     scheduleOwnerReviewRequired: true,
     killSwitchPolicyEnforced: true
   };
@@ -1830,7 +1841,7 @@ export function createGatewayApplicationFailureNotifier({
   };
 }
 
-export function createGatewayFailureNotificationCoordinator({ channel, notify } = {}) {
+export function createGatewayFailureNotificationCoordinator({ channel, notify, notificationDeliveryEnabled = true } = {}) {
   if (!channel
     || typeof channel.listPendingFailureNotifications !== 'function'
     || typeof channel.markFailureNotified !== 'function') {
@@ -1840,6 +1851,7 @@ export function createGatewayFailureNotificationCoordinator({ channel, notify } 
   let recoveryTail = Promise.resolve();
   return {
     async recover() {
+      if (!notificationDeliveryEnabled) return [];
       const operation = recoveryTail.then(async () => {
         const pending = await channel.listPendingFailureNotifications();
         const results = [];
@@ -2069,7 +2081,9 @@ const gatewayChannel = gatewayTransportEnabled
   ? createHermesGatewayChannel({
     directory: CONFIG.queueDir,
     leaseMs: CONFIG.hermesLeaseMs,
-    maxAttempts: CONFIG.hermesMaxAttempts
+    maxAttempts: CONFIG.hermesMaxAttempts,
+    heldJobs: recoveryHold?.heldJobs || [],
+    freezeBefore: recoveryHold?.freezeBefore || null
   })
   : null;
 export function createGatewayConfirmationExecutor({ getConfig, executeOperation = executeVillageConfirmationRequest } = {}) {
@@ -2494,7 +2508,8 @@ export function createGatewayResultApplicationCoordinator({
   finalize = finalizePreparedKakaoDecision,
   record = async () => {},
   onFailure = async () => {},
-  auditCoordinator = null
+  auditCoordinator = null,
+  notificationDeliveryEnabled = true
 } = {}) {
   if (!channel
     || typeof channel.claimApplication !== 'function'
@@ -2731,6 +2746,7 @@ export function createGatewayResultApplicationCoordinator({
   }
 
   async function notifyApplicationFailure(failedJob, error, source) {
+    if (!notificationDeliveryEnabled) return; // Preserve pending; never pretend a notice was delivered.
     await onFailure({ durableJob: failedJob, error });
     await channel.markApplicationFailureNotified({
       job_id: failedJob.job_id,
@@ -2832,6 +2848,7 @@ const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
   transport: CONFIG.hermesTransport,
+  recoveryHoldMode: Boolean(recoveryHold),
   consumerFreshnessMs: Math.max(60_000, CONFIG.hermesLeaseMs * 2),
   executeConfirmation: gatewayConfirmationExecutor,
   executeRead: request => executeVillageReadOnlyLookup(getKakaoWorkerRuntimeConfigForTransport(),request),
@@ -4668,7 +4685,7 @@ let aiJobDispatcher = null;
 
 function getKakaoWorkerRuntimeConfigForTransport() {
   kakaoWorkerRuntimeConfig ||= loadKakaoWorkerRuntimeConfig();
-  return configForHermesTransport(kakaoWorkerRuntimeConfig, CONFIG.hermesTransport);
+  return recoveryRuntimeConfig(configForHermesTransport(kakaoWorkerRuntimeConfig, CONFIG.hermesTransport), Boolean(recoveryHold));
 }
 
 async function notifyGatewayTerminalFailure({ durableJob, error }) {
@@ -4698,7 +4715,8 @@ function getGatewayFailureNotificationCoordinator() {
   if (gatewayFailureNotificationCoordinator) return gatewayFailureNotificationCoordinator;
   gatewayFailureNotificationCoordinator = createGatewayFailureNotificationCoordinator({
     channel: gatewayChannel,
-    notify: notifyGatewayTerminalFailure
+    notify: notifyGatewayTerminalFailure,
+    notificationDeliveryEnabled: !recoveryHold
   });
   return gatewayFailureNotificationCoordinator;
 }
@@ -4752,6 +4770,7 @@ function getGatewayResultApplicationCoordinator() {
     getConfig: () => getKakaoWorkerRuntimeConfigForTransport(),
     record: recordGatewayApplicationResult,
     auditCoordinator: getKakaoAutomationAuditCoordinator(),
+    notificationDeliveryEnabled: !recoveryHold,
     onFailure: createGatewayApplicationFailureNotifier({
       slackEnabled: CONFIG.slackCardDeliveryEnabled,
       createFollowUp: ({ job, error, context }) => createWorkerFailureFollowUp(job, error, context),
@@ -6036,7 +6055,7 @@ async function recordGatewayDispatchFailure(job, error, context = {}) {
 async function dispatchAiJob(job, context = {}) {
   try {
     const result = await getAiJobDispatcher()(job, context);
-    if (gatewayTransportEnabled && await recoverFailedGatewayDispatch({
+    if (gatewayTransportEnabled && !recoveryHold && await recoverFailedGatewayDispatch({
       result,
       recover: () => getGatewayFailureNotificationCoordinator().recover()
     })) {
@@ -6673,7 +6692,8 @@ const server = http.createServer(async (req, res) => {
     if (await gatewayHttpHandler(req, res, url)) return;
 
     // Gateway dry-run decisions remain available; general operational POSTs can send or write.
-    if (CONFIG.hermesTransport === 'gateway_no_send' && req.method === 'POST') {
+    if (req.method === 'POST' && (CONFIG.hermesTransport === 'gateway_no_send'
+      || (recoveryHold && !recoveryGeneralPostAllowed(url.pathname)))) {
       return json(res, 403, { ok: false, error: 'writes_disabled' });
     }
 
@@ -6869,8 +6889,8 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     console.info(`[dom-bridge] worker: ${CONFIG.workerCommand ? CONFIG.workerCommand : 'disabled'}`);
     // No-send startup must not replay historical applications or emit Slack notifications.
     // Leave durable obligations pending; this is not a blanket guard on explicit HTTP actions.
-    if (CONFIG.hermesTransport === 'gateway_no_send') {
-      console.info('[dom-bridge] startup background work held in gateway_no_send mode');
+    if (CONFIG.hermesTransport === 'gateway_no_send' || recoveryHold) {
+      console.info('[dom-bridge] startup background work held by no-send/recovery policy');
       return;
     }
     if (gatewayTransportEnabled) {

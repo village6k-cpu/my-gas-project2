@@ -49,6 +49,7 @@ function harness({ dashboardHasTrade, sheetRows, dashboardThrows = false, contra
         { tid: OTHER, s: start - DAY, e: end },
       ],
     }),
+    getTradeExtrasForIds_: ids => Object.fromEntries(ids.map(id => [id, { tradeRowFound: true }])),
     getDashboardData: () => {
       if (dashboardThrows) throw new Error('simulated dashboard failure');
       const rows = [];

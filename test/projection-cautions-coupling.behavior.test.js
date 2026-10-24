@@ -35,7 +35,7 @@ function projectAfterInvalidation() {
     getDashboardCacheJson_: () => null, putDashboardCacheJson_: () => {},
     findDashboardRowsByValue_: () => [2, 3], readDashboardScheduleRowsDisplay_: () => rows,
     getDashboardContractMapForIds_: () => ({ target: { name: '대상' }, other: { name: '다른 예약' } }),
-    getTradeExtrasForIds_: () => ({ target: { actualAmount: 182160, contractUrl: 'https://example.invalid/contract' } }),
+    getTradeExtrasForIds_: () => ({ target: { tradeRowFound: true, actualAmount: 182160, contractUrl: 'https://example.invalid/contract' } }),
     getEquipmentCheckMapForIds_: () => ({}), getEquipmentCheckForTrade_: () => ({}),
     getDashboardCheckinItemDefault_: () => false, supaGetScheduleItemCheckoutStateMap_: () => ({ byScheduleId: {} }),
     getTradePaymentOptions_: () => [], getTradeProofTypeOptions_: () => [], getTradeIssueStatusOptions_: () => [],

@@ -71,3 +71,16 @@ test('API GET with both flags remains a read-only status request',()=>{
  vm.runInNewContext('function route(){switch("repairTradeProjection"){'+code+'}} result=route();',ctx);
  assert.equal(ctx.result.status,true);assert.equal(ctx.result.drain,false);
 });
+
+test('deferred financial authority retains structure task before any external or return/removal work',()=>{
+ const f=fixture(),key='dashboardStructureQueue_v1_'+tid;
+ const task=JSON.parse(f.state[key]);task.returnState={done:true};task.removeScheduleIds=[tid+'-01'];f.state[key]=JSON.stringify(task);
+ let external=0;
+ f.ctx.buildSupabaseTrades_=()=>({trades:[],items:[],deferredTradeIds:[tid]});
+ for(const name of ['supaInsertAuthorizedScheduleItems_','supaSetTradeReturnDone_','supaMarkScheduleItemsRemoved_'])f.ctx[name]=()=>{external++;return {ok:true};};
+ const otherBefore=f.state['dashboardStructureQueue_v1_'+other];
+ f.ctx.flushDashboardStructureProjectionQueue_(tid);
+ assert.equal(external,0);
+ const pending=JSON.parse(f.state[key]);assert.equal(pending.token,task.token);assert.equal(pending.revision,task.revision);assert.equal(pending.lastAttemptStage,'financial_source');assert.equal(pending.attempts,1);
+ assert.equal(f.state['dashboardStructureQueue_v1_'+other],otherBefore);
+});
