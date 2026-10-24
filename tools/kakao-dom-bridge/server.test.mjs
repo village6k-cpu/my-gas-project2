@@ -6429,6 +6429,7 @@ test('health config exposes the live safety contract used by supervised restarts
     workerDryRun: false,
     windowsWritesEnabled: true,
     startupCatchupSupported: true,
+    startupBackgroundWorkHeld: false,
     scheduleOwnerReviewRequired: true,
     killSwitchPolicyEnforced: true
   });
