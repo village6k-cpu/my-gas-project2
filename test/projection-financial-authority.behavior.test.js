@@ -27,7 +27,7 @@ for(const options of [{fresh:{tradeRowFound:false,actualAmount:0,contractUrl:''}
 function runDirtyWorker(allDeferred=false){
  const values={dirty_target:'one',dirty_other:'two'},sent=[],mirrored=[];
  const context={Logger:{log(){}},SUPA_DIRTY_PREFIX_:'dirty_',SUPA_CFG_:()=>({url:'https://example.invalid',apikey:'test'}),rescueDashboardAsyncWorkerTriggers_:()=>{},migrateLegacySupaDirtyProperties_:()=>{},
-  PropertiesService:{getScriptProperties:()=>({getProperties:()=>({...values}),getProperty:k=>values[k],deleteProperty:k=>{delete values[k];}})},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock(){}})},
+  PropertiesService:{getScriptProperties:()=>({getProperties:()=>({...values}),getProperty:k=>values[k],deleteProperty:k=>{delete values[k];},setProperty:(k,v)=>{values[k]=v;}})},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock(){}})},
   buildSupabaseTrades_:()=>({trades:allDeferred?[]:[{trade_id:'other'}],items:[],deferredTradeIds:allDeferred?['target','other']:['target']}),
   supaDropOverwritingNotes_:()=>{},supaUpsertGrouped_:(_cfg,table,rows)=>{sent.push({table,rows});return true;},flushPaymentLedgerMirror_:ids=>{mirrored.push(Array.from(ids));return true;}
  };vm.createContext(context);const a=source.indexOf('function flushDirtyToSupabase()'),b=source.indexOf('/** 거래ID 배열',a);vm.runInContext(source.slice(a,b),context);context.flushDirtyToSupabase();return{values,sent,mirrored};
@@ -36,7 +36,7 @@ test('dirty cleanup retains unreadable financial work while completing other tra
  const {values,sent,mirrored}=runDirtyWorker();assert.equal(values.dirty_target,'one');assert.equal(Object.hasOwn(values,'dirty_other'),false);assert.equal(sent.length,1);assert.deepEqual(mirrored,[['other']]);
 });
 test('a financial outage keeps dirty markers and causes no projection or payment HTTP',()=>{
- const {values,sent,mirrored}=runDirtyWorker(true);assert.equal(Object.keys(values).length,2);assert.equal(sent.length,0);assert.equal(mirrored.length,0);
+ const {values,sent,mirrored}=runDirtyWorker(true);assert.equal(Object.keys(values).filter(k=>k.startsWith('dirty_')).length,2);assert.equal(values.dirty_target,'one');assert.equal(values.dirty_other,'two');assert.equal(sent.length,0);assert.equal(mirrored.length,0);
 });
 
 test('full sync refuses partial authority without any external projection or success report',()=>{
