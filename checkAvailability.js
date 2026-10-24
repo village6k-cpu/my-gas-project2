@@ -2992,6 +2992,10 @@ function flushDashboardStructureProjectionQueue_(targetTradeId) {
       if (ok && task.syncStructure) {
         var cfg = SUPA_CFG_();
         var built = buildSupabaseTrades_([tid]);
+        if ((built.deferredTradeIds || []).indexOf(tid) >= 0) {
+          projectionStage = 'financial_source';
+          throw new Error('계약 원장 조회 보류: 기존 투영 작업 보존');
+        }
         if (built.trades && built.trades.length) {
           projectionStage = 'trade_upsert';
           // 복구 큐도 매분 dirty worker와 동일하게 앱에서 입력한 메모를 보존한다.

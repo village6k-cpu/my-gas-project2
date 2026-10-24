@@ -10,7 +10,7 @@ assert.equal(source.split(marker).length, 2, 'unique startup boundary');
 const startup = source.slice(source.indexOf(marker));
 const healthSource = source.slice(source.indexOf('export function buildHealthConfig('), source.indexOf('\n}\n', source.indexOf('export function buildHealthConfig(')) + 3).replace('export ', '');
 
-async function boot(transport, { noListen = false, enabled = true } = {}) {
+async function boot(transport, { noListen = false, enabled = true, recoveryHold = null } = {}) {
   const calls = [], timers = [], notifications = { application: 'pending', terminal: 'pending' };
   const record = name => () => { calls.push(name); };
   const timer = kind => (fn, delay) => { timers.push({ kind, fn, delay }); return { unref() {} }; };
@@ -25,7 +25,7 @@ async function boot(transport, { noListen = false, enabled = true } = {}) {
       workOrchestrator: { digestEnabled: enabled } },
     ensureQueueDir: record('ensure_directory'),
     server: { listen(_port, _host, callback) { calls.push('listen'); callback(); } },
-    gatewayTransportEnabled: transport !== 'cli',
+    gatewayTransportEnabled: transport !== 'cli', recoveryHold,
     getGatewayResultApplicationCoordinator() {
       calls.push('gateway_coordinator');
       return { recoverPendingApplications: async () => calls.push('apply_history'),
@@ -82,4 +82,8 @@ test('health identifies startup hold separately from runtime sending readiness',
   assert.equal(build({ hermesTransport: 'gateway_no_send' }).startupBackgroundWorkHeld, true);
   assert.equal(build({ hermesTransport: 'gateway' }).startupBackgroundWorkHeld, false);
   assert.equal(build({ hermesTransport: 'cli' }).startupBackgroundWorkHeld, false);
+});
+test('configured recovery mode keeps all startup background side effects held',async()=>{
+ const {calls,timers,notifications}=await boot('gateway',{recoveryHold:{file:'manifest'}});
+ assert.deepEqual(calls,['ensure_directory','listen']);assert.equal(timers.length,0);assert.deepEqual(notifications,{application:'pending',terminal:'pending'});
 });

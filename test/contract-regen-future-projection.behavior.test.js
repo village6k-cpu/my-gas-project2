@@ -66,6 +66,7 @@ function harness({ fail = false, refillBeforeFinish = false } = {}) {
     removeDashboardCacheJson_: (_cache, key) => cache.delete(key),
     parseDT: (date, time) => new Date(`${date}T${time}:00+09:00`),
     getTimelineData: () => ({ groups: [], items: [{ tid: TID, s: Date.parse(`${START}T10:00:00+09:00`), e: Date.parse(`${END}T10:00:00+09:00`) }] }),
+    getTradeExtrasForIds_: () => ({ [TID]: { tradeRowFound: true, contractUrl: ledger.url, actualAmount: ledger.amount, contractRegenPending: !!values[`contractEditTS_${TID}`] } }),
     getDashboardData(date) {
       const key = `dashboard_v7_${date}`;
       if (!cache.has(key)) cache.set(key, { ...stale, contractUrl: ledger.url, actualAmount: ledger.amount, contractRegenPending: !!values[`contractEditTS_${TID}`] });
