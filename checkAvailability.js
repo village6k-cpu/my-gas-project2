@@ -881,7 +881,7 @@ function getDashboardData(targetDate, skipCache, options) {
     var cachedResult = getDashboardCacheJson_(cache, cacheKey);
     if (cachedResult) {
       if (!cachedResult.date) cachedResult.date = today;
-      return cachedResult;
+      return finishDashboardCautions_(cachedResult, options);
     }
   }
 
@@ -1117,8 +1117,8 @@ function getDashboardData(targetDate, skipCache, options) {
   // 시간순 정렬
   checkoutList.sort(compareDashboardItemsByTime_);
   checkinList.sort(compareDashboardItemsByTime_);
-  attachDashboardCardCautions_(checkoutList, checkinList);
-  markDash_('cautions');
+  // Core cache is also consumed by warming and durable DB projection.
+  // Display-only HTTP belongs to the requested staff response, not the core build.
 
   var result = {
     date: today,
@@ -1134,11 +1134,20 @@ function getDashboardData(targetDate, skipCache, options) {
   markDash_('options_built');
   if (dashProfile) {
     // 프로파일 응답은 캐시에 저장하지 않는다(진단용 필드 오염 방지)
+    finishDashboardCautions_(result, options);
+    markDash_('cautions');
     result.profile = dashProfileMarks;
     return result;
   }
   // 등록/취소/일정변경 시 invalidateDashboardCache로 무효화되므로, 날짜 이동 체감을 위해 15분 유지.
   putDashboardCacheJson_(cache, cacheKey, result, 900);
+  return finishDashboardCautions_(result, options);
+}
+
+function finishDashboardCautions_(result, options) {
+  if (!options || options.includeCautions !== false) {
+    attachDashboardCardCautions_(result.checkout || [], result.checkin || []);
+  }
   return result;
 }
 
@@ -2068,7 +2077,14 @@ function fetchCardCautionsBatch_(requests) {
   }
   if (!missIdx.length) return results;
 
-  var fetchRequests = missIdx.map(function(idx) {
+  // fetchAll still charges one UrlFetch per entry. Share identical card misses.
+  var uniqueMissIdx = [], representative = {}, seenMiss = {};
+  missIdx.forEach(function(idx) {
+    var signature = JSON.stringify([requests[idx].phase, requests[idx].itemNames]);
+    if (Object.prototype.hasOwnProperty.call(seenMiss, signature)) representative[idx] = seenMiss[signature];
+    else { seenMiss[signature] = idx; representative[idx] = idx; uniqueMissIdx.push(idx); }
+  });
+  var fetchRequests = uniqueMissIdx.map(function(idx) {
     var request = requests[idx];
     return {
       url: getCardCautionsApiUrl_(),
@@ -2083,7 +2099,7 @@ function fetchCardCautionsBatch_(requests) {
     var responses = UrlFetchApp.fetchAll(fetchRequests);
     var toCache = {};
     responses.forEach(function(response, i) {
-      var idx = missIdx[i];
+      var idx = uniqueMissIdx[i];
       var phase = requests[idx].phase;
       var normalized = emptyCardCautionsResponse_(phase);
       if (response && response.getResponseCode() === 200) {
@@ -2093,6 +2109,9 @@ function fetchCardCautionsBatch_(requests) {
         } catch (parseErr) {}
       }
       results[idx] = normalized;
+    });
+    missIdx.forEach(function(idx) {
+      if (representative[idx] !== idx) results[idx] = results[representative[idx]];
     });
     if (cautionsCache) {
       try { cautionsCache.putAll(toCache, 300); } catch (cachePutErr) {}
@@ -2449,7 +2468,7 @@ function warmDashboardCache() {
     var yest = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     var tom = Utilities.formatDate(new Date(Date.now() + 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     [today, yest, tom].forEach(function(d) {
-      try { getDashboardData(d, true); } catch (e) { /* 개별 실패 무시 */ }
+      try { getDashboardData(d, true, { includeCautions: false }); } catch (e) { /* 개별 실패 무시 */ }
     });
     try { warmTimelineCache_(); } catch (eTimeline) { /* 개별 실패 무시 */ }
     try { warmDashboardMutationCaches_(); } catch (eMutation) { /* 개별 실패 무시 */ }
