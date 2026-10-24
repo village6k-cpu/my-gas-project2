@@ -220,7 +220,7 @@ assert.match(
 
 assert.match(
   bridge,
-  /function updateSupabaseEventByHash\(eventHash, patch\)/,
+  /function updateSupabaseEventByHash\(eventHash, patch(?:, expectedRow = null)?\)/,
   'Bridge must update Supabase job status after local worker execution'
 );
 
