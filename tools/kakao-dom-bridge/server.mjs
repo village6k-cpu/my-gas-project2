@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { isIncidentCaptureRetry } from './incident-capture-recovery.mjs';
 import os from 'node:os';
 import https from 'node:https';
 import fs from 'node:fs';
@@ -3933,14 +3934,22 @@ async function fetchSupabaseEventByHash(eventHash) {
   return Array.isArray(data) && data.length ? data[0] : null;
 }
 
-async function fetchSupabaseRowsByStatuses(statuses = [], limit = 20) {
+async function fetchSupabaseRowsByStatuses(statuses = [], limit = 20, { capturePending = false, afterDetectedAt = null } = {}) {
   if (!supabaseConfigured() || !statuses.length) return [];
   const url = new URL(supabaseTableEndpoint());
   const cutoff = new Date(Date.now() - CONFIG.supabaseRecoveryLookbackHours * 60 * 60_000).toISOString();
   url.searchParams.set('status', `in.(${statuses.join(',')})`);
-  url.searchParams.set('created_at', `gte.${cutoff}`);
+  if (capturePending) {
+    url.searchParams.set('payload->capture_retry->>version', 'eq.1');
+    url.searchParams.set('payload->capture_retry->>state', 'eq.pending');
+    url.searchParams.set('payload->capture_retry->>stage', 'eq.before_gateway_enqueue');
+    if (afterDetectedAt !== null) {
+      if (!Number.isFinite(Date.parse(afterDetectedAt))) throw new Error('Invalid incident capture cutoff');
+      url.searchParams.set('detected_at', `gt.${afterDetectedAt}`);
+    }
+  } else url.searchParams.set('created_at', `gte.${cutoff}`);
   url.searchParams.set('select', 'id,status,room_key,event_hash,preview_text,unread_count,detected_at,created_at,updated_at,claimed_at,completed_at,error_message,payload');
-  url.searchParams.set('order', 'updated_at.desc');
+  url.searchParams.set('order', capturePending ? 'updated_at.asc' : 'updated_at.desc');
   url.searchParams.set('limit', String(limit));
   const { response, text, data } = await supabaseFetchWithTimeout(url.toString(), {
     method: 'GET',
@@ -3950,17 +3959,22 @@ async function fetchSupabaseRowsByStatuses(statuses = [], limit = 20) {
   return Array.isArray(data) ? data : [];
 }
 
-async function updateSupabaseEventByHash(eventHash, patch) {
+async function updateSupabaseEventByHash(eventHash, patch, expectedRow = null) {
   if (!supabaseConfigured() || !eventHash || !patch) return { skipped: true };
   const url = new URL(supabaseTableEndpoint());
   url.searchParams.set('event_hash', `eq.${eventHash}`);
+  if (expectedRow) {
+    if (!expectedRow.id || !expectedRow.updated_at || !expectedRow.status) throw new Error('Recovery claim requires exact source version');
+    for (const key of ['id', 'status', 'updated_at']) url.searchParams.set(key, `eq.${expectedRow[key]}`);
+  }
   const { response, text, data } = await supabaseFetchWithTimeout(url.toString(), {
     method: 'PATCH',
     headers: supabaseHeaders('return=representation'),
     body: JSON.stringify(patch)
   });
   if (!response.ok) throw new Error(`Supabase update failed: ${response.status} ${text}`);
-  return { ok: true, row: Array.isArray(data) ? data[0] : data };
+  const row = Array.isArray(data) ? data[0] : data;
+  return { ok: !!row?.id, row };
 }
 
 async function writeSupabaseEvent(eventOrJob, kind) {
@@ -6234,6 +6248,12 @@ function buildJobFromSupabaseRow(row = {}, attempt = 0) {
 
 async function fetchRecoverableSupabaseRows() {
   const scanLimit = Math.max(CONFIG.supabaseRecoveryBatchSize * 12, 24);
+  if (recoveryHold) {
+    const rows = await fetchSupabaseRowsByStatuses(['ai_worker_error', 'processing_by_ai_worker'], scanLimit, {
+      capturePending: true, afterDetectedAt: recoveryHold.freezeBefore
+    });
+    return rows.filter(row => isIncidentCaptureRetry(row, recoveryHold.freezeBefore, Date.now(), Math.max(CONFIG.workerTimeoutMs * 2, 10 * 60_000)));
+  }
   const groups = await Promise.all([
     fetchSupabaseRowsByStatuses(['ready_for_ai_worker', 'ai_decision_ready_no_sheet_write'], scanLimit),
     fetchSupabaseRowsByStatuses(['processing_by_ai_worker'], scanLimit),
@@ -6272,7 +6292,7 @@ async function markSupabaseRowClaimedForRecovery(row, attempt) {
       ...payload,
       bridge_recovery: recovery
     }
-  });
+  }, row);
 }
 
 async function markSupabaseRowEscalated(row, followUpResult) {
@@ -6296,7 +6316,7 @@ async function markSupabaseRowEscalated(row, followUpResult) {
 }
 
 async function runSupabaseRecoverySweep(reason = 'interval') {
-  if (!CONFIG.supabaseRecoveryEnabled || !supabaseConfigured() || (!CONFIG.workerCommand && !gatewayTransportEnabled)) return { skipped: true };
+  if (CONFIG.hermesTransport === 'gateway_no_send' || !CONFIG.supabaseRecoveryEnabled || !supabaseConfigured() || (!CONFIG.workerCommand && !gatewayTransportEnabled)) return { skipped: true };
   if (state.recoverySweepRunning) return { skipped: true, reason: 'already_running' };
   state.recoverySweepRunning = true;
   const startedAt = nowIso();
@@ -6306,7 +6326,9 @@ async function runSupabaseRecoverySweep(reason = 'interval') {
     result.scanned = rows.length;
     for (const row of rows) {
       if (result.replayed >= CONFIG.supabaseRecoveryBatchSize) break;
-      const lowValueReason = shouldSkipSupabaseRowAsLowValue(row);
+      const incidentCapture = recoveryHold && isIncidentCaptureRetry(row, recoveryHold.freezeBefore, Date.now(), Math.max(CONFIG.workerTimeoutMs * 2, 10 * 60_000));
+      if (recoveryHold && !incidentCapture) { result.skipped += 1; continue; }
+      const lowValueReason = incidentCapture ? '' : shouldSkipSupabaseRowAsLowValue(row);
       if (lowValueReason) {
         try {
           await markSupabaseRowSkippedLowValue(row, lowValueReason);
@@ -6316,7 +6338,7 @@ async function runSupabaseRecoverySweep(reason = 'interval') {
         }
         continue;
       }
-      if (shouldEscalateExhaustedSupabaseRow(row)) {
+      if (!incidentCapture && shouldEscalateExhaustedSupabaseRow(row)) {
         try {
           const job = buildJobFromSupabaseRow(row, recoveryAttemptCount(row));
           const followUpResult = await createWorkerFailureFollowUp(job, new Error(row.error_message || 'worker recovery attempts exhausted'), {
@@ -6330,19 +6352,21 @@ async function runSupabaseRecoverySweep(reason = 'interval') {
         }
         continue;
       }
-      if (!shouldRecoverSupabaseRow(row)) {
+      if (!incidentCapture && !shouldRecoverSupabaseRow(row)) {
         result.skipped += 1;
         continue;
       }
       const attempt = recoveryAttemptCount(row) + 1;
       const job = buildJobFromSupabaseRow(row, attempt);
       try {
-        await markSupabaseRowClaimedForRecovery(row, attempt);
+        const claim = await markSupabaseRowClaimedForRecovery(row, attempt);
+        if (!claim?.ok || !claim.row?.id) { result.skipped += 1; continue; }
         appendNdjson('worker-replayed.ndjson', { at: nowIso(), jobId: job.jobId, reason: 'supabase_recovery_sweeper', attempt, rowId: row.id, previousStatus: row.status });
         const outcome = await dispatchAiJob(job, {
           origin: 'supabase_recovery_sweeper',
           attempt,
-          previous_status: row.status
+          previous_status: row.status,
+          recoveryClaim: claim.row
         });
         result.replayed += 1;
         if (outcome.ok) state.recoveredJobs += 1;
@@ -6889,7 +6913,19 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     console.info(`[dom-bridge] worker: ${CONFIG.workerCommand ? CONFIG.workerCommand : 'disabled'}`);
     // No-send startup must not replay historical applications or emit Slack notifications.
     // Leave durable obligations pending; this is not a blanket guard on explicit HTTP actions.
-    if (CONFIG.hermesTransport === 'gateway_no_send' || recoveryHold) {
+    if (recoveryHold && CONFIG.hermesTransport !== 'gateway_no_send') {
+      const recoverEligible = async () => {
+        await getGatewayResultApplicationCoordinator().recoverPendingApplications();
+        await runSupabaseRecoverySweep('incident_capture');
+      };
+      const guardedRecovery = () => recoverEligible().catch(error => {
+        appendNdjson('errors.ndjson', { at: nowIso(), type: 'eligible_recovery', message: String(error.message).slice(0, 500) });
+      });
+      guardedRecovery();
+      setInterval(guardedRecovery, 30_000).unref?.();
+      return;
+    }
+    if (CONFIG.hermesTransport === 'gateway_no_send') {
       console.info('[dom-bridge] startup background work held by no-send/recovery policy');
       return;
     }

@@ -1,0 +1,9 @@
+# Owned Kakao evidence capture and scoped incident recovery
+
+The first new post-cutoff event failed before Gateway enqueue because a separate shared Hermes task was active. Keep the shared browser guard; read the exact room in a process-owned background target instead. Never alter shared search/list/focus, and close only an unchanged, verified-owned target with no composer draft. Traverse open shadow roots and frames; unknown draft scopes remain open. Exclude only an inaccessible zero-height textarea layout measurement, proven by live metadata. Resume debugger waiting only on the newly created owned target; another CDP client can attach it paused. Preserve typed failure stage, target ID and cleanup outcome.
+
+Incident recovery must preserve the fixed historical cutoff and all 7004 held jobs. Query only post-cutoff capture_retry version1/pending/before_gateway_enqueue rows before the remote batch limit. Reject handoff/business receipts and fresh claims; require exact id/status/updated_at CAS before dispatch. No historical skip/escalation branch, no old notifications, no customer or Slack sending. Preserve runtime capture-retry CAS and registration retry extensions through a reviewed three-way merge.
+
+Validation: RED/GREEN ownership, draft, resume, scoped query and stale-CAS regressions; full worker and bridge suites; reviewed runtime candidate suite; actual failed room read/owned cleanup with all prior targets preserved; then one guarded bridge-only replacement with the same cutoff, native consumer, Chrome and relay preserved. Verify the original new event through fresh capture, model, durable result and authoritative readback; never manufacture or replay a business mutation for a test.
+
+Evidence: incident audit/incident-startup-fences-20261024, owned-live-capture-final.json and owned-test-tabs-cleaned.json. First live proof exposed debugger wait and hidden textarea measurement; both failures and corrective tests retained.

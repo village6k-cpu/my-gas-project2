@@ -10,6 +10,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { INQUIRY_LIFECYCLE_PROMPT, inquiryLifecycleErrors, validatePendingInquiryRevision } from './inquiry-lifecycle.mjs';
 import { reconcileConfirmationBatchReceipt } from './confirmation-batch-reconciliation.mjs';
 import { isSharedHermesGatewayIdle } from './shared-hermes-browser.mjs';
+import { captureOwnedKakaoRoom, closeOwnedKakaoRoom, buildOwnedDraftInspectionExpression } from './owned-room-capture.mjs';
 import { effectiveRegisteredOperationReceipts } from './registered-operation-recovery.mjs';
 import {
   inquiryConversationKey,
@@ -6680,12 +6681,24 @@ export async function closeKakaoConversationWindow(windowInfo = {}, {
   });
 }
 
+function ownedRoomDependencies({ cdpBaseUrl, timeoutMs, fetchImpl, evaluateImpl, cdpCallImpl }) {
+  return {
+    cdpBaseUrl,
+    fetchJson: (base, endpoint) => devtoolsFetchJson(base, endpoint, { fetchImpl, timeoutMs }),
+    callCdp: (target, method, params) => cdpCallImpl(target, method, params, { timeoutMs }),
+    inspectDraft: (target) => evaluateImpl(target, buildOwnedDraftInspectionExpression(), { timeoutMs })
+  };
+}
+
 export async function closeKakaoConversationTargetViaDevtools(targetInfo = {}, {
   cdpBaseUrl = kakaoDevtoolsBaseUrlFromEnv(),
   timeoutMs = 10000,
   fetchImpl = fetch,
+  evaluateImpl = devtoolsEvaluateOnTarget,
+  cdpCallImpl = devtoolsCdpCallOnTarget,
   sharedGatewayIdle = isSharedHermesGatewayIdle
 } = {}) {
+  if (targetInfo.owned_capture === true) return closeOwnedKakaoRoom(targetInfo, ownedRoomDependencies({ cdpBaseUrl, timeoutMs, fetchImpl, evaluateImpl, cdpCallImpl }));
   if (!targetInfo?.id || !cdpBaseUrl) return { status: 'skipped_missing_devtools_target' };
   if (targetInfo.close_safe === false) {
     return { status: 'skipped_unsafe_main_target', targetId: targetInfo.id };
@@ -7479,6 +7492,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
   timeoutMs = 20000,
   fetchImpl = fetch,
   evaluateImpl = devtoolsEvaluateOnTarget,
+  cdpCallImpl = devtoolsCdpCallOnTarget,
   sharedGatewayIdle = isSharedHermesGatewayIdle,
   allowSearch = process.env.KAKAO_WORKER_SEARCH_TARGET_CHAT !== '0',
   evidenceMaxAttempts = 40,
@@ -7521,6 +7535,20 @@ export async function openKakaoTargetChatViaDevtools(job, {
 
   const mainTarget = pickKakaoMainListTarget(targetList);
   if (!mainTarget) return { status: 'main_list_target_not_found', hints };
+  if (roomIds.length === 1 && /^\d{6,24}$/.test(roomIds[0])
+    && /^https:\/\/business\.kakao\.com\/space\/[^/]+\/channel\/[^/]+\/chats(?:[/?#]|$)/.test(mainTarget.url)) {
+    try {
+      const captured = await captureOwnedKakaoRoom({
+        ...ownedRoomDependencies({ cdpBaseUrl, timeoutMs, fetchImpl, evaluateImpl, cdpCallImpl }),
+        mainTarget, knownTargets: targetList, roomId: roomIds[0], sleepImpl,
+        readEvidence: target => readUsableKakaoConversationEvidence(target, { hints, timeoutMs, evaluateImpl,
+          evidenceMaxAttempts, evidencePollMs, sleepImpl, source: 'live_kakao_dom_owned_conversation' })
+      });
+      return { ...captured, hints };
+    } catch (error) {
+      return { status: 'owned_capture_evidence_unavailable', via_devtools: true, hints, error: String(error.message).slice(0, 200) };
+    }
+  }
   if (!sharedGatewayIdle()) return { status: 'shared_browser_active_or_unknown', hints, via_devtools: true };
   const searchTerms = buildKakaoChatSearchTerms(hints);
   const openResult = await evaluateImpl(mainTarget, buildKakaoSearchAndOpenExpression(searchTerms, hints, { allowSearch }), { timeoutMs });
@@ -8841,7 +8869,7 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
 function isKakaoNavigationSafetyStop(result) {
   return [
     'chat_search_owned_elsewhere', 'chat_search_existing_query_preserved',
-    'chat_search_ownership_changed', 'chat_list_restore_failed', 'shared_browser_active_or_unknown'
+    'chat_search_ownership_changed', 'chat_list_restore_failed', 'shared_browser_active_or_unknown', 'owned_capture_evidence_unavailable'
   ].includes(result?.status);
 }
 

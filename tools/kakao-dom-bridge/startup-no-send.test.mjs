@@ -83,7 +83,14 @@ test('health identifies startup hold separately from runtime sending readiness',
   assert.equal(build({ hermesTransport: 'gateway' }).startupBackgroundWorkHeld, false);
   assert.equal(build({ hermesTransport: 'cli' }).startupBackgroundWorkHeld, false);
 });
-test('configured recovery mode keeps all startup background side effects held',async()=>{
+test('incident startup schedules only coordinator-filtered applications and post-cutoff capture recovery, without notices',async()=>{
  const {calls,timers,notifications}=await boot('gateway',{recoveryHold:{file:'manifest'}});
- assert.deepEqual(calls,['ensure_directory','listen']);assert.equal(timers.length,0);assert.deepEqual(notifications,{application:'pending',terminal:'pending'});
+ assert.deepEqual(calls,['ensure_directory','listen','gateway_coordinator','apply_history','supabase_recovery','gateway_coordinator','apply_history','supabase_recovery']);
+ assert.equal(timers.length,1);assert.equal(timers[0].delay,30000);
+ assert.deepEqual(notifications,{application:'pending',terminal:'pending'});
+ for(const blocked of ['application_notifications','terminal_notifications','audit_import','slack_actions','notice_updates','p0_notifications','tab_cleanup','digest','notice_cleanup'])assert.ok(!calls.includes(blocked),blocked);
+});
+test('no-send takes precedence over incident recovery and never schedules even the scoped recovery',async()=>{
+ const {calls,timers}=await boot('gateway_no_send',{recoveryHold:{file:'manifest'}});
+ assert.deepEqual(calls,['ensure_directory','listen']);assert.equal(timers.length,0);
 });
