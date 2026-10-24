@@ -76,7 +76,7 @@ const flushDirtyBody = supa.slice(
   supa.indexOf('\n/** 거래ID 배열', supa.indexOf('function flushDirtyToSupabase')),
 );
 assert(
-  /if \(ok\) \{[\s\S]*if \(p\.getProperty\(dirtyKey\) === snapshot\[dirtyKey\]\) p\.deleteProperty\(dirtyKey\)/.test(flushDirtyBody) &&
+  /p\.getProperty\(key\) !== snapshot\[key\][\s\S]*if \(outcomes\[tid\]\) \{ p\.deleteProperty\(key\)/.test(flushDirtyBody) &&
     /function supaUpsert_\(cfg, table, rows, conflict\) \{[\s\S]*?return true;\s*\n\}/.test(supa),
   '#14/#30 flushDirtyToSupabase must clear only the successfully uploaded, unchanged per-trade dirty marker; supaUpsert_ must return a boolean'
 );

@@ -110,7 +110,8 @@ function paymentLedgerServerRequest_(body) {
   var props = PropertiesService.getScriptProperties();
   var key = props.getProperty('VILLAGE_API_WRITE_KEY_V1');
   if (!key) throw new Error('수납 내부 인증 설정 없음');
-  var response = UrlFetchApp.fetch('https://today-dashboard-ten.vercel.app/api/internal/payments', {
+  var fetch = typeof supaSyncFetch_ === 'function' ? supaSyncFetch_ : function(url, options) { return UrlFetchApp.fetch(url, options); };
+  var response = fetch('https://today-dashboard-ten.vercel.app/api/internal/payments', {
     method: 'post', contentType: 'application/json',
     headers: { 'x-payment-internal-key': key }, payload: JSON.stringify(body), muteHttpExceptions: true
   });
@@ -120,12 +121,22 @@ function paymentLedgerServerRequest_(body) {
 }
 
 /** 기존 1분 dirty 큐를 재사용한다. 실패하면 해당 dirty 표식을 지우지 않는다. */
-function flushPaymentLedgerMirror_(tradeIds) {
+function flushPaymentLedgerMirror_(tradeIds, report) {
   if (!paymentLedgerEnabled_()) return true;
   var snapshot = getPaymentLedgerSnapshot_(tradeIds);
   var result = paymentLedgerServerRequest_({ action: 'syncSnapshot', accounts: snapshot.accounts });
   var projected = applyPaymentLedgerProjection_(result.projections || []);
   paymentLedgerServerRequest_({ action: 'ackProjections', applied: projected.applied, rejected: projected.rejected });
+  if (report) {
+    tradeIds.forEach(function(id) { report[id] = false; });
+    (Array.isArray(result.snapshotAcknowledgements) ? result.snapshotAcknowledgements : []).forEach(function(item) {
+      if (Object.prototype.hasOwnProperty.call(report, item.tradeId) &&
+          (item.state === 'current' || item.state === 'review_held')) report[item.tradeId] = true;
+    });
+    // Review-held means the authoritative snapshot was accepted, not that money was paid or review resolved.
+    projected.applied.forEach(function(item) { report[item.tradeId] = true; });
+    projected.rejected.forEach(function(item) { report[item.tradeId] = false; });
+  }
   return projected.rejected.length === 0;
 }
 

@@ -40,7 +40,7 @@ function runAudit(claims, { rows = [row], unavailable = false } = {}) {
     normalizeEquipmentCheckTradeId_: (value) => String(value).trim(),
     normalizeDashboardPhotoPhase_: (value) => ({ '반출': 'checkout', '반납': 'checkin' }[value] || value),
   };
-  vm.runInNewContext(source.slice(source.indexOf('function auditScriptProperties()'), source.indexOf('function cleanupOldTradeProps(')), context);
+  vm.runInNewContext(source.slice(source.indexOf('var SUPA_SYNC_ATTEMPT_'), source.indexOf('/** 거래ID 배열', source.indexOf('var SUPA_SYNC_ATTEMPT_'))) + '\n' + source.slice(source.indexOf('function auditScriptProperties()'), source.indexOf('function cleanupOldTradeProps(')), context);
   const result = JSON.parse(JSON.stringify(context.auditScriptProperties()));
   assert.equal(JSON.stringify(all), before, 'audit must never mutate any property');
   return { audit: result.dashboardPhotoUploads, ledgerReads, all };
@@ -144,7 +144,7 @@ test('photo audit eligibility agrees with the existing cleanup predicate without
   const gas = fs.readFileSync(path.join(__dirname, '..', 'checkAvailability.js'), 'utf8');
   const context = { Date: { now: () => now }, DASHBOARD_PHOTO_UPLOAD_CLAIM_PREFIX_: prefix,
     CacheService: { getScriptCache: () => ({ get: () => null, put() {} }) } };
-  vm.runInNewContext(gas.slice(gas.indexOf('function cleanupDashboardPhotoUploadClaims_('), gas.indexOf('function findDashboardPhotoUploadRow_(')), context);
+  vm.runInNewContext(source.slice(source.indexOf('var SUPA_SYNC_ATTEMPT_'), source.indexOf('/** 거래ID 배열', source.indexOf('var SUPA_SYNC_ATTEMPT_'))) + '\n' + gas.slice(gas.indexOf('function cleanupDashboardPhotoUploadClaims_('), gas.indexOf('function findDashboardPhotoUploadRow_(')), context);
   context.cleanupDashboardPhotoUploadClaims_({ getProperties: () => ({ ...values }), deleteProperty: (key) => { delete values[key]; } });
   Object.keys(claims).forEach((key, index) => assert.equal(audit.entries[index].legacyCleanupEligible, !(prefix + key in values)));
   assert.equal(values.village_operation_receipt_v1_protected, 'protected receipt');

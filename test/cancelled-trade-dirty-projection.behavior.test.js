@@ -17,6 +17,7 @@ function fixture({ cancelOk = true, authorityOk = true, checkoutStarted = false 
     getProperties: () => Object.fromEntries(values),
     getProperty: (k) => values.get(k),
     deleteProperty: (k) => values.delete(k),
+    setProperty: (k, v) => values.set(k, v),
   };
   const context = {
     SUPA_DIRTY_PREFIX_: 'SUPA_DIRTY_v2_',

@@ -164,7 +164,7 @@ test('반출 후 누락 품목은 브라우저가 기준선 없이 insert하지 
     '반출 후 구조 동기화는 존재하는 행만 PATCH해야 한다');
   assert.match(worker, /var checkoutStarted = localCheckoutStarted/,
     '운영에서 제거된 Supabase 기준선 조회를 되살리지 말고 권위 시트 반출 상태로 판정해야 한다');
-  assert.match(supa, /function supaPatchExistingScheduleItems_[\s\S]*method: 'patch'[\s\S]*returned\.length !== 1/);
+  assert.match(supa, /function supaPatchExistingScheduleItems_[\s\S]*method: 'patch'[\s\S]*returned\.length === 1/);
 });
 
 test('느린 구조 투영 lease는 카드 입력을 막지 않고 큐 merge만 원자화한다', () => {
@@ -225,7 +225,7 @@ test('연속 품목 체크는 150ms 거래 배치와 내구 outbox로 유실 없
   assert.match(batch, /commitLock\.tryLock\(2000\)/);
 
   const parallel = section(supa, 'function supaSetScheduleItemCheckoutStatesBatch_', '\nfunction supaActualTakenQty_');
-  assert.match(parallel, /UrlFetchApp\.fetchAll\(requests\)/);
+  assert.match(parallel, /supaSyncFetchAll_\(requests\)/);
 });
 
 test('수량·반납 상세은 네트워크 실패에도 사용자 목표를 보존하고 요청 폭주 없이 재시도한다', () => {

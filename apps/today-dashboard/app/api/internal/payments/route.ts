@@ -29,9 +29,15 @@ export async function POST(req: NextRequest) {
     }
     if (body.action === "syncSnapshot") {
       const tids = await refreshPaymentAccounts(undefined, body.accounts, db);
-      const projections = (await paymentBalances(tids, db)).filter(a => a.needs_projection && !a.review_required && a.billed_amount !== null && !["취소", "계약누락"].includes(a.contract_status)).map(projectionItem);
+      const balances = await paymentBalances(tids, db);
+      const projections = balances.filter(a => a.needs_projection && !a.review_required && a.billed_amount !== null && !["취소", "계약누락"].includes(a.contract_status)).map(projectionItem);
       // GAS가 호출한 요청에는 GAS를 다시 호출하지 않는다. 호출자가 직접 투영 후 ACK한다.
-      return json({ success: true, projections });
+      const snapshotAcknowledgements = balances.map(a => ({
+        tradeId: a.trade_id,
+        state: a.review_required || a.billed_amount === null || ["취소", "계약누락"].includes(a.contract_status)
+          ? "review_held" : a.needs_projection ? "projection_required" : "current",
+      }));
+      return json({ success: true, projections, snapshotAcknowledgements });
     }
     if (body.action === "ackProjections") {
       if (!Array.isArray(body.applied) || !Array.isArray(body.rejected)) throw new Error("수납 반영 확인 목록 오류");

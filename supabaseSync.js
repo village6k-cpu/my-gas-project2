@@ -28,7 +28,7 @@ function supaToken_(cfg) {
   var exp = Number(p.getProperty('SUPA_TOKEN_EXP') || 0);
   if (cached && Date.now() < exp - 60000) return cached;
   if (!cfg.botEmail || !cfg.botPassword) { Logger.log('봇 계정 미설정 — initSupabaseConfig 실행 필요'); return null; }
-  var res = UrlFetchApp.fetch(cfg.url + '/auth/v1/token?grant_type=password', {
+  var res = supaSyncFetch_(cfg.url + '/auth/v1/token?grant_type=password', {
     method: 'post',
     contentType: 'application/json',
     headers: { apikey: cfg.apikey },
@@ -86,8 +86,8 @@ function supaDeleteTrade_(tid) {
     Prefer: 'return=minimal'
   };
   var filt = '?trade_id=eq.' + encodeURIComponent(tid);
-  var rItems = UrlFetchApp.fetch(cfg.url + '/rest/v1/schedule_items' + filt, { method: 'delete', headers: headers, muteHttpExceptions: true });
-  var rTrade = UrlFetchApp.fetch(cfg.url + '/rest/v1/trades' + filt, { method: 'delete', headers: headers, muteHttpExceptions: true });
+  var rItems = supaSyncFetch_(cfg.url + '/rest/v1/schedule_items' + filt, { method: 'delete', headers: headers, muteHttpExceptions: true });
+  var rTrade = supaSyncFetch_(cfg.url + '/rest/v1/trades' + filt, { method: 'delete', headers: headers, muteHttpExceptions: true });
   var ci = rItems.getResponseCode(), ct = rTrade.getResponseCode();
   var ok = ci < 300 && ct < 300;
   if (!ok) Logger.log('supaDeleteTrade_ 실패 items=' + ci + ' trade=' + ct + ' : ' +
@@ -113,12 +113,12 @@ function supaCancelTrade_(tid) {
     Prefer: 'return=minimal'
   };
   var filt = '?trade_id=eq.' + encodeURIComponent(tid);
-  var rItems = UrlFetchApp.fetch(cfg.url + '/rest/v1/schedule_items' + filt, {
+  var rItems = supaSyncFetch_(cfg.url + '/rest/v1/schedule_items' + filt, {
     method: 'delete',
     headers: headers,
     muteHttpExceptions: true
   });
-  var rTrade = UrlFetchApp.fetch(cfg.url + '/rest/v1/trades' + filt, {
+  var rTrade = supaSyncFetch_(cfg.url + '/rest/v1/trades' + filt, {
     method: 'patch',
     contentType: 'application/json',
     headers: headers,
@@ -157,7 +157,7 @@ function supaMarkScheduleItemsRemoved_(tid, scheduleIds) {
       + '?trade_id=eq.' + encodeURIComponent(tid)
       + '&schedule_id=eq.' + encodeURIComponent(scheduleId)
       + '&taken_qty=is.null';
-    var response = UrlFetchApp.fetch(url, {
+    var response = supaSyncFetch_(url, {
       method: 'patch',
       contentType: 'application/json',
       headers: headers,
@@ -170,7 +170,7 @@ function supaMarkScheduleItemsRemoved_(tid, scheduleIds) {
     if (code < 300 && Array.isArray(rows) && rows.length === 0) {
       // 브라우저의 이전 버전/중복 재시도가 이미 물리 삭제했거나 앞선 worker가 제외했을 수 있다.
       // 대상이 없으면 목표 상태(현재 목록에서 제거)는 이미 달성된 것이므로 멱등 성공이다.
-      var check = UrlFetchApp.fetch(
+      var check = supaSyncFetch_(
         cfg.url + '/rest/v1/schedule_items?select=schedule_id,removed_at,taken_qty'
           + '&trade_id=eq.' + encodeURIComponent(tid)
           + '&schedule_id=eq.' + encodeURIComponent(scheduleId),
@@ -268,7 +268,7 @@ function supaApplyReturnedTradeHistoricalCorrection_(tid, removedScheduleIds, ad
     };
     var addedIds = rows.map(function(row) { return row.schedule_id; });
     var inList = addedIds.map(function(id) { return '"' + id.replace(/"/g, '') + '"'; }).join(',');
-    var existing = UrlFetchApp.fetch(
+    var existing = supaSyncFetch_(
       cfg.url + '/rest/v1/schedule_items?select=schedule_id,taken_qty,removed_at'
         + '&trade_id=eq.' + encodeURIComponent(tid)
         + '&schedule_id=in.(' + encodeURIComponent(inList) + ')',
@@ -283,7 +283,7 @@ function supaApplyReturnedTradeHistoricalCorrection_(tid, removedScheduleIds, ad
       return { ok: false, error: 'Supabase에 과거 정정 추가 스케줄ID가 이미 존재해 충돌했습니다' };
     }
 
-    var inserted = UrlFetchApp.fetch(
+    var inserted = supaSyncFetch_(
       cfg.url + '/rest/v1/schedule_items?on_conflict=schedule_id',
       {
         method: 'post',
@@ -338,7 +338,7 @@ function supaSetTradeSetupDone_(tid, done, doneAt) {
     cfg = SUPA_CFG_();
     token = supaToken_(cfg);
     if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음' };
-    var res = UrlFetchApp.fetch(
+    var res = supaSyncFetch_(
       cfg.url + '/rest/v1/trades?trade_id=eq.' + encodeURIComponent(tid) + '&select=trade_id',
       {
         method: 'patch',
@@ -397,7 +397,7 @@ function supaReadAuthorityRow_(cfg, token, table, filters, select) {
       return key + '=eq.' + encodeURIComponent(String(filters[key]));
     });
     query.push('select=' + encodeURIComponent(select));
-    var res = UrlFetchApp.fetch(cfg.url + '/rest/v1/' + table + '?' + query.join('&'), {
+    var res = supaSyncFetch_(cfg.url + '/rest/v1/' + table + '?' + query.join('&'), {
       method: 'get',
       headers: {
         apikey: cfg.apikey,
@@ -462,7 +462,7 @@ function supaSetTradeReturnDone_(tid, done, doneAt, contractStatus, expectedRetu
     if (!isDone && expectedReturnCounts && typeof expectedReturnCounts === 'object') {
       payload.return_counts = expectedReturnCounts;
     }
-    var res = UrlFetchApp.fetch(url, {
+    var res = supaSyncFetch_(url, {
       method: 'patch',
       contentType: 'application/json',
       headers: {
@@ -556,7 +556,7 @@ function supaCheckoutResult_(row, scheduleId, targetState, applied) {
 function supaReadCheckoutAuthority_(cfg, token, tid, scheduleId) {
   if (!cfg || !token) return null;
   try {
-    var response = UrlFetchApp.fetch(cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
+    var response = supaSyncFetch_(cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
       + '&schedule_id=eq.' + encodeURIComponent(scheduleId) + '&select=trade_id,schedule_id,checkout_state,updated_at,removed_at', {
       method: 'get', headers: { apikey: cfg.apikey, Authorization: 'Bearer ' + token, 'Accept-Profile': 'village' }, muteHttpExceptions: true
     });
@@ -579,7 +579,7 @@ function supaSetScheduleItemCheckoutState_(tid, scheduleId, done, expectedUpdate
     cfg = SUPA_CFG_();
     token = supaToken_(cfg);
     if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음' };
-    var res = UrlFetchApp.fetch(
+    var res = supaSyncFetch_(
       cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
         + '&schedule_id=eq.' + encodeURIComponent(scheduleId) + '&updated_at=eq.' + encodeURIComponent(expectedUpdatedAt)
         + '&removed_at=is.null&select=trade_id,schedule_id,checkout_state,updated_at,removed_at',
@@ -663,7 +663,7 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
       };
     });
 
-    var responses = UrlFetchApp.fetchAll(requests);
+    var responses = supaSyncFetchAll_(requests);
     results = normalized.map(function(item, index) {
       var response = responses[index];
       var code = response ? response.getResponseCode() : 0;
@@ -676,7 +676,7 @@ function supaSetScheduleItemCheckoutStatesBatch_(tid, items) {
     var unresolved = results.filter(function(result) { return !result.ok; });
     if (unresolved.length) {
       var ids = unresolved.map(function(result) { return result.scheduleId; });
-      var read = UrlFetchApp.fetch(
+      var read = supaSyncFetch_(
         cfg.url + '/rest/v1/schedule_items?trade_id=eq.' + encodeURIComponent(tid)
           + '&schedule_id=in.' + encodeURIComponent('(' + ids.join(',') + ')')
           + '&select=trade_id,schedule_id,checkout_state,updated_at,removed_at',
@@ -750,7 +750,7 @@ function supaGetScheduleItemCheckoutStateMap_(tradeIds) {
       var inList = '(' + chunk.map(function(tid) {
         return '"' + String(tid).replace(/"/g, '') + '"';
       }).join(',') + ')';
-      var res = UrlFetchApp.fetch(
+      var res = supaSyncFetch_(
         cfg.url + '/rest/v1/schedule_items?select=trade_id,schedule_id,checkout_state,updated_at,removed_at&removed_at=is.null'
           + '&trade_id=in.' + encodeURIComponent(inList)
           + '&limit=2000',
@@ -808,7 +808,7 @@ function supaGetTradeReturnCounts_(tid) {
     if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음', returnCounts: {} };
     var url = cfg.url + '/rest/v1/trades?select=trade_id,return_counts&trade_id=eq.'
       + encodeURIComponent(tid) + '&limit=1';
-    var res = UrlFetchApp.fetch(url, {
+    var res = supaSyncFetch_(url, {
       method: 'get',
       headers: {
         apikey: cfg.apikey,
@@ -827,7 +827,7 @@ function supaGetTradeReturnCounts_(tid) {
     }
     var counts = rows[0].return_counts;
     if (!counts || typeof counts !== 'object' || Array.isArray(counts)) counts = {};
-    var itemRes = UrlFetchApp.fetch(
+    var itemRes = supaSyncFetch_(
       cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,checkout_state,onsite,removed_at'
         + '&trade_id=eq.' + encodeURIComponent(tid) + '&order=sort.asc',
       {
@@ -868,7 +868,7 @@ function supaGetCheckoutBaselineState_(tid) {
     if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음', started: false, items: [] };
     // 로컬 ScriptProperties가 소실돼도 완료 거래를 신규 예약처럼 upsert하지 않도록
     // 거래 권한 상태와 taken_qty 기준선을 한 번에 확인한다.
-    var responses = UrlFetchApp.fetchAll([
+    var responses = supaSyncFetchAll_([
       {
         url: cfg.url + '/rest/v1/trades?select=trade_id,setup_done,setup_done_at,return_done,contract_status'
           + '&trade_id=eq.' + encodeURIComponent(tid),
@@ -1031,20 +1031,25 @@ function supaDirtyPropertyKey_(tid) {
 }
 
 function supaMarkTradeDirty_(tid) {
+  var lock = null, acquired = false;
   try {
     tid = String(tid || '').trim();
     if (!tid) return;
     var p = PropertiesService.getScriptProperties();
-    // 거래별 독립 키는 단일 SUPA_DIRTY JSON의 read-modify-write 경쟁을 없앤다.
-    // flush 도중 같은 거래가 다시 변경되면 값이 달라져 cleanup에서 보존된다.
-    p.setProperty(
-      supaDirtyPropertyKey_(tid),
-      String(Date.now()) + ':' + String(Math.random()).slice(2)
-    );
+    var revision = String(Date.now()) + ':' + String(Math.random()).slice(2);
+    lock = LockService.getScriptLock();
+    if (!lock.hasLock()) acquired = lock.tryLock(1000);
+    if (acquired || lock.hasLock()) p.setProperty(supaDirtyPropertyKey_(tid), revision);
+    else {
+      // Coalesce contention by trade, not event: repeated edits cannot grow property history.
+      // The existing worker merges before reading fresh source; no new trigger or HTTP.
+      p.setProperty('SUPA_DIRTY_PENDING_v1_' + encodeURIComponent(tid), JSON.stringify({ tid: tid }));
+    }
     if (typeof requestInventoryRiskScan_ === 'function') requestInventoryRiskScan_();
   } catch (err) {
-    // 동기화 마킹 실패가 본 작업을 막으면 안 됨
-  }
+    // Keep the original non-throwing edit contract; persistence failure is operationally visible.
+    Logger.log('Supabase 변경 표식 저장 실패');
+  } finally { if (acquired) lock.releaseLock(); }
 }
 
 /** 이전 배포의 단일 JSON dirty 표식을 거래별 키로 한 번 옮긴다. */
@@ -1108,7 +1113,7 @@ function supaGetCheckoutAuthorityStates_(tids) {
     for (var offset = 0; offset < tids.length; offset += 50) {
       var chunk = tids.slice(offset, offset + 50);
       var inList = chunk.map(function(tid) { return '"' + tid.replace(/"/g, '') + '"'; }).join(',');
-      var responses = UrlFetchApp.fetchAll([
+      var responses = supaSyncFetchAll_([
         {
           url: cfg.url + '/rest/v1/trades?select=trade_id,setup_done,return_done,contract_status'
             + '&trade_id=in.(' + encodeURIComponent(inList) + ')',
@@ -1169,7 +1174,7 @@ function supaDropOverwritingNotes_(cfg, tradeRows) {
     var token = supaToken_(cfg);
     if (!token) throw new Error('봇 토큰 없음');
     var idList = withNotes.map(function(row) { return String(row.trade_id || '').trim(); }).filter(Boolean);
-    var res = UrlFetchApp.fetch(
+    var res = supaSyncFetch_(
       cfg.url + '/rest/v1/trades?select=trade_id,note_checkin&trade_id=in.('
         + encodeURIComponent(idList.join(',')) + ')',
       {
@@ -1194,142 +1199,193 @@ function supaDropOverwritingNotes_(cfg, tradeRows) {
 
 /** 1분 트리거 — dirty 거래들을 빌드해 Supabase upsert 후 클리어. */
 function flushDirtyToSupabase() {
-  // Supabase 환경설정 장애가 있어도 구조/계약/취소 durable queue 트리거는 살려야 한다.
   rescueDashboardAsyncWorkerTriggers_();
   var cfg = SUPA_CFG_();
-  if (!cfg.url || !cfg.apikey) { Logger.log('Supabase 설정 없음'); return; }
-  var p = PropertiesService.getScriptProperties();
-  // 레거시 JSON 이관과 성공 cleanup만 짧은 잠금에서 수행한다. mark는 거래별
-  // 원자 키라 이미 ScriptLock을 가진 호출에서도 중첩 잠금 없이 안전하다.
-  var migrateLock = LockService.getScriptLock();
-  var migrateLocked = false;
+  if (!cfg.url || !cfg.apikey) return;
+  var p = PropertiesService.getScriptProperties(), now = Date.now();
+  var lock = LockService.getScriptLock(), locked = false, snapshot = {}, retry = {}, tids = [];
+  var lease = JSON.stringify({ id: String(now) + ':' + String(Math.random()), until: now + 600000 });
   try {
-    migrateLocked = migrateLock.tryLock(1000);
-    if (migrateLocked) migrateLegacySupaDirtyProperties_(p);
-  } catch (migrateErr) {
-    Logger.log('SUPA_DIRTY 레거시 이관 보류: ' + migrateErr);
-  } finally {
-    if (migrateLocked) try { migrateLock.releaseLock(); } catch (migrateReleaseErr) {}
-  }
-  var dirtyProperties = p.getProperties();
-  var dirtyKeys = Object.keys(dirtyProperties).filter(function(key) {
-    return key.indexOf(SUPA_DIRTY_PREFIX_) === 0;
-  });
-  var tids = dirtyKeys.map(function(key) { return key.substring(SUPA_DIRTY_PREFIX_.length); }).filter(Boolean);
-  if (!tids.length) return;
-  // dirty 마크 스냅샷 — 업서트 동안 새로 dirty가 된 거래는 지우지 않고 다음 분에 재동기화
-  var snapshot = {};
-  for (var s = 0; s < dirtyKeys.length; s++) snapshot[dirtyKeys[s]] = dirtyProperties[dirtyKeys[s]];
-
-  // ★ 잠금은 시트 읽기(빌드) 동안만 쥔다. HTTP 업서트(수 초)까지 잠금 안에서 돌리면
-  //   1분마다 반납완료·품목체크 같은 인터랙티브 쓰기와 경합해 버튼이 실패한다.
-  var built = null;
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return;
-  try {
-    built = buildSupabaseTrades_(tids);
-  } catch (buildErr) {
-    Logger.log('flushDirty 빌드 오류: ' + buildErr);
+    locked = lock.tryLock(1000);
+    if (!locked) return;
+    migrateLegacySupaDirtyProperties_(p);
+    supaSyncMergePendingMarks_(p);
+    var all = p.getProperties();
+    if (supaSyncState_(all.SUPA_SYNC_LEASE_v1).until > now) return;
+    if (supaSyncState_(all.SUPA_SYNC_COOLDOWN_v1).until > now) return;
+    Object.keys(all).filter(function(key) { return key.indexOf(SUPA_DIRTY_PREFIX_) === 0; }).forEach(function(key) {
+      var state = supaSyncState_(all[key]);
+      // The original dirty revision remains inside its existing property; no retry-history keys.
+      if (state.nextAt > now && state.nextAt <= now + 21600000) return;
+      var tid = key.substring(SUPA_DIRTY_PREFIX_.length);
+      if (!tid) return;
+      tids.push(tid); snapshot[key] = all[key]; retry[tid] = state;
+    });
+    if (!tids.length) return;
+    // A durable ownership lease prevents HTTP overlap without holding the UI's ScriptLock.
+    p.setProperty('SUPA_SYNC_LEASE_v1', lease);
+  } catch (leaseError) {
+    Logger.log('Supabase 동기화 실행권 저장 실패: 작업 보존');
     return;
-  } finally {
-    lock.releaseLock();
-  }
+  } finally { if (locked) lock.releaseLock(); }
 
-  var deferredTradeIds = built.deferredTradeIds || [];
-  var eligibleTids = tids.filter(function(tid) { return deferredTradeIds.indexOf(tid) < 0; });
-  var ok = true;
+  var attempt = { p: p, startedAt: now, httpRequests: 0, fetchBatches: 0, quotaBlocked: false };
+  SUPA_SYNC_ATTEMPT_ = attempt;
+  var outcomes = {}, deferred = {}, stage = {};
+  tids.forEach(function(tid) { outcomes[tid] = false; stage[tid] = true; });
   try {
-    // 취소는 일반 구조 upsert로 복구되지 않는다. contract_status는 평소 앱/GAS
-    // 명령이 소유하고 누락 품목 삭제도 별도 경로라, 취소 워커가 지연되면 dirty만
-    // 성공 처리되어 앱에 예약/점유가 남았다. 원본에서 명시적으로 취소된 거래만
-    // 같은 취소 투영을 재시도하고, 실패하면 dirty를 보존한다.
+    var buildLock = LockService.getScriptLock();
+    if (!buildLock.tryLock(5000)) return;
+    var built;
+    try { built = buildSupabaseTrades_(tids); } finally { buildLock.releaseLock(); }
+    (built.deferredTradeIds || []).forEach(function(tid) { deferred[tid] = true; stage[tid] = false; });
+    var eligibleTids = tids.filter(function(tid) { return !deferred[tid]; });
     var cancelledTradeIds = built.cancelledTradeIds || [];
+    var represented = {};
+    built.trades.forEach(function(row) { represented[row.trade_id] = true; });
+    cancelledTradeIds.forEach(function(tid) { represented[tid] = true; });
+    eligibleTids.forEach(function(tid) { if (!represented[tid]) stage[tid] = false; });
     if (cancelledTradeIds.length) {
       var cancellationAuthority = supaGetCheckoutAuthorityStates_(cancelledTradeIds);
       cancelledTradeIds.forEach(function(tid) {
         var authority = cancellationAuthority.states && cancellationAuthority.states[tid];
-        if (!cancellationAuthority.ok || !authority || authority.started) { ok = false; return; }
+        if (!cancellationAuthority.ok || !authority || authority.started) { stage[tid] = false; return; }
         var cancelled = supaCancelTrade_(tid);
-        if (!cancelled || !cancelled.ok) ok = false;
+        if (!cancelled || !cancelled.ok) stage[tid] = false;
       });
     }
     if (built.trades.length) {
-      // note_checkin은 앱이 정본 — 앱이 쓴 노트를 시트 returnMemo가 덮어쓰지 않게 한다
       supaDropOverwritingNotes_(cfg, built.trades);
-      if (!supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
+      var tradeReport = {};
+      var tradesOk = supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id', tradeReport);
+      supaSyncMergeReport_(stage, built.trades.map(function(row) { return row.trade_id; }), tradesOk, tradeReport);
       if (built.items.length) {
-        // 반출 전 품목은 누락 행을 생성해도 되지만, 반출 후에는 taken_qty 기준선 없는
-        // 신규 INSERT가 반납 검증을 무력화한다. 이 경우 존재하는 행만 PATCH하고,
-        // 누락 행 복구는 repairTradeProjection의 불변 기준선 검증 경로로 한정한다.
         var propSnapshot = p.getProperties();
         var durableAuthority = supaGetCheckoutAuthorityStates_(eligibleTids);
-        var ssForAuthority = SpreadsheetApp.getActiveSpreadsheet();
-        var localAuthority = {};
+        var ssForAuthority = SpreadsheetApp.getActiveSpreadsheet(), localAuthority = {};
         eligibleTids.forEach(function(tid) {
           localAuthority[tid] = typeof isDashboardTradeCheckoutStarted_ === 'function'
-            ? isDashboardTradeCheckoutStarted_(ssForAuthority, tid)
-            : false;
+            ? isDashboardTradeCheckoutStarted_(ssForAuthority, tid) : false;
         });
-        var insertItems = [];
-        var patchItems = [];
-        for (var bi = 0; bi < built.items.length; bi++) {
-          var builtItem = built.items[bi];
-          var builtTid = String(builtItem.trade_id || '').trim();
-          // 원격 권한 조회가 실패하면 신규 INSERT는 금지하고 existing-only PATCH로
-          // 실패-폐쇄한다. 새 예약 누락행은 dirty를 유지해 다음 주기에 재시도한다.
-          var remoteStarted = durableAuthority.ok && durableAuthority.states[builtTid] &&
-            durableAuthority.states[builtTid].started;
-          var checkoutStarted = !durableAuthority.ok || !!localAuthority[builtTid] || !!remoteStarted ||
-            propSnapshot['setupDone_' + builtTid] === '1' ||
-            propSnapshot['returnDone_' + builtTid] === '1' ||
-            propSnapshot['checkoutBaselineStarted_' + builtTid] === '1';
+        var insertItems = [], patchItems = [];
+        built.items.forEach(function(builtItem) {
+          var tid = String(builtItem.trade_id || '').trim();
+          if (!stage[tid]) return;
+          var remoteStarted = durableAuthority.ok && durableAuthority.states[tid] && durableAuthority.states[tid].started;
+          var checkoutStarted = !durableAuthority.ok || !!localAuthority[tid] || !!remoteStarted ||
+            propSnapshot['setupDone_' + tid] === '1' || propSnapshot['returnDone_' + tid] === '1' ||
+            propSnapshot['checkoutBaselineStarted_' + tid] === '1';
           if (checkoutStarted) patchItems.push(builtItem);
-          else {
-            // 반출 전 존재의 정본은 시트다. 제외→추가로 스케줄ID가 재사용될 때 이전
-            // 제외의 removed_at tombstone이 merge-duplicates로 승계되면 새 장비가
-            // 앱에서 영영 안 보인다. 시트에 현존하는 행은 tombstone을 명시적으로 해제.
-            insertItems.push(Object.assign({}, builtItem, { removed_at: null }));
-          }
+          else insertItems.push(Object.assign({}, builtItem, { removed_at: null }));
+        });
+        if (insertItems.length) {
+          var insertReport = {};
+          var inserted = supaUpsertGrouped_(cfg, 'schedule_items', insertItems, 'schedule_id', insertReport);
+          supaSyncMergeReport_(stage, insertItems.map(function(row) { return row.trade_id; }), inserted, insertReport);
         }
-        if (insertItems.length && !supaUpsertGrouped_(cfg, 'schedule_items', insertItems, 'schedule_id')) ok = false;
-        if (patchItems.length && !supaPatchExistingScheduleItems_(cfg, patchItems)) ok = false;
-        // 삭제는 장비 삭제 명령의 정확한 schedule_id 경로가 소유한다. 여기서 오래된 전체
-        // keep-set으로 가지치기하면 동기화 빌드 뒤 다른 직원이 추가한 행까지 지울 수 있다.
+        if (patchItems.length) {
+          var patchReport = {};
+          var patched = supaPatchExistingScheduleItems_(cfg, patchItems, patchReport);
+          supaSyncMergeReport_(stage, patchItems.map(function(row) { return row.trade_id; }), patched, patchReport);
+        }
       }
     }
-    if (eligibleTids.length && typeof flushPaymentLedgerMirror_ === 'function' && !flushPaymentLedgerMirror_(eligibleTids)) ok = false;
-  } catch (err) {
-    Logger.log('flushDirty 오류: ' + err);
-    return;
-  }
-  // ★ 성공한 경우에만 dirty에서 제거. 실패(Supabase 장애·봇 토큰 만료·스키마 오류)면
-  //    dirty를 유지해 다음 1분 트리거가 재시도한다. 예전엔 실패해도 무조건 지워서
-  //    그 분(minute)의 변경분이 영구 유실 → 앱이 낡은 반출/반납 데이터를 표시했다.
-  //    업서트 중 다시 dirty가 된 거래(마크 값이 달라짐)도 보존한다.
-  if (ok) {
-    var cleanupLock = LockService.getScriptLock();
-    var cleanupLocked = false;
+    var paymentTids = eligibleTids.filter(function(tid) { return stage[tid]; });
+    if (paymentTids.length && typeof flushPaymentLedgerMirror_ === 'function') {
+      var paymentReport = {};
+      var paymentOk = flushPaymentLedgerMirror_(paymentTids, paymentReport);
+      supaSyncMergeReport_(stage, paymentTids, paymentOk, paymentReport);
+    }
+    eligibleTids.forEach(function(tid) { outcomes[tid] = stage[tid]; });
+  } catch (error) {
+    // No unknown or uncompleted stage is acknowledged. Quota transport has already stopped further HTTP.
+    Logger.log('Supabase 동기화 보류: ' + (supaSyncDailyQuota_(error) ? 'urlfetch_daily_quota' : 'stage_failed'));
+  } finally {
+    SUPA_SYNC_ATTEMPT_ = null;
+    var completed = 0, cleanup = LockService.getScriptLock(), cleanupLocked = false;
     try {
-      cleanupLocked = cleanupLock.tryLock(1000);
-      if (cleanupLocked) {
-        for (var i = 0; i < dirtyKeys.length; i++) {
-          var dirtyKey = dirtyKeys[i];
-          var dirtyTid = dirtyKey.substring(SUPA_DIRTY_PREFIX_.length);
-          if (deferredTradeIds.indexOf(dirtyTid) < 0) {
-            if (p.getProperty(dirtyKey) === snapshot[dirtyKey]) p.deleteProperty(dirtyKey);
+      cleanupLocked = cleanup.tryLock(1000);
+      if (cleanupLocked && p.getProperty('SUPA_SYNC_LEASE_v1') === lease) {
+        tids.forEach(function(tid) {
+          var key = SUPA_DIRTY_PREFIX_ + tid;
+          if (deferred[tid] || p.getProperty(key) !== snapshot[key]) return;
+          if (outcomes[tid]) { p.deleteProperty(key); completed++; }
+          else {
+            var previous = retry[tid], failures = Math.min(16, Number(previous.failures || 0) + 1);
+            p.setProperty(key, JSON.stringify({ revision: previous.revision || snapshot[key], failures: failures,
+              nextAt: Date.now() + Math.min(1800000, 60000 * Math.pow(2, failures - 1)) }));
           }
-        }
+        });
+        if (attempt.httpRequests && !attempt.quotaBlocked) p.deleteProperty('SUPA_SYNC_COOLDOWN_v1');
       }
-    } catch (cleanupErr) {
-      Logger.log('Supabase dirty cleanup 보류(다음 주기 재시도): ' + cleanupErr);
-    } finally {
-      if (cleanupLocked) try { cleanupLock.releaseLock(); } catch (cleanupReleaseErr) {}
+    } catch (cleanupError) { Logger.log('Supabase 동기화 완료표시 보류: 작업 보존'); }
+    finally {
+      if (cleanupLocked) {
+        try { if (p.getProperty('SUPA_SYNC_LEASE_v1') === lease) p.deleteProperty('SUPA_SYNC_LEASE_v1'); }
+        finally { cleanup.releaseLock(); }
+      }
     }
-    Logger.log('Supabase push: ' + built.trades.length + '건');
-  } else {
-    Logger.log('Supabase push 일부 실패 → dirty 유지(재시도 예정): ' + tids.length + '건');
+    var summary = { type: 'supabase_sync_attempt', at: Date.now(), httpRequests: attempt.httpRequests,
+      fetchBatches: attempt.fetchBatches, quotaBlocked: attempt.quotaBlocked, selected: tids.length,
+      completed: completed, retained: tids.length - completed, elapsedMs: Date.now() - now };
+    Logger.log(JSON.stringify(summary));
+    // One bounded summary; no customer data, URLs, credentials, or per-attempt history.
+    try { p.setProperty('SUPA_SYNC_LAST_v1', JSON.stringify(summary)); } catch (summaryError) {}
   }
 }
+
+var SUPA_SYNC_ATTEMPT_ = null;
+function supaSyncMergePendingMarks_(p) {
+  var all = p.getProperties();
+  Object.keys(all).filter(function(key) { return key.indexOf('SUPA_DIRTY_PENDING_v1_') === 0; }).slice(0, 100).forEach(function(key) {
+    var pending = supaSyncState_(all[key]), tid = String(pending.tid || '').trim();
+    if (!tid) return;
+    p.setProperty(supaDirtyPropertyKey_(tid), String(Date.now()) + ':' + String(Math.random()).slice(2));
+    p.deleteProperty(key); // Source changes behind coalesced marks are read AFTER this merge; later marks remain for the next run.
+  });
+}
+function supaSyncState_(raw) {
+  try { var state = JSON.parse(raw || '{}'); return state && typeof state === 'object' ? state : {}; }
+  catch (error) { return {}; }
+}
+function supaSyncMergeReport_(outcomes, tids, ok, report) {
+  tids.forEach(function(tid) {
+    if (!tid) return;
+    var success = Object.prototype.hasOwnProperty.call(report, tid) ? report[tid] : ok;
+    outcomes[tid] = outcomes[tid] !== false && !!success;
+  });
+}
+function supaSyncReportRows_(report, rows, ok) {
+  if (!report) return;
+  rows.forEach(function(row) {
+    var tid = String(row.trade_id || '').trim();
+    if (tid) report[tid] = report[tid] !== false && !!ok;
+  });
+}
+function supaSyncDailyQuota_(error) {
+  var text = String(error && error.message || error || '');
+  return /(?:Service invoked too many times for one day:\s*urlfetch|하루에\s*urlfetch\s*서비스를\s*너무\s*많이\s*호출)/i.test(text);
+}
+function supaSyncHttp_(batch, url, args) {
+  var attempt = SUPA_SYNC_ATTEMPT_;
+  if (attempt && attempt.quotaBlocked) throw new Error('Service invoked too many times for one day: urlfetch.');
+  if (attempt) { attempt.httpRequests += batch ? url.length : 1; if (batch) attempt.fetchBatches++; }
+  try { return batch ? UrlFetchApp.fetchAll(url) : UrlFetchApp.fetch(url, args); }
+  catch (error) {
+    if (attempt && supaSyncDailyQuota_(error)) {
+      attempt.quotaBlocked = true;
+      try {
+        var previous = supaSyncState_(attempt.p.getProperty('SUPA_SYNC_COOLDOWN_v1'));
+        var failures = Math.min(16, Number(previous.failures || 0) + 1);
+        attempt.p.setProperty('SUPA_SYNC_COOLDOWN_v1', JSON.stringify({ failures: failures,
+          until: Date.now() + 900000 }));
+      } catch (recordError) { Logger.log('Supabase 일일 호출한도 대기 저장 실패'); }
+    }
+    throw error;
+  }
+}
+function supaSyncFetch_(url, args) { return supaSyncHttp_(false, url, args); }
+function supaSyncFetchAll_(requests) { return supaSyncHttp_(true, requests); }
 
 /** 거래ID 배열 → Supabase 행({trades, items}). 날짜는 timeline(보정됨), 상세는 dashboard에서. */
 function buildSupabaseTrades_(tids) {
@@ -1609,7 +1665,7 @@ function buildSupabaseTrades_(tids) {
 
 /** payload 키 구성이 같은 행끼리 묶어 upsert — PostgREST는 배치 내 키 불일치를 거부하므로.
  *  반환: 모든 그룹이 성공했을 때만 true (하나라도 실패하면 false → 호출부가 dirty 유지). */
-function supaUpsertGrouped_(cfg, table, rows, conflict) {
+function supaUpsertGrouped_(cfg, table, rows, conflict, report) {
   var groups = {};
   for (var i = 0; i < rows.length; i++) {
     var sig = Object.keys(rows[i]).sort().join(',');
@@ -1617,7 +1673,9 @@ function supaUpsertGrouped_(cfg, table, rows, conflict) {
   }
   var allOk = true;
   for (var sig2 in groups) {
-    if (!supaUpsert_(cfg, table, groups[sig2], conflict)) allOk = false;
+    var groupOk = supaUpsert_(cfg, table, groups[sig2], conflict);
+    supaSyncReportRows_(report, groups[sig2], groupOk);
+    if (!groupOk) allOk = false;
   }
   return allOk;
 }
@@ -1644,7 +1702,7 @@ function supaInsertAuthorizedScheduleItems_(cfg, tid, rows, addedScheduleIds) {
   }
   var token = supaToken_(cfg);
   if (!token) return false;
-  var response = UrlFetchApp.fetch(cfg.url + '/rest/v1/schedule_items?on_conflict=schedule_id', {
+  var response = supaSyncFetch_(cfg.url + '/rest/v1/schedule_items?on_conflict=schedule_id', {
     method: 'post', contentType: 'application/json',
     headers: { apikey: cfg.apikey, Authorization: 'Bearer ' + token,
       'Content-Profile': 'village', 'Accept-Profile': 'village',
@@ -1656,7 +1714,7 @@ function supaInsertAuthorizedScheduleItems_(cfg, tid, rows, addedScheduleIds) {
 
 /** 반출 후 schedule_items 구조 동기화. PATCH만 사용해 기준선 없는 행을
  * 신규 생성하지 않고, 한 행이라도 없으면 실패로 돌려 안전 복구 큐가 담당하게 한다. */
-function supaPatchExistingScheduleItems_(cfg, rows) {
+function supaPatchExistingScheduleItems_(cfg, rows, report) {
   if (!rows || !rows.length) return true;
   var token = supaToken_(cfg);
   if (!token) { Logger.log('봇 토큰 없음 → schedule_items PATCH 중단'); return false; }
@@ -1668,7 +1726,7 @@ function supaPatchExistingScheduleItems_(cfg, rows) {
     if (!scheduleId || !tradeId) continue;
     byId[scheduleId] = row;
   }
-  var ids = Object.keys(byId);
+  var ids = Object.keys(byId), allOk = true;
   for (var offset = 0; offset < ids.length; offset += 50) {
     var chunk = ids.slice(offset, offset + 50);
     var requests = chunk.map(function(scheduleId) {
@@ -1695,24 +1753,23 @@ function supaPatchExistingScheduleItems_(cfg, rows) {
       };
     });
     var responses;
-    try { responses = UrlFetchApp.fetchAll(requests); }
+    try { responses = supaSyncFetchAll_(requests); }
     catch (fetchErr) {
       Logger.log('Supabase schedule_items PATCH 오류: ' + fetchErr.message);
+      supaSyncReportRows_(report, ids.slice(offset).map(function(id) { return byId[id]; }), false);
       return false;
     }
-    for (var ri = 0; ri < responses.length; ri++) {
-      var response = responses[ri];
-      var code = response.getResponseCode();
-      var returned = [];
-      try { returned = JSON.parse(response.getContentText() || '[]'); } catch (parseErr) {}
-      if (code >= 300 || !Array.isArray(returned) || returned.length !== 1) {
-        Logger.log('Supabase schedule_items existing-only PATCH 실패 '
-          + code + ' / ' + chunk[ri] + ': ' + response.getContentText().slice(0, 160));
-        return false;
-      }
+    for (var ri = 0; ri < chunk.length; ri++) {
+      var response = responses[ri], returned = [], code = response ? response.getResponseCode() : 0;
+      try { returned = response ? JSON.parse(response.getContentText() || '[]') : []; } catch (parseErr) {}
+      var source = byId[chunk[ri]];
+      var ok = code >= 200 && code < 300 && Array.isArray(returned) && returned.length === 1
+        && returned[0].schedule_id === source.schedule_id && returned[0].trade_id === source.trade_id;
+      supaSyncReportRows_(report, [source], ok);
+      if (!ok) allOk = false;
     }
   }
-  return true;
+  return allOk;
 }
 
 /** Supabase REST 벌크 upsert (anon 키, merge-duplicates). 성공 시 true, 실패 시 false. */
@@ -1729,7 +1786,7 @@ function supaUpsert_(cfg, table, rows, conflict) {
   }
   var token = supaToken_(cfg);
   if (!token) { Logger.log('봇 토큰 없음 → 동기화 중단'); return false; }
-  var res = UrlFetchApp.fetch(cfg.url + '/rest/v1/' + table + '?on_conflict=' + conflict, {
+  var res = supaSyncFetch_(cfg.url + '/rest/v1/' + table + '?on_conflict=' + conflict, {
     method: 'post',
     contentType: 'application/json',
     headers: {
@@ -1763,7 +1820,7 @@ function supaDeleteStaleItems_(cfg, tradeId, keepIds) {
     + '&schedule_id=not.in.(' + encodeURIComponent(inList) + ')'
     // 반출 기준선(taken_qty)은 시트 행이 지워져도 감사/완료 검증을 위해 보존한다.
     + '&taken_qty=is.null';
-  var res = UrlFetchApp.fetch(url, {
+  var res = supaSyncFetch_(url, {
     method: 'delete',
     headers: {
       apikey: cfg.apikey,
@@ -1888,6 +1945,8 @@ function auditScriptProperties() {
     };
   });
   return { propertyCount: keys.length, storage: storage, cancellations: cancellations,
+    supabaseSync: { protocolVersion: 1, lastAttempt: supaSyncState_(all.SUPA_SYNC_LAST_v1),
+      cooldown: supaSyncState_(all.SUPA_SYNC_COOLDOWN_v1), leaseUntil: Number(supaSyncState_(all.SUPA_SYNC_LEASE_v1).until || 0) },
     dashboardPhotoUploads: auditDashboardPhotoUploadClaims_(all, Date.now()),
     cancellationTriggerAt: Number(all.cancelCleanupTriggerAt_v1 || 0),
     cancellationDirty: cancellations.filter(function(s) {

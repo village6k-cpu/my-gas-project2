@@ -503,11 +503,11 @@ test("GAS 전역 잠금: 무거운 작업이 잠금을 통째로 쥐지 않는�
   const supa = fs.readFileSync(path.resolve(appRoot, "../..", "supabaseSync.js"), "utf8");
   const flush = section(supa, "function flushDirtyToSupabase", "/** 거래ID 배열");
   const buildAt = flush.indexOf("buildSupabaseTrades_(tids)");
-  const releaseAt = flush.indexOf("lock.releaseLock()");
+  const releaseAt = flush.indexOf("buildLock.releaseLock()", buildAt);
   const upsertAt = flush.indexOf("supaUpsertGrouped_");
   assert.ok(buildAt >= 0 && releaseAt > buildAt && upsertAt > releaseAt, "HTTP 업서트는 잠금 해제 뒤여야 한다");
-  assert.match(flush, /p\.getProperty\(dirtyKey\) === snapshot\[dirtyKey\]/, "업서트 중 재변경된 거래의 dirty 마크는 보존해야 한다");
-  assert.match(flush, /p\.deleteProperty\(dirtyKey\)/, "성공한 동일 버전 dirty 키만 제거해야 한다");
+  assert.match(flush, /p\.getProperty\(key\) !== snapshot\[key\]/, "업서트 중 재변경된 거래의 dirty 마크는 보존해야 한다");
+  assert.match(flush, /if \(outcomes\[tid\]\) \{ p\.deleteProperty\(key\)/, "성공한 동일 버전 dirty 키만 제거해야 한다");
 });
 
 test("반납완료는 잠금 경합을 재시도로 흡수하고 중복 탭을 막는다", () => {

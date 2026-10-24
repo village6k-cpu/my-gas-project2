@@ -20,7 +20,7 @@ test('property audit measures UTF-8 storage by category without exposing stored 
     Utilities: { newBlob: (value) => ({ getBytes: () => [...Buffer.from(value, 'utf8')] }) },
     Logger: { log() {} },
   };
-  vm.runInNewContext(source.slice(source.indexOf('function auditScriptProperties()'), source.indexOf('function cleanupOldTradeProps(')), context);
+  vm.runInNewContext(source.slice(source.indexOf('var SUPA_SYNC_ATTEMPT_'), source.indexOf('/** 거래ID 배열', source.indexOf('var SUPA_SYNC_ATTEMPT_'))) + '\n' + source.slice(source.indexOf('function auditScriptProperties()'), source.indexOf('function cleanupOldTradeProps(')), context);
   const result = JSON.parse(JSON.stringify(context.auditScriptProperties()));
   assert.equal(result.propertyCount, 4);
   assert.equal(result.storage.valueBytes, 48);

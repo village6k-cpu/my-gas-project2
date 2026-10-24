@@ -68,7 +68,7 @@ function harness({ baseline, existingAddedRows = [] } = {}) {
       },
     },
   };
-  vm.runInNewContext(`${extractFunction('supaApplyReturnedTradeHistoricalCorrection_')}\nthis.applyHistorical = supaApplyReturnedTradeHistoricalCorrection_;`, context);
+  vm.runInNewContext(source.slice(source.indexOf('var SUPA_SYNC_ATTEMPT_'), source.indexOf('/** 거래ID 배열', source.indexOf('var SUPA_SYNC_ATTEMPT_'))) + '\n' + `${extractFunction('supaApplyReturnedTradeHistoricalCorrection_')}\nthis.applyHistorical = supaApplyReturnedTradeHistoricalCorrection_;`, context);
   return { context, requests, removals };
 }
 
