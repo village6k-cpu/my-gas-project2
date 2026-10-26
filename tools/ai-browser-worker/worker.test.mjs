@@ -1762,6 +1762,31 @@ test('exact fast-reply receipt finalizes the generated RQ without a duplicate ow
   }
 });
 
+test('successful registration retains a separate explicit inventory obligation', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=confirmedRegistrationDecisionFixture();
+  decision.follow_up_items=[{type:'reservation_review',route:'inventory',
+    taskKey:'registered-supply-review:260907-001',requiresHumanAction:true,
+    actionFamily:'inventory_check',businessKey:'260907-001',priority:'urgent',status:'open',
+    title:'Supply remains unconfirmed',customer_name:'홍길동',summary:'Registered demand exceeds confirmed supply.',
+    suggested_reply_draft:'',evidence:['Staff confirmed supply shortage'],
+    recommended_action:'Confirm external supply before pickup.'}];
+  const receipt=confirmedRegistrationReceiptFixture(job);
+  decision.staff_confirmed_registration=null;
+  decision.should_write_to_sheet=false;
+  decision.reservation_inquiry.already_registered=true;
+  decision.inquiry_disposition='already_applied';
+  decision.existing_confirm_request_ids=[receipt.effective_request_id];
+  const p=await workerModule.prepareKakaoGatewayDecision({job,turn,
+    finalText:JSON.stringify(decision),trustedToolReceipts:[receipt]});
+  assert.deepEqual(p.gatewaySafetyFailures,[]);
+  assert.equal(p.decision.should_write_to_sheet,false);
+  assert.equal(p.decision.owner_review_required,false);
+  assert.equal(p.decision.follow_up_items.length,1);
+  assert.equal(p.decision.follow_up_items[0].route,'inventory');
+  assert.equal(p.availabilityAwareRows.some(row=>row.payload?.follow_up_route==='inventory'),true);
+});
+
 test('completed registration survives an incomplete repeated FINAL input with no replay or reply', async () => {
   const {job,turn}=gatewayTurnFixture();
   const decision=confirmedRegistrationDecisionFixture();
