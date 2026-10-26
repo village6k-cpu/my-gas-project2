@@ -11089,8 +11089,14 @@ function exactConfirmedRegistrationRequestReadback(result, registration) {
   if (registration?.request_id === null) {
     const candidate = registration?.pending_request_candidate;
     const phoneKey = (value) => text(value).replace(/\D/g, '');
+    const expectedPhone = phoneKey(candidate?.phone);
+    const observedPhone = phoneKey(request.phone);
+    // Numeric Sheet cells can omit exactly the national leading zero.
+    // Keep all remaining digits exact; never compare only a phone suffix.
+    const phoneMatches = observedPhone === expectedPhone
+      || (/^0\d{8,10}$/.test(expectedPhone) && observedPhone === expectedPhone.slice(1));
     if (!candidate || text(request.name).normalize('NFKC').trim() !== text(candidate.customer_name).normalize('NFKC').trim()
-      || phoneKey(request.phone) !== phoneKey(candidate.phone)
+      || !phoneMatches
       || text(request.discount).normalize('NFKC').trim() !== text(candidate.discount_type).normalize('NFKC').trim()
       || text(request.memo).normalize('NFKC').trim() !== text(candidate.memo).normalize('NFKC').trim()
       || text(request.extraRequest).normalize('NFKC').trim() !== text(candidate.extra_request).normalize('NFKC').trim()) {
