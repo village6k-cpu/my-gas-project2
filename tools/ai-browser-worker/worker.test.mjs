@@ -1694,6 +1694,7 @@ test('confirmed registration success requires the exact authoritative confirmati
 });
 
 test('exact fast-reply receipt finalizes the generated RQ without a duplicate owner review', async () => {
+  for (const phoneCase of ['formatted','numeric','numeric-text','different','foreign-prefix']) {
   const { job, turn } = gatewayTurnFixture();
   const registration = fastConfirmedRegistrationFixture();
   const decision = confirmedRegistrationDecisionFixture({
@@ -1729,7 +1730,7 @@ test('exact fast-reply receipt finalizes the generated RQ without a duplicate ow
       request: {
         reqID: 'RQ-260907-009',
         name: registration.pending_request_candidate.customer_name,
-        phone: registration.pending_request_candidate.phone.replace(/\D/g, ''),
+        phone: (() => { const digits=registration.pending_request_candidate.phone.replace(/\D/g, ''); return phoneCase === 'numeric' ? Number(digits) : phoneCase === 'numeric-text' ? String(Number(digits)) : phoneCase === 'different' ? digits.slice(0,-1)+(digits.endsWith('9')?'8':'9') : phoneCase === 'foreign-prefix' ? '99'+digits.slice(-10) : registration.pending_request_candidate.phone; })(),
         discount: registration.pending_request_candidate.discount_type,
         memo: registration.pending_request_candidate.memo,
         extraRequest: registration.pending_request_candidate.extra_request,
@@ -1748,11 +1749,17 @@ test('exact fast-reply receipt finalizes the generated RQ without a duplicate ow
   const prepared = await workerModule.prepareKakaoGatewayDecision({
     config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: [receipt]
   });
+  if (['different','foreign-prefix'].includes(phoneCase)) {
+    assert.equal(prepared.decision.owner_review_required,true,phoneCase);
+    assert.ok(prepared.gatewaySafetyFailures.includes('trusted_confirmed_registration_readback_contradiction'),phoneCase);
+    continue;
+  }
   assert.equal(prepared.decision.owner_review_required, false);
   assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
   assert.deepEqual(prepared.availabilityAwareRows, []);
   assert.deepEqual(prepared.gatewaySafetyFailures, []);
   assert.equal(prepared.decision.confirmed_registration_readback.effective_request_id, 'RQ-260907-009');
+  }
 });
 
 test('completed registration survives an incomplete repeated FINAL input with no replay or reply', async () => {
