@@ -12,6 +12,7 @@ import { reconcileConfirmationBatchReceipt } from './confirmation-batch-reconcil
 import { isSharedHermesGatewayIdle } from './shared-hermes-browser.mjs';
 import { captureOwnedKakaoRoom, closeOwnedKakaoRoom, buildOwnedDraftInspectionExpression } from './owned-room-capture.mjs';
 import { effectiveRegisteredOperationReceipts } from './registered-operation-recovery.mjs';
+import { assessKakaoCaptureIntegrity } from './capture-integrity.mjs';
 import {
   inquiryConversationKey,
   actionFamilyForFollowUp,
@@ -7155,6 +7156,7 @@ const KAKAO_CONVERSATION_CHROME_ONLY_LINES = new Set([
 
 export function isUsableKakaoConversationEvidence(evidence = {}) {
   if (evidence?.hint_matched !== true) return false;
+  if (!assessKakaoCaptureIntegrity(evidence).ok) return false;
   const hints = Array.isArray(evidence?.hints)
     ? evidence.hints.map((value) => text(value).replace(/\s+/g, ' ').trim()).filter(Boolean)
     : [];
@@ -7173,6 +7175,7 @@ export function isUsableKakaoConversationEvidence(evidence = {}) {
 }
 
 async function readUsableKakaoConversationEvidence(target, {
+  job = {},
   hints = [],
   timeoutMs = 20000,
   evaluateImpl = devtoolsEvaluateOnTarget,
@@ -7193,6 +7196,7 @@ async function readUsableKakaoConversationEvidence(target, {
       roomMemo: dom?.room_memo,
       source
     });
+    evidence.capture_integrity = assessKakaoCaptureIntegrity(evidence, job);
     if (isUsableKakaoConversationEvidence(evidence)) return { ready: true, dom, evidence, attempts: attempt };
     if (attempt < maxAttempts && evidencePollMs > 0) await sleepImpl(evidencePollMs);
   }
@@ -7506,8 +7510,10 @@ export async function openKakaoTargetChatViaDevtools(job, {
   const targets = await devtoolsFetchJson(cdpBaseUrl, '/json/list', { fetchImpl, timeoutMs });
   const targetList = Array.isArray(targets) ? targets : [];
   const existingConversationTarget = pickKakaoConversationTarget(targetList, hints, roomIds);
+  let existingCaptureFailure = null;
   if (existingConversationTarget) {
     const evidenceRead = await readUsableKakaoConversationEvidence(existingConversationTarget, {
+      job,
       hints,
       timeoutMs,
       evaluateImpl,
@@ -7517,7 +7523,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
       source: 'live_kakao_dom_existing_conversation'
     });
     const dom = evidenceRead.dom;
-    return {
+    const existingResult = {
       status: evidenceRead.ready ? 'opened_target_chat' : 'conversation_evidence_unavailable',
       already_open: true,
       via_devtools: true,
@@ -7531,17 +7537,21 @@ export async function openKakaoTargetChatViaDevtools(job, {
       },
       conversation_evidence: evidenceRead.evidence
     };
+    if (evidenceRead.ready) return existingResult;
+    // Do not let a stale operator tab strand an exact room forever.
+    // Preserve that tab and use only the existing owned background capture.
+    existingCaptureFailure = existingResult;
   }
 
   const mainTarget = pickKakaoMainListTarget(targetList);
-  if (!mainTarget) return { status: 'main_list_target_not_found', hints };
+  if (!mainTarget) return existingCaptureFailure || { status: 'main_list_target_not_found', hints };
   if (roomIds.length === 1 && /^\d{6,24}$/.test(roomIds[0])
     && /^https:\/\/business\.kakao\.com\/space\/[^/]+\/channel\/[^/]+\/chats(?:[/?#]|$)/.test(mainTarget.url)) {
     try {
       const captured = await captureOwnedKakaoRoom({
         ...ownedRoomDependencies({ cdpBaseUrl, timeoutMs, fetchImpl, evaluateImpl, cdpCallImpl }),
         mainTarget, knownTargets: targetList, roomId: roomIds[0], sleepImpl,
-        readEvidence: target => readUsableKakaoConversationEvidence(target, { hints, timeoutMs, evaluateImpl,
+        readEvidence: target => readUsableKakaoConversationEvidence(target, { job, hints, timeoutMs, evaluateImpl,
           evidenceMaxAttempts, evidencePollMs, sleepImpl, source: 'live_kakao_dom_owned_conversation' })
       });
       return { ...captured, hints };
@@ -7549,6 +7559,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
       return { status: 'owned_capture_evidence_unavailable', via_devtools: true, hints, error: String(error.message).slice(0, 200) };
     }
   }
+  if (existingCaptureFailure) return existingCaptureFailure;
   if (!sharedGatewayIdle()) return { status: 'shared_browser_active_or_unknown', hints, via_devtools: true };
   const searchTerms = buildKakaoChatSearchTerms(hints);
   const openResult = await evaluateImpl(mainTarget, buildKakaoSearchAndOpenExpression(searchTerms, hints, { allowSearch }), { timeoutMs });
@@ -7590,6 +7601,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
     };
   }
   const evidenceRead = await readUsableKakaoConversationEvidence(conversationTarget, {
+    job,
     hints,
     timeoutMs,
     evaluateImpl,
@@ -9508,6 +9520,7 @@ export function createImmutableKakaoRoomSnapshot({ job = {}, navigationContext =
       source: text(evidence.source).trim(),
       title: text(evidence.title).trim(),
       hint_matched: evidence.hint_matched === true,
+      ...(evidence.capture_integrity ? { capture_integrity: { ...evidence.capture_integrity } } : {}),
       hints: Array.isArray(evidence.hints) ? evidence.hints.map((value) => text(value).trim()).filter(Boolean).slice(0, 20) : [],
       visible_static_text_tail: text(evidence.visible_static_text_tail).slice(-20_000),
       messages: normalizeKakaoConversationMessages(evidence.messages, { maxItems: 80 }),
@@ -9780,7 +9793,8 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
   if (roomKey !== text(snapshot.roomKey).trim()) throw new Error('Gateway turn room_key must exactly match immutable snapshot');
   if (roomRevision !== Number(snapshot.roomRevision)) throw new Error('Gateway turn room_revision must exactly match immutable snapshot');
   if (signal?.aborted) throw signal.reason || new Error('Gateway turn aborted');
-  if (!isUsableKakaoConversationEvidence(snapshot.navigation?.conversation_evidence)) {
+  if (!isUsableKakaoConversationEvidence(snapshot.navigation?.conversation_evidence)
+    || !assessKakaoCaptureIntegrity(snapshot.navigation?.conversation_evidence, job).ok) {
     const error = new Error('Kakao conversation evidence is unavailable after bounded DOM wait');
     error.code = 'kakao_conversation_evidence_unavailable';
     throw error;
