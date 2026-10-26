@@ -60,6 +60,14 @@ assert(
   'PaymentControls must render a visible contract regeneration button'
 );
 
+assert(
+  /const canOpenContract = !!trade\.contractUrl;/.test(paymentControls) &&
+    paymentControls.includes('기존 계약서 열기 (갱신 중)') &&
+    /disabled=\{regenerating\}/.test(paymentControls) &&
+    paymentControls.includes('"지금 갱신"'),
+  'a stale background pending flag must not block opening the existing contract or forcing an immediate regeneration'
+);
+
 ['dashboard.html'].forEach((file) => {
   const html = read(file);
   assert(
