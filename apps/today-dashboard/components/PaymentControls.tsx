@@ -151,8 +151,9 @@ export function PaymentControls({ trade }: { trade: Trade }) {
   const [sendingStatement, setSendingStatement] = useState(false);
   const options = usePaymentControlOptions();
   const isTax = trade.proofType === "세금계산서";
-  const isRegenerating = trade.contractRegenPending || regenerating;
-  const canOpenContract = !!trade.contractUrl && !trade.contractRegenPending;
+  // 백그라운드 갱신 표식이 오래 남아도 기존 계약서는 즉시 열 수 있어야 한다.
+  // 수동 재생성은 로컬 요청이 실제 진행 중일 때만 막아 stale pending을 복구할 수 있게 한다.
+  const canOpenContract = !!trade.contractUrl;
 
   // 한 줄 요약 토큰
   const tokens: { t: string; bad?: boolean }[] = [];
@@ -263,6 +264,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
             <a
               href={canOpenContract ? (trade.contractUrl ?? undefined) : undefined}
               target="_blank"
+              rel="noopener noreferrer"
               onClick={(event) => {
                 if (!canOpenContract) event.preventDefault();
               }}
@@ -271,13 +273,15 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               }`}
             >
               <Doc className="h-3.5 w-3.5" />
-              {trade.contractRegenPending ? "계약서 갱신중…" : trade.contractUrl ? "계약서 열기" : "계약서 없음"}
+              {trade.contractRegenPending && trade.contractUrl
+                ? "기존 계약서 열기 (갱신 중)"
+                : trade.contractUrl ? "계약서 열기" : "계약서 없음"}
             </a>
             <button
               type="button"
-              disabled={isRegenerating}
+              disabled={regenerating}
               onClick={() => {
-                if (isRegenerating) return;
+                if (regenerating) return;
                 setRegenerating(true);
                 regenerateContract(trade.tradeId)
                   .catch((err) => window.alert("계약서 재생성 실패: " + (err instanceof Error ? err.message : String(err))))
@@ -285,8 +289,8 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               }}
               className="tap inline-flex items-center gap-1.5 rounded-lg bg-brand-50 px-3 py-2 text-[13px] font-bold text-brand-700 ring-1 ring-brand-200 disabled:bg-paper disabled:text-ink-faint disabled:ring-line/70"
             >
-              <Refresh className={`h-3.5 w-3.5 ${isRegenerating ? "animate-spin" : ""}`} />
-              {isRegenerating ? "재생성 중…" : "계약서 재생성"}
+              <Refresh className={`h-3.5 w-3.5 ${regenerating ? "animate-spin" : ""}`} />
+              {regenerating ? "재생성 중…" : trade.contractRegenPending ? "지금 갱신" : "계약서 재생성"}
             </button>
           </div>
         </div>
