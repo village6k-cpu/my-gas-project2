@@ -11196,7 +11196,7 @@ function exactConfirmedRegistrationAuthoritativeReadback(receipt, registration) 
 function forceConfirmedRegistrationSuccess(decision = {}, receipt) {
   const followUps = (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [])
     .filter(item => text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done'
-      || item?.requiresHumanAction === true && text(item?.route).trim() === 'document'
+      || item?.requiresHumanAction === true && ['document', 'inventory'].includes(text(item?.route).trim())
       && !['done', 'completed', 'resolved', 'cancelled', 'dismissed'].includes(text(item?.status).trim()));
   return {
     ...decision,
@@ -11538,7 +11538,20 @@ export async function prepareKakaoGatewayDecision({
   if (!validateStaffConfirmedRegistration(modelRegistration, { roomRevision }).valid && authorizedConfirmedRegistration
     && isSealedInputProjection(modelRegistration, authorizedConfirmedRegistration)) {
     const completed = { ...decision, staff_confirmed_registration: authorizedConfirmedRegistration };
-    decision = validateAiDecisionContract(completed, {roomRevision}).valid ? completed
+    // FINAL can report the exact completed RQ rather than its pre-commit intake.
+    // Validate only a temporary intake view; never turn this into another write.
+    const exactPostCommitReport = trustedConfirmedRegistrationReceipt.status === 'ok'
+      && trustedConfirmedRegistrationReceipt.error === null
+      && completed.should_write_to_sheet === false
+      && completed.reservation_inquiry?.already_registered === true
+      && sameGatewayDecisionValue(completed.existing_confirm_request_ids,
+        [trustedConfirmedRegistrationReceipt.effective_request_id])
+      && exactConfirmedRegistrationAuthoritativeReadback(trustedConfirmedRegistrationReceipt, authorizedConfirmedRegistration);
+    const validationView = exactPostCommitReport ? {...completed,
+      reservation_inquiry:{...completed.reservation_inquiry,already_registered:false},
+      existing_confirm_request_ids:authorizedConfirmedRegistration.request_id === null
+        ? [] : [authorizedConfirmedRegistration.request_id]} : completed;
+    decision = validateAiDecisionContract(validationView, {roomRevision}).valid ? completed
       : { staff_confirmed_registration: authorizedConfirmedRegistration,
       reply_decision: {replyMode:'no_reply',text:'',safetyClass:'no_send',grounding:'staff_confirmation',
         confidence:'high',reason:'durable_registration_readback',requiresRag:false,shouldCreateTask:false} };
