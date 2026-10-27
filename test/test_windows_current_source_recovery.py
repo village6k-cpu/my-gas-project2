@@ -33,6 +33,32 @@ class SourceRecoveryTests(unittest.TestCase):
         return build_plan(self.intent, self.receipt, 'a'*64, self.snapshot,
                           self.remote, now=self.now, activated=kw.get('activated', False))
 
+    def test_detached_bun_store_interpreter_blocks_closed_writer_claim(self):
+        self.snapshot['processes'].append(dict(pid=90,started=995,exe='C:/tools/bun.exe',
+            argv=['C:/tools/bun.exe','C:/code/gbrain/src/cli.ts','serve'],cwd='C:/code/gbrain',
+            home=None,pythonpath=None,ancestors=[]))
+        result=self.plan()
+        self.assertFalse(result['ready'])
+        self.assertIn('detached_store_interpreter_requires_ownership_resolution',result['errors'])
+
+    def test_bun_store_child_of_exact_replacement_is_preserved(self):
+        root=self.candidate('root',50)
+        self.snapshot['processes'].append(root)
+        self.snapshot['listeners'].append(dict(port=root['ports'][0],pid=root['pid']))
+        self.snapshot['processes'].append(dict(pid=90,started=996,exe='C:/tools/bun.exe',
+            argv=['C:/tools/bun.exe','C:/code/gbrain/src/cli.ts','serve'],cwd='C:/code/gbrain',
+            home=root['home'],pythonpath=None,ancestors=[dict(pid=50,started=995)]))
+        result=self.plan()
+        self.assertTrue(result['ready'],result['errors'])
+
+    def test_source_collection_does_not_skip_bun_processes(self):
+        proc=SimpleNamespace(pid=90,name=lambda:'bun.exe',create_time=lambda:995,
+             exe=lambda:'C:/tools/bun.exe',cmdline=lambda:['C:/tools/bun.exe','C:/code/cli.ts'],
+             cwd=lambda:'C:/code',environ=lambda:{},parents=lambda:[])
+        with patch('psutil.process_iter',return_value=[proc]),patch('psutil.net_connections',return_value=[]):
+            result=collect_source(self.intent,self.receipt)
+        self.assertEqual([p['pid'] for p in result['processes']],[90])
+
     def candidate(self, role='root', pid=50):
         row = copy.deepcopy(next(x for x in self.intent['profiles'] if x['role'] == role))
         row.update(pid=pid, started=995)

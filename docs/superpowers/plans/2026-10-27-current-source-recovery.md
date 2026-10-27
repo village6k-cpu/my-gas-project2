@@ -64,7 +64,7 @@ restores the original21scheduler states.
 Recovery requires a hash-bound `village-current-recovery-inputs/v1` document in
 the current protected control directory. It binds intent, stop receipt, scheduler
 manifest/states, browser, watcher pause/helper, captured per-role environments,
-executor hash and an `owned_drains` reference. The latter has schema
+executor and observation module hashes and an `owned_drains` reference. The latter has schema
 `village-owned-drains/v1`, migration ID, intent SHA and root/worker records with
 exact marker path/hash, original absence, creation status and source owner identity.
 These must be produced by the real source-stop controller; none has been fabricated.
@@ -84,7 +84,13 @@ real service. The parent controller launcher must apply the same isolation.
 Writer detection is not weakened. An exclusive child-attempt journal prevents
 two copies of the child launcher from starting the same role.
 
-Current observation/executor tests pass38/38 on Windows and native Mac. This is controller/fixture
+Detached Bun processes require an explicit ownership resolution before a closed
+store can be claimed. Bun is included in the collector even though no service
+owner uses it as its main executable. A child Bun is preserved only when exact
+ancestor identities attach it to a verified current service owner.
+
+Current observation/executor tests pass41/41 on Windows and native Mac with exact
+matching module/test hashes. This is controller/fixture
 evidence, not proof of an actual service recovery. Actual source-stop input
 generation, closed capture, activation binding and live recovery remain separate
 requirements before declaring rollback_ready.

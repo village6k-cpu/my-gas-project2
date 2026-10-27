@@ -137,6 +137,8 @@ class WindowsAdapter:
                 raise RecoveryError('guarded_runtime_dependency_changed')
         if sha(Path(__file__).read_bytes())!=self.inputs['executor_sha256']:
             raise RecoveryError('recovery_executor_changed')
+        if sha(Path(checks.__file__).read_bytes())!=self.inputs['observation_sha256']:
+            raise RecoveryError('recovery_observation_module_changed')
 
     def assert_fenced(self):
         broker=json.loads((self.control/'BROKER-STATE.json').read_text(encoding='utf-8-sig'))
