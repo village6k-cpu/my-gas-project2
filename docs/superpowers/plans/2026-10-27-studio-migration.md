@@ -76,7 +76,10 @@ found no logic changes; worker differences are line endings only. Existing Mac
 service endpoints and ten baseline file hashes remain unchanged.
 
 The scheduler broker passed an actual read-only21-task/16-unloaded-native-service
-preflight. Its single administrator launch was not confirmed; no task was disabled.
+preflight. On the user's request, its administrator dialog was relaunched; actual
+ADMIN-READY and a fresh lease heartbeat then confirmed administrator execution.
+It remains unfenced (sequence0); no task was disabled. Its two-hour lease is
+temporary and must be revalidated immediately before any controlled task action.
 Windows remains the operational source, and no profile was promoted or activated.
 
 Before any live stop, implement and rehearse accepted-input preservation and the
@@ -86,3 +89,8 @@ all existing incident holds and uncertain outcomes without replay. Finish the
 closed-state database/WAL/queue/GBrain transfer, validate promoted hashes and
 activation gates, move actual voice clients, then verify ordinary business results.
 Administrator access alone does not make these remaining gates complete.
+
+The first Slack handoff storage component is now prepared separately, without a
+live connection or dispatch/replay. See `2026-10-27-slack-handoff-storage.md` for its
+commit-before-ACK contract and the still-unimplemented connection, interaction,
+closure and rollback requirements. It does not satisfy the handoff gate alone.
