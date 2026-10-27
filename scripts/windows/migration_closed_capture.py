@@ -203,7 +203,9 @@ def main():
     parser.add_argument('--inputs-sha',required=True)
     parser.add_argument('--stop-sha',required=True)
     parser.add_argument('--capture-plan-sha',required=True)
-    parser.add_argument('--capture',action='store_true')
+    mode=parser.add_mutually_exclusive_group()
+    mode.add_argument('--capture',action='store_true')
+    mode.add_argument('--stream',action='store_true')
     args = parser.parse_args()
     adapter = recovery.WindowsAdapter(args.control,args.inputs_sha,args.stop_sha)
     control = adapter.control
@@ -232,6 +234,10 @@ def main():
         if row['name'].endswith('-profile') and any(
                 x == 'state.db' or x.startswith('state.db-') for x in row['excluded']):
             raise ValueError('profile_sqlite_or_wal_must_not_be_excluded')
+        if row['name'].endswith('-profile'):
+            db=Path(row['source'])/'state.db'
+            if not db.is_file() or db.is_symlink() or db.stat().st_size<=0:
+                raise ValueError('current_profile_sqlite_missing')
     dest = control/'closed-raw-v1'
     validate_roots(roots,dest.resolve())
 
@@ -256,6 +262,16 @@ def main():
                 'destination_inactive':True,'owned_watcher_paused':True}
 
     gate()
+    if args.stream:
+        sender=load_helper(config['stream_helper'],'pinned_cold_sender',checks.BASE.parent)
+        streamer=load_helper(config['stream_module'],'pinned_cold_stream',checks.BASE.parent)
+        if hashlib.sha256(Path(streamer.closed.__file__).read_bytes()).hexdigest()!=config['capture_module_sha256']:
+            raise ValueError('stream_capture_dependency_changed')
+        ssh=['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',
+             '-i',checks.SSH_KEY,checks.REMOTE_HOST]
+        report=streamer.stream(roots,config['stream_destination'],control,gate,trees,sender,ssh)
+        print(json.dumps({k:report[k] for k in ('cold_capture_verified','verified_files',
+            'verified_bytes','local_full_payload_copy','production_activated')}));return
     required = sum(sum(v[0] for v in trees.inventory(r['source'],frozenset(r['excluded']))[0].values())
                    for r in roots)
     free = shutil.disk_usage(control).free

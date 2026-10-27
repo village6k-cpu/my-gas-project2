@@ -114,7 +114,32 @@ Write, flush and fsync fault cases leave no success marker.
 
 Live sizing found12,304,556,471bytes to copy but only10,441,895,936bytes free on
 Windows, before the1GiB reserve. Therefore the full local copy mode must NOT be
-used for this cutover. No production capture was attempted. A bounded delta or
-source-closed direct stream with the same closure, preservation and remote hash
-checks is still required before source stop. Do not make a second full database
+used for this cutover. No production capture was attempted. The source-closed
+direct-stream mode now exists, described below. Do not make a second full database
 copy, delete unrelated backups, or clear obligations to bypass this limitation.
+
+`migration_closed_stream.py`, selected with `--stream`, reuses the pinned sender /
+receiver with exact relative exclusions. It requires the same real stop and
+accepted-work receipts, current fence/watcher and destination inactivity. It
+compares independent source inventories to the transport manifest, confirms native
+hash readback, checks unchanged source trees and rechecks closure before publishing
+the local `COLD-VERIFIED.json`. The native transport `VERIFIED.json` alone never
+authorizes final restoration or activation. The cold proof and its bound source /
+stop provenance still have to be transferred and validated by the current native
+restoration/activation path.
+
+All66current controller tests pass on Windows and native Mac. A closed synthetic
+Windows fixture also streamed14files/16directories/98,926bytes through the actual
+SSH sender/receiver. Native readback verified all hashes, two WAL pairs and retained
+nested `memory/backups` while excluding only root `backups`. No operational source
+data or actual stop receipt was used. Independent one-pass stream review reported
+no Critical/Important findings. Current final restoration must be adapted from the
+old four-owner delta layout to this full-byte streamed layout before actual stop.
+
+The voice frontend now receives both old and new URLs. Complete source recovery
+therefore also requires restoring its fresh Windows dispatch lease after backend
+recovery. Backend port8788 and five healthy owners alone cannot prove public voice
+recovery. The original temporary lease is bound to the original root/voice PIDs
+and stops on SOURCE_STOP_REQUESTED, so it cannot simply be restarted after a
+replacement process is created. This integration remains required before claiming
+rollback_ready or publishing a full source recovery success receipt.
