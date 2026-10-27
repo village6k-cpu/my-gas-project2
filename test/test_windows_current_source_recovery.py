@@ -59,6 +59,22 @@ class SourceRecoveryTests(unittest.TestCase):
             result=collect_source(self.intent,self.receipt)
         self.assertEqual([p['pid'] for p in result['processes']],[90])
 
+    def test_detached_gbrain_launcher_is_a_store_owner_candidate(self):
+        self.snapshot['processes'].append(dict(pid=90,started=995,exe='C:/tools/gbrain.exe',
+            argv=['C:/tools/gbrain.exe','serve'],cwd='C:/code/gbrain',
+            home=None,pythonpath=None,ancestors=[]))
+        result=self.plan()
+        self.assertFalse(result['ready'])
+        self.assertIn('detached_store_interpreter_requires_ownership_resolution',result['errors'])
+
+    def test_source_collection_does_not_skip_gbrain_launchers(self):
+        proc=SimpleNamespace(pid=90,name=lambda:'gbrain.exe',create_time=lambda:995,
+             exe=lambda:'C:/tools/gbrain.exe',cmdline=lambda:['C:/tools/gbrain.exe','serve'],
+             cwd=lambda:'C:/code',environ=lambda:{},parents=lambda:[])
+        with patch('psutil.process_iter',return_value=[proc]),patch('psutil.net_connections',return_value=[]):
+            result=collect_source(self.intent,self.receipt)
+        self.assertEqual([p['pid'] for p in result['processes']],[90])
+
     def candidate(self, role='root', pid=50):
         row = copy.deepcopy(next(x for x in self.intent['profiles'] if x['role'] == role))
         row.update(pid=pid, started=995)

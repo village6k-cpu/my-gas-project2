@@ -21,7 +21,7 @@ import subprocess
 import time
 
 BASE = Path('C:/Village/migration-staging/studio-20260930/resume-20261027')
-CONTROL = BASE / 'scheduler-fence-v1'
+CONTROL = BASE / 'scheduler-fence-v2'
 REMOTE_HOST = 'choijaehyeong@100.103.83.1'
 CANDIDATE = '/Users/choijaehyeong/VillageMigration/20260930-windows/candidate'
 SSH_KEY = 'C:/Users/ssper/.ssh/village_macmini_migration'
@@ -231,12 +231,12 @@ def build_plan(intent, receipt, intent_sha, snapshot, remote, *, now, activated)
                                     preserve_existing_chrome_and_paused_watcher=True))
             else:
                 planned.append(dict(role=role, method='known_scheduler_task', task=TASKS[role]))
-        # GBrain runs on Bun, outside the five service executable names. An
+        # GBrain's launcher and Bun are outside the five service exe names. An
         # unaccounted interpreter may still own its store after a parent exits.
         # Do not call that a closed source merely because Python/Node are gone.
         verified_owners=[p for p in processes if any(same_contract(p,old) for old in expected)]
         for proc in processes:
-            if (ntpath.basename(proc.get('exe','')).lower()=='bun.exe'
+            if (ntpath.basename(proc.get('exe','')).lower() in ('bun.exe','gbrain.exe')
                     and not any(owned_descendant(proc,owner) for owner in verified_owners)):
                 errors.append('detached_store_interpreter_requires_ownership_resolution')
         if not errors:
@@ -254,7 +254,7 @@ def collect_source(intent, receipt):
     begin = time.time()
     result = dict(observed_at=begin, processes=[], listeners=[], errors=[])
     exe_names = {ntpath.basename(p['exe']).lower() for p in intent['profiles']}
-    exe_names.add('bun.exe')
+    exe_names.update(('bun.exe','gbrain.exe'))
     relevant_ids = {p['pid'] for p in intent['profiles']}
     relevant_ids.update(c['pid'] for p in receipt['profiles'] for c in p['children'])
     for proc in psutil.process_iter():

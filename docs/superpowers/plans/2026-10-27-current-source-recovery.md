@@ -84,13 +84,37 @@ real service. The parent controller launcher must apply the same isolation.
 Writer detection is not weakened. An exclusive child-attempt journal prevents
 two copies of the child launcher from starting the same role.
 
-Detached Bun processes require an explicit ownership resolution before a closed
-store can be claimed. Bun is included in the collector even though no service
+Detached Bun/GBrain processes require an explicit ownership resolution before a closed
+store can be claimed. Both bun.exe and gbrain.exe are included even though no service
 owner uses it as its main executable. A child Bun is preserved only when exact
 ancestor identities attach it to a verified current service owner.
 
-Current observation/executor tests pass41/41 on Windows and native Mac with exact
+Current observation/executor tests pass43/43 on Windows and native Mac with exact
 matching module/test hashes. This is controller/fixture
 evidence, not proof of an actual service recovery. Actual source-stop input
 generation, closed capture, activation binding and live recovery remain separate
 requirements before declaring rollback_ready.
+
+## Closed capture continuation
+
+`migration_closed_capture.py` requires the real five-owner stop receipt, a bound
+accepted-work closure receipt, the current scheduler fence, paused owned watcher,
+absent source descendants/scheduled writers and fresh destination inactivity.
+It preserves six roots, rechecks closure after each root and never stops/starts a
+service. Pending uncertain obligations require an explicit no-replay preservation
+manifest; a cold copy does not resolve them.
+
+Sixteen capture tests pass on Windows and native Mac (59 total with observation
+and recovery). Real temporary SQLite WAL pairs, empty directories and failed /
+reserved obligation payloads also survive capture on both hosts. These are
+fixture results only. Independent review found two Important bugs, both reproduced
+and fixed: success is now published after a staged durable write, and a strict
+exclusion allowlist prevents omitting WAL, queue, receipt or current learning data.
+Write, flush and fsync fault cases leave no success marker.
+
+Live sizing found12,304,556,471bytes to copy but only10,441,895,936bytes free on
+Windows, before the1GiB reserve. Therefore the full local copy mode must NOT be
+used for this cutover. No production capture was attempted. A bounded delta or
+source-closed direct stream with the same closure, preservation and remote hash
+checks is still required before source stop. Do not make a second full database
+copy, delete unrelated backups, or clear obligations to bypass this limitation.
