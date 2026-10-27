@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {refreshKakaoConversationWithoutDraft} from './stale-conversation-refresh.mjs';
 import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
 import fs from 'node:fs';
@@ -7205,6 +7206,18 @@ async function readUsableKakaoConversationEvidence(target, {
   return { ready: false, dom, evidence, attempts: maxAttempts };
 }
 
+async function readKakaoConversationWithRecovery(target, options, { enabled, refreshImpl }) {
+  const first = await readUsableKakaoConversationEvidence(target, options);
+  if (first.ready || !enabled || first.evidence?.capture_integrity?.ok !== false) return first;
+  // One refresh of this exact conversation only; never discard an unsent draft.
+  const refreshed = await refreshImpl(target, options).catch(() => ({ refreshed: false }));
+  if (!refreshed?.refreshed) return first;
+  await options.sleepImpl(500);
+  try { return await readUsableKakaoConversationEvidence(target, options); }
+  catch { return first; } // A navigation failure must remain a retryable capture failure.
+}
+
+
 function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allowSearch = true } = {}) {
   return `(${async function kakaoSearchAndOpen(searchTermsArg, hintsArg, allowSearchArg) {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -7503,7 +7516,9 @@ export async function openKakaoTargetChatViaDevtools(job, {
   allowSearch = process.env.KAKAO_WORKER_SEARCH_TARGET_CHAT !== '0',
   evidenceMaxAttempts = 40,
   evidencePollMs = 200,
-  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  refreshStaleConversation = true,
+  refreshImpl = refreshKakaoConversationWithoutDraft
 } = {}) {
   const hints = extractNavigationHints(job);
   const roomIds = extractKakaoRoomIds(job);
@@ -7514,7 +7529,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
   const existingConversationTarget = pickKakaoConversationTarget(targetList, hints, roomIds);
   let existingCaptureFailure = null;
   if (existingConversationTarget) {
-    const evidenceRead = await readUsableKakaoConversationEvidence(existingConversationTarget, {
+    const evidenceRead = await readKakaoConversationWithRecovery(existingConversationTarget, {
       job,
       hints,
       timeoutMs,
@@ -7523,7 +7538,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
       evidencePollMs,
       sleepImpl,
       source: 'live_kakao_dom_existing_conversation'
-    });
+    }, { enabled: refreshStaleConversation, refreshImpl });
     const dom = evidenceRead.dom;
     const existingResult = {
       status: evidenceRead.ready ? 'opened_target_chat' : 'conversation_evidence_unavailable',
@@ -7602,7 +7617,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
       }
     };
   }
-  const evidenceRead = await readUsableKakaoConversationEvidence(conversationTarget, {
+  const evidenceRead = await readKakaoConversationWithRecovery(conversationTarget, {
     job,
     hints,
     timeoutMs,
@@ -7610,7 +7625,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
     evidenceMaxAttempts,
     evidencePollMs,
     sleepImpl
-  });
+  }, { enabled: refreshStaleConversation, refreshImpl });
   const dom = evidenceRead.dom;
   return {
     status: evidenceRead.ready ? 'opened_target_chat' : 'conversation_evidence_unavailable',
