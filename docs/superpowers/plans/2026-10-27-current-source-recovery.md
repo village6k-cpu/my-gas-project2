@@ -165,3 +165,19 @@ Windows and native Mac. Native results are retained separately under
 unchanged. Reviewer findings for expired authority before watcher resume and a
 dead forwarding thread were reproduced before the fixes. No production owner
 was stopped and no source recovery success receipt was generated.
+
+`scripts/macos/migration_streamed_restore.py` now verifies the full-byte raw
+layout before offline reconstruction. It requires caller-pinned cold, intent,
+stop, and accepted-work receipts; binds both closure observations and the exact
+transport manifest; rejects alternative source trees, operational exclusions,
+links, missing or unlisted paths, and changed payloads. Generic transport
+`VERIFIED.json` is insufficient. It does not infer that source writers are still
+absent, canonicalize SQLite/GBrain, promote profiles, or authorize activation.
+The actual Windows controller remains responsible for supplying authentic pins.
+
+The new verifier's six synthetic cases pass on native Mac. Windows passes five
+and skips the symlink creation case because that OS capability is unavailable.
+The existing95 cases also pass on native under a new immutable test directory,
+`current-recovery-executor-tests-v7`. Independent review found no Critical or
+Important issue in this offline verification scope. Production cold capture and
+the canonicalization/reconstruction stage remain pending.
