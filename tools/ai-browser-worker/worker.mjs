@@ -7207,16 +7207,28 @@ async function readUsableKakaoConversationEvidence(target, {
 }
 
 async function readKakaoConversationWithRecovery(target, options, { enabled, refreshImpl }) {
-  const first = await readUsableKakaoConversationEvidence(target, options);
+  const wake = async () => {
+    const url = new URL(target.url);
+    if (url.origin !== 'https://business.kakao.com' || !/^\/space\/[A-Za-z0-9_-]+\/channel\/_[A-Za-z0-9_-]+\/chats\/\d{6,24}\/?$/.test(url.pathname)) throw new Error('Exact Kakao conversation target required');
+    await options.cdpCallImpl(target, 'Page.setWebLifecycleState', { state: 'active' }, { timeoutMs: options.timeoutMs });
+  };
+  let first;
+  try { first = await readUsableKakaoConversationEvidence(target, options); }
+  catch (error) {
+    if (!enabled) throw error;
+    // A frozen background page cannot answer Runtime.evaluate. Waking scripts
+    // does not focus, navigate, close the page or discard any draft.
+    await wake();
+    first = await readUsableKakaoConversationEvidence(target, options);
+  }
   if (first.ready || !enabled || first.evidence?.capture_integrity?.ok !== false) return first;
-  // One refresh of this exact conversation only; never discard an unsent draft.
   const refreshed = await refreshImpl(target, options).catch(() => ({ refreshed: false }));
   if (!refreshed?.refreshed) return first;
+  await wake();
   await options.sleepImpl(500);
   try { return await readUsableKakaoConversationEvidence(target, options); }
-  catch { return first; } // A navigation failure must remain a retryable capture failure.
+  catch { return first; }
 }
-
 
 function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allowSearch = true } = {}) {
   return `(${async function kakaoSearchAndOpen(searchTermsArg, hintsArg, allowSearchArg) {
@@ -7537,6 +7549,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
       evidenceMaxAttempts,
       evidencePollMs,
       sleepImpl,
+      cdpCallImpl,
       source: 'live_kakao_dom_existing_conversation'
     }, { enabled: refreshStaleConversation, refreshImpl });
     const dom = evidenceRead.dom;
@@ -7624,7 +7637,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
     evaluateImpl,
     evidenceMaxAttempts,
     evidencePollMs,
-    sleepImpl
+    sleepImpl,
+    cdpCallImpl
   }, { enabled: refreshStaleConversation, refreshImpl });
   const dom = evidenceRead.dom;
   return {
