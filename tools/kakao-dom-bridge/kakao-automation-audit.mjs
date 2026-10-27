@@ -542,7 +542,9 @@ function buildRegisteredEvent({ durableJob, operation, receipt, customerLabel, h
   if (allocation && outcome!=='no_action') {
     const row=mutation.expected_before?.[0],supply=mutation.external_supply;
     if(!row || !supply)throw new TypeError('external supply audit data missing');
-    changeItems.push({field:'equipment',before:`${row.name} 총 ${row.quantity}개`,after:`${row.name} 총 ${row.quantity}개 (외부 ${supply.supplier} ${supply.quantity}개)`});
+    const before = safeOptionalText(`${row.name} 총 ${row.quantity}개`, 1000);
+    const after = safeOptionalText(`${row.name} 총 ${row.quantity}개 (외부 ${supply.supplier} ${supply.quantity}개)`, 1000);
+    if (before !== null && after !== null) changeItems.push({ field: 'equipment', before, after });
   } else if (!allocation && actionType !== 'date_time_change') {
     const before = equipmentText(mutation.expected_before);
     const after = equipmentText(mutation.desired_after);
