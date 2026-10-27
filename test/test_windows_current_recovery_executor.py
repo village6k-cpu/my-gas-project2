@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from datetime import datetime,timezone
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts/windows'))
 from migration_source_recovery_executor import execute_recovery, RecoveryError, WindowsAdapter, read_bound, sha
+from migration_source_recovery_executor import validate_voice_ingress
 
 
 class Adapter:
@@ -33,11 +35,69 @@ class Adapter:
         self.events.append('all-ready')
         if self.live != {'root','worker','bridge','relay','voice'}:raise RecoveryError('incomplete')
         return {'profiles':sorted(self.live)}
-    def resume_watcher(self):self.events.append('resume')
+    def resume_watcher(self):
+        self.verify_voice_ingress(self.verify_all());self.events.append('resume')
     def publish(self,proof):self.events.append('receipt');return proof
+    def verify_voice_ingress(self,proof):self.events.append('voice-ingress-ready')
 
 
 class CurrentExecutorTests(unittest.TestCase):
+    def test_authority_revoked_by_slow_resume_gate_cannot_resume_watcher(self):
+        a=WindowsAdapter.__new__(WindowsAdapter);a.resumed=False
+        a.browser={};a.pause_path=Path('fixture-pause')
+        permitted=[True];mutations=[]
+        def slow_gate():permitted[0]=False
+        def verify(_):
+            if not permitted[0]:raise RecoveryError('voice authority expired during gate')
+        a.gate=slow_gate
+        a.verify_all=lambda:{}
+        a.inspect_watcher=lambda:SimpleNamespace(operate=lambda *args:mutations.append(args))
+        a.verify_voice_ingress=verify
+        with self.assertRaises(RecoveryError):a.resume_watcher()
+        self.assertEqual(mutations,[]);self.assertFalse(a.resumed)
+
+    def fence_fixture(self,directory):
+        a=WindowsAdapter.__new__(WindowsAdapter);a.control=Path(directory)
+        a.inputs={'scheduler_manifest':{'sha256':'a'*64}}
+        state={'active':True,'fenced':True,'nonce':'fixture-nonce',
+               'manifestSha256':'a'*64,'at':datetime.now(timezone.utc).isoformat()}
+        (a.control/'BROKER-STATE.json').write_text(json.dumps(state))
+        fence={'valid':True,'all21Disabled':True,'nonce':'fixture-nonce','manifestSha256':'a'*64}
+        (a.control/'SCHEDULER-FENCED.json').write_text(json.dumps(fence))
+        return a,state,fence
+
+    def test_lease_revocation_during_definition_read_is_rechecked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            a,state,_=self.fence_fixture(directory)
+            def revoke(_):
+                state['active']=False
+                (a.control/'BROKER-STATE.json').write_text(json.dumps(state))
+                return ''
+            with patch('migration_source_recovery_executor.powershell',side_effect=revoke):
+                with self.assertRaises(RecoveryError):a.assert_fenced()
+
+    def test_rejected_fence_cannot_be_reused_even_while_broker_active(self):
+        with tempfile.TemporaryDirectory() as directory:
+            a,_,fence=self.fence_fixture(directory)
+            fence['valid']=False
+            (a.control/'SCHEDULER-FENCED.json').write_text(json.dumps(fence))
+            with patch('migration_source_recovery_executor.powershell',return_value='') as task_read:
+                with self.assertRaises(RecoveryError):a.assert_fenced()
+                task_read.assert_not_called()
+
+    def test_backend_only_recovery_is_not_full_source_recovery(self):
+        a=Adapter();result=execute_recovery(a)
+        self.assertTrue(result['source_backends_ready'])
+        self.assertFalse(result['source_ready'])
+        self.assertNotIn('receipt',a.events)
+
+    def test_held_public_voice_prevents_watcher_resume_and_recovery_receipt(self):
+        a=Adapter()
+        def held(_):raise RecoveryError('native voice dispatch remains held')
+        a.verify_voice_ingress=held
+        with self.assertRaises(RecoveryError):execute_recovery(a,resume_watcher=True)
+        self.assertNotIn('resume',a.events);self.assertNotIn('receipt',a.events)
+
     def test_worker_precedes_guarded_pair_then_root_and_voice(self):
         a=Adapter();r=execute_recovery(a,resume_watcher=True)
         self.assertEqual([x for x in a.events if x.startswith('start:') or x=='guarded'],
@@ -57,6 +117,8 @@ class CurrentExecutorTests(unittest.TestCase):
         self.assertFalse(any(x.startswith('start:') or x=='guarded' for x in a.events))
         self.assertFalse(result['ready_to_unfence'])
         self.assertNotIn('receipt',a.events)
+
+
     def test_guarded_failure_cannot_advance_to_root_or_unfence(self):
         a=Adapter()
         def reject():raise RecoveryError('fixture guarded contract failed')
@@ -154,6 +216,56 @@ class CurrentExecutorTests(unittest.TestCase):
             a.intent={'profiles':[{'role':'root','home':directory}]}
             a.drains={'profiles':[]};a.inputs={}
             with self.assertRaises(RecoveryError):a.prepare_profile('root')
+
+
+class VoiceDispatchReadbackTests(unittest.TestCase):
+    def setUp(self):
+        self.owners={'root':{'pid':10,'started':100.1},'voice':{'pid':11,'started':100.2}}
+        self.intake={'epoch':'fixture-epoch','source':self.owners,'config_sha256':'a'*64}
+        self.row={'schema':'village-source-voice-dispatch-readback/v1','config_sha256':'a'*64,
+            'epoch':'fixture-epoch','origin_source':self.owners,'effective_owners':self.owners,
+            'phase_mode':'windows','lease_age_native_seconds':2.0,'native_activation_absent':True,
+            'native_closure_absent':True,'mac_route_verified':True,'legacy_route_verified':True,
+            'intake_healthy':True,'relay_healthy':True,'counts':{},'conflicts':0,
+            'forwarder':{'schema':'village-voice-forwarder-runtime/v1','thread_alive':True,
+                'failed':False,'config_sha256':'a'*64,'epoch':'fixture-epoch',
+                'authority':'windows','evaluation_age_seconds':.1,'phase_sha256':'b'*64},
+            'phase_sha256':'b'*64}
+
+    def test_healthy_http_and_phase_do_not_prove_live_forwarding_consumer(self):
+        original=dict(self.row['forwarder'])
+        for key,value in (('thread_alive',False),('failed',True),('authority',None),
+             ('evaluation_age_seconds',3),('evaluation_age_seconds',float('nan')),
+             ('phase_sha256','c'*64),('config_sha256','c'*64),('epoch','wrong')):
+            self.row['forwarder']=dict(original);self.row['forwarder'][key]=value
+            with self.subTest(key=key):
+                with self.assertRaises(RecoveryError):validate_voice_ingress(self.row,self.owners,self.intake)
+        self.row['forwarder']=None
+        with self.assertRaises(RecoveryError):validate_voice_ingress(self.row,self.owners,self.intake)
+
+    def test_original_or_proven_replacement_identity_must_match_dispatch(self):
+        validate_voice_ingress(self.row,self.owners,self.intake)
+        changed={'root':{'pid':20,'started':200.1},'voice':self.owners['voice']}
+        with self.assertRaisesRegex(RecoveryError,'old_or_unknown_source'):
+            validate_voice_ingress(self.row,changed,self.intake)
+        self.row['effective_owners']=changed
+        validate_voice_ingress(self.row,changed,self.intake)
+
+    def test_held_stale_activated_or_wrong_route_is_not_ready(self):
+        original=dict(self.row)
+        for key,value in (('phase_mode','hold'),('lease_age_native_seconds',16),
+             ('lease_age_native_seconds',float('nan')),('native_activation_absent',False),
+             ('native_closure_absent',False),('mac_route_verified',False),
+             ('legacy_route_verified',False),('relay_healthy',False),('epoch','wrong')):
+            self.row=dict(original);self.row[key]=value
+            with self.subTest(key=key,value=value):
+                with self.assertRaises(RecoveryError):validate_voice_ingress(self.row,self.owners,self.intake)
+
+    def test_uncertain_delivery_conflicts_or_unknown_states_block(self):
+        for counts,conflicts in (({'uncertain':1},0),({'dispatching':1},0),({},1),
+                                ({'unknown':1},0),({'queued':False},0)):
+            self.row.update(counts=counts,conflicts=conflicts)
+            with self.assertRaises(RecoveryError):validate_voice_ingress(self.row,self.owners,self.intake)
 
 
 if __name__=='__main__':unittest.main()

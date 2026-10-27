@@ -223,8 +223,21 @@ class PhaseAuthority:
         self.now = now
 
     def __call__(self):
+        return self.observe()['authority']
+
+    def observe(self):
+        digest=None
         try:
-            data = json.loads(self.phase.read_text(encoding='utf-8'))
+            raw=self.phase.read_bytes()
+            digest=hashlib.sha256(raw).hexdigest()
+            data=json.loads(raw.decode('utf-8'))
+            target=self._evaluate(data)
+        except (OSError, ValueError, TypeError, AttributeError):
+            target=None
+        return {'authority':target,'phase_sha256':digest}
+
+    def _evaluate(self,data):
+        try:
             if (data.get('schema') != 'village-voice-phase/v1' or data.get('epoch') != self.epoch
                     or data.get('source') != self.source): return None
             closure = self.root / 'SOURCE-CLOSED.json'
@@ -251,7 +264,49 @@ class PhaseAuthority:
         return None
 
 
-def make_server(inbox, bearer, *, port=18788):
+class ForwardingLoop:
+    """Process-local observation of the actual single consumer, never a lease.
+
+    HTTP intake can remain healthy after a storage failure. Its readiness must
+    therefore expose the real thread and the exact phase it last evaluated.
+    """
+    def __init__(self,pump,authority,send,*,config_sha256,epoch):
+        self.pump,self.authority,self.send=pump,authority,send
+        self.config_sha256,self.epoch=config_sha256,epoch
+        self.stopping=threading.Event()
+        self._lock=threading.Lock();self._last={};self._evaluated=None;self._failed=False
+        self.thread=threading.Thread(target=self._run,daemon=True)
+
+    def start(self):self.thread.start()
+
+    def _authority(self):
+        observation=self.authority.observe()
+        with self._lock:
+            self._last=observation;self._evaluated=time.monotonic()
+        return observation['authority']
+
+    def _run(self):
+        while not self.stopping.is_set():
+            try:self.pump.once(self._authority,self.send)
+            except VoiceBlocked:pass  # Retain conflicts/uncertain claims; never retry them.
+            except Exception:
+                with self._lock:self._failed=True
+                return
+            self.stopping.wait(.25)
+
+    def status(self):
+        with self._lock:
+            return dict(self._last,schema='village-voice-forwarder-runtime/v1',
+                config_sha256=self.config_sha256,epoch=self.epoch,
+                thread_alive=self.thread.is_alive() and not self.stopping.is_set(),
+                failed=self._failed,evaluation_age_seconds=(
+                    None if self._evaluated is None else time.monotonic()-self._evaluated))
+
+    def stop(self):
+        self.stopping.set();self.thread.join(timeout=30)
+
+
+def make_server(inbox, bearer, *, port=18788, forwarder=None):
     if not isinstance(bearer, str) or len(bearer) < 43:
         raise ValueError('Strong voice bearer is required')
 
@@ -272,7 +327,8 @@ def make_server(inbox, bearer, *, port=18788):
             if self.path.split('?', 1)[0].rstrip('/') not in ('/health', '/watch/voice/health'):
                 self.reply(404, {'status': 'not_found'}); return
             self.reply(200, {'status': 'ok', 'role': 'durable_voice_intake',
-                             'counts': inbox.counts(), 'business_completion_verified': False})
+                             'counts': inbox.counts(), 'business_completion_verified': False,
+                             'forwarder':None if forwarder is None else forwarder.status()})
 
         def do_POST(self):
             if self.path.split('?', 1)[0].rstrip('/') not in ('', '/watch/voice'):
@@ -362,31 +418,18 @@ def main():
     if sys.platform != 'darwin': raise RuntimeError('Voice handoff daemon requires macOS')
     inbox = VoiceInbox(database)
     pump = VoicePump(inbox)
-    server = make_server(inbox, bearer)
-    stopping = threading.Event()
     def send(target, payload):
         port = 28788 if target == 'windows' else 8788
         return forward_to_relay(f'http://127.0.0.1:{port}/watch/voice', bearer, payload)
-    def forward_loop():
-        while not stopping.is_set():
-            try:
-                pump.once(authority, send)
-            except VoiceBlocked:
-                pass  # Re-observe the persistent fence; never clear/retry it.
-            except Exception:
-                # Unexpected storage failure stops forwarding. Intake remains
-                # durable and the controller must inspect the retained journal.
-                return
-            stopping.wait(.25)
-    thread = threading.Thread(target=forward_loop, daemon=True)
-    thread.start()
+    forwarder=ForwardingLoop(pump,authority,send,config_sha256=args.config_sha,epoch=config['epoch'])
+    server=make_server(inbox,bearer,forwarder=forwarder)
+    forwarder.start()
     try:
         server.serve_forever()
     finally:
-        stopping.set()
-        thread.join(timeout=30)
+        forwarder.stop()
         server.server_close()
-        if not thread.is_alive():
+        if not forwarder.thread.is_alive():
             pump.close();inbox.close()
     return 0
 

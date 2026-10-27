@@ -42,15 +42,15 @@ def execute_recovery(adapter, *, resume_watcher=False):
         adapter.wait_owner(role)
     adapter.gate()
     proof = adapter.verify_all()
-    result = dict(schema=1, source_ready=True, ready_to_unfence=False,
+    result = dict(schema=1, source_backends_ready=True, source_ready=False, ready_to_unfence=False,
                   task_states_restored=False, destination_activated=False)
     if resume_watcher:
-        adapter.gate()
         adapter.resume_watcher()
         adapter.gate()
         proof = adapter.verify_all()
-        result['ready_to_unfence'] = True
+        adapter.verify_voice_ingress(proof)
         adapter.publish(proof)
+        result.update(source_ready=True,ready_to_unfence=True)
     return result
 
 
@@ -79,6 +79,46 @@ def powershell(script, *, timeout=30):
 def write_new(path, value):
     with Path(path).open('x',encoding='utf-8') as f:
         json.dump(value,f,separators=(',',':'));f.flush();os.fsync(f.fileno())
+
+
+def validate_voice_ingress(evidence, expected, intake):
+    if (evidence.get('schema')!='village-source-voice-dispatch-readback/v1'
+            or evidence.get('config_sha256')!=intake['config_sha256']
+            or evidence.get('epoch')!=intake['epoch']
+            or evidence.get('origin_source')!=intake['source']
+            or evidence.get('phase_mode')!='windows'
+            or not checks.number(evidence.get('lease_age_native_seconds'))
+            or not 0<=evidence['lease_age_native_seconds']<=15
+            or evidence.get('native_activation_absent') is not True
+            or evidence.get('native_closure_absent') is not True
+            or evidence.get('mac_route_verified') is not True
+            or evidence.get('legacy_route_verified') is not True
+            or evidence.get('intake_healthy') is not True
+            or evidence.get('relay_healthy') is not True):
+        raise RecoveryError('public_voice_dispatch_not_restored')
+    forwarder=evidence.get('forwarder')
+    if (not isinstance(forwarder,dict)
+            or forwarder.get('schema')!='village-voice-forwarder-runtime/v1'
+            or forwarder.get('thread_alive') is not True or forwarder.get('failed') is not False
+            or forwarder.get('authority')!='windows'
+            or forwarder.get('config_sha256')!=intake['config_sha256']
+            or forwarder.get('epoch')!=intake['epoch']
+            or not checks.number(forwarder.get('evaluation_age_seconds'))
+            or not 0<=forwarder['evaluation_age_seconds']<=2
+            or not isinstance(evidence.get('phase_sha256'),str)
+            or not re.fullmatch('[a-f0-9]{64}',evidence['phase_sha256'])
+            or forwarder.get('phase_sha256')!=evidence['phase_sha256']):
+        raise RecoveryError('live_voice_forwarder_not_verified')
+    owners=evidence.get('effective_owners',{})
+    if set(owners)!=set(expected) or any(not checks.same_identity(owners[r],expected[r]) for r in expected):
+        raise RecoveryError('voice_dispatch_points_to_old_or_unknown_source')
+    counts=evidence.get('counts')
+    if (not isinstance(counts,dict) or set(counts)-{'queued','dispatching','uncertain','delivered'}
+            or any(type(v) is not int or v<0 for v in counts.values())
+            or counts.get('dispatching',0) or counts.get('uncertain',0)
+            or type(evidence.get('conflicts')) is not int or evidence['conflicts']!=0):
+        raise RecoveryError('voice_delivery_outcome_requires_inspection')
+    return evidence
 
 
 class WindowsAdapter:
@@ -140,18 +180,27 @@ class WindowsAdapter:
         if sha(Path(checks.__file__).read_bytes())!=self.inputs['observation_sha256']:
             raise RecoveryError('recovery_observation_module_changed')
 
-    def assert_fenced(self):
+    def assert_fence_lease(self):
         broker=json.loads((self.control/'BROKER-STATE.json').read_text(encoding='utf-8-sig'))
-        if broker.get('active') is not True or broker.get('manifestSha256')!=self.inputs['scheduler_manifest']['sha256']:
+        fence=json.loads((self.control/'SCHEDULER-FENCED.json').read_text(encoding='utf-8-sig'))
+        if (broker.get('active') is not True or broker.get('fenced') is not True
+                or not isinstance(broker.get('nonce'),str) or not broker['nonce']
+                or broker.get('manifestSha256')!=self.inputs['scheduler_manifest']['sha256']
+                or fence.get('nonce')!=broker['nonce'] or fence.get('manifestSha256')!=broker['manifestSha256']
+                or fence.get('valid') is not True or fence.get('all21Disabled') is not True):
             raise RecoveryError('administrator_fence_owner_unavailable')
         from datetime import datetime,timezone
         stamp=datetime.fromisoformat(broker['at'].replace('Z','+00:00')).astimezone(timezone.utc).timestamp()
         if not 0<=time.time()-stamp<=15:raise RecoveryError('administrator_fence_lease_stale')
+
+    def assert_fenced(self):
+        self.assert_fence_lease()
         script="$rows=Get-Content -LiteralPath "+quote(self.control/'original-task-states.json')+" -Raw|ConvertFrom-Json;"
         script+="$rows|ForEach-Object {$t=Get-ScheduledTask -TaskName $_.name -TaskPath $_.path;if($t.Settings.Enabled){throw 'Owner not fenced'};"
         script+="$saved=Join-Path "+quote(self.control)+" ($_.name.Replace(' ','_')+'.xml');[xml]$a=Get-Content -LiteralPath $saved -Raw;[xml]$b=Export-ScheduledTask -TaskName $_.name -TaskPath $_.path;"
         script+="$a.Task.Settings.Enabled='false';$b.Task.Settings.Enabled='false';if($a.OuterXml -cne $b.OuterXml){throw 'Owner definition changed'}}"
         powershell(script)
+        self.assert_fence_lease()
 
     def inspect_watcher(self):
         # This reviewed helper operates only on the captured browser/target and
@@ -333,18 +382,94 @@ class WindowsAdapter:
     def resume_watcher(self):
         self.gate()
         module=self.inspect_watcher()
+        proof=self.verify_all()
+        # All slow scheduler/owner inspection precedes the final bounded voice
+        # observation. Nothing else may renew/consume that lease before resume.
+        self.verify_voice_ingress(proof)
         module.operate(self.browser,'resume',self.pause_path)
         self.resumed=True
         self.inspect_watcher()
+
+    def verify_voice_ingress(self,proof):
+        # Read-only route/authority check. It never writes phase, renews a lease,
+        # starts a forwarder or submits speech. Ordinary request/reply readback
+        # remains separate from this readiness observation.
+        plan=self.gate()
+        profiles=[{'role':x['role'],'pid':x['pid'],'start_time':round(x['started']*100),'state':'running'} for x in plan['steps']]
+        if proof['profiles']!=profiles:
+            raise RecoveryError('backend_owners_changed_before_voice_readback')
+        _,intake=self.reference(self.inputs['voice_intake'])
+        if intake.get('schema')!='village-voice-intake-preparation/v1':
+            raise RecoveryError('original_voice_epoch_binding_required')
+        expected={x['role']:{'pid':x['pid'],'started':x['started']} for x in plan['steps']
+                  if x['role'] in ('root','voice')}
+        script=r'''from pathlib import Path
+from contextlib import closing
+import hashlib,json,sqlite3,subprocess,time
+from urllib.request import urlopen
+C=Path('/Users/choijaehyeong/VillageMigration/20260930-windows/candidate');D=C/'state/voice-ingress-v1'
+raw=(D/'config.json').read_bytes();cfg=json.loads(raw)
+def health(port):
+ with urlopen('http://127.0.0.1:'+str(port)+'/health',timeout=5) as response:return json.load(response)
+front=health(18788);relay=health(28788)
+with closing(sqlite3.connect((D/'voice.sqlite3').as_uri()+'?mode=ro',uri=True)) as db:
+ conflicts=db.execute('SELECT count(*) FROM conflicts').fetchone()[0]
+run=subprocess.run(['/Applications/Tailscale.app/Contents/MacOS/Tailscale','serve','status','--json'],capture_output=True,text=True,timeout=10,check=True)
+serve=json.loads(run.stdout);host='mac-studio.tail7f97ff.ts.net:443'
+route=serve.get('Web',{}).get(host,{}).get('Handlers',{}).get('/watch/voice')=={'Proxy':'http://127.0.0.1:18788'} and serve.get('AllowFunnel',{}).get(host) is True
+# Read back the phase actually evaluated by the running pump. A renewing source
+# lease may race one sample, so retry reads only, never requests or phase writes.
+for attempt in range(8):
+ front=health(18788);phase_raw=(D/'phase.json').read_bytes();phase=json.loads(phase_raw)
+ phase_sha=hashlib.sha256(phase_raw).hexdigest()
+ if (front.get('forwarder') or {}).get('phase_sha256')==phase_sha:break
+ if attempt<7:time.sleep(.25)
+origin_ok=phase.get('schema')=='village-voice-phase/v1' and phase.get('source')==cfg.get('source') and phase.get('epoch')==cfg.get('epoch')
+print(json.dumps({'schema':'village-source-voice-dispatch-readback/v1','config_sha256':hashlib.sha256(raw).hexdigest(),
+ 'epoch':cfg['epoch'],'origin_source':cfg['source'],'phase_mode':phase.get('mode') if origin_ok else None,
+ 'effective_owners':phase.get('effective_owners',phase.get('source')),
+ 'lease_age_native_seconds':time.time()-phase.get('verified_unix',0),
+ 'phase_sha256':phase_sha,'forwarder':front.get('forwarder'),
+ 'native_activation_absent':not (C/'ACTIVATION.json').exists(),'native_closure_absent':not (C/'SOURCE-CLOSED.json').exists(),
+ 'intake_healthy':front.get('status')=='ok' and front.get('role')=='durable_voice_intake',
+ 'relay_healthy':relay.get('status')=='ok','counts':front.get('counts'),'conflicts':conflicts,'mac_route_verified':route}))
+'''
+        command=['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',
+                 '-i',checks.SSH_KEY,checks.REMOTE_HOST,checks.CANDIDATE+'/venv-root/bin/python -']
+        run=subprocess.run(['C:/Program Files/Tailscale/tailscale.exe','serve','status','--json'],
+                           capture_output=True,text=True,timeout=10,check=True)
+        serve=json.loads(run.stdout);host='ax2.tail7f97ff.ts.net:443'
+        legacy_route_verified=(serve.get('Web',{}).get(host,{}).get('Handlers',{}).get('/watch/voice')
+            =={'Proxy':'http://127.0.0.1:18788'} and serve.get('AllowFunnel',{}).get(host) is True)
+        with urlopen('http://127.0.0.1:18788/health',timeout=5) as response:
+            local=json.load(response)
+        if local.get('role')!='durable_voice_intake':raise RecoveryError('legacy_voice_tunnel_not_ready')
+        fresh=self.gate()
+        current={x['role']:{'pid':x['pid'],'started':x['started']} for x in fresh['steps'] if x['role'] in expected}
+        if current!=expected:raise RecoveryError('voice_owners_changed_during_readback')
+        # Native phase is sampled last, after potentially slow scheduler reads.
+        # Include the entire RPC time conservatively in its15-second age bound.
+        observed=time.monotonic()
+        run=subprocess.run(command,input=script.encode(),capture_output=True,timeout=25)
+        if run.returncode:raise RecoveryError('native_voice_dispatch_readback_failed')
+        evidence=json.loads(run.stdout);evidence['legacy_route_verified']=legacy_route_verified
+        evidence['lease_age_native_seconds']+=time.monotonic()-observed
+        if isinstance(evidence.get('forwarder'),dict) and checks.number(evidence['forwarder'].get('evaluation_age_seconds')):
+            evidence['forwarder']['evaluation_age_seconds']+=time.monotonic()-observed
+        validate_voice_ingress(evidence,expected,intake)
+        self.assert_fence_lease()
+        return evidence
 
     def publish(self,proof):
         if not self.resumed:raise RecoveryError('watcher_not_resumed')
         fresh=self.verify_all()
         if fresh!=proof:raise RecoveryError('recovery_owners_changed_before_receipt')
+        voice=self.verify_voice_ingress(fresh)
         broker=json.loads((self.control/'BROKER-STATE.json').read_text(encoding='utf-8-sig'))
         result={'schema':'village-source-recovery/v1','nonce':broker['nonce'],
                 'stopReceiptSha256':self.stop_sha,'destinationEverActivated':False,
-                'profiles':proof['profiles'],'at_unix':time.time()}
+                'profiles':proof['profiles'],'voiceDispatchRestored':True,
+                'voiceDispatchEffectiveOwners':voice['effective_owners'],'at_unix':time.time()}
         write_new(self.control/'SOURCE-RECOVERED.json',result)
         return result
 

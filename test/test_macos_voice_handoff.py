@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts/macos'
 sys.path.insert(0, str(SCRIPTS))
+import migration_voice_ingress as voice
 from migration_voice_ingress import VoiceInbox, VoicePump, VoiceBlocked, parse_voice, make_server, PhaseAuthority, forward_to_relay
 from migration_slack_dispatch import ConsumerBusy
 
@@ -28,6 +29,48 @@ class VoiceTests(unittest.TestCase):
     def tearDown(self):
         self.inbox.close()
         self.temp.cleanup()
+
+    def test_health_distinguishes_dead_forwarder_from_durable_intake(self):
+        self.assertTrue(hasattr(voice,'ForwardingLoop'),'forwarder runtime observation is missing')
+        base=Path(self.temp.name);phase=base/'phase.json'
+        source={'root':{'pid':1,'started':1.2},'voice':{'pid':2,'started':2.3}}
+        phase.write_text(json.dumps({'schema':'village-voice-phase/v1','epoch':'fixture',
+                         'source':source,'mode':'windows','verified_unix':time.time()}))
+        authority=PhaseAuthority(base,phase,'fixture',source)
+        with VoicePump(self.inbox) as pump:
+            loop=voice.ForwardingLoop(pump,authority,lambda *_:self.fail('sent'),
+                                      config_sha256='a'*64,epoch='fixture')
+            loop.start()
+            deadline=time.monotonic()+3
+            while loop.status().get('authority')!='windows' and time.monotonic()<deadline:time.sleep(.01)
+            status=loop.status()
+            self.assertTrue(status['thread_alive']);self.assertFalse(status['failed'])
+            self.assertEqual(status['config_sha256'],'a'*64)
+            self.assertEqual(status['phase_sha256'],__import__('hashlib').sha256(phase.read_bytes()).hexdigest())
+            self.assertLess(status['evaluation_age_seconds'],1)
+            # An actual storage exception kills forwarding, with an empty queue.
+            with patch.object(pump,'once',side_effect=sqlite3.DatabaseError('fixture')):
+                loop.thread.join(timeout=3)
+            self.assertFalse(loop.thread.is_alive())
+            server=make_server(self.inbox,'a'*48,port=0,forwarder=loop)
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            try:
+                with urlopen('http://127.0.0.1:%d/health'%server.server_port,timeout=3) as response:
+                    health=json.load(response)
+                self.assertEqual(health['status'],'ok')
+                self.assertFalse(health['forwarder']['thread_alive'])
+                self.assertTrue(health['forwarder']['failed'])
+                self.assertEqual(self.inbox.capture('held synthetic','dead-pump')['state'],'queued')
+            finally:
+                server.shutdown();server.server_close();thread.join(timeout=3);loop.stop()
+
+    def test_intake_without_a_forwarding_owner_never_claims_runtime_readiness(self):
+        server=make_server(self.inbox,'a'*48,port=0)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            with urlopen('http://127.0.0.1:%d/health'%server.server_port,timeout=3) as response:
+                self.assertIsNone(json.load(response).get('forwarder'))
+        finally:server.shutdown();server.server_close();thread.join(timeout=3)
 
     def test_supported_forms_normalize_like_the_current_relay(self):
         for body, kind in [(b'{"transcript":"  hello   world ","request_id":"r1"}', 'application/json'),

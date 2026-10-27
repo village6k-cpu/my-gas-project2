@@ -143,3 +143,25 @@ recovery. The original temporary lease is bound to the original root/voice PIDs
 and stops on SOURCE_STOP_REQUESTED, so it cannot simply be restarted after a
 replacement process is created. This integration remains required before claiming
 rollback_ready or publishing a full source recovery success receipt.
+
+The current executor now distinguishes `source_backends_ready` from
+`source_ready`. Before resuming the watcher, it performs every slow scheduler
+and owner check, then verifies the voice route, exact effective source owners,
+native-clock lease age, and the live forwarding thread. The final recovery
+receipt repeats those checks. Administrator authority is also rechecked after
+reading all 21 task definitions, including the fence receipt's validity.
+
+Voice health now includes a process-local forwarding observation: thread
+liveness, storage-failure state, configuration and epoch binding, the exact
+phase hash evaluated by the consumer, and evaluation age. Healthy HTTP intake
+with a dead forwarder remains available for durable admission but cannot pass
+source recovery. This is runtime readiness evidence, not a completed user
+request. The native daemon still runs the earlier version; this update is staged
+and tested, and requires an intake-preserving rollout before operational use.
+
+The current recovery/capture tests pass75/75 and voice tests20/20 on both
+Windows and native Mac. Native results are retained separately under
+`current-recovery-executor-tests-v6`; all ten incumbent file hashes remain
+unchanged. Reviewer findings for expired authority before watcher resume and a
+dead forwarding thread were reproduced before the fixes. No production owner
+was stopped and no source recovery success receipt was generated.
