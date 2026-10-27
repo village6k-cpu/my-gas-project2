@@ -78,6 +78,9 @@ export function buildOwnedDraftInspectionExpression() {
       if (!root || visited.has(root)) return;
       visited.add(root);
       try {
+        for (const el of root.querySelectorAll('input[type="file"]')) {
+          if (el.files?.length) hasDraft = true;
+        }
         for (const el of root.querySelectorAll('textarea,input[type="text"],[contenteditable="true"]')) {
           // Autosizing libraries use a noninteractive hidden textarea containing a probe character.
           const style = el.ownerDocument?.defaultView?.getComputedStyle(el);

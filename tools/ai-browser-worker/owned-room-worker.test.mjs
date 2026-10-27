@@ -59,3 +59,5 @@ test('a failed existing room without an exact room ID cannot trigger owned captu
  const h=staleRoomFixture({roomKnown:false});const r=await openKakaoTargetChatViaDevtools(h.job,h.options);
  assert.equal(r.status,'conversation_evidence_unavailable');assert.equal(h.commands.length,0);
 });
+
+test('default stale-room recovery delegates the exact draft-safe refresh and rereads without creating a tab',async()=>{const h=staleRoomFixture();let refreshed=false;const original=h.options.evaluateImpl;h.options.refreshStaleConversation=true;h.options.evaluateImpl=async(t,expression)=>{if(expression.includes('const state =')){assert.equal(t.id,'stale');refreshed=true;return{refreshed:true}}if(refreshed)return{href:t.url,title:'Fixture - 빌리지 - 카카오비즈니스 파트너센터',text:'Fixture\nlatest confirmation',messages:[{role:'customer',text:'latest confirmation',order:1}]};return original(t,expression)};h.options.sleepImpl=async()=>{};const r=await openKakaoTargetChatViaDevtools(h.job,h.options);assert.equal(refreshed,true);assert.equal(r.status,'opened_target_chat');assert.equal(r.already_open,true);assert.equal(h.commands.length,0)});
