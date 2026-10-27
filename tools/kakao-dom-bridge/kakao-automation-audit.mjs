@@ -54,6 +54,7 @@ const TOOL_RECEIPT_SCHEMA = Object.freeze({
   document_send: 'village-document-receipt/v1'
 });
 const REGISTERED_ACTION = Object.freeze({
+  external_supply_allocation: 'update',
   equipment_add: 'add',
   equipment_remove: 'remove',
   equipment_replace: 'replace',
@@ -516,7 +517,8 @@ function contractPeriod(result, side) {
 }
 
 function buildRegisteredEvent({ durableJob, operation, receipt, customerLabel, historicalImport }) {
-  const outcome = statusOutcome(receipt.status);
+  const allocation=receipt.mutation_kind==='external_supply_allocation';
+  const outcome = allocation && receipt.status==='ok' && receipt.applied_stages?.length===0 ? 'no_action' : statusOutcome(receipt.status);
   const actionType = REGISTERED_ACTION[receipt.mutation_kind];
   const mutation = receipt.authorized_mutation;
   const result = receipt.authoritative_result;
@@ -537,7 +539,13 @@ function buildRegisteredEvent({ durableJob, operation, receipt, customerLabel, h
       changeItems.push({ field: 'end_at', before: before.end, after: after.end });
     }
   }
-  if (actionType !== 'date_time_change') {
+  if (allocation && outcome!=='no_action') {
+    const row=mutation.expected_before?.[0],supply=mutation.external_supply;
+    if(!row || !supply)throw new TypeError('external supply audit data missing');
+    const before = safeOptionalText(`${row.name} 총 ${row.quantity}개`, 1000);
+    const after = safeOptionalText(`${row.name} 총 ${row.quantity}개 (외부 ${supply.supplier} ${supply.quantity}개)`, 1000);
+    if (before !== null && after !== null) changeItems.push({ field: 'equipment', before, after });
+  } else if (!allocation && actionType !== 'date_time_change') {
     const before = equipmentText(mutation.expected_before);
     const after = equipmentText(mutation.desired_after);
     if (before !== null || after !== null) changeItems.push({ field: 'equipment', before, after });
@@ -555,7 +563,9 @@ function buildRegisteredEvent({ durableJob, operation, receipt, customerLabel, h
     customer_label: customerLabel,
     target_type: 'trade',
     target_id: tradeId,
-    summary: receipt.mutation_kind === 'reservation_cancel'
+    summary: allocation
+      ? (outcome==='no_action' ? `등록예약 ${tradeId}의 기존 외부 조달 배정을 확인했습니다.` : outcome==='success' ? `등록예약 ${tradeId}에 외부 조달 배정을 반영했습니다.` : `등록예약 ${tradeId}의 외부 조달 배정이 완료되지 않았습니다 (${outcome}).`)
+      : receipt.mutation_kind === 'reservation_cancel'
       ? (outcome === 'success' ? `등록예약 ${tradeId}을 취소했습니다.` : `등록예약 ${tradeId} 취소가 완료되지 않았습니다 (${outcome}).`)
       : registeredSummary(actionType, tradeId, outcome),
     change_items: changeItems,
