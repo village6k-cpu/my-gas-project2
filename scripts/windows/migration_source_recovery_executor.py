@@ -1,0 +1,372 @@
+"""Current preactivation recovery; no launches on import or --verify-only.
+
+No queue/data rewind, normal-send bridge task or scheduler enable is supported.
+The caller must supply hash-bound current stop and recovery input receipts.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+from urllib.request import urlopen
+
+import migration_source_recovery as checks
+
+INCIDENT = Path('C:/Village/task-artifacts/20261022-reservation-incident/audit/incident-startup-fences-20261024')
+PYTHON = 'C:/Users/ssper/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe'
+
+
+class RecoveryError(RuntimeError): pass
+
+
+def execute_recovery(adapter, *, resume_watcher=False):
+    reusable = ('reuse_verified_replacement', 'preserve_unaffected')
+    plan = adapter.gate()
+    adapter.prepare_profile('worker')
+    if next(x for x in plan['steps'] if x['role']=='worker')['method'] not in reusable:
+        adapter.start_profile('worker')
+    adapter.wait_owner('worker')
+    plan = adapter.gate()
+    if any(x['method'] not in reusable for x in plan['steps'] if x['role'] in ('bridge','relay')):
+        adapter.start_guarded_pair()
+    adapter.wait_guarded_pair()
+    for role in ('root','voice'):
+        plan = adapter.gate()
+        adapter.prepare_profile(role)
+        if next(x for x in plan['steps'] if x['role']==role)['method'] not in reusable:
+            adapter.start_profile(role)
+        adapter.wait_owner(role)
+    adapter.gate()
+    proof = adapter.verify_all()
+    result = dict(schema=1, source_ready=True, ready_to_unfence=False,
+                  task_states_restored=False, destination_activated=False)
+    if resume_watcher:
+        adapter.gate()
+        adapter.resume_watcher()
+        adapter.gate()
+        proof = adapter.verify_all()
+        result['ready_to_unfence'] = True
+        adapter.publish(proof)
+    return result
+
+
+def sha(raw): return hashlib.sha256(raw).hexdigest()
+
+
+def read_bound(path, digest):
+    if not isinstance(digest,str) or not re.fullmatch('[a-f0-9]{64}',digest):
+        raise RecoveryError('invalid_bound_hash')
+    raw=Path(path).read_bytes()
+    if sha(raw)!=digest:raise RecoveryError('bound_input_changed')
+    return json.loads(raw.decode('utf-8-sig'))
+
+
+def quote(value): return "'"+str(value).replace("'","''")+"'"
+
+
+def powershell(script, *, timeout=30):
+    result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',
+                           "$ErrorActionPreference='Stop';"+script],
+                          capture_output=True,text=True,timeout=timeout)
+    if result.returncode:raise RecoveryError('scoped_source_operation_failed')
+    return result.stdout
+
+
+def write_new(path, value):
+    with Path(path).open('x',encoding='utf-8') as f:
+        json.dump(value,f,separators=(',',':'));f.flush();os.fsync(f.fileno())
+
+
+class WindowsAdapter:
+    def __init__(self, control, inputs_sha, stop_sha):
+        self.control=Path(control).resolve()
+        if (self.control.parent!=checks.BASE.resolve()
+                or not re.fullmatch(r'scheduler-fence-v\d+',self.control.name)):
+            raise RecoveryError('wrong_protected_control_directory')
+        self.inputs_sha,self.stop_sha=inputs_sha,stop_sha
+        self.resumed=False
+        self.reload()
+
+    def reference(self, ref):
+        path=Path(ref['path']).resolve()
+        if not path.is_relative_to(checks.BASE.resolve()):
+            raise RecoveryError('reference_outside_private_staging')
+        return path,read_bound(path,ref['sha256'])
+
+    def reload(self):
+        if not (self.control/'SOURCE_STOP_REQUESTED').is_file():
+            raise RecoveryError('actual_source_stop_required')
+        if (self.control/'MAC_EVER_ACTIVATED').exists():
+            raise RecoveryError('destination_activation_forbids_source_recovery')
+        self.inputs=read_bound(self.control/'recovery-inputs.json',self.inputs_sha)
+        if self.inputs.get('schema')!='village-current-recovery-inputs/v1' or self.inputs.get('stop_sha256')!=self.stop_sha:
+            raise RecoveryError('wrong_recovery_input_contract')
+        self.intent_path,self.intent=self.reference(self.inputs['intent'])
+        self.receipt=read_bound(self.control/'source-stop-receipt.json',self.stop_sha)
+        self.states=read_bound(self.control/'original-task-states.json',self.inputs['tasks_sha256'])
+        self.manifest_path,self.manifest=self.reference(self.inputs['scheduler_manifest'])
+        if len(self.states)!=21 or len({x['name'] for x in self.states})!=21:
+            raise RecoveryError('incomplete_original_task_states')
+        if {x['name'] for x in self.states}!={x['name'] for x in self.manifest['tasks']}:
+            raise RecoveryError('task_inventory_mismatch')
+        self.browser_path,self.browser=self.reference(self.inputs['browser'])
+        self.pause_path,self.pause=self.reference(self.inputs['watcher_pause'])
+        _path,self.drains=self.reference(self.inputs['owned_drains'])
+        if (self.drains.get('schema')!='village-owned-drains/v1'
+                or self.drains.get('intent_sha256')!=self.inputs['intent']['sha256']
+                or not isinstance(self.drains.get('migration_id'),str) or not self.drains['migration_id']
+                or sorted(x['role'] for x in self.drains['profiles'])!=['root','worker']):
+            raise RecoveryError('owned_drain_inventory_required')
+        self.envs={}
+        for role in ('root','worker','voice'):
+            ref=self.inputs['environments'][role]
+            old=next(x for x in self.intent['profiles'] if x['role']==role)
+            if not checks.same_identity(ref['source'],old):raise RecoveryError('environment_source_changed')
+            _path,env=self.reference(ref)
+            if (not isinstance(env,dict) or not all(isinstance(k,str) and isinstance(v,str)
+                    and '=' not in k and '\0' not in k+v for k,v in env.items())
+                    or env.get('HERMES_HOME')!=old['home'] or env.get('PYTHONPATH')!=old['pythonpath']):
+                raise RecoveryError('captured_environment_contract_changed')
+            self.envs[role]=env
+        for binding in self.manifest['recoveryFiles']:
+            if sha(Path(binding['path']).read_bytes())!=binding['sha256']:
+                raise RecoveryError('guarded_runtime_dependency_changed')
+        if sha(Path(__file__).read_bytes())!=self.inputs['executor_sha256']:
+            raise RecoveryError('recovery_executor_changed')
+
+    def assert_fenced(self):
+        broker=json.loads((self.control/'BROKER-STATE.json').read_text(encoding='utf-8-sig'))
+        if broker.get('active') is not True or broker.get('manifestSha256')!=self.inputs['scheduler_manifest']['sha256']:
+            raise RecoveryError('administrator_fence_owner_unavailable')
+        from datetime import datetime,timezone
+        stamp=datetime.fromisoformat(broker['at'].replace('Z','+00:00')).astimezone(timezone.utc).timestamp()
+        if not 0<=time.time()-stamp<=15:raise RecoveryError('administrator_fence_lease_stale')
+        script="$rows=Get-Content -LiteralPath "+quote(self.control/'original-task-states.json')+" -Raw|ConvertFrom-Json;"
+        script+="$rows|ForEach-Object {$t=Get-ScheduledTask -TaskName $_.name -TaskPath $_.path;if($t.Settings.Enabled){throw 'Owner not fenced'};"
+        script+="$saved=Join-Path "+quote(self.control)+" ($_.name.Replace(' ','_')+'.xml');[xml]$a=Get-Content -LiteralPath $saved -Raw;[xml]$b=Export-ScheduledTask -TaskName $_.name -TaskPath $_.path;"
+        script+="$a.Task.Settings.Enabled='false';$b.Task.Settings.Enabled='false';if($a.OuterXml -cne $b.OuterXml){throw 'Owner definition changed'}}"
+        powershell(script)
+
+    def inspect_watcher(self):
+        # This reviewed helper operates only on the captured browser/target and
+        # the persisted pause token; it neither reloads nor cleans up timers.
+        helper=self.inputs['watcher_helper']
+        path=Path(helper['path']).resolve()
+        if not path.is_relative_to(checks.BASE.parent.resolve()) or sha(path.read_bytes())!=helper['sha256']:
+            raise RecoveryError('watcher_helper_changed')
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('current_owned_watcher',path)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        row=module.operate(self.browser,'inspect',self.pause_path)['readback']
+        if (row.get('started') is not True or row.get('enabled') is not self.resumed
+                or row.get('pausedByThisMigration') is not (not self.resumed)
+                or (not self.resumed and (row.get('deepRunning') is not False
+                                         or row.get('pauseOwnedByReceipt') is not True))):
+            raise RecoveryError('owned_watcher_fence_changed')
+        return module
+
+    def gate(self):
+        self.assert_helper_isolated()
+        self.reload();self.assert_fenced();self.inspect_watcher()
+        remote=checks.collect_remote();source=checks.collect_source(self.intent,self.receipt)
+        plan=checks.build_plan(self.intent,self.receipt,self.inputs['intent']['sha256'],source,remote,
+                              now=time.time(),activated=(self.control/'MAC_EVER_ACTIVATED').exists())
+        if not plan['ready']:raise RecoveryError('current_recovery_observation_rejected')
+        return plan
+
+    def assert_helper_isolated(self):
+        if (checks.norm(os.environ.get('HERMES_HOME'))!=checks.norm(str(self.control/'helper-home'))
+                or os.environ.get('PYTHONPATH') not in (None,'')):
+            raise RecoveryError('launch_controller_with_isolated_home_and_no_pythonpath')
+
+    def prepare_profile(self,role):
+        if role=='voice':return
+        if role not in ('root','worker'):raise RecoveryError('unapproved_drain_cleanup')
+        plan=self.gate()  # proves closed old owners, or exact preserved unaffected owners
+        stopped=next(x for x in self.receipt['profiles'] if x['role']==role)
+        old=next(x for x in self.intent['profiles'] if x['role']==role)
+        if stopped['status']=='unaffected':
+            current=next(x for x in plan['steps'] if x['role']==role)
+            if current.get('method')!='preserve_unaffected' or not checks.same_identity(current,old):
+                raise RecoveryError('exact_preserved_owner_required_for_drain_cancel')
+        elif stopped['status']!='stopped':
+            raise RecoveryError('old_owner_closure_required_for_drain_cleanup')
+        row=next(x for x in self.drains['profiles'] if x['role']==role)
+        marker=Path(old['home'])/'.drain_request.json'
+        if (checks.norm(row['path'])!=checks.norm(str(marker)) or row.get('original_absent') is not True
+                or not checks.same_identity(row.get('owner'),old)):
+            raise RecoveryError('drain_cleanup_not_owned_by_this_migration')
+        if row.get('created') is False:
+            if marker.exists():raise RecoveryError('unowned_drain_marker_preserved')
+            return
+        if row.get('created') is not True:raise RecoveryError('unknown_drain_creation_state')
+        removal=self.control/('drain-removal-'+role+'.json')
+        expected={'intent_sha256':self.inputs['intent']['sha256'],'marker_sha256':row['sha256'],
+                  'migration_id':self.drains['migration_id'],'path':str(marker),
+                  'mode':'cancel_on_preserved_owner' if stopped['status']=='unaffected' else 'closed_owner_cleanup'}
+        if removal.exists() and json.loads(removal.read_text())!=expected:
+            raise RecoveryError('different_drain_removal_intent')
+        if not marker.exists():
+            if removal.exists():return
+            raise RecoveryError('owned_drain_disappeared_without_removal_intent')
+        raw=marker.read_bytes()
+        if sha(raw)!=row['sha256']:raise RecoveryError('changed_drain_marker_preserved')
+        data=json.loads(raw.decode('utf-8'))
+        if (data.get('action')!='drain' or data.get('migration_id')!=self.drains['migration_id']
+                or data.get('principal')!='village-studio-migration:'+self.drains['migration_id']
+                or not checks.same_identity(data.get('owner'),old)):
+            raise RecoveryError('unowned_drain_marker_preserved')
+        if not removal.exists():write_new(removal,expected)
+        self.gate()
+        if marker.read_bytes()!=raw:raise RecoveryError('drain_changed_before_owned_removal')
+        marker.unlink()  # only the exact hash-bound marker, never an operator's drain
+        if marker.exists():raise RecoveryError('owned_drain_removal_not_observed')
+
+    def begin(self):
+        marker=self.control/'SOURCE_RECOVERY_STARTED'
+        expected={'inputs_sha256':self.inputs_sha,'stop_sha256':self.stop_sha}
+        if marker.exists():
+            if json.loads(marker.read_text())!=expected:raise RecoveryError('different_recovery_attempt')
+        else:write_new(marker,expected)
+
+    def start_profile(self,role):
+        if role not in ('root','worker','voice'):raise RecoveryError('unapproved_profile_start')
+        plan=self.gate()
+        step=next(x for x in plan['steps'] if x['role']==role)
+        if step.get('method')!='known_scheduler_task' or step.get('task')!=checks.TASKS[role]:
+            raise RecoveryError('profile_not_proven_absent')
+        self.begin()
+        # The journal predates the uncertain launch boundary. Never repeat a
+        # failed/unknown Start-Process request automatically.
+        write_new(self.control/('launch-'+role+'.json'),{'role':role,'inputs_sha256':self.inputs_sha,'at':time.time()})
+        args=subprocess.list2cmdline([str(Path(__file__).resolve()),'--control',str(self.control),
+            '--inputs-sha',self.inputs_sha,'--stop-sha',self.stop_sha,'--launch-child',role])
+        script='$env:HERMES_HOME='+quote(self.control/'helper-home')+';'
+        script+='Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue;'
+        script+='Start-Process -FilePath '+quote(PYTHON)+' -ArgumentList '+quote(args)+' -WindowStyle Hidden | Out-Null'
+        powershell(script)
+
+    def launch_child(self,role):
+        if role not in ('root','worker','voice'):raise RecoveryError('unapproved_child_role')
+        plan=self.gate()
+        if next(x for x in plan['steps'] if x['role']==role)['method']!='known_scheduler_task':
+            raise RecoveryError('child_role_not_absent')
+        self.prepare_profile(role)
+        journal=json.loads((self.control/('launch-'+role+'.json')).read_text())
+        if journal.get('inputs_sha256')!=self.inputs_sha:raise RecoveryError('launch_journal_changed')
+        self.begin()
+        old=next(x for x in self.intent['profiles'] if x['role']==role)
+        write_new(self.control/('launch-'+role+'-child-entered.json'),
+                  {'inputs_sha256':self.inputs_sha,'at':time.time()})
+        with (self.control/(role+'-recovery.stdout.log')).open('ab') as out, (self.control/(role+'-recovery.stderr.log')).open('ab') as err:
+            child=subprocess.Popen(old['argv'],executable=old['exe'],cwd=old['cwd'],env=self.envs[role],
+                                   stdin=subprocess.DEVNULL,stdout=out,stderr=err,
+                                   creationflags=subprocess.CREATE_NO_WINDOW|subprocess.CREATE_NEW_PROCESS_GROUP)
+        # The subsequent read-only planner discovers the actual service owner,
+        # not the venv launcher/Start-Process PID.
+        write_new(self.control/('launch-'+role+'-returned.json'),{'launcher_pid':child.pid,'at':time.time()})
+
+    def start_guarded_pair(self):
+        plan=self.gate()
+        if not any(x['method']=='current_guarded_bridge_relay_recovery_required' for x in plan['steps']):
+            raise RecoveryError('guarded_pair_not_proven_missing')
+        self.wait_owner('worker');self.begin()
+        write_new(self.control/'launch-guarded-pair.json',{'at':time.time(),'inputs_sha256':self.inputs_sha})
+        result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
+            '-File',str(INCIDENT/'guarded-runtime.ps1')],capture_output=True,text=True,timeout=120)
+        if result.returncode:raise RecoveryError('guarded_recovery_failed_preserve_started_processes')
+
+    def wait_owner(self,role):
+        deadline=time.monotonic()+90
+        while time.monotonic()<deadline:
+            try:
+                plan=self.gate();step=next(x for x in plan['steps'] if x['role']==role)
+                if step['method'] in ('reuse_verified_replacement','preserve_unaffected'):
+                    if role=='root':
+                        old=next(x for x in self.intent['profiles'] if x['role']==role)
+                        state=json.loads((Path(old['home'])/'gateway_state.json').read_text(encoding='utf-8'))
+                        if (state.get('pid')!=step['pid'] or state.get('start_time')!=round(step['started']*100)
+                                or state.get('gateway_state')!='running'
+                                or state.get('platforms',{}).get('slack',{}).get('state')!='connected'):
+                            time.sleep(.5);continue
+                    return step
+            except (RecoveryError,OSError,ValueError,KeyError):pass
+            time.sleep(.5)
+        raise RecoveryError('source_owner_not_verified_leave_fenced')
+
+    def wait_guarded_pair(self):
+        self.wait_owner('bridge');self.wait_owner('relay')
+        self.guard_healthy()
+
+    def guard_healthy(self):
+        self.reload()
+        r=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
+            '-File',str(INCIDENT/'guarded-runtime.ps1'),'-CheckHealthy'],capture_output=True,text=True,timeout=30)
+        if r.returncode:raise RecoveryError('guarded_readiness_failed')
+        row=json.loads(r.stdout)
+        if row.get('healthy') is not True or row.get('mutated') is not False:
+            raise RecoveryError('guarded_readback_not_read_only_healthy')
+
+    def verify_all(self):
+        plan=self.gate();self.guard_healthy()
+        if any(x['method'] not in ('reuse_verified_replacement','preserve_unaffected') for x in plan['steps']):
+            raise RecoveryError('not_all_current_owners_present')
+        for role,platform in (('root','slack'),('worker','kakao_village')):
+            old=next(x for x in self.intent['profiles'] if x['role']==role)
+            current=next(x for x in plan['steps'] if x['role']==role)
+            state=json.loads((Path(old['home'])/'gateway_state.json').read_text(encoding='utf-8'))
+            if (state.get('pid')!=current['pid'] or state.get('start_time')!=round(current['started']*100)
+                    or state.get('gateway_state')!='running'
+                    or state.get('platforms',{}).get(platform,{}).get('state')!='connected'):
+                raise RecoveryError('recovered_gateway_platform_not_connected')
+        with urlopen('http://127.0.0.1:8788/health',timeout=5) as response:
+            if json.load(response).get('status')!='ok':raise RecoveryError('voice_not_ready')
+        self.gate()
+        return {'profiles':[{'role':x['role'],'pid':x['pid'],'start_time':round(x['started']*100),'state':'running'} for x in plan['steps']]}
+
+    def resume_watcher(self):
+        self.gate()
+        module=self.inspect_watcher()
+        module.operate(self.browser,'resume',self.pause_path)
+        self.resumed=True
+        self.inspect_watcher()
+
+    def publish(self,proof):
+        if not self.resumed:raise RecoveryError('watcher_not_resumed')
+        fresh=self.verify_all()
+        if fresh!=proof:raise RecoveryError('recovery_owners_changed_before_receipt')
+        broker=json.loads((self.control/'BROKER-STATE.json').read_text(encoding='utf-8-sig'))
+        result={'schema':'village-source-recovery/v1','nonce':broker['nonce'],
+                'stopReceiptSha256':self.stop_sha,'destinationEverActivated':False,
+                'profiles':proof['profiles'],'at_unix':time.time()}
+        write_new(self.control/'SOURCE-RECOVERED.json',result)
+        return result
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--control',type=Path,default=checks.CONTROL)
+    parser.add_argument('--inputs-sha',required=True);parser.add_argument('--stop-sha',required=True)
+    modes=parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument('--verify-only',action='store_true');modes.add_argument('--execute',action='store_true')
+    modes.add_argument('--launch-child',choices=('root','worker','voice'))
+    parser.add_argument('--resume-watcher',action='store_true')
+    args=parser.parse_args()
+    try:
+        adapter=WindowsAdapter(args.control,args.inputs_sha,args.stop_sha)
+        if args.verify_only:
+            adapter.gate();result={'verified':True,'launched':False,'task_changes':False}
+        elif args.launch_child:
+            adapter.launch_child(args.launch_child);result={'launch_requested':True,'task_changes':False}
+        else:result=execute_recovery(adapter,resume_watcher=args.resume_watcher)
+        print(json.dumps(result));return 0
+    except (RecoveryError,OSError,ValueError,KeyError,TypeError,StopIteration,subprocess.SubprocessError):
+        print(json.dumps({'verified':False,'source_ready':False,'task_changes':False,
+                          'error':'current_recovery_failed_leave_fenced'}));return 2
+
+
+if __name__=='__main__':raise SystemExit(main())
