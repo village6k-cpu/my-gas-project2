@@ -8,10 +8,14 @@ export async function refreshKakaoConversationWithoutDraft(target, {evaluateImpl
     throw new Error('Exact Kakao conversation target required');
   }
   return evaluateImpl(target, `(() => {
-    const state = ${buildOwnedDraftInspectionExpression()};
+    const inspect = () => ${buildOwnedDraftInspectionExpression()};
+    const state = inspect();
     if (state.href !== ${JSON.stringify(target.url)}) return { refreshed: false, reason: 'target_changed' };
     if (state.hasDraft !== false) return { refreshed: false, reason: 'unsent_draft_or_unknown' };
-    setTimeout(() => location.reload(), 0);
+    setTimeout(() => {
+      const latest = inspect();
+      if (latest.href === ${JSON.stringify(target.url)} && latest.hasDraft === false) location.reload();
+    }, 0);
     return { refreshed: true };
   })()`, {timeoutMs});
 }
