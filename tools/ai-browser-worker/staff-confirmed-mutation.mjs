@@ -1,3 +1,4 @@
+import {runExternalSupplyAllocation} from './external-supply-allocation.mjs';
 import { createRequire } from 'node:module';
 import { createHash, randomUUID as defaultRandomUUID } from 'node:crypto';
 
@@ -6,10 +7,10 @@ const { CorrectionStageError, runRegisteredTradeCorrection } = require('../../sc
 
 const TOP_LEVEL_FIELDS = new Set([
   'confirmed', 'kind', 'target_scope', 'request_id', 'trade_id', 'source_evidence',
-  'expected_period', 'expected_before', 'desired_after', 'date_change'
+  'expected_period', 'expected_before', 'desired_after', 'date_change', 'external_supply'
 ]);
 const KINDS = new Set([
-  'equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change', 'reservation_cancel'
+  'external_supply_allocation', 'equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change', 'reservation_cancel'
 ]);
 const TRADE_ID = /^\d{6}-\d{3}$/;
 const REQUEST_ID = /^RQ-\d{6}-\d{3}$/;
@@ -140,7 +141,16 @@ function validateRegisteredKindShape(mutation, errors) {
   const after = Array.isArray(mutation.desired_after) ? mutation.desired_after : [];
   const hasDateChange = mutation.date_change !== null;
   const shapeError = () => errors.push(`${mutation.kind} has an invalid affected-row delta shape`);
-  if (mutation.kind === 'equipment_add') {
+  if (mutation.kind === 'external_supply_allocation') {
+    const supply=mutation.external_supply;
+    if (before.length!==1 || after.length!==0 || hasDateChange || mutation.target_scope!=='registered_trade' || Object.hasOwn(mutation,'request_id')) shapeError();
+    if(exactKeys(supply,new Set(['supplier','quantity','expected_note']),'external_supply',errors)){
+      if(!text(supply.supplier)||/[|\r\n]/.test(supply.supplier))errors.push('external_supply.supplier is invalid');
+      if(!Number.isInteger(supply.quantity)||supply.quantity<1||supply.quantity>before[0]?.quantity)errors.push('external_supply.quantity exceeds demand');
+      if(typeof supply.expected_note!=='string')errors.push('external_supply.expected_note is required');
+      if(!text(before[0]?.name)||/[|\r\n]/.test(before[0]?.name||''))errors.push('external supply equipment name is invalid');
+    }
+  } else if (mutation.kind === 'equipment_add') {
     if (before.length !== 0 || after.length === 0 || hasDateChange) shapeError();
   } else if (['equipment_remove', 'reservation_cancel'].includes(mutation.kind)) {
     if (before.length === 0 || after.length !== 0 || hasDateChange) shapeError();
@@ -182,6 +192,7 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
   if (!exactKeys(mutation, TOP_LEVEL_FIELDS, 'mutation', errors)) return { valid: false, errors };
   if (mutation.confirmed !== true) errors.push('confirmed must be true');
   if (!KINDS.has(mutation.kind)) errors.push('kind is unsupported');
+  if (Object.hasOwn(mutation,'external_supply') && mutation.kind!=='external_supply_allocation') errors.push('external_supply requires allocation kind');
   const scope = mutation.target_scope;
   if (scope !== 'pending_request' && scope !== 'registered_trade') errors.push('target_scope is unsupported');
 
@@ -211,7 +222,7 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
     }
   }
   if (scope === 'pending_request') {
-    if (mutation.kind === 'reservation_cancel') errors.push('reservation_cancel requires registered_trade');
+    if (['reservation_cancel','external_supply_allocation'].includes(mutation.kind)) errors.push('mutation requires registered_trade');
     if (mutation.kind === 'equipment_and_date_change') errors.push('equipment_and_date_change requires registered_trade');
     if (!REQUEST_ID.test(text(mutation.request_id))) errors.push('request_id is invalid');
     if (Object.hasOwn(mutation, 'trade_id')) errors.push('trade_id is forbidden for pending_request');
@@ -325,13 +336,14 @@ export async function executeVillageRegisteredReservationChange(request = {}, op
     });
   }
 
-  const input = buildRegisteredTradeCorrectionInput(mutation, operationId);
+  const allocation=mutation.kind==='external_supply_allocation';
+  const input = allocation ? null : buildRegisteredTradeCorrectionInput(mutation, operationId);
   const assertCurrentClaim = options.assertCurrentClaim || dependencies.assertCurrentClaim || (async () => {});
-  const runner = dependencies.runRegisteredTradeCorrection || runRegisteredTradeCorrection;
+  const runner = allocation ? (dependencies.runExternalSupplyAllocation || runExternalSupplyAllocation) : (dependencies.runRegisteredTradeCorrection || runRegisteredTradeCorrection);
   if (typeof runner !== 'function') throw new Error('runRegisteredTradeCorrection is unavailable');
   try {
     await assertCurrentClaim();
-    const result = await runner({ config, input });
+    const result = await runner(allocation ? {config,mutation,operationId,assertCurrentClaim} : {config,input});
     const authoritativeReadback = result?.authoritativeReadback;
     const requestFinalization = result?.requestFinalization;
     const requiresRequestFinalization = Object.hasOwn(mutation, 'request_id');

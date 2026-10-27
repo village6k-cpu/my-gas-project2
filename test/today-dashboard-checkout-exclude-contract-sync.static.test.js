@@ -85,11 +85,9 @@ assert.match(
   'removeEquip response must expose pending regeneration and the exact removed schedule ids'
 );
 
-assert.match(
-  paymentControls,
-  /const canOpenContract = !!trade\.contractUrl && !trade\.contractRegenPending/,
-  'contract link must be disabled while regeneration is pending'
-);
+// Existing-contract access during background regeneration is covered by
+// today-dashboard-contract-regenerate-action.static.test.js. A pending flag
+// must not contradict that policy by disabling an already available document.
 assert.match(
   paymentControls,
   /window\.alert\("계약서 재생성 실패:/,
