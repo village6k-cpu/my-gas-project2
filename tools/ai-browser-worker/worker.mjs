@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
 import fs from 'node:fs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
@@ -738,6 +739,7 @@ export function buildHermesPrompt(job, options = {}) {
 - 최초 확인요청 입력에는 staff_confirmed_mutation이 필요 없다. 고객 장비 문의 자체만으로 village_confirmation_request를 호출하고, 직원의 이후 답변은 별도의 등록·변경 권한으로 의미 판단한다.
 - Clear, unconditional staff authorization of an exact pending RQ must use village_confirmed_reservation_commit. Use village_confirmation_request maintenance only for an explicit RQ edit that does not authorize registration.
 - For an agreed cancellation of the entire registered reservation, use village_registered_reservation_change with kind="reservation_cancel". Resolve the exact trade and current period from the full conversation and live records; include ALL current schedule rows (including set components) in expected_before, desired_after=[], date_change=null, and omit request_id. A single item cancellation remains equipment_remove. Interpret consent and any later reversal semantically, never by a cancellation keyword. A verified cancelled contract with no schedule rows is already applied; do not replay it. Refund/fees and customer delivery remain separate work.
+- Confirmed external procurement for an existing row uses village_registered_reservation_change with kind=external_supply_allocation, expected_before=[{schedule_id,name,quantity:CURRENT TOTAL DEMAND}], desired_after=[], date_change=null, no request_id, and external_supply={supplier,quantity:CONFIRMED EXTERNAL COUNT,expected_note:EXACT CURRENT ROW NOTE}. Read the exact trade first. Staff procurement confirmation plus exact supplier, quantity and rental period authorizes this allocation now; customer pickup/return is separate physical work and must not block recording confirmed supply. Do not create an RQ, add more demand, change prices, mark handover, or merely leave a task when you can record the confirmed allocation. Preserve genuinely unresolved physical or pricing follow-up. Pending sourcing or conditional availability is not confirmation.
 - Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use village_registered_reservation_change before FINAL_JSON and verify its authoritative result. Authority comes from the current registered trade, exact schedule rows/period and staff approval. A prior intake RQ may have been finalized or removed; its absence does not block a registered change. For equipment changes, include request_id only when a live pending inquiry for this exact change exists, with the same single ID in existing_confirm_request_ids; otherwise omit request_id and use existing_confirm_request_ids=[]. date_time_change carries neither. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
     '같은 대화 snapshot에서 직원이 장비와 대여 일시 변경을 함께 승인했다면 kind=equipment_and_date_change로 한 번의 village_registered_reservation_change 호출에 묶는다. expected_before에는 제거·교체할 정확한 스케줄 행만, desired_after에는 추가·교체할 수량만, date_change에는 승인된 변경 기간을 담는다. 일시만 먼저 적용한 뒤 장비를 두 번째 mutation으로 남기지 않는다.',
     '세트 구성품 하나만 같은 수량의 다른 품목으로 교체하도록 승인되었으면 equipment_replace의 expected_before에 선택한 구성품 스케줄ID·현재 이름·수량 한 행, desired_after에 대체 품목·동일 수량 한 행만 담는다. 이 경로는 기존 스케줄ID와 세트 소속을 유지한다. 다른 장비 추가나 수량 변경을 함께 섞지 않는다.',
@@ -10336,7 +10338,7 @@ function exactTrustedRegisteredReservationChangeReceipt(receipt, { jobId, roomKe
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text(receipt.operation_id).trim())) return false;
   if (receipt.job_id !== jobId || receipt.room_key !== roomKey || receipt.room_revision !== roomRevision) return false;
   if (receipt.target_scope !== 'registered_trade' || !/^\d{6}-\d{3}$/.test(text(receipt.trade_id).trim())) return false;
-  if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change', 'reservation_cancel']
+  if (!['external_supply_allocation', 'equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change', 'equipment_and_date_change', 'reservation_cancel']
     .includes(text(receipt.mutation_kind).trim())) return false;
   if (!['ok', 'blocked', 'failed', 'partial_success'].includes(text(receipt.status).trim())) return false;
   if (!Array.isArray(receipt.applied_stages)
@@ -10501,6 +10503,7 @@ function sameRegisteredScheduleRow(left, right) {
 
 function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
   const authoritative = receipt?.authoritative_result;
+  if (mutation?.kind === 'external_supply_allocation') return exactExternalSupplyReadback(authoritative,mutation);
   if (mutation?.kind === 'reservation_cancel') return exactRegisteredCancellationReadback(authoritative, mutation);
   const before = registeredAuthoritativeSnapshot(authoritative?.before, {
     tradeId: text(mutation?.trade_id).trim(), requireLedger: false
@@ -10963,7 +10966,9 @@ function registeredMutationInventoryFollowUps(decision = {}, receipt = {}) {
 }
 
 function forceRegisteredMutationSuccess(decision = {}, receipt) {
-  const inventoryFollowUps = registeredMutationInventoryFollowUps(decision, receipt);
+  const inventoryFollowUps = receipt.mutation_kind==='external_supply_allocation'
+    ? (Array.isArray(decision.follow_up_items)?decision.follow_up_items:[]).filter(item=>text(item?.status).trim()==='open' && text(item?.type).trim()!=='completed_log')
+    : registeredMutationInventoryFollowUps(decision, receipt);
   return {
     ...decision,
     should_write_to_sheet: false,
