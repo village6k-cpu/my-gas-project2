@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 
-const DEFAULT_ENV_FILE = 'C:\\Village\\village-ai\\.env.finance';
+const DEFAULT_ENV_FILE = String(process.env.VILLAGE_FINANCE_ENV || '').trim() || 'C:\\Village\\village-ai\\.env.finance';
 const ALLOWED_ENV_NAMES = new Set(['VILLAGE2_API_URL', 'VILLAGE2_API_KEY']);
 
 function unquote(value) {

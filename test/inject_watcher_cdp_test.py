@@ -1,6 +1,9 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import json
+import shutil
+import subprocess
 
 
 INJECTOR_PATH = (
@@ -60,6 +63,26 @@ def healthy_extension_probe(**overrides):
 
 
 class WatcherHealthTest(unittest.TestCase):
+    def test_document_start_injection_waits_for_a_real_document_node(self):
+        injection=INJECTOR.build_injection('globalThis.started += 1;')
+        harness=r'''
+const vm=require('node:vm');
+const source=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+let ready;
+const context={started:0, document:{documentElement:null,addEventListener(event,callback,options){
+  if(event!=='DOMContentLoaded'||options.once!==true)throw Error('bounded readiness listener required');
+  ready=callback;
+}}};
+context.globalThis=context;
+vm.runInNewContext(source,context);
+if(context.started!==0)throw Error('started before document node');
+context.document.documentElement={};ready();
+if(context.started!==1)throw Error('did not start after document ready');
+console.log('ok');
+'''
+        result=subprocess.run([shutil.which('node'),'--eval',harness],input=json.dumps(injection),text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_accepts_current_space_channel_chat_routes(self):
         list_url = "https://business.kakao.com/space/353491/channel/_xhPMls/chats"
         detail_url = f"{list_url}/4845268282772547"

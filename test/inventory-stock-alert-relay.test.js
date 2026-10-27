@@ -3,6 +3,15 @@ const assert=require('node:assert/strict');
 const {relayOnce,relayWithBusyRetry,createClients}=require('../scripts/windows/inventory-stock-alert-relay');
 const channel='C0B769B394K';
 const pending=()=>({id:'message-id',relayToken:'lease',channel,text:'재고 부족',hash:'same',desiredHash:'same',actionable:true,createdAt:100000,attemptedAt:100000,transportRejected:true});
+
+test('relay credentials use the explicit profile home on native hosts and preserve Windows fallback',()=>{
+ const {resolveHermesEnvFile}=require('../scripts/windows/inventory-stock-alert-relay');
+ assert.equal(typeof resolveHermesEnvFile,'function','profile-aware credential resolution required');
+ const path=require('node:path');
+ assert.equal(resolveHermesEnvFile({HERMES_HOME:'/Users/operator/isolated/hermes'}),path.join('/Users/operator/isolated/hermes','.env'));
+ assert.equal(resolveHermesEnvFile({LOCALAPPDATA:'C:/Users/operator/AppData/Local'}),path.join('C:/Users/operator/AppData/Local','hermes','.env'));
+ assert.throws(()=>resolveHermesEnvFile({}),/relay_hermes_home_missing/);
+});
 function env(over={}) {
  const p={...pending(),...over},messages=[],calls=[],acks=[];
  const gas=async (name,args)=>{if(name==='claimPreRegistrationStockAlertRelay')return {status:'claimed',requestId:'RQ-260904-014',pending:p};if(name==='authorizePreRegistrationStockAlertRelay')return {status:'authorized',validUntil:500000};acks.push(args[0]);return {status:args[0].delivered?'sent':'obsolete'};};

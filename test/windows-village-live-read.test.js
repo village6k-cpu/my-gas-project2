@@ -1,12 +1,35 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
+const fs = require('node:fs');
+const os = require('node:os');
+const {spawnSync} = require('node:child_process');
 
 const {
   buildAutopilotRequest,
   parseEnv,
   summarizeAutopilotPayload
 } = require(path.resolve(__dirname, '..', 'scripts', 'windows', 'village-live-read.js'));
+
+test('native finance selection reads the configured file without a Windows default or real request',t=>{
+  const base=fs.realpathSync(os.tmpdir());
+  const root=fs.mkdtempSync(path.join(base,'village-native-finance-'));
+  t.after(()=>{
+    assert.equal(path.dirname(fs.realpathSync(root)),base);
+    assert.ok(path.basename(root).startsWith('village-native-finance-'));
+    fs.rmSync(root,{recursive:true,force:true});
+  });
+  const file=path.join(root,'native.env');
+  fs.writeFileSync(file,'VILLAGE2_API_URL=https://script.google.com/macros/s/native/exec\nVILLAGE2_API_KEY=native-fixture\n');
+  const modulePath=path.resolve(__dirname,'../scripts/windows/village-live-read.js');
+  const script=`require(${JSON.stringify(modulePath)}).readLiveRevenue({fetchImpl:async url=>{
+    if(new URL(url).searchParams.get('key')!=='native-fixture')throw Error('Wrong configuration');
+    return {ok:true,json:async()=>({ok:true,kpi:{revenueThisMonth:3,revenueLastMonth:2,txThisMonth:1,txLastMonth:1}})};
+  }}).then(value=>console.log(JSON.stringify(value))).catch(()=>process.exitCode=1);`;
+  const child=spawnSync(process.execPath,['-e',script],{env:{...process.env,VILLAGE_FINANCE_ENV:file},encoding:'utf8'});
+  assert.equal(child.status,0,'native finance must not open a Windows path');
+  assert.equal(JSON.parse(child.stdout).revenueThisMonth,3);
+});
 
 test('parseEnv reads the two Village API settings without exposing unrelated values', () => {
   const parsed = parseEnv([

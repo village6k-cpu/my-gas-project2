@@ -6,6 +6,12 @@ const path = require('node:path');
 const {parseEnv, DEFAULT_ENV_FILE} = require('./village-live-read');
 const {stockAlertSlackText_} = require('../../stockAlertReceipt');
 
+function resolveHermesEnvFile(env=process.env) {
+  if(env.HERMES_HOME)return path.join(env.HERMES_HOME,'.env');
+  if(env.LOCALAPPDATA)return path.join(env.LOCALAPPDATA,'hermes','.env');
+  throw new Error('relay_hermes_home_missing');
+}
+
 async function findReceipt(slack, pending) {
   const args = {channel:pending.channel,oldest:pending.ts || String((pending.createdAt-60000)/1000),inclusive:true,limit:100,include_all_metadata:true};
   if(pending.ts)args.latest=pending.ts;
@@ -110,7 +116,7 @@ async function main() {
     const localConfig=fs.existsSync(configPath)?JSON.parse(fs.readFileSync(configPath,'utf8')):{};
     const channel=options.channel || localConfig.channel;
     if(!/^[CG][A-Z0-9]{8,}$/.test(channel || ''))throw new Error('relay_channel_missing');
-    const env=fs.readFileSync(path.join(process.env.LOCALAPPDATA,'hermes','.env'),'utf8');
+    const env=fs.readFileSync(resolveHermesEnvFile(),'utf8');
     const token=/^SLACK_BOT_TOKEN\s*=\s*(.+)$/m.exec(env)?.[1]?.trim().replace(/^['"]|['"]$/g,'');
     const clients=createClients({config:parseEnv(fs.readFileSync(DEFAULT_ENV_FILE,'utf8')),slackToken:token,onBackoff:t=>state.retryAfter=t});
     let result;
@@ -128,5 +134,5 @@ async function main() {
   }catch(error){save({status:'error',error:/^relay_[a-z_]+$/.test(error.message)?error.message:'relay_operation_failed'});process.exitCode=1;}
 }
 
-module.exports={findReceipt,relayOnce,relayWithBusyRetry,parseArgs,createClients};
+module.exports={findReceipt,relayOnce,relayWithBusyRetry,parseArgs,createClients,resolveHermesEnvFile};
 if(require.main===module)main().catch(()=>{console.error('relay_start_failed');process.exitCode=1;});

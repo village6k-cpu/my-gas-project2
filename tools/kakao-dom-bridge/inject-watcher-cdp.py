@@ -226,7 +226,12 @@ def choose_kakao_page(pages: list[dict[str, Any]]) -> dict[str, Any]:
 
 def build_injection(content_js: str) -> str:
     shim = DEFAULT_SHIM_JS.read_text(encoding="utf-8")
-    return shim + "\n" + content_js + "\n//# sourceURL=village-kakao-dom-watcher-cdp-injected.js\n"
+    # CDP's new-document hook runs before documentElement exists. The watcher
+    # observes that Node during startup; defer only until it can exist.
+    return ("(() => { const start = () => {\n" + shim + "\n" + content_js
+            + "\n}; if (document.documentElement) start(); else "
+            + "document.addEventListener('DOMContentLoaded', start, {once:true}); })();"
+            + "\n//# sourceURL=village-kakao-dom-watcher-cdp-injected.js\n")
 
 
 def extract_watcher_version(content_js: str) -> str:
