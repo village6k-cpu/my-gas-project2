@@ -1927,3 +1927,5 @@ test('composite receipt persists as one operation and keeps the different-second
     });
   });
 });
+
+test('external allocation receipt is persisted and returned after restart without executing again',async()=>{await withChannel(async({channel,directory})=>{await channel.enqueue(event('external-allocation','external-room',1));const claim=await channel.claim({consumerId:'test'});const reserved=await channel.reserveToolOperation(registeredReservationChangeOperation(claim));const receipt=registeredReservationChangeReceipt(claim,reserved.reservation.operation_id,undefined,{mutation_kind:'external_supply_allocation'});await channel.recordToolReceipt(receipt);const restarted=createHermesGatewayChannel({directory});const job=await restarted.get(claim.job_id);assert.equal(job.tool_operation.state,'completed');assert.equal(job.tool_receipts[0].mutation_kind,'external_supply_allocation')})});
