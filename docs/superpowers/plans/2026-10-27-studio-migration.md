@@ -66,7 +66,10 @@ immutable, individually hashed native snapshots. Native execution helper tests62
 voice tests4 and isolated Windows scheduler-controller tests11 pass. Current raw
 Windows business-code fixtures and prepared fixtures run on Mac have the same
 596passes/52failures out of648; this comparison shows no added failure from the
-port and does not constitute a Windows-OS test or production workflow proof.
+port. A subsequent real Windows run completed 648 cases: 592 pass, 52 fail,
+4 skip. Its four fixture hashes and all 52 failed case names exactly match the
+prepared Mac run; there are no added native failures. The 52 existing failures
+remain unresolved. These fixtures do not demonstrate a production workflow.
 
 Ten current Git repositories have independently verified object stores, original
 shallow boundaries, exact captured HEADs, branches and remote definitions. Fourteen
@@ -80,6 +83,8 @@ preflight. On the user's request, its administrator dialog was relaunched; actua
 ADMIN-READY and a fresh lease heartbeat then confirmed administrator execution.
 It remains unfenced (sequence0); no task was disabled. Its two-hour lease is
 temporary and must be revalidated immediately before any controlled task action.
+That lease subsequently expired unfenced at 09:39:58 UTC, sequence zero; it grants
+no current administrator authority.
 Windows remains the operational source, and no profile was promoted or activated.
 
 Before any live stop, implement and rehearse accepted-input preservation and the
@@ -94,3 +99,16 @@ The first Slack handoff storage component is now prepared separately, without a
 live connection or dispatch/replay. See `2026-10-27-slack-handoff-storage.md` for its
 commit-before-ACK contract and the still-unimplemented connection, interaction,
 closure and rollback requirements. It does not satisfy the handoff gate alone.
+
+Actual unchanged-model transport probes now authenticate on both hosts without
+OAuth refresh or tool execution. All three actual request-body hashes match;
+the provider reports gpt-5.6-sol. Replaying six recorded synthetic response streams
+through both transports yields identical decoded results. One original Mac probe
+returned catalog lookup prose instead of a tool call; its failure is retained.
+The exact-search-string fixture also rejects semantically valid search wording.
+Neither full-agent quality nor full business latency is certified by these probes.
+
+The current five-owner read-only recovery planner is documented in
+`2026-10-27-current-source-recovery.md`. It replaces the old four-owner observation
+contract only. It is not the missing current recovery executor or source-stop
+procedure, and must not turn any activation gate true.
