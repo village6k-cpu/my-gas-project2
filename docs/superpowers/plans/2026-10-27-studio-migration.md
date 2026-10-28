@@ -59,6 +59,34 @@ preparation is historical evidence, never the current operational source.
 
 Ledger: .superpowers/sdd/2026-10-27-studio-migration/progress.md.
 
+## October 28 continuation: current routing and reconstruction
+
+Windows remains the only business consumer. Both public voice paths currently
+bypass the inactive native intake: the Windows URL proxies to Windows8788;
+the Mac URL uses Mac28788 over the existing reverse SSH tunnel to Windows8788.
+Do not run historical route-to-intake helpers against these recovered routes.
+Actual Watch request/reply remains unverified.
+
+The current full-byte restorer preserves all six retained trees, including file
+modification times and empty directories, and creates new canonical SQLite clones.
+It discovers SQLite headers across all six trees and refuses an unmapped database
+outside the two Hermes profiles. Before SQLite opens a clone, it validates every
+retained WAL frame and the committed boundary using SQLite's documented checksums.
+Stale, torn or uncommitted WAL tails require explicit adjudication; none are
+silently dropped or repaired. GBrain logical validation is still a separate gate.
+These offline results provide no activation or current source-closure authority.
+
+The bounded source voice controller was rehearsed while both public routes
+bypassed the intake. The running native pump evaluated a fresh Windows lease for
+the current Root/voice owners, then returned to HOLD after an owned stop. No speech
+was submitted, no route changed and no business service stopped. Its version1
+configuration is now permanently stopped and must not be reused. Parent recovery
+integration and current accepted-work closure remain necessary before live stop.
+
+Native verification of the current recovery, voice, raw restoration and phase
+helpers passed118 cases, with all ten incumbent file hashes unchanged. These
+synthetic and off-route checks do not certify an actual production transition.
+
 ## Preparation readback and outstanding gates
 
 Current code, learning and two consistent SQLite baselines are preserved in
