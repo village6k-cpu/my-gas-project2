@@ -121,6 +121,26 @@ all nine merged without conflicts and all446 bindings then matched Windows.
 These preparation records are still not an operational assembly policy. Native
 path-adapted learning also retains the original source modification time.
 
+The current source instruction census also found fourteen new active documents
+after the October27 baseline. Their exact current Windows bytes and timestamps
+are preserved in a separate immutable native snapshot and their hashes are added
+to preparation anchors. Rotated cron output is distinct from active instructions;
+none of the missing baseline paths is a missing active instruction.
+
+The read-only bridge private-work observer verifies the exact process and both
+disk/loaded hashes for the current server, gateway HTTP handler and channel.
+An owned unknown GET reaches the server's final404; it deliberately bypasses
+health, which serializes channel status behind existing mutations. While paused
+at that exact nonce boundary it reads four private in-flight Map sizes, existing
+application/audit/channel/notification/worker promise states and public work flags.
+It does not await those promises or serialize their values. Cleanup resumes only
+its own verified breakpoint pause, leaving another debugger's pause untouched.
+Pending work, wrong ownership and paused-error cleanup are covered by isolated
+tests using both synthetic modules and the actual current production source.
+This observation is not a fence or a complete accepted-input closure receipt.
+Current source recovery and registration timers also need explicit fencing;
+the older bridge inspector's default false preinstallation gate remains false.
+
 ## Preparation readback and outstanding gates
 
 Current code, learning and two consistent SQLite baselines are preserved in
