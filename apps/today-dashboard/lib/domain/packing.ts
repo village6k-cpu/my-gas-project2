@@ -73,13 +73,13 @@ export function packingBlockers(p?: PackingManifest | null) {
 }
 function defaultOwner(t: Trade, source: EquipmentItem, name: string): EquipmentItem | undefined {
   const devices = packingDevices(t).filter(e => e.setName === source.setName);
-  const monitors = devices.filter(e => needsDeviceModel(e) || /스몰HD|포트키|티비로직.*(?:7|F-7)/i.test(e.name));
+  const monitors = devices.filter(e => needsDeviceModel(e) || /스몰HD|포트키|(?:티비로직|TVLogic).*?(?:F-?7|074|7인치)/i.test(e.name));
   if ((name === "노가암" || /스몰HD용/.test(name)) && monitors.length === 1) return monitors[0];
-  // 운영자 확인: FX6의 일반 SDI는 7인치, 롱라인은 LVM. 다른 세트에 추정 적용하지 않는다.
-  if (source.setName === "소니 FX6 풀세트") {
-    if (name === "소니 FX6 풀세트용 SDI 라인" && monitors.length === 1) return monitors[0];
-    const lvms=devices.filter(e=>/^LVM-/.test(e.name));
-    if (name === "소니 FX6 풀세트용 SDI 롱라인" && lvms.length === 1) return lvms[0];
+  // 운영자 확인: 카메라 풀세트는 일반 SDI→7인치, 롱라인→LVM의 공통 구성.
+  if (/(풀세트|베이직세트)/.test(source.setName ?? "")) {
+    if (/용 SDI 라인$/.test(name) && monitors.length === 1) return monitors[0];
+    const lvms=devices.filter(e=>/LVM-|(?:TVLogic|티비로직)\s*17인치/i.test(e.name));
+    if (/용 SDI 롱라인$/.test(name) && lvms.length === 1) return lvms[0];
   }
   const target = name.includes("용 ") ? name.split("용 ")[0] : "";
   const matched = target ? devices.filter(e => partKey(e.name).includes(partKey(target))) : [];
@@ -91,6 +91,11 @@ function initialEntries(t: Trade, e: EquipmentItem): PackingEntry[] {
   const template = templateFor(e.setName || "");
   const tokens = e.name.replace(/SDI\s*\/\s*HDMI/gi, "SDI or HDMI").split(/\s*,\s*|\s+\/\s+/);
   const bundled = tokens.length > 1;
+  // 과거 FX9/PYXIS 묶음의 '4'는 세트 개수가 아니다. 확인된 기본 묶음만 세트 수로 환산한다.
+  const cameraBundle = /풀세트/.test(e.setName ?? "") && tokens.length === 3 &&
+    tokens.every((v,i)=>v === ["SDI 롱라인","SDI 라인","노가암"][i]);
+  const headers = cameraBundle ? t.equipments.filter(h=>h.isSetHeader && h.name===e.setName && h.checkoutState!=="excluded") : [];
+  const multiplier = cameraBundle ? (headers.length===1 ? headers[0].qty : null) : e.qty;
   return tokens.map((token,index) => {
     const match = token.match(/^(.*?)\s*[*×]\s*(\d+)\s*$/);
     const label = (match?.[1] ?? token).trim();
@@ -101,11 +106,11 @@ function initialEntries(t: Trade, e: EquipmentItem): PackingEntry[] {
     const quantity = match ? Number(match[2]) : bundled ? master?.qty : 1;
     const part = registeredPart(name);
     const owner = defaultOwner(t,e,name);
-    const unresolved = !part || quantity == null || CHOICE.test(name);
+    const unresolved = !part || quantity == null || multiplier == null || CHOICE.test(name);
     return { id: bundled ? `${e.scheduleId}:${index}` : e.scheduleId, sourceId: e.scheduleId,
       ownerId: owner?.scheduleId, device: owner?.name ?? e.setName ?? "공용 구성품",
       name: part?.name ?? name, partId: part?.id ?? `unresolved:${e.scheduleId}:${index}`,
-      qty: (quantity ?? 1) * e.qty, checked: false, unresolved };
+      qty: (quantity ?? 1) * (multiplier ?? 1), checked: false, unresolved };
   });
 }
 export function unassignedVideo(t: Trade, p: PackingManifest, ownerId: string): PackingEntry[] {
@@ -185,7 +190,10 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     fresh.entries = fresh.entries.map(e => {
       const old=prev.entries.find(x=>x.id===e.id);
       const before=prev.sources.find(x=>x.id===e.sourceId), after=fresh.sources.find(x=>x.id===e.sourceId);
-      return old && before && after && before.name===after.name && before.qty===after.qty ? old : e;
+      const legacyOvercount = old && before && !old.checked && before.name === "SDI 롱라인, SDI 라인, 노가암" &&
+        old.partId === e.partId && old.qty === before.qty && old.qty !== e.qty;
+      return old && before && after && before.name===after.name &&
+        !legacyOvercount && (before.qty===after.qty || (old.partId===e.partId && old.qty===e.qty && old.ownerId===e.ownerId)) ? old : e;
     });
     for (const e of prev.entries) if (!fresh.entries.some(x=>x.id===e.id)) {
       if (!e.sourceId && (!e.ownerId || packingDevices(t).some(d=>d.scheduleId===e.ownerId))) fresh.entries.push(e);
