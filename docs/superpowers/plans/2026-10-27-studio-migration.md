@@ -141,6 +141,25 @@ This observation is not a fence or a complete accepted-input closure receipt.
 Current source recovery and registration timers also need explicit fencing;
 the older bridge inspector's default false preinstallation gate remains false.
 
+The separate current producer fence now covers all six reviewed producer paths,
+including guarded application recovery and registration retry. It blocks new
+HTTP input, maintenance and event claims while retaining the result protocol for
+already accepted work. It tracks requests, producers and room enqueue operations
+observed after installation. Preinstallation work remains an explicit unknown.
+Its adapter checks the process, loaded source and private controller ownership on
+each operation; controller reconnection does not install another set of wrappers.
+
+Runtime abort preserves the actual digest/cleanup interval objects, callbacks and
+schedule. The adapter reads their private timer bindings while paused, refuses
+a pending untimed startup sweep and validates the pinned Node Timeout contract.
+The fence gates existing interval callbacks rather than clearing/restarting them.
+Abort restores the original callback references and verifies running-state readback;
+it never runs startup sweeps or enables historically held timers. Actual current
+source fixtures cover normal gateway, held recovery, and enabled live intervals,
+with external traffic denied and synthetic credentials only. These producer and
+observer tests pass31 cases on Windows and Mac. This still supplies no HTTP close,
+process stop, complete accepted-work receipt or production activation authority.
+
 ## Preparation readback and outstanding gates
 
 Current code, learning and two consistent SQLite baselines are preserved in
