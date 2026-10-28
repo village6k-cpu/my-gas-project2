@@ -40,7 +40,8 @@ export function packingCandidates(t: Trade): EquipmentItem[] {
 }
 export function packingDevices(t: Trade) {
   const managed = new Set(packingCandidates(t).map(e => e.scheduleId));
-  return t.equipments.filter(e => !managed.has(e.scheduleId) && e.checkoutState !== "excluded" && !e.synthetic);
+  return t.equipments.filter(e => !managed.has(e.scheduleId) && e.checkoutState !== "excluded" && !e.synthetic)
+    .map(e => ({...e, name: String(e.actualName || e.name).trim()}));
 }
 export function needsDeviceModel(e: EquipmentItem) { return e.name === "7인치 모니터"; }
 export function packingAvailable(t: Trade) { return packingCandidates(t).length > 0 || packingDevices(t).some(e => needsDeviceModel(e) || templateFor(e.name).some(r => ACCESSORY.test(r.name))); }
@@ -93,7 +94,8 @@ function initialEntries(t: Trade, e: EquipmentItem): PackingEntry[] {
   return tokens.map((token,index) => {
     const match = token.match(/^(.*?)\s*[*×]\s*(\d+)\s*$/);
     const label = (match?.[1] ?? token).trim();
-    const matches = template.filter(r => partKey(r.name) === partKey(label) || partKey(r.name).endsWith("용" + partKey(label)));
+    const choices = /^(SDI|HDMI)$/i.test(label) ? template.map(r => ({...r, name: r.name.replace(/SDI\s*(?:or|\/)\s*HDMI/i, label.toUpperCase())})) : template;
+    const matches = choices.filter(r => partKey(r.name) === partKey(label) || partKey(r.name).endsWith("용" + partKey(label)));
     const master = matches.length === 1 ? matches[0] : undefined;
     const name = master?.name ?? label;
     const quantity = match ? Number(match[2]) : bundled ? master?.qty : 1;
@@ -242,7 +244,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
   for (const e of next.entries) if (e.ownerId && !packingDevices(t).some(owner=>owner.scheduleId===e.ownerId)) throw new Error("사용 장비가 변경되었습니다. 목록을 업데이트해주세요");
   if (packingCandidates(t).some(e=>!prev.sources.some(s=>s.id===e.scheduleId))) throw new Error("예약 구성품이 추가되었습니다. 목록을 업데이트해주세요");
   for (const s of prev.sources) {
-    const current = t.equipments.find(e => e.scheduleId === s.id);
+    const current = (s.device ? packingDevices(t) : t.equipments).find(e => e.scheduleId === s.id);
     if (!current || current.checkoutState === "excluded" || current.name !== s.name || current.qty !== s.qty) throw new Error("예약 구성품이 변경되었습니다. 원본과 준비 목록을 확인해주세요");
   }
   for (const owner of packingDevices(t)) {

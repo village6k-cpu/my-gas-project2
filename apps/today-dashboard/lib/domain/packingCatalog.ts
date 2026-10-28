@@ -150,7 +150,9 @@ export function registeredPart(name: string) {
   const p=canonicalPart(name); return catalog.get(p.id);
 }
 export function templateFor(name: string) {
-  const key = Object.keys(PACKING_TEMPLATES).find(n => partKey(n) === partKey(name));
+  // 운영 예약에서 사용하는 동일 모델의 영문 표기. 다른 모니터를 추정하지 않는다.
+  const model = partKey(name) === partKey("스몰HD INDIE7") ? "스몰HD 인디7" : name;
+  const key = Object.keys(PACKING_TEMPLATES).find(n => partKey(n) === partKey(model));
   return key ? PACKING_TEMPLATES[key] : [];
 }
 export const MONITOR_MODELS = ["스몰HD 인디7", "포트키 BM7", "티비로직 F-7HS", "티비로직 LVM-074W", "파이로 7"];
