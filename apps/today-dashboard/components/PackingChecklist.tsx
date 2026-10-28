@@ -98,7 +98,7 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
   const device=p.deviceModels?.[ownerId ?? ""] ?? owner?.name ?? "공용 구성품";
   const existingVideo = ownerId && templateFor(device).some(r=>/SDI|HDMI/i.test(r.name)) && !entries.some(e=>/SDI|HDMI/i.test(e.name)) ? unassignedVideo(trade,p,ownerId) : [];
   if (!entries.length && !modelNeeded && !existingVideo.length) return null;
-  return <div className="my-2 ml-8 border-l-2 border-brand-200 pl-3" data-packing-owner={ownerId}>
+  return <div className="my-2 ml-8 rounded-r-lg border-l-2 border-brand-200 bg-white px-3 py-2" data-packing-owner={ownerId}>
     {common && <p className="mb-2 text-xs font-bold text-ink-mute">공용·여분 구성품</p>}
     {modelNeeded && <label className="mb-2 block text-xs font-bold">실제 모니터 모델
       <select aria-label="실제 모니터 모델" disabled={busy || p.phase !== "draft" || packingStarted(trade)} value={p.deviceModels?.[ownerId!] ?? ""} onChange={e => run({action:"model",ownerId:ownerId!,model:e.target.value})} className="mt-1 w-full rounded-lg border border-line bg-white p-2 text-sm">
