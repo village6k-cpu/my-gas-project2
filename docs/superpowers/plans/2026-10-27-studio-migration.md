@@ -59,6 +59,30 @@ preparation is historical evidence, never the current operational source.
 
 Ledger: .superpowers/sdd/2026-10-27-studio-migration/progress.md.
 
+## Abort and final-plan binding
+
+`migration_pre_stop_abort.py` is restricted to the period before an actual
+`SOURCE_STOP_REQUESTED`. It requires all five original process identities,
+execution contracts and listeners, all sixteen native owners absent, and the
+administrator's twenty-one-task fence. The bridge participant, browser, voice,
+watcher and scheduler references must match the original source plan before any
+drain removal. It reopens only owned HTTP admission, cancels only the exact
+migration drains, restores the original producer functions and timer bindings,
+then verifies Windows voice authority before resuming the owned watcher. It
+never creates a stop receipt or launches/stops a business backend. A separate
+broker request restores original task states only after readiness is published.
+An uncertain producer resume or voice-controller launch is not repeated.
+
+`migration_freeze_closed_plans.py` converts preparation blueprints into private
+operational transfer/recovery inputs only after the real complete five-role stop.
+It binds the pre-stop recursive child inventory, accepted-work closure and stop
+request hashes, then independently rechecks current source absence, native
+inactivity, scheduler fencing and the owned browser pause. Missing, partial,
+unaffected, recovered or changed source observations cannot authorize a cold
+copy. Before source stop, its read-only mode reports the missing receipt without
+creating it. These two new scopes pass fifteen focused tests on Windows and Mac;
+that does not represent an actual cutover or rollback.
+
 ## Current bridge accepted-work observations
 
 Disconnected preinstallation event claims can sleep outside every private queue
