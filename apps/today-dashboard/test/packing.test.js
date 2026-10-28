@@ -38,15 +38,14 @@ test("replace removes old physical type, add retains it; 9V, 2pin and 7pin never
   save(t, rows);
   save(t,[...t.packing.entries,{id:"add1",device:"테라덱",name:"ignored",partId:"teradek-2pin",qty:2,checked:false},{id:"add2",device:"뉴클-M",name:"ignored",partId:"nucleus-m-7pin",qty:1,checked:false}]);
   assert.equal(groups(t.packing).length,4);
-  const replaced=t.packing.entries.map(e=>e.id==="s3"?{...e,name:"스몰HD용 더미 모델A",partId:"custom"}:e);
+  const replaced=t.packing.entries.map(e=>e.id==="s3"?{...e,name:"스몰HD용 더미 모델A",partId:"smallhd-dummy"}:e);
   save(t,replaced); assert.equal(groups(t.packing).some(g=>g.id==="smallhd-9v"),false);
   assert.equal(groups(t.packing).find(g=>g.id==="teradek-2pin").expected,2);
 });
-test("custom parts stay distinct unless staff explicitly selects an existing exact physical type",()=>{
+test("free text cannot create a part; registered IDs aggregate regardless of supplied display name",()=>{
   const t=started(); const base=t.packing.entries[2];
-  save(t,[...t.packing.entries,{...base,id:"copy1",partId:"unknown"}]);
-  assert.equal(groups(t.packing).length,3);
-  save(t,[...t.packing.entries,{...base,id:"copy2"}]);
+  assert.throws(()=>save(t,[...t.packing.entries,{...base,id:"copy1",partId:"unknown"}]),/등록/);
+  save(t,[...t.packing.entries,{...base,id:"copy2",name:"직원 별칭"}]);
   assert.equal(groups(t.packing).find(g=>g.id===base.partId).expected,2);
 });
 test("exclude preserves source and requires recheck; cannot drop original rows",()=>{
@@ -56,10 +55,12 @@ test("exclude preserves source and requires recheck; cannot drop original rows",
   assert.equal(groups(t.packing).find(g=>g.id==="CBL-003").expected,2);
   assert.throws(()=>save(t,t.packing.entries.slice(1)),/제외/);
 });
-test("SDI or HDMI remains unresolved until selected; quantity/name change invalidates readiness",()=>{
-  const t=started(); save(t,t.packing.entries.map(e=>e.id==="s3"?{...e,name:"SDI or HDMI",partId:"custom"}:e));
+test("SDI or HDMI remains unresolved until selected; quantity change invalidates readiness",()=>{
+  const t=trade();t.equipments[2].name="스몰HD 인디7용 SDI or HDMI";
+  t.packing=step(t,{action:"start"},now);
   assert.throws(()=>seal(t),/실제 종류/);
-  save(t,t.packing.entries.map(e=>e.id==="s3"?{...e,name:"HDMI 중",partId:"custom"}:e)); seal(t);
+  const {PACKING_PARTS}=load("packing");const hdmi=PACKING_PARTS.find(p=>p.name==="스몰HD 인디7용 HDMI");
+  save(t,t.packing.entries.map(e=>e.id==="s3"?{...e,partId:hdmi.id}:e));seal(t);
   assert.equal(t.packing.phase,"sealed");
 });
 test("sealed snapshot survives master change; no rewrite after checkout or after undo",()=>{
@@ -86,10 +87,10 @@ test("loss requires a reason; old checked-out contracts cannot silently migrate"
   assert.throws(()=>step(t,{action:"receive",partId:"CBL-003",count:{good:2,damaged:0,lost:1}},now),/사유/);
   const old=trade();old.setupDone=true;assert.throws(()=>step(old,{action:"start"},now),/기존 검수/);
 });
-test("changing a shared custom part creates a new identity and preserves the other device",()=>{
+test("replacing a shared registered part preserves the other device",()=>{
   const t=started(); const base=t.packing.entries[2];
   save(t,[...t.packing.entries,{...base,id:"copy"}]);
-  save(t,t.packing.entries.map(e=>e.id===base.id?{...e,name:"스몰HD용 더미 모델B",partId:"custom"}:e));
+  save(t,t.packing.entries.map(e=>e.id===base.id?{...e,name:"스몰HD용 더미 모델B",partId:"smallhd-dummy"}:e));
   const a=t.packing.entries.find(e=>e.id===base.id), b=t.packing.entries.find(e=>e.id==="copy");
   assert.notEqual(a.partId,b.partId);
   assert.equal(groups(t.packing).find(g=>g.id===b.partId).name,base.name);
@@ -99,7 +100,7 @@ test("legacy completed cards without packing keep their original completion poli
   assert.equal(returnCompletionBlockers(t).length,0);
 });
 test("booking refresh preserves manual additions and cannot duplicate a removed/readded source",()=>{
-  const t=started(); save(t,[...t.packing.entries,{id:"extra",device:"여분",name:"HDMI 중",partId:"custom",qty:1,checked:false}]);
+  const t=started(); save(t,[...t.packing.entries,{id:"extra",device:"여분",name:"SDI 연선",partId:"CBL-003",qty:1,checked:false}]);
   t.equipments[0].qty=2;
   t.packing=step(t,{action:"refresh"},now);
   assert.equal(t.packing.entries.find(e=>e.id==="s1").qty,2);

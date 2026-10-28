@@ -7,7 +7,9 @@ const source = fs.readFileSync(new URL('../lib/domain/status.ts', import.meta.ur
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const module = { exports: {} };
 const packingModule = { exports: {} };
-vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../lib/domain/packing.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module: packingModule, exports: packingModule.exports, structuredClone });
+const catalogModule = { exports: {} };
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../lib/domain/packingCatalog.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module: catalogModule, exports: catalogModule.exports });
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../lib/domain/packing.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module: packingModule, exports: packingModule.exports, structuredClone, require: name => { assert.equal(name, "./packingCatalog"); return catalogModule.exports; } });
 vm.runInNewContext(compiled, { module, exports: module.exports, Date, Intl, require: name => { assert.equal(name, './packing'); return packingModule.exports; } });
 const { timeLabel, shortDate, phaseForDate, timeSortKey, timeBand, reservationDay, tradesForTab, searchTradeEvents, tabCounts } = module.exports;
 const originalTZ = process.env.TZ;

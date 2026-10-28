@@ -1,13 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
-import { PACKING_PARTS, packingCandidates, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
+import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
+import { templateFor } from "@/lib/domain/packingCatalog";
 import { savePacking } from "@/lib/data/store";
 
+type PackingContextValue = { trade: Trade; busy: boolean; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
+const PackingContext = createContext<PackingContextValue | null>(null);
 const button = "tap rounded-lg px-3 py-2 text-sm font-bold ring-1 ring-line disabled:opacity-40";
 
-export function PackingChecklist({ trade, phase, onCommand }: { trade: Trade; phase: Phase; onCommand?: (version: number, command: PackingCommand) => Promise<void> }) {
+export function PackingChecklist({ trade, phase, onCommand, children }: { trade: Trade; phase: Phase; onCommand?: (version: number, command: PackingCommand) => Promise<void>; children?: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<PackingEntry | null>(null);
@@ -25,49 +28,35 @@ export function PackingChecklist({ trade, phase, onCommand }: { trade: Trade; ph
   const save = (entries: PackingEntry[], version = p?.version ?? 0) => run({ action: "save", entries, note: p?.note ?? "" }, version);
   const openEditor = (entry: PackingEntry) => { setEditing(entry); setEditingVersion(p?.version ?? 0); };
   const update = (e: PackingEntry, patch: Partial<PackingEntry>) => save(p!.entries.map(row => row.id === e.id ? { ...row, ...patch } : row));
-  if (!p && (phase === "checkin" || packingStarted(trade) || !packingCandidates(trade).length)) return null;
+  if (!p && (phase === "checkin" || packingStarted(trade) || !packingAvailable(trade))) return <>{children}</>;
   const groups = packingGroups(p);
+  const unresolvedQty = p?.entries.filter(e=>e.unresolved).reduce((n,e)=>n+e.qty,0) ?? 0;
   const total = groups.reduce((n, g) => n + g.expected, 0);
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
-  const devices = [...new Set(p?.entries.map(e => e.device))];
-  const newEntry = (device: string): PackingEntry => {
-    const id = crypto.randomUUID();
-    return { id, device, name: "", partId: `private:${id}`, qty: 1, checked: false };
-  };
-  return <section aria-label="장비별 구성품" className="mb-3 overflow-hidden rounded-xl border border-brand-200 bg-white">
+  const devices = packingDevices(trade);
+  const context = { trade, busy, update, open: openEditor, run };
+  return <PackingContext.Provider value={context}><section aria-label="구성품 검수" className="mb-3">
     <div className="flex flex-wrap items-center justify-between gap-2 bg-brand-50 px-3 py-3">
-      <div><h3 className="text-sm font-extrabold text-brand-700">장비별 구성품 · 라인 수량 확인</h3>
-        <p className="mt-1 text-xs text-ink-mute">{p ? `${p.phase === "sealed" ? "확정된 반출" : "반출 준비"} · ${total}개${phase === "checkin" ? ` · 미반납 ${missing}개` : ""}` : "실제 챙기는 종류와 개수를 장비별로 기록합니다."}</p></div>
+      <div><h3 className="text-sm font-extrabold text-brand-700">구성품 검수</h3>
+        <p className="mt-1 text-xs text-ink-mute">{p ? `${p.phase === "sealed" ? "확정된 반출" : "반출 준비"} · ${total}개${unresolvedQty ? ` · 종류 미선택 ${unresolvedQty}개` : ""}${phase === "checkin" ? ` · 미반납 ${missing}개` : ""}` : "실제 챙기는 종류와 개수를 장비별로 기록합니다."}</p></div>
       {!p && <button className={`${button} bg-brand-600 text-white`} disabled={busy} onClick={() => run({ action: "start" })}>구성품 준비 시작</button>}
     </div>
     <div aria-live="polite">{error && <p role="alert" className="m-3 rounded-lg bg-attention-bg p-2 text-sm font-bold text-attention-fg">{error}</p>}</div>
+    {!p && children}
     {p && <fieldset disabled={busy} className="min-w-0 disabled:opacity-60">
       {phase === "checkout" ? <>
-        <p className="px-3 pt-3 text-xs text-ink-mute">메모에 적은 추가·변경도 아래 수량에 반영해주세요. 같은 단자라도 규격이 다르면 따로 셉니다. 동봉품 수량만 관리하며, 대여 장비·요금 변경은 현장 항목 추가에서 처리하세요.</p>
-        {devices.map(device => <div key={device} className="m-3 rounded-xl border border-line">
-          <div className="flex items-center justify-between gap-2 bg-paper p-3"><h4 className="break-words text-sm font-extrabold">{device}</h4>
-            {p.phase === "draft" && <button className={`${button} shrink-0 bg-white`} onClick={() => openEditor(newEntry(device))}>+ 추가</button>}</div>
-          {p.entries.filter(e => e.device === device).map(e => <div key={e.id} className="border-t border-line px-3 py-2">
-            <div className="flex items-center gap-2">
-              <button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={p.phase === "sealed"} onClick={() => update(e, { checked: !e.checked })} className={`tap h-9 w-9 shrink-0 rounded-lg border-2 text-lg font-bold ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : ""}</button>
-              <span className={`min-w-0 flex-1 break-words text-sm ${e.qty === 0 ? "text-ink-faint line-through" : "font-medium"}`}>{e.name}</span>
-              <strong className="shrink-0 text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong>
-            </div>
-            {p.phase === "draft" && <div className="mt-2 flex flex-wrap gap-2 pl-11">
-              <button className={`${button} text-brand-700`} onClick={() => openEditor(e)}>종류·수량 변경</button>
-              <button className={`${button} text-ink-mute`} onClick={() => update(e, { qty: e.qty ? 0 : 1, checked: false })}>{e.qty ? "제외" : "다시 포함"}</button>
-            </div>}
-          </div>)}
-        </div>)}
-        {p.phase === "draft" && <div className="space-y-2 px-3"><button className={button} onClick={() => openEditor(newEntry("추가 구성품"))}>+ 다른 장비의 구성품 추가</button><details className="text-xs text-ink-mute"><summary>예약 장비가 변경됐나요?</summary><p className="my-2">예약에서 바뀐 줄만 다시 불러옵니다. 직접 추가한 구성품과 변경 없는 준비 내역은 유지합니다.</p><button className={button} onClick={() => run({ action: "refresh" })}>예약 변경 내용 불러오기</button></details></div>}
-        <details className="m-3 rounded-lg bg-paper p-3"><summary className="cursor-pointer text-sm font-bold">실물별 총수량 · {total}개</summary>
+        {packingNeedsUpgrade(p) ? <div className="my-3 rounded-lg bg-warn-bg p-3 text-sm"><p>이전 묶음 목록을 장비별 표준 구성품으로 업데이트해야 합니다.</p><button className={`${button} mt-2 bg-white`} onClick={() => run({ action: "refresh" })}>구성품 목록 업데이트</button></div> : null}
+        {children ?? devices.map(device => <div key={device.scheduleId} className="my-3 rounded-xl border border-line p-3"><h4 className="font-extrabold">{p.deviceModels?.[device.scheduleId] ?? device.name}</h4><PackingDevice ownerId={device.scheduleId} /></div>)}
+        {p.entries.some(e => !e.ownerId) && !packingNeedsUpgrade(p) && <PackingDevice />}
+        <details className="m-3 rounded-lg bg-paper p-3"><summary className="cursor-pointer text-sm font-bold">실물별 총수량 · {total}개{unresolvedQty > 0 ? ` + 종류 미선택 ${unresolvedQty}개` : ""}</summary>
           {groups.map(g => <div key={g.id} className="mt-2 text-sm"><strong>{g.name} ×{g.expected}</strong><div className="text-xs text-ink-mute">{g.entries.map(e => `${e.device} ${e.qty}`).join(" + ")}</div></div>)}
         </details>
         <div className="m-3 space-y-2">
           {p.phase === "draft" ? <><label className="block text-xs font-bold text-ink-mute">인계 메모 (수량은 위 목록으로 확인)</label>
             <textarea value={note ?? p.note} onChange={e => { if (note === null) setNoteVersion(p.version); setNote(e.target.value); }} maxLength={2000} className="w-full rounded-lg border border-line p-2 text-sm" placeholder="예: 고객 요청으로 D탭 라인 대신 더미 사용" />
             {note !== null && <><button className={button} onClick={async () => { if (await run({ action: "save", entries: p.entries, note }, noteVersion)) setNote(null); }}>메모 저장</button><button className={button} onClick={() => setNote(null)}>입력 취소</button></>}
-            <button className={`${button} w-full bg-brand-600 text-white`} disabled={p.entries.some(e => !e.checked) || note !== null} onClick={() => run({ action: "seal" })}>이 구성으로 반출 준비 확정</button>
+            <details className="text-xs text-ink-mute"><summary>예약 장비가 변경됐나요?</summary><button className={button} onClick={() => run({ action: "refresh" })}>예약 변경 내용 불러오기</button></details>
+            <button className={`${button} w-full bg-brand-600 text-white`} disabled={packingNeedsUpgrade(p) || p.entries.some(e => !e.checked || (e.qty > 0 && e.unresolved)) || devices.some(e => needsDeviceModel(e) && !p.deviceModels?.[e.scheduleId]) || note !== null} onClick={() => run({ action: "seal" })}>이 구성으로 반출 준비 확정</button>
           </> : <><p className="rounded-lg bg-checkin-bg p-3 text-sm font-bold text-checkin-fg">✓ 반출 구성품 확정 · 반납 때 이 수량과 대조합니다.</p>
             {p.note && <p className="whitespace-pre-wrap text-sm text-ink-soft">반출 메모: {p.note}</p>}
             {!packingStarted(trade) && <button className={button} onClick={() => run({ action: "revise" })}>구성 다시 준비</button>}</>}
@@ -84,7 +73,8 @@ export function PackingChecklist({ trade, phase, onCommand }: { trade: Trade; ph
         return memo ? <p key={s.id} className="mt-2 whitespace-pre-wrap">{s.name}: {memo}</p> : null;
       })}</details>}
     </fieldset>}
-    {editing && p && <PackingEditor key={editing.id} entry={editing} entries={p.entries} busy={busy} error={error} onClose={() => setEditing(null)} onSave={async (entry, add) => {
+    {phase === "checkin" && children}
+    {editing && p && <PackingEditor key={editing.id} entry={editing} entries={p.entries} devices={devices.map(e=>({id:e.scheduleId,name:p.deviceModels?.[e.scheduleId] ?? e.name}))} busy={busy} error={error} onClose={() => setEditing(null)} onSave={async (entry, add) => {
       const exists = p.entries.some(e => e.id === entry.id);
       let updated = entry;
       if (add && exists) { const id = crypto.randomUUID(); updated = { ...entry, id, sourceId: undefined }; }
@@ -92,27 +82,61 @@ export function PackingChecklist({ trade, phase, onCommand }: { trade: Trade; ph
       if (await save(entries, editingVersion)) setEditing(null);
     }} />}
     {busy && <p className="px-3 pb-2 text-xs text-brand-700" role="status">저장 중…</p>}
-  </section>;
+  </section></PackingContext.Provider>;
 }
 
-function PackingEditor({ entry, entries, busy, error, onClose, onSave }: { entry: PackingEntry; entries: PackingEntry[]; busy: boolean; error: string; onClose: () => void; onSave: (entry: PackingEntry, add: boolean) => void }) {
+/** 기존 본체 행 바로 아래에 삽입한다. 별도 장비 목록을 만들지 않는다. */
+export function PackingDevice({ ownerId, common = false }: { ownerId?: string; common?: boolean }) {
+  const ctx = useContext(PackingContext);
+  if (!ctx?.trade.packing) return null;
+  const { trade, busy, update, open, run } = ctx;
+  const p=trade.packing!;
+  if (packingNeedsUpgrade(p)) return null;
+  const owner=packingDevices(trade).find(e=>e.scheduleId===ownerId);
+  const entries=p.entries.filter(e=>e.ownerId===ownerId);
+  const modelNeeded=!!owner && needsDeviceModel(owner);
+  const device=p.deviceModels?.[ownerId ?? ""] ?? owner?.name ?? "공용 구성품";
+  const existingVideo = ownerId && templateFor(device).some(r=>/SDI|HDMI/i.test(r.name)) && !entries.some(e=>/SDI|HDMI/i.test(e.name)) ? unassignedVideo(trade,p,ownerId) : [];
+  if (!entries.length && !modelNeeded && !existingVideo.length) return null;
+  return <div className="my-2 ml-8 border-l-2 border-brand-200 pl-3" data-packing-owner={ownerId}>
+    {common && <p className="mb-2 text-xs font-bold text-ink-mute">공용·여분 구성품</p>}
+    {modelNeeded && <label className="mb-2 block text-xs font-bold">실제 모니터 모델
+      <select aria-label="실제 모니터 모델" disabled={busy || p.phase !== "draft" || packingStarted(trade)} value={p.deviceModels?.[ownerId!] ?? ""} onChange={e => run({action:"model",ownerId:ownerId!,model:e.target.value})} className="mt-1 w-full rounded-lg border border-line bg-white p-2 text-sm">
+        <option value="" disabled>실제로 나가는 모델 선택</option>{MONITOR_MODELS.map(name=><option key={name}>{name}</option>)}
+      </select></label>}
+    {(!modelNeeded || p.deviceModels?.[ownerId!]) && existingVideo.length>0 && <label className="mb-2 block rounded-lg bg-warn-bg p-2 text-xs font-bold">기존 영상선 연결 (추가 수량 없음)
+      <select aria-label="기존 영상선 연결" value="" disabled={busy || p.phase!=="draft"} onChange={event=>{const row=existingVideo.find(e=>e.id===event.target.value);if(row) update(row,{ownerId,device,checked:false});}} className="mt-1 w-full rounded border border-line bg-white p-2 text-sm"><option value="" disabled>이 장비에 연결할 선 선택</option>{existingVideo.map(e=><option key={e.id} value={e.id}>{e.name} ×{e.qty}</option>)}</select>
+    </label>}
+    {entries.map(e=><div key={e.id} className="border-b border-line/50 py-2 last:border-0">
+      <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={busy || p.phase !== "draft" || (e.qty>0 && e.unresolved) || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>update(e,{checked:!e.checked})} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : ""}</button>
+        <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span><strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>
+      {p.phase === "draft" && <div className="mt-1 flex flex-wrap gap-1 pl-8"><button className={`${button} text-brand-700`} onClick={()=>open(e)}>교체·수량</button><button className={`${button} text-ink-mute`} onClick={()=>update(e,{qty:e.qty?0:1,checked:false})}>{e.qty ? "제외" : "포함"}</button></div>}
+    </div>)}
+    {p.phase === "draft" && <button className="tap mt-2 text-xs font-bold text-brand-700" disabled={busy || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>{const id=crypto.randomUUID();open({id,ownerId,device,name:"",partId:"",qty:1,checked:false});}}>+ 구성품 추가</button>}
+  </div>;
+}
+
+function PackingEditor({ entry, entries, devices, busy, error, onClose, onSave }: { entry: PackingEntry; entries: PackingEntry[]; devices: {id:string;name:string}[]; busy: boolean; error: string; onClose: () => void; onSave: (entry: PackingEntry, add: boolean) => void }) {
   const [draft, setDraft] = useState(entry);
   const [mode, setMode] = useState<"replace" | "add">("replace");
+  const [query,setQuery]=useState("");
   const exists = entries.some(e => e.id === entry.id);
-  const options = [...PACKING_PARTS.map(p => ({ id: p.id as string, name: p.name as string })), ...entries.filter((e, i, all) => !PACKING_PARTS.some(p => p.id === e.partId) && all.findIndex(r => r.partId === e.partId) === i).map(e => ({ id: e.partId, name: e.name }))];
-  const [selected, setSelected] = useState(options.some(p => p.id === entry.partId) ? entry.partId : "custom");
-  return <div role="dialog" aria-modal="true" aria-label="구성품 종류·수량 변경" className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/40 p-4" onKeyDown={e => { if (e.key === "Escape" && !busy) onClose(); }}>
-    <form className="max-h-[90dvh] w-full max-w-md space-y-3 overflow-y-auto rounded-2xl bg-white p-4 shadow-xl" onSubmit={e => { e.preventDefault(); onSave({ ...draft, checked: false }, mode === "add"); }}>
-      <h3 className="font-extrabold">실제로 챙길 구성품</h3>
-      {error && <p role="alert" className="text-sm font-bold text-attention-fg">{error} 창을 닫고 최신 내역을 확인해주세요.</p>}
-      <label className="block text-sm">사용 장비<input autoFocus required maxLength={160} value={draft.device} onChange={e => setDraft({ ...draft, device: e.target.value })} className="mt-1 w-full rounded-lg border p-2" /></label>
-      <label className="block text-sm">실물 종류<select value={selected} onChange={e => { const id = e.target.value; setSelected(id); const part = options.find(p => p.id === id); setDraft({ ...draft, name: part?.name ?? "", partId: part?.id ?? `private:${draft.id}` }); }} className="mt-1 w-full rounded-lg border p-2">
-        {options.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}<option value="custom">다른 종류 직접 입력 (더미·HDMI 등)</option></select></label>
-      {selected === "custom" && <label className="block text-sm">장비·규격 이름<input required maxLength={160} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} placeholder="예: 스몰HD용 D탭 더미 + 실제 모델" className="mt-1 w-full rounded-lg border p-2" /></label>}
-      <p className="text-xs text-ink-mute">기존 실물 종류를 선택하면 같은 종류끼리 합산합니다. 전압·단자·배선·길이가 다르면 직접 입력해 구분하세요.</p>
+  const normalized=(s:string)=>s.toLowerCase().replace(/\s/g,"");
+  const relevant=(name:string)=>normalized(name).includes(normalized(draft.device).split("용")[0]) || (/스몰HD/.test(draft.device)&&/스몰HD/.test(name)) || (/테라덱/.test(draft.device)&&/테라덱/.test(name)) || name==="노가암" || name==="SDI 연선";
+  const options=PACKING_PARTS.filter(p=>query ? normalized(p.name).includes(normalized(query)) : relevant(p.name) || p.id===draft.partId).sort((a,b)=>Number(relevant(b.name))-Number(relevant(a.name)) || a.name.localeCompare(b.name,"ko"));
+  const selected=PACKING_PARTS.find(p=>p.id===draft.partId);
+  return <div role="dialog" aria-modal="true" aria-label="구성품 선택" className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/40 p-4" onKeyDown={e => { if (e.key === "Escape" && !busy) onClose(); }}>
+    <form className="max-h-[90dvh] w-full max-w-md space-y-3 overflow-y-auto rounded-2xl bg-white p-4 shadow-xl" onSubmit={e => { e.preventDefault(); if(selected) onSave({ ...draft, name:selected.name, checked: false }, mode === "add"); }}>
+      <h3 className="font-extrabold">{draft.device} 구성품</h3>
+      {error && <p role="alert" className="text-sm font-bold text-attention-fg">{error}</p>}
+      <label className="block text-sm">사용 장비<select value={draft.ownerId ?? ""} onChange={e=>{const owner=devices.find(d=>d.id===e.target.value);setDraft({...draft,ownerId:owner?.id,device:owner?.name??draft.device});}} className="mt-1 w-full rounded-lg border p-2"><option value="" disabled>장비 선택</option>{devices.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
+      <label className="block text-sm">등록 구성품 검색<input autoFocus value={query} onChange={e=>setQuery(e.target.value)} placeholder="다른 등록 품목도 검색할 수 있습니다" className="mt-1 w-full rounded-lg border p-2" /></label>
+      <div role="listbox" aria-label="등록 구성품" className="max-h-44 overflow-y-auto rounded-lg border border-line">{options.map(p=><button type="button" role="option" aria-selected={draft.partId===p.id} key={p.id} onClick={()=>setDraft({...draft,name:p.name,partId:p.id})} className={`block w-full border-b border-line/40 px-3 py-2 text-left text-sm ${draft.partId===p.id ? "bg-brand-50 font-bold text-brand-700" : ""}`}>{p.name}</button>)}{!options.length&&<p className="p-3 text-sm">등록된 구성품이 없습니다. 담당자에게 품목 등록을 요청해주세요.</p>}</div>
+      <p className="text-sm font-bold">선택: {selected?.name ?? "구성품을 선택해주세요"}</p>
+      <p className="text-xs text-ink-mute">같은 등록 품목을 고르면 장비가 달라도 합산됩니다. 검색어는 품목 이름으로 저장되지 않습니다.</p>
       <label className="block text-sm">수량<input required type="number" min={1} max={99} value={draft.qty || ""} onChange={e => setDraft({ ...draft, qty: Number(e.target.value) })} className="ml-3 w-20 rounded-lg border p-2" /></label>
       {exists && <div className="flex flex-wrap gap-3 text-sm"><label><input type="radio" checked={mode === "replace"} onChange={() => setMode("replace")} /> 기존 {entry.qty}개 교체</label><label><input type="radio" checked={mode === "add"} onChange={() => setMode("add")} /> 기존 유지하고 추가</label></div>}
-      <div className="flex justify-end gap-2"><button type="button" disabled={busy} className={button} onClick={onClose}>취소</button><button disabled={busy} className={`${button} bg-brand-600 text-white`}>{mode === "add" || !exists ? "추가 저장" : "교체 저장"}</button></div>
+      <div className="flex justify-end gap-2"><button type="button" disabled={busy} className={button} onClick={onClose}>취소</button><button disabled={busy || !selected} className={`${button} bg-brand-600 text-white`}>{mode === "add" || !exists ? "추가 저장" : "교체 저장"}</button></div>
     </form>
   </div>;
 }
