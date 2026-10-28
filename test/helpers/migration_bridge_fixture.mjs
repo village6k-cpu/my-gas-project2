@@ -44,6 +44,10 @@ export async function fixture(t, {busy = '', actual = false, transport = 'cli', 
       function timerRuntime(kind) {let timer=null;return {state:{digestRunning:false,noticeCleanupRunning:process.env.FIXTURE_BUSY==='timer-start' && kind==='notice'},async start(){return timer;},stop(){timer=null;}};}
       const workOrchestratorDigestRuntime=timerRuntime('digest');
       const workOrchestratorNoticeCleanupRuntime=timerRuntime('notice');
+      function p0Runtime(){const cutoverEnabled=true;let activeSweep=process.env.FIXTURE_BUSY==='p0-active'?new Promise(()=>{}):null;let catchUpPending=process.env.FIXTURE_BUSY==='p0-catchup';return {async sweep(){return {cutoverEnabled,activeSweep,catchUpPending};}};}
+      const workOrchestratorP0Runtime=p0Runtime();
+      function shadowRuntime(){const active=new Set();if(process.env.FIXTURE_BUSY==='shadow')active.add(new Promise(()=>{}));return {settled(){return Promise.allSettled([...active]);}};}
+      const workOrchestratorShadowRuntime=shadowRuntime();
       const gatewayHttpHandler = createHttp();
       const gatewayChannel = createChannel();
       function app() { let applicationTail = process.env.FIXTURE_BUSY === 'app' ? new Promise(()=>{}) : Promise.resolve(); return {async idle() { await applicationTail; }}; }
@@ -60,9 +64,10 @@ export async function fixture(t, {busy = '', actual = false, transport = 'cli', 
       const state = {workerRunning:false,slackActionPollRunning:false,p0SlackEscalationRunning:false,recoverySweepRunning:false,tabCleanupRunning:false,
         activeWorkerRuns:0,workerQueueLength:0,rooms:new Map(),activeWorkerJobIds:new Set(),workOrchestrator:{noticeCleanupRunning:false,digestRunning:false,workActionPollRunning:false}};
       if (process.env.FIXTURE_BUSY === 'worker') state.workerRunning = true;
+      globalThis.__fixtureToggleWorker=()=>{state.workerRunning=!state.workerRunning;};
       const server = http.createServer(async (req,res) => {
         const url = new URL(req.url || '/', 'http://127.0.0.1');
-        if (req.url === '/fixture-never-requested') console.log(CONFIG, workOrchestratorActionPoller, gatewayChannel, gatewayResultApplicationCoordinator, kakaoAutomationAuditCoordinator, manualSendInFlight, queuedWorkerSlotsByRoom, state, workerChain, registrationRetryRunning, gatewayFailureNotificationCoordinator,workOrchestratorDigestRuntime,workOrchestratorNoticeCleanupRuntime);
+        if (req.url === '/fixture-never-requested') console.log(CONFIG, workOrchestratorActionPoller, gatewayChannel, gatewayResultApplicationCoordinator, kakaoAutomationAuditCoordinator, manualSendInFlight, queuedWorkerSlotsByRoom, state, workerChain, registrationRetryRunning, gatewayFailureNotificationCoordinator,workOrchestratorDigestRuntime,workOrchestratorNoticeCleanupRuntime,workOrchestratorP0Runtime,workOrchestratorShadowRuntime);
         await gatewayHttpHandler(req,res,url);
         if (url.pathname === '/health') await gatewayChannel.status();
         if (url.pathname.startsWith('/migration-private-work/')) res.statusCode=404;
@@ -93,7 +98,8 @@ export async function fixture(t, {busy = '', actual = false, transport = 'cli', 
     Object.assign(env,{KAKAO_GATEWAY_RECOVERY_MANIFEST:manifest});
   }
   const preload = path.join(root,'deny-external.mjs');
-  await fs.writeFile(preload, `import http from 'node:http'; import https from 'node:https'; import net from 'node:net'; import fs from 'node:fs'; import path from 'node:path';
+  await fs.writeFile(preload, `import http from 'node:http'; import https from 'node:https'; import net from 'node:net'; import fs from 'node:fs'; import path from 'node:path'; import vm from 'node:vm';
+    globalThis.__fixtureVmCreate=()=>{globalThis.__fixtureVM=vm.createContext({});vm.runInContext('globalThis.pending=new Promise(()=>{})',globalThis.__fixtureVM);};
     const deny=()=>{throw Error('External traffic forbidden in fixture');};
     const exists=fs.existsSync,read=fs.readFileSync;
     const productionEnv=p=>path.basename(String(p))==='.env' && !path.resolve(String(p)).startsWith(path.resolve(process.env.HERMES_HOME)+path.sep);

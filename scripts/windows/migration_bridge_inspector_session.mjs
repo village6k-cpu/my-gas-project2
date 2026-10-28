@@ -8,7 +8,7 @@ const sha = raw => createHash('sha256').update(raw).digest('hex');
 const normalize = value => process.platform === 'win32' ? value.replaceAll('\\','/').toLowerCase() : value;
 class Inspector {
   constructor(socket) {
-    this.socket=socket; this.next=0; this.pending=new Map(); this.scripts=[]; this.paused=null;
+    this.socket=socket; this.next=0; this.pending=new Map(); this.scripts=[]; this.paused=null; this.contexts=new Map(); this.contextRevision=0;
     socket.addEventListener('message', event => {
       const message=JSON.parse(event.data);
       if (message.id) {
@@ -18,6 +18,9 @@ class Inspector {
       } else if(message.method==='Debugger.scriptParsed') this.scripts.push(message.params);
       else if(message.method==='Debugger.paused') {this.paused=message.params;this.onPause?.(message.params);}
       else if(message.method==='Debugger.resumed') this.paused=null;
+      else if(message.method==='Runtime.executionContextCreated') {this.contextRevision++;this.contexts.set(message.params.context.id,message.params.context);}
+      else if(message.method==='Runtime.executionContextDestroyed') {this.contextRevision++;this.contexts.delete(message.params.executionContextId);}
+      else if(message.method==='Runtime.executionContextsCleared') {this.contextRevision++;this.contexts.clear();}
     });
     socket.addEventListener('close', () => {
       for(const item of this.pending.values()) {clearTimeout(item.timer);item.reject(Error('Inspector disconnected'));}

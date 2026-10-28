@@ -59,6 +59,27 @@ preparation is historical evidence, never the current operational source.
 
 Ledger: .superpowers/sdd/2026-10-27-studio-migration/progress.md.
 
+## Current bridge accepted-work observations
+
+Disconnected preinstallation event claims can sleep outside every private queue
+tail and later write an audit projection. Private P0 catch-up timers also bypass
+the public producer entry. The current observer includes private P0 active/pending
+state and the shadow runtime's active Set. A separate native Promise census reads
+only PromiseState across all reported execution contexts; a limit, unknown state
+or any context lifecycle revision change makes that census incomplete.
+
+The source-bound HTTP adapter retains a live module reader after the owned nonce
+has completed, gracefully closes the listener under a referenced verification
+hold, and observes accepted work without invoking business operations. Its
+reversible session reopens the same server and port on callback success/failure,
+then releases only its HTTP marker while keeping the producer fence in place.
+An unfinished close or a failure before post-resume cleanup retains the hold and
+requires independent recovery; this adapter supplies no process-stop authority.
+All51 focused cases pass on Windows and the isolated Mac, including a real current
+source disconnected claim and repeated close/reopen. No production source was
+fenced, closed or stopped by these fixtures, and current SourceStop orchestration
+still needs its own complete accepted-work proof and failure recovery.
+
 ## October 28 continuation: current routing and reconstruction
 
 Windows remains the only business consumer. Both public voice paths currently

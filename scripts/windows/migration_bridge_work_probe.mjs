@@ -38,6 +38,14 @@ async function mapSize(client,map) {
   return result;
 }
 
+async function setSize(client,set) {
+  if(set?.subtype!=='set')throw Error('Required private Set unavailable');
+  const count=checked(await client.command('Runtime.callFunctionOn',{objectId:set.objectId,
+    functionDeclaration:"function(){return Object.getOwnPropertyDescriptor(Set.prototype,'size').get.call(this);}",
+    returnByValue:true,throwOnSideEffect:true})).value;
+  if(!Number.isSafeInteger(count)||count<0)throw Error('Invalid private Set size');return count;
+}
+
 async function promiseState(client,fn,name) {
   if(fn?.subtype==='null') return 'absent';
   if(fn?.type!=='function') throw Error('Required coordinator function unavailable');
@@ -53,15 +61,15 @@ async function directPromiseState(client,value,name) {
   return state;
 }
 
-export async function observeBridgePrivateWork(url,expected) {
-  return atOwnedBridgeBoundary(url,expected,async ({client,frame,identity}) => {
-    const refs=checked(await client.command('Debugger.evaluateOnCallFrame',{callFrameId:frame.callFrameId,
-      expression:`(() => {
+export async function captureBridgePrivateWorkReader(client,frame,expected) {
+  return checked(await client.command('Debugger.evaluateOnCallFrame',{callFrameId:frame.callFrameId,
+      expression:`(() => () => {
         if(CONFIG.port!==${expected.port}) throw Error('Request owner mismatch');
         return {http:gatewayHttpHandler, app:gatewayResultApplicationCoordinator?.idle ?? null,
           audit:kakaoAutomationAuditCoordinator?.projectPending ?? null,channel:gatewayChannel?.status ?? null,
           manual:manualSendInFlight,slots:queuedWorkerSlotsByRoom,workerChain,
-          recovery:gatewayFailureNotificationCoordinator?.recover ?? null,
+          recovery:gatewayFailureNotificationCoordinator?.recover ?? null,p0:workOrchestratorP0Runtime.sweep,
+          shadow:workOrchestratorShadowRuntime.settled,
           flags:{workerRunning:state.workerRunning,slackActionPollRunning:state.slackActionPollRunning,
             p0SlackEscalationRunning:state.p0SlackEscalationRunning,recoverySweepRunning:state.recoverySweepRunning,
             tabCleanupRunning:state.tabCleanupRunning,noticeCleanupRunning:state.workOrchestrator.noticeCleanupRunning,
@@ -70,6 +78,13 @@ export async function observeBridgePrivateWork(url,expected) {
             activeWorkerRuns:state.activeWorkerRuns,workerQueueLength:state.workerQueueLength,
             rooms:state.rooms.size,activeWorkerJobIds:state.activeWorkerJobIds.size}};
       })()`,returnByValue:false,throwOnSideEffect:true}));
+}
+
+// The retained function reads live bindings on each call. It does not retain a
+// stale copy of a mutable queue tail, active sweep, workerChain or flag value.
+export async function readCapturedBridgePrivateWork(client,reader,identity,expected) {
+    const refs=checked(await client.command('Runtime.callFunctionOn',{objectId:reader.objectId,
+      functionDeclaration:'function(){return this();}',returnByValue:false,throwOnSideEffect:true}));
     const values=await properties(client,refs);
     const get=name=>values.result.find(p=>p.name===name)?.value;
     const http={};
@@ -80,6 +95,13 @@ export async function observeBridgePrivateWork(url,expected) {
       recoveryTail:await promiseState(client,get('recovery'),'recoveryTail'),
       workerChain:await directPromiseState(client,get('workerChain'),'workerChain')};
     const manual=await mapSize(client,get('manual')), slots=await mapSize(client,get('slots'));
+    const p0Cutover=(await binding(client,get('p0'),'cutoverEnabled')).value;
+    const p0CatchUp=(await binding(client,get('p0'),'catchUpPending')).value;
+    const p0Active=await binding(client,get('p0'),'activeSweep');
+    if(typeof p0Cutover!=='boolean'||typeof p0CatchUp!=='boolean')throw Error('Private P0 state unavailable');
+    const p0={cutover_enabled:p0Cutover,catch_up_pending:p0CatchUp,
+      active_sweep:await directPromiseState(client,p0Active,'activeSweep')};
+    const shadowPending=await setSize(client,await binding(client,get('shadow'),'active'));
     const flagDetails=await properties(client,get('flags'));
     const flags=Object.fromEntries(flagDetails.result.map(p=>[p.name,p.value?.value]));
     const booleanFlags=['workerRunning','slackActionPollRunning','p0SlackEscalationRunning','recoverySweepRunning',
@@ -88,11 +110,16 @@ export async function observeBridgePrivateWork(url,expected) {
     const idle=booleanFlags.every(k=>flags[k]===false) && countFlags.every(k=>flags[k]===0)
       && (flags.workActionPollEnabled===false || (flags.workActionPollEnabled===true && flags.workActionPollRunning===false))
       && Object.values(http).every(n=>n===0) && manual===0 && slots===0
+      && p0.catch_up_pending===false && p0.active_sweep==='absent' && shadowPending===0
       && Object.values(promises).every(s=>s==='absent'||s==='fulfilled');
     const report={schema:'village-bridge-private-work-observation/v1',observed_unix_ms:Date.now(),
       owner:identity,source_sha256:Object.fromEntries(Object.entries(expected.modules).map(([k,v])=>[k,v.sha256])),
-      http_in_flight:http,promises,manual_in_flight:manual,queued_room_slots:slots,flags,idle,
+      http_in_flight:http,promises,p0,shadow_pending:shadowPending,manual_in_flight:manual,queued_room_slots:slots,flags,idle,
       observation_only:true,stop_authorized:false};
     return report;
-  });
+}
+
+export async function observeBridgePrivateWork(url,expected) {
+  return atOwnedBridgeBoundary(url,expected,async ({client,frame,identity}) =>
+    readCapturedBridgePrivateWork(client,await captureBridgePrivateWorkReader(client,frame,expected),identity,expected));
 }

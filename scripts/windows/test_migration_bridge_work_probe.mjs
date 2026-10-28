@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import {once} from 'node:events';
 import {createHash} from 'node:crypto';
 import {fixture} from '../../test/helpers/migration_bridge_fixture.mjs';
+import {atOwnedBridgeBoundary} from './migration_bridge_inspector_session.mjs';
 
 const adapter = await import('./migration_bridge_work_probe.mjs').catch(() => ({}));
 const sha = b => createHash('sha256').update(b).digest('hex');
@@ -28,6 +29,19 @@ test('probe is implemented before use', () => {
   assert.equal(typeof adapter.observeBridgePrivateWork,'function','read-only private-work observer is required');
 });
 
+test('a retained reader observes live flags after the nonce request has completed',async t=>{
+  const {ws,expected}=await fixture(t);
+  await atOwnedBridgeBoundary(ws,expected,async({client,frame,identity})=>({
+    reader:await adapter.captureBridgePrivateWorkReader(client,frame,expected),identity
+  }),{afterResume:async({reader,identity},client)=>{
+    const first=await adapter.readCapturedBridgePrivateWork(client,reader,identity,expected);assert.equal(first.idle,true);
+    const changed=await client.command('Runtime.evaluate',{expression:'globalThis.__fixtureToggleWorker();void 0'});
+    assert.equal(changed.exceptionDetails,undefined);
+    const second=await adapter.readCapturedBridgePrivateWork(client,reader,identity,expected);
+    assert.equal(second.flags.workerRunning,true);assert.equal(second.idle,false);
+  }});
+});
+
 test('real closure maps and promise states are observed without leaking private values or changing source', async t => {
   const {ws,expected} = await fixture(t);
   const result = await adapter.observeBridgePrivateWork(ws,expected);
@@ -40,7 +54,7 @@ test('real closure maps and promise states are observed without leaking private 
   assert.equal((await fetch(`http://127.0.0.1:${expected.port}/health`)).status,200,'debugger always resumes');
 });
 
-for (const busy of ['http','app','audit','channel','manual','worker','recovery','chain','registration']) {
+for (const busy of ['http','app','audit','channel','manual','worker','recovery','chain','registration','p0-active','p0-catchup','shadow']) {
   test(`preexisting ${busy} work blocks idle observation`, async t => {
     const {ws,expected} = await fixture(t,{busy});
     const before=Date.now();
