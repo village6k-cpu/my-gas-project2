@@ -563,6 +563,7 @@ class WindowsAdapter:
         config=json.loads(json.dumps(template))
         config.update(dependencies=dependencies,prior_writers=prior,native_phase_writer=plan['native_phase_writer'],
             previous_controller_sha256=plan['previous_controller_sha256'],
+            prior_recovered_stops=lease.carry_prior_recoveries(template),
             historical_stop_marker=reference(self.control/'SOURCE_STOP_REQUESTED'),
             recovery_authorization={'inputs':reference(self.control/'recovery-inputs.json'),
                 'stop':reference(self.control/'source-stop-receipt.json'),'backends':reference(backends)})

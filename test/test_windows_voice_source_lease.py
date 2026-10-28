@@ -76,6 +76,30 @@ class SourceLeaseTests(unittest.TestCase):
         held=self.m.phase_payload(config,'hold',{},'a'*64)
         self.assertEqual(held['mode'],'hold');self.assertNotIn('effective_owners',held)
 
+    def test_multiple_recovered_attempts_never_ignore_a_new_or_changed_stop(self):
+        old={'path':'C:/fixture/old/SOURCE_STOP_REQUESTED','sha256':'a'*64}
+        current={'path':'C:/fixture/current/SOURCE_STOP_REQUESTED','sha256':'b'*64}
+        prior=[{'marker':old,'authorization':{'recovered':{'path':'bound-proof','sha256':'c'*64}}}]
+        observed={old['path']:old['sha256'],current['path']:current['sha256']}
+        self.m.validate_stop_markers(observed,current,prior=prior)
+        for changed in ({current['path']:current['sha256']},dict(observed,unapproved='d'*64),
+                        {old['path']:'e'*64,current['path']:current['sha256']}):
+            with self.subTest(changed=changed),self.assertRaises(self.m.LeaseHeld):
+                self.m.validate_stop_markers(changed,current,prior=prior)
+        with self.assertRaises(self.m.LeaseHeld):
+            self.m.validate_stop_markers(observed,current,prior=prior+prior)
+
+    def test_only_completed_recovery_can_be_carried_into_the_next_attempt(self):
+        config={'historical_stop_marker':{'path':'old','sha256':'a'*64},
+                'recovery_authorization':{'inputs':{'path':'inputs','sha256':'b'*64}}}
+        with self.assertRaises(self.m.LeaseHeld):self.m.carry_prior_recoveries(config)
+        config['recovery_authorization']['recovered']={'path':'ready','sha256':'c'*64}
+        carried=self.m.carry_prior_recoveries(config)
+        self.assertEqual(carried,[{'marker':config['historical_stop_marker'],
+                                  'authorization':config['recovery_authorization']}])
+        carried[0]['marker']['sha256']='changed'
+        self.assertEqual(config['historical_stop_marker']['sha256'],'a'*64)
+
     def test_local_writer_lock_has_one_owner_and_can_be_released(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'lease.lock'
@@ -114,6 +138,19 @@ class SourceLeaseTests(unittest.TestCase):
                     for i,r in enumerate(('root','worker','voice','bridge','relay'))]})
             cfg['recovery_authorization']={'inputs':inputs,'stop':stop,'backends':backends}
             self.m.validate_private_configuration(cfg,base)
+            prior={'marker':cfg.pop('historical_stop_marker'),'authorization':cfg.pop('recovery_authorization')}
+            cfg['prior_recovered_stops']=[prior]
+            with self.assertRaises(self.m.LeaseHeld):self.m.validate_private_configuration(cfg,base)
+            proof={'schema':'village-source-recovery/v1','stopReceiptSha256':stop['sha256'],
+                'voiceDispatchRestored':True,'destinationEverActivated':False,
+                'profiles':[{'role':r,'pid':i+10,'start_time':10000+i,'state':'running'}
+                    for i,r in enumerate(('root','worker','voice','bridge','relay'))]}
+            prior['authorization']['recovered']=ref('SOURCE-RECOVERED.json',proof)
+            self.m.validate_private_configuration(cfg,base)
+            changed_proof=dict(proof,destinationEverActivated=True)
+            prior['authorization']['recovered']=ref('SOURCE-RECOVERED.json',changed_proof)
+            with self.assertRaises(self.m.LeaseHeld):self.m.validate_private_configuration(cfg,base)
+            prior['authorization']['recovered']=ref('SOURCE-RECOVERED.json',proof)
             changed=copy.deepcopy(template);changed[0]['cwd']='C:/other'
             cfg['source_template']=ref('template.json',{'profiles':changed})
             with self.assertRaises(self.m.LeaseHeld):self.m.validate_private_configuration(cfg,base)

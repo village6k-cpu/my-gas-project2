@@ -8,6 +8,7 @@ alone starts the fifteen-second authority lease.
 """
 import argparse
 import base64
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -85,8 +86,34 @@ def select_current_sources(contracts,observation,*,now):
     return selected
 
 
-def validate_stop_markers(observed,allowed):
-    expected={} if allowed is None else {allowed['path']:allowed['sha256']}
+def recovery_records(config):
+    prior=config.get('prior_recovered_stops',[])
+    if not isinstance(prior,list) or any(not isinstance(r,dict) or set(r)!={'marker','authorization'} for r in prior):
+        raise LeaseHeld('bound_prior_recoveries_required')
+    records=[(r['marker'],r['authorization'],True) for r in prior]
+    if config.get('historical_stop_marker') is not None:
+        records.append((config['historical_stop_marker'],config.get('recovery_authorization'),False))
+    paths=[]
+    for marker,auth,_ in records:
+        if (not isinstance(marker,dict) or set(marker)!={'path','sha256'} or not isinstance(auth,dict)
+                or not isinstance(marker['path'],str) or not isinstance(marker['sha256'],str)):
+            raise LeaseHeld('bound_recovery_authorization_required')
+        paths.append(checks.norm(str(Path(marker['path']).resolve())))
+    if len(paths)!=len(set(paths)):raise LeaseHeld('duplicate_historical_stop_authorization')
+    return records
+
+
+def carry_prior_recoveries(config):
+    records=recovery_records(config)
+    if any(not isinstance(auth.get('recovered'),dict) for _,auth,_ in records):
+        raise LeaseHeld('completed_source_recovery_receipt_required')
+    return deepcopy([{'marker':marker,'authorization':auth} for marker,auth,_ in records])
+
+
+def validate_stop_markers(observed,allowed,*,prior=None):
+    records=recovery_records({'historical_stop_marker':allowed,'recovery_authorization':{},
+                              'prior_recovered_stops':[] if prior is None else prior})
+    expected={marker['path']:marker['sha256'] for marker,_,_ in records}
     if observed!=expected:raise LeaseHeld('source_stop_marker_requires_new_authorization')
 
 
@@ -130,10 +157,7 @@ def validate_private_configuration(config,base):
             or any(not checks.identity(r) for r in config['prior_writers'])
             or not any(checks.same_identity(origin_writer,r) for r in config['prior_writers'])):
         raise LeaseHeld('original_writer_closure_must_be_verified')
-    allowed=config.get('historical_stop_marker')
-    if allowed is not None:
-        auth=config.get('recovery_authorization')
-        if not isinstance(auth,dict):raise LeaseHeld('bound_recovery_authorization_required')
+    for allowed,auth,completed_required in recovery_records(config):
         inputs=read(auth['inputs']);stop=read(auth['stop']);backends=read(auth['backends'])
         if (inputs.get('schema')!='village-current-recovery-inputs/v1'
                 or inputs.get('stop_sha256')!=auth['stop']['sha256']
@@ -149,6 +173,19 @@ def validate_private_configuration(config,base):
                 or not Path(allowed['path']).resolve().is_relative_to(base.resolve())
                 or digest(allowed['path'])!=allowed['sha256']):
             raise LeaseHeld('historical_stop_not_bound_to_actual_backend_recovery')
+        if completed_required or 'recovered' in auth:
+            if not isinstance(auth.get('recovered'),dict):raise LeaseHeld('completed_source_recovery_receipt_required')
+            recovered=read(auth['recovered'])
+            if (Path(auth['recovered']['path']).resolve()!=Path(auth['inputs']['path']).resolve().parent/'SOURCE-RECOVERED.json'
+                    or recovered.get('schema')!='village-source-recovery/v1'
+                    or recovered.get('stopReceiptSha256')!=auth['stop']['sha256']
+                    or recovered.get('voiceDispatchRestored') is not True
+                    or recovered.get('destinationEverActivated') is not False
+                    or sorted(r.get('role') for r in recovered.get('profiles',[]))!=sorted(checks.ROLES)
+                    or any(r.get('state')!='running' for r in recovered['profiles'])
+                    or {r['role']:(r.get('pid'),r.get('start_time')) for r in recovered['profiles']}
+                       !={r['role']:(r['pid'],r['start_time']) for r in backends['profiles']}):
+                raise LeaseHeld('historical_stop_requires_completed_source_recovery')
 
 
 def observe(contracts,root_state):
@@ -239,7 +276,7 @@ def main():
         except psutil.NoSuchProcess:pass
     if args.verify_only:
         markers={str(p.resolve()):digest(p) for p in base.glob('scheduler-fence-v*/SOURCE_STOP_REQUESTED')}
-        validate_stop_markers(markers,config.get('historical_stop_marker'))
+        validate_stop_markers(markers,config.get('historical_stop_marker'),prior=config.get('prior_recovered_stops'))
         if any(Path(p).exists() for p in config['drain_paths']):raise LeaseHeld('source_drain')
         owners=select_current_sources(config['contracts'],observe(config['contracts'],config['root_state']),now=time.time())
         print(json.dumps({'verified':True,'effective_owners':owners,'phase_written':False,'speech_submitted':False}))
@@ -254,7 +291,7 @@ def main():
             try:
                 if (directory/'STOP').exists():raise LeaseHeld('operator_stop')
                 markers={str(p.resolve()):digest(p) for p in base.glob('scheduler-fence-v*/SOURCE_STOP_REQUESTED')}
-                validate_stop_markers(markers,config.get('historical_stop_marker'))
+                validate_stop_markers(markers,config.get('historical_stop_marker'),prior=config.get('prior_recovered_stops'))
                 if any(Path(p).exists() for p in config['drain_paths']):raise LeaseHeld('source_drain')
             except LeaseHeld as exc:terminal=True;reason=str(exc)
             if not terminal:

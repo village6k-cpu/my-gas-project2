@@ -279,3 +279,12 @@ watcher-inventory cases; the fresh review found no material issue in this patch.
 The exhausted attempt and all receipts remain preserved. Another attempt requires
 new bound control files and complete final restoration/promotion/activation
 preparation; the recovered receipt must never be relabeled as source closure.
+
+For a fresh attempt, bounded voice recovery can now retain multiple earlier
+recovered stop markers. Each prior marker requires its exact path and hash plus
+linked stop, recovery-input, backend-owner and completed `SOURCE-RECOVERED`
+receipts. The complete observed marker set must match exactly; a new, missing,
+changed or duplicate marker blocks renewal. The recovery executor carries an
+earlier attempt forward only with that completion proof. Current owner, listener,
+drain, phase-lock and freshness checks remain unchanged. This permits recovery
+without deleting historical attempt evidence or treating it as current closure.
