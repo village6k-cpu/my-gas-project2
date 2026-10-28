@@ -181,3 +181,41 @@ The existing95 cases also pass on native under a new immutable test directory,
 `current-recovery-executor-tests-v7`. Independent review found no Critical or
 Important issue in this offline verification scope. Production cold capture and
 the canonicalization/reconstruction stage remain pending.
+
+## October 28 runtime changes and source voice controller
+
+The source Root, worker, relay and browser processes had exited or restarted
+before this continuation. The old PID-bound voice renewer had stopped with HOLD;
+the intake contained zero requests and zero conflicts. Both public voice routes
+now bypass that temporary intake and reach the existing Windows voice relay:
+the Windows URL uses localhost8788, and the Mac URL uses the verified reverse
+tunnel28788. Other Serve/Funnel settings remain unchanged. Public health and
+authenticated empty-body rejection were checked without sending speech.
+
+The absent worker was restored through its verified existing task. The existing
+Kakao browser profile was reopened; its saved account restored authentication.
+The guarded relay and watcher then reattached. Only the lifecycle configuration's
+ChromePid changed, from8612 to12200, with the original bytes retained privately.
+Existing scheduler manifests that bind this configuration must be regenerated.
+Current jobs are still running; these processes must not be stopped prematurely.
+
+The intake's reviewed forwarder-observation code is now deployed while it is
+off the public routes, retaining the same database, origin epoch and HOLD state.
+`migration_voice_source_lease.py` provides the restart-aware source controller.
+It requires a unique current full process contract, matching Root gateway state,
+independent system-wide listener ownership, healthy source endpoints, pinned
+private proofs and a single local writer. An exact historical stop can be
+ignored only with bound source recovery inputs, stop receipt and five-backend
+recovery evidence. All other migration stop/drain markers end renewal.
+
+`migration_voice_phase.py` supplies the shared native transition lock. Every
+closure, activation and native phase publisher must hold this same lock across
+its checks and publication. Source renewal uses this pinned module, so a
+cooperating native transition cannot be overwritten between a check and write.
+
+Windows targeted tests pass111 with one OS symlink skip; native tests pass112.
+One-pass review found the listener omission and phase-publication race; both
+were reproduced and fixed. A private controller configuration and native lock
+helper are prepared. The actual `--verify-only` source observation hit a health
+timeout and wrote no phase. The controller has not been run, recovery-parent
+integration remains pending, and rollback_ready remains false.
