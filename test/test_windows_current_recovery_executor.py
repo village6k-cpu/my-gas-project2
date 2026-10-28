@@ -121,11 +121,15 @@ class CurrentExecutorTests(unittest.TestCase):
 
     def fence_fixture(self,directory):
         a=WindowsAdapter.__new__(WindowsAdapter);a.control=Path(directory)
-        a.inputs={'scheduler_manifest':{'sha256':'a'*64}}
+        tasks=[{'name':'task-'+str(i),'path':'\\','definitionSha256':str(i).zfill(64)} for i in range(21)]
+        manifest=a.control/'manifest.json';manifest.write_text(json.dumps({'tasks':tasks}))
+        import hashlib
+        pin=hashlib.sha256(manifest.read_bytes()).hexdigest()
+        a.inputs={'scheduler_manifest':{'path':str(manifest),'sha256':pin}}
         state={'active':True,'fenced':True,'nonce':'fixture-nonce',
-               'manifestSha256':'a'*64,'at':datetime.now(timezone.utc).isoformat()}
+               'manifestSha256':pin,'at':datetime.now(timezone.utc).isoformat()}
         (a.control/'BROKER-STATE.json').write_text(json.dumps(state))
-        fence={'valid':True,'all21Disabled':True,'nonce':'fixture-nonce','manifestSha256':'a'*64}
+        fence={'valid':True,'all21Disabled':True,'nonce':'fixture-nonce','manifestSha256':pin}
         (a.control/'SCHEDULER-FENCED.json').write_text(json.dumps(fence))
         return a,state,fence
 
@@ -135,7 +139,8 @@ class CurrentExecutorTests(unittest.TestCase):
             def revoke(_):
                 state['active']=False
                 (a.control/'BROKER-STATE.json').write_text(json.dumps(state))
-                return ''
+                tasks=json.loads(Path(a.inputs['scheduler_manifest']['path']).read_text())['tasks']
+                return json.dumps([dict(row,enabled=False) for row in tasks])
             with patch('migration_source_recovery_executor.powershell',side_effect=revoke):
                 with self.assertRaises(RecoveryError):a.assert_fenced()
 

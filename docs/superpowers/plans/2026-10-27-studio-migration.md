@@ -61,6 +61,16 @@ Ledger: .superpowers/sdd/2026-10-27-studio-migration/progress.md.
 
 ## Abort and final-plan binding
 
+The actual administrator broker has now fenced all21 scheduler owners. Before
+pausing input, live readback exposed an optional XML Enabled node omitted by
+Windows for default true values. The recovery check now reads registered tasks
+through Schedule.Service, hashes definitions with the broker's exact optional
+node removal, and separately requires actual Enabled=false. It validates all21
+names, root folders and hashes against the hash-bound manifest, with fresh broker
+leases before and after.47 focused tests and the actual Windows21-task readback
+pass (1.235 seconds); one independent review found no material issues. This
+read-only correction does not stop a source service or authorize activation.
+
 `migration_pre_stop_abort.py` is restricted to the period before an actual
 `SOURCE_STOP_REQUESTED`. It requires all five original process identities,
 execution contracts and listeners, all sixteen native owners absent, and the

@@ -71,6 +71,22 @@ def read_bound(path, digest):
 def quote(value): return "'"+str(value).replace("'","''")+"'"
 
 
+def validate_scheduler_fence(expected,actual):
+    if (len(expected)!=21 or len(actual)!=21
+            or len({r['name'] for r in expected})!=21
+            or len({r['name'] for r in actual})!=21
+            or {r['name'] for r in expected}!={r['name'] for r in actual}):
+        raise RecoveryError('scheduler_owner_inventory_changed')
+    by_name={r['name']:r for r in expected}
+    for row in actual:
+        old=by_name[row['name']]
+        if (row.get('enabled') is not False or row.get('path')!='\\'
+                or old.get('path')!='\\'
+                or row.get('definitionSha256')!=old.get('definitionSha256')
+                or not re.fullmatch('[a-f0-9]{64}',str(row.get('definitionSha256','')))):
+            raise RecoveryError('scheduler_owner_enabled_or_definition_changed')
+
+
 def powershell(script, *, timeout=30):
     result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',
                            "$ErrorActionPreference='Stop';"+script],
@@ -215,11 +231,21 @@ class WindowsAdapter:
 
     def assert_fenced(self):
         self.assert_fence_lease()
+        ref=self.inputs['scheduler_manifest']
+        manifest=read_bound(ref['path'],ref['sha256'])
+        # Read the same Task Scheduler authority directly. CIM cmdlets make
+        # dozens of separate queries, and Windows may OMIT Enabled=true in XML.
+        # Remove only that optional node, exactly as the reviewed broker hashes
+        # definitions; separately require the actual COM Enabled value false.
         script="$rows=Get-Content -LiteralPath "+quote(self.control/'original-task-states.json')+" -Raw|ConvertFrom-Json;"
-        script+="$rows|ForEach-Object {$t=Get-ScheduledTask -TaskName $_.name -TaskPath $_.path;if($t.Settings.Enabled){throw 'Owner not fenced'};"
-        script+="$saved=Join-Path "+quote(self.control)+" ($_.name.Replace(' ','_')+'.xml');[xml]$a=Get-Content -LiteralPath $saved -Raw;[xml]$b=Export-ScheduledTask -TaskName $_.name -TaskPath $_.path;"
-        script+="$a.Task.Settings.Enabled='false';$b.Task.Settings.Enabled='false';if($a.OuterXml -cne $b.OuterXml){throw 'Owner definition changed'}}"
-        powershell(script)
+        script+="$service=New-Object -ComObject 'Schedule.Service';$service.Connect();$folder=$service.GetFolder('\\');$out=@();"
+        script+="foreach($row in $rows){if($row.path -cne '\\'){throw 'Unexpected task folder'};$t=$folder.GetTask($row.name);[xml]$doc=$t.Xml;"
+        script+="$node=$doc.SelectSingleNode(\"/*[local-name()='Task']/*[local-name()='Settings']/*[local-name()='Enabled']\");"
+        script+="$settings=$doc.SelectSingleNode(\"/*[local-name()='Task']/*[local-name()='Settings']\");if($null -eq $settings){throw 'Missing task settings'};"
+        script+="if($null -ne $node){[void]$settings.RemoveChild($node)};$h=[Security.Cryptography.SHA256]::Create();"
+        script+="try{$pin=[BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($doc.OuterXml))).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()};"
+        script+="$out+=@{name=[string]$row.name;path=[string]$row.path;enabled=[bool]$t.Enabled;definitionSha256=$pin}};$out|ConvertTo-Json -Compress -Depth 4"
+        validate_scheduler_fence(manifest['tasks'],json.loads(powershell(script)))
         self.assert_fence_lease()
 
     def inspect_watcher(self):
