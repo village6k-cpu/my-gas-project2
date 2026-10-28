@@ -98,7 +98,7 @@ test("반출 후에도 품목 편집이 가능하고 완료 카드는 재개방 
   assert.doesNotMatch(lock, /setupDone|takenQty|contractStatus === "반출"/);
 
   const blockers = section(status, "export function returnCompletionBlockers", "export function returnBadge");
-  assert.match(blockers, /if \(t\.returnDone\) return \[\]/);
+  assert.match(blockers, /if \(t\.returnDone\) return packingPending/);
 
   const itemBatch = section(gas, "function toggleItemChecksBatch", "function toggleItemCheck");
   assert.doesNotMatch(itemBatch, /isDashboardTradeCheckoutStarted_|checkoutBaselineStarted_/);

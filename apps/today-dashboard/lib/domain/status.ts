@@ -1,6 +1,7 @@
 // 상태/시간 헬퍼 — 한국어 시간 정렬, 확인필요 집계, 인계 요약
 
 import type { EquipmentItem, ReturnCount, Trade, TabKey, Phase } from "./types";
+import { packingBlockers, packingGroups, packingSourceIds } from "./packing";
 
 function equipmentActualName(item: EquipmentItem): string {
   return String(item.actualName || item.name || "").trim();
@@ -118,10 +119,12 @@ export function rcOf(t: Trade, scheduleId: string): ReturnCount {
  *  진행도 카운트와 화면 줄 수가 항상 일치하도록 한다.
  *  (세트 대표행 = 실제 메인 장비면 포함, 단순 번들 라벨이면 제외) */
 export function aggregateReturns(t: Trade): AggReturn[] {
-  return checkableItems(t, "checkin").map((e) => {
+  const managed = packingSourceIds(t.packing);
+  const legacy = checkableItems(t, "checkin").filter(e => !managed.has(e.scheduleId)).map((e) => {
     const qty = equipmentActualTakenQty(e);
     return { name: equipmentActualName(e), scheduleId: e.scheduleId, category: e.category, expected: qty, onsiteQty: e.onsite ? qty : 0, count: rcOf(t, e.scheduleId) };
   });
+  return [...legacy, ...packingGroups(t.packing).map(g => ({ name: g.name, scheduleId: `packing:${g.id}`, expected: g.expected, onsiteQty: 0, count: g.count }))];
 }
 
 /** 품목을 세트 단위로 묶음 (반출/반납 공통). 세트명 있는 것끼리, 단품은 연속해서 한 묶음. */
@@ -263,12 +266,14 @@ export interface ReturnCompletionBlocker {
  * 정상/파손/분실 중 어느 상태든 합계가 실제 반출 수량과 정확히 같아야 한다.
  */
 export function returnCompletionBlockers(t: Trade): ReturnCompletionBlocker[] {
+  const packingPending = packingBlockers(t.packing);
+  if (t.packing?.phase === "draft") packingPending.push({ scheduleId: "packing:draft", name: "구성품 준비 미확정", expected: 1, accounted: 0, missing: 1, over: 0 });
   // 완료가 확정된 카드는 과거 상세 수량을 다시 해석해 '잘못 닫힌 카드'로 부활시키지 않는다.
-  if (t.returnDone) return [];
+  if (t.returnDone) return packingPending;
   // taken_qty 도입 전 완료된 레거시 거래에는 불변 반출 기준선이 없다. 예약 qty를
   // 사후 기준선처럼 소급 적용하면 과거 완료 카드 수백 건이 확인필요로 부활한다.
   // 기준선이 한 행이라도 시작된 거래(김동민 사고 건 및 향후 반출)만 새 차단을 적용한다.
-  if (!checkableItems(t, "checkin").some((e) => Number(e.takenQty ?? 0) > 0 || e.actualTakenQty != null)) return [];
+  if (!checkableItems(t, "checkin").some((e) => Number(e.takenQty ?? 0) > 0 || e.actualTakenQty != null)) return packingPending;
   return aggregateReturns(t)
     .map((a) => {
       const accounted = a.count.good + a.count.damaged + a.count.lost;
@@ -568,9 +573,11 @@ export function setupProgress(t: Trade, phase: "checkout" | "checkin"): { done: 
     const aggs = aggregateReturns(t);
     return { done: aggs.filter(isReturnDone).length, total: aggs.length };
   }
-  const list = checkableItems(t, "checkout");
-  const done = list.filter((e) => e.checkoutState !== "pending").length;
-  return { done, total: list.length };
+  const managed = packingSourceIds(t.packing);
+  const list = checkableItems(t, "checkout").filter(e => !managed.has(e.scheduleId));
+  const entries = t.packing?.entries ?? [];
+  const done = list.filter((e) => e.checkoutState !== "pending").length + entries.filter(e => e.checked).length;
+  return { done, total: list.length + entries.length };
 }
 
 /** 인계 요약: 체크리스트에서 자동 산출 (자유 텍스트 대체) */

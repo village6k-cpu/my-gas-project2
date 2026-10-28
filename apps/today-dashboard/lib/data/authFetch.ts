@@ -1,4 +1,4 @@
-import { getCachedAccessToken, supabase } from "@/lib/supabase/client";
+import { getCachedAccessToken, supabase } from "../supabase/client";
 
 // 로그인 토큰(Supabase 세션)을 자동 첨부해 /api/* 호출 — 서버 라우트의 인증 게이트 통과용.
 // 토큰은 모듈 캐시(getCachedAccessToken)에서 동기적으로 읽어 매 호출 getSession() await를 없앤다.

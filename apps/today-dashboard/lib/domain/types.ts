@@ -108,6 +108,9 @@ export interface RiskWarning {
 }
 
 export interface Trade {
+  /** 직원이 확정한 동봉 구성품. 예약·가격 원본과 분리해 반납 때까지 보존한다. */
+  packing?: import("./packing").PackingManifest;
+  packingDispatchedAt?: string;
   tradeId: string;
   customerName: string;
   customerPhone: string;

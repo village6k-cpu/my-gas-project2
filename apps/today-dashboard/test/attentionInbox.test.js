@@ -21,6 +21,9 @@ function loadTypeScriptModule(relativePath) {
   const mod = new Module(filename, module);
   mod.filename = filename;
   mod.paths = Module._nodeModulePaths(path.dirname(filename));
+  mod.require = specifier => specifier.startsWith(".")
+    ? loadTypeScriptModule(path.relative(root, path.resolve(path.dirname(filename), `${specifier}.ts`)))
+    : require(specifier);
   mod._compile(compiled, filename);
   return mod.exports;
 }

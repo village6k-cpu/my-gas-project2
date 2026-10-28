@@ -8,6 +8,7 @@ import { SetBox, LooseList } from "./SetBox";
 import { Check } from "./icons";
 import { MemoTag, itemMemoEntries } from "./MemoTag";
 import { equipmentActualName, equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
+import { packingSourceIds } from "@/lib/domain/packing";
 
 function SetSingleList({ children }: { children: ReactNode }) {
   return <ul className="divide-y divide-brand-200/70 overflow-hidden rounded-xl bg-brand-50 shadow-card ring-1 ring-brand-200">{children}</ul>;
@@ -15,8 +16,9 @@ function SetSingleList({ children }: { children: ReactNode }) {
 
 // 반납도 반출과 동일하게 세트별 구획(세트명 헤더 + 구성품). 줄(scheduleId) 단위로 회수 체크.
 export function ReturnChecklist({ trade }: { trade: Trade }) {
-  const booked = trade.equipments.filter((e) => !e.onsite && e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0);
-  const onsite = trade.equipments.filter((e) => e.onsite && e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0);
+  const managed = packingSourceIds(trade.packing);
+  const booked = trade.equipments.filter((e) => !managed.has(e.scheduleId) && !e.onsite && e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0);
+  const onsite = trade.equipments.filter((e) => !managed.has(e.scheduleId) && e.onsite && e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0);
 
   return (
     <div className="mt-1.5">

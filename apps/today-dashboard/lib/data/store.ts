@@ -16,6 +16,8 @@ import type {
   Trade,
 } from "../domain/types";
 import { equipmentActualTakenQty } from "../domain/equipmentActual";
+import { packingBlockers, type PackingCommand } from "../domain/packing";
+import { authFetch } from "./authFetch";
 import { buildSeed } from "./seed";
 import { isSupabase, supabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
@@ -2349,6 +2351,24 @@ export async function cancelTrade(tradeId: string): Promise<{ ok: true; warning?
   }
 }
 
+export async function savePacking(tradeId: string, version: number, command: PackingCommand): Promise<void> {
+  if (hasTradePending(tradeId)) throw new Error("이 거래의 저장을 마친 뒤 다시 시도해주세요");
+  const saveId = beginTradeTransition(tradeId);
+  try {
+    const response = await authFetch("/api/packing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tradeId, version, command }), signal: AbortSignal.timeout(20_000) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "구성품 저장 실패");
+    mutateTrade(tradeId, t => ({ ...t, packing: result.packing }), false);
+    finishTradeSave(tradeId, saveId, "saved", "구성품 저장됨");
+  } catch (error) {
+    // 응답 유실/다른 직원의 수정 후에는 서버 사실을 다시 받아 중복 추가를 막는다.
+    const fresh = await fetchTradesByIds([tradeId]).catch(() => []);
+    if (fresh.length) set({ trades: mergeTradeChanges(state.trades, fresh) });
+    finishTradeSave(tradeId, saveId, "error", "구성품 저장 상태를 확인해주세요");
+    throw error;
+  }
+}
+
 export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
   if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
     const error = pendingRemoveEquipmentTrades.has(tradeId)
@@ -2359,6 +2379,7 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
   const current = state.trades.find((t) => t.tradeId === tradeId);
   if (!current) return { ok: false, error: "거래를 찾을 수 없습니다" };
   const done = !current.setupDone;
+  if (done && current.packing?.phase === "draft") return { ok: false, error: "구성품 준비를 먼저 확정해주세요" };
   if (isSupabase && !writeBackEnabled) {
     const error = `반출 상태 변경 실패: ${writeBackDisabledReason}`;
     set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
@@ -2405,6 +2426,8 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
 
   const on = !current.returnDone;
   const force = !!opts?.force;
+  const packingPending = packingBlockers(current.packing);
+  if (on && (packingPending.length || current.packing?.phase === "draft")) return { ok: false, blockers: packingPending, error: "구성품 수량을 확인한 뒤 반납을 완료해주세요" };
   const blockers = on && !force ? returnCompletionBlockers(current) : [];
   if (blockers.length > 0) {
     // 강제 차단하지 않는다 — 호출부(카드)가 미확인 내역을 보여주고 작업자 확인 후
