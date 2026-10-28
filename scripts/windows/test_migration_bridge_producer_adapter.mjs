@@ -4,6 +4,27 @@ import {fixture} from '../../test/helpers/migration_bridge_fixture.mjs';
 import {observeBridgePrivateWork} from './migration_bridge_work_probe.mjs';
 const adapter=await import('./migration_bridge_producer_adapter.mjs').catch(()=>({}));
 
+test('an aborted source fence can be installed again on the same unchanged process',async t=>{
+  const {ws,expected}=await fixture(t,{actual:true,transport:'gateway'});
+  for(const token of ['fixture-first-attempt','fixture-second-attempt']) {
+    const control=await adapter.installCurrentBridgeFenceOnInspectedSource(ws,expected,token);
+    await control.fence();assert.equal((await control.resume()).mode,'released');
+  }
+  assert.equal((await fetch(`http://127.0.0.1:${expected.port}/health`)).status,200);
+});
+
+test('reconnecting after restoration but before marker disposal finishes the abort without replaying resume',async t=>{
+  const {ws,expected}=await fixture(t,{actual:true,transport:'gateway'});
+  const control=await adapter.installCurrentBridgeFenceOnInspectedSource(ws,expected,'fixture-interrupted-owner');await control.fence();
+  const Original=globalThis.WebSocket;let connections=0;
+  globalThis.WebSocket=class extends Original {constructor(...args){if(++connections===2)throw Error('SYNTHETIC POST RESTORE DISCONNECT');super(...args);}};
+  try {await assert.rejects(control.resume(),/SYNTHETIC POST RESTORE DISCONNECT/);}finally{globalThis.WebSocket=Original;}
+  const reconnected=await adapter.connectCurrentBridgeProducerFence(ws,expected,'fixture-interrupted-owner');
+  assert.equal((await reconnected.snapshot()).mode,'released');
+  assert.equal((await reconnected.resume()).mode,'released');
+  const next=await adapter.installCurrentBridgeFenceOnInspectedSource(ws,expected,'fixture-next-owner');await next.fence();await next.resume();
+});
+
 test('CURRENT isolated gateway source can fence every producer and restore exact normal serving',async t=>{
   assert.equal(typeof adapter.installCurrentBridgeFenceOnInspectedSource,'function','source-bound producer adapter required');
   const {ws,expected}=await fixture(t,{actual:true,transport:'gateway'});

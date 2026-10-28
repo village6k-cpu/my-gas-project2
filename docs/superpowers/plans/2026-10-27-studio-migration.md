@@ -94,6 +94,24 @@ and21 current task definitions. Read-only validation passes with20 tasks enabled
 the version2 control directory remains absent. No administrator broker was
 launched, task state changed, or source closure authorized by this preparation.
 
+The bridge stop participant now publishes fresh idle observations, requires a
+matching parent intent/controller/observation and a persisted acknowledgement,
+then records only independently observed bridge process absence. It never kills
+a process or grants five-service SourceStop authority. Protocol changes and
+unexpected exits remain failures even when the process disappears. Aborts keep
+the producer fence for parent recovery; an interrupted restore can reconnect and
+finish marker disposal without replaying startup work. Native65 cases and the
+changed30 Windows cases pass. Operational five-service orchestration is required
+before using this participant against the production source.
+
+A disposable clone of the October27 live GBrain diagnostic opens with the current
+native engine and WAL repair disabled, and reads61 public tables. All1,414 raw
+file hashes remain unchanged. This is a rehearsal; the final closed current
+GBrain still requires logical validation. The isolated native Chrome had no tabs;
+one owned background channel tab is now open. A read-only authenticated chat-list
+query returns100 items and the five newest list entries match the rendered DOM.
+No native watcher or business consumer was enabled by that check.
+
 ## October 28 continuation: current routing and reconstruction
 
 Windows remains the only business consumer. Both public voice paths currently

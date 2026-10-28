@@ -68,7 +68,9 @@ function lookup(bound) {
 
 function proxy(url,expected,token,bound) {
   const invoke=async method=>atOwnedBridgeBoundary(url,expected,async({client,frame})=>{
-    const expression=`${lookup(bound)}.${method}(${JSON.stringify(token)})`;
+    const expression=method==='resume'
+      ? `(() => {const c=${lookup(bound)};return c.snapshot().mode==='released'?Promise.resolve(c.snapshot()):c.resume(${JSON.stringify(token)});})()`
+      : `${lookup(bound)}.${method}(${JSON.stringify(token)})`;
     const result=checked(await client.command('Debugger.evaluateOnCallFrame',{
       callFrameId:frame.callFrameId,expression,returnByValue:method!=='resume'}));
     return method==='resume'?result:result.value;
@@ -83,6 +85,9 @@ function proxy(url,expected,token,bound) {
     const result=await invoke('resume');
     const timers=await observeCurrentBridgeRuntimeTimers(url,expected);
     if(JSON.stringify(timers)!==JSON.stringify(result.runtime_previous_running))throw Error('Original runtime timer state not restored');
+    await atOwnedBridgeBoundary(url,expected,async({client,frame})=>checked(await client.command('Debugger.evaluateOnCallFrame',{
+      callFrameId:frame.callFrameId,expression:`(() => {const c=${lookup(bound)};
+        const restored=c.dispose(${JSON.stringify(token)});delete globalThis[${JSON.stringify(key)}];return restored;})()`,returnByValue:true})).value);
     return result;
   },snapshot:()=>invoke('snapshot')};
 }

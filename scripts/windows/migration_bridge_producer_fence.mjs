@@ -83,6 +83,15 @@ export function installCurrentBridgeProducerFence({server,token,entries,tracked,
       runtimes.forEach((r,i)=>{if(r.timer)r.timer._onTimeout=runtimeCallbacks[i];});
       delete server[key];
       return snapshot();
+    },
+    dispose(value) {
+      assertOwner(value);
+      if(mode!=='released'||Object.hasOwn(server,key)||server.listeners('request').length!==1
+          ||server.listeners('request')[0]!==original||entries.some((r,i)=>r.get()!==producerOriginals[i])
+          ||tracked.some((r,i)=>r.get()!==trackedOriginals[i])
+          ||runtimes.some((r,i)=>r.timer!==null && (r.timer._onTimeout!==runtimeCallbacks[i]
+            ||r.timer._destroyed!==false||r.timer._repeat!==runtimeRepeats[i])))throw Error('Original source bindings not restored');
+      mode='disposed';return {disposed:true,original_bindings_restored:true,stop_authorized:false};
     }
   };
   try {
