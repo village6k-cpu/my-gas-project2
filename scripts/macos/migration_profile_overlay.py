@@ -67,7 +67,7 @@ def build(raw,native,output,*,overrides,controls,canonical,native_only,excluded,
         if any(name in (db+'-wal',db+'-shm') for db in canonical):continue
         with p.open('rb') as f:header=f.read(16)
         empty_journal=False
-        if (name.endswith(('.db-journal','.sqlite-journal')) or any(name==db+'-journal' for db in canonical)):
+        if (name.endswith(('.db-journal','.sqlite-journal','.sqlite3-journal')) or any(name==db+'-journal' for db in canonical)):
             parent=name[:-len('-journal')];database=files.get(parent)
             if p.stat().st_size!=0 or parent not in canonical or database is None:
                 raise ValueError('rollback_journal_requires_adjudication')

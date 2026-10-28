@@ -106,9 +106,10 @@ class ProfileOverlayTests(unittest.TestCase):
         self.assertFalse(self.out.exists());self.assertEqual(journal.read_bytes(),b'\0')
 
     def test_empty_journal_without_canonical_parent_still_requires_adjudication(self):
-        (self.raw/'orphan.db-journal').touch()
-        with self.assertRaisesRegex(ValueError,'journal'):self.build()
-        self.assertFalse(self.out.exists())
+        for name in ('orphan.db-journal','orphan.sqlite-journal','orphan.sqlite3-journal'):
+            p=self.raw/name;p.touch()
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'journal'):self.build()
+            self.assertFalse(self.out.exists());p.unlink()
 
     def test_empty_journal_cannot_validate_a_non_sqlite_raw_parent(self):
         journal=self.canonical_fixture();journal.touch();(self.raw/'state.sqlite3').write_bytes(b'not sqlite')
