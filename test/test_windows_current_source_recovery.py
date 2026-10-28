@@ -266,6 +266,16 @@ class SourceRecoveryTests(unittest.TestCase):
         self.snapshot['processes']=[helper]
         self.assertFalse(self.plan()['ready'])
 
+    def test_cross_profile_service_script_is_not_helper_when_exact_service_is_absent(self):
+        root=self.candidate('root',50)
+        bridge=next(r for r in self.intent['profiles'] if r['role']=='bridge');bridge['home']=root['home']
+        helper=dict(bridge,pid=70,started=996,argv=bridge['argv']+['--changed-mode'],
+                    ancestors=[{'pid':root['pid'],'started':root['started']}])
+        self.snapshot['processes']=[root,helper]
+        self.snapshot['listeners']=[{'port':root['ports'][0],'pid':root['pid']}]
+        result=self.plan();self.assertFalse(result['ready'])
+        self.assertIn('bridge:near_candidate_has_wrong_execution_contract',result['errors'])
+
     def test_changed_gateway_entrypoint_arguments_are_rejected_even_in_new_owner_lineage(self):
         owner=self.candidate('root')
         child=self.candidate('root',pid=51);child['started']=996

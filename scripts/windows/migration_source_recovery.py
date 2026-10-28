@@ -144,14 +144,14 @@ def owned_descendant(actual, owner):
     return False
 
 
-def distinct_owned_helper(actual, verified_owners):
+def distinct_owned_helper(actual, verified_owners, service_contracts):
     """A classified different entrypoint in an exact live profile's lineage.
 
     This only distinguishes a tool child from a competing service candidate.
     It never exempts the child from accepted-work or writer-closure checks.
     """
     return (any(owned_descendant(actual,owner) for owner in verified_owners)
-            and all(not same_entrypoint(actual,owner) for owner in verified_owners))
+            and all(not same_entrypoint(actual,owner) for owner in service_contracts))
 
 
 def confirmed_label_absence(domain_verified, code, diagnostic, label, uid):
@@ -243,7 +243,7 @@ def build_plan(intent, receipt, intent_sha, snapshot, remote, *, now, activated)
             for proc in processes:
                 near = (proc.get('argv') == old['argv'] or
                         (norm(proc.get('exe')) == norm(old['exe']) and proc.get('home') == old['home']
-                         and not distinct_owned_helper(proc,verified_owners)
+                         and not distinct_owned_helper(proc,verified_owners,expected)
                          and (same_entrypoint(proc, old) or not owned_descendant(proc, selected))
                          and not any(same_contract(proc, other) for other in expected)))
                 if near and not same_contract(proc, old):

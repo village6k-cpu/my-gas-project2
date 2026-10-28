@@ -41,7 +41,7 @@ def validate_original_owners(intent,source,remote,*,now,allow_closed_bridge=Fals
             near=(p.get('argv')==old['argv'] or (checks.norm(p.get('exe'))==checks.norm(old['exe'])
                 and p.get('home')==old['home'] and (checks.same_entrypoint(p,old)
                     or not checks.owned_descendant(p,old))
-                and not checks.distinct_owned_helper(p,verified_owners)
+                and not checks.distinct_owned_helper(p,verified_owners,intent['profiles'])
                 and not any(checks.same_contract(p,r) for r in intent['profiles'])))
             if near and not checks.same_contract(p,old):raise ValueError('near_candidate_execution_contract_changed')
         for port in old['ports']:
