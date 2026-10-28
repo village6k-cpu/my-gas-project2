@@ -17,8 +17,8 @@ function SetSingleList({ children }: { children: ReactNode }) {
 // 반납도 반출과 동일하게 세트별 구획(세트명 헤더 + 구성품). 줄(scheduleId) 단위로 회수 체크.
 export function ReturnChecklist({ trade }: { trade: Trade }) {
   const managed = packingSourceIds(trade.packing);
-  const booked = trade.equipments.filter((e) => !managed.has(e.scheduleId) && !e.onsite && e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0);
-  const onsite = trade.equipments.filter((e) => !managed.has(e.scheduleId) && e.onsite && e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0);
+  const booked = trade.equipments.filter((e) => !e.onsite && e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0 && !managed.has(e.scheduleId));
+  const onsite = trade.equipments.filter((e) => e.onsite && e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0 && !managed.has(e.scheduleId));
 
   return (
     <div className="mt-1.5">
