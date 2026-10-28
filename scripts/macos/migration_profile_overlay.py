@@ -66,11 +66,19 @@ def build(raw,native,output,*,overrides,controls,canonical,native_only,excluded,
         if name in OWNER_FILES or name in omitted or name=='gateway-locks' or name.startswith('gateway-locks/'):continue
         if any(name in (db+'-wal',db+'-shm') for db in canonical):continue
         with p.open('rb') as f:header=f.read(16)
+        empty_journal=False
         if (name.endswith(('.db-journal','.sqlite-journal')) or any(name==db+'-journal' for db in canonical)):
-            raise ValueError('rollback_journal_requires_adjudication')
+            parent=name[:-len('-journal')];database=files.get(parent)
+            if p.stat().st_size!=0 or parent not in canonical or database is None:
+                raise ValueError('rollback_journal_requires_adjudication')
+            with database.open('rb') as f:signature=f.read(16)
+            if signature!=b'SQLite format 3\0':raise ValueError('rollback_journal_requires_adjudication')
+            # A zero-byte journal contains no rollback records. Retain the
+            # exact empty file, paired only with a verified canonical DB.
+            empty_journal=True
         if (header==b'SQLite format 3\0' or name.endswith(('.db','.sqlite'))) and name not in canonical:
             raise ValueError('unclassified_sqlite_database')
-        selected[name]=p;policies[name]='latest_raw'
+        selected[name]=p;policies[name]='verified_empty_sqlite_journal' if empty_journal else 'latest_raw'
     for name,binding in overrides.items():
         p=native/name
         if (name not in selected or digest(files[name])!=binding['source_sha256'] or p.is_symlink()

@@ -85,6 +85,36 @@ class ProfileOverlayTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.build()
         self.assertFalse(self.out.exists())
 
+    def canonical_fixture(self):
+        raw=self.raw/'state.sqlite3';db=sqlite3.connect(raw)
+        try:db.executescript('CREATE TABLE facts(value TEXT);INSERT INTO facts VALUES(\'committed\');');db.commit()
+        finally:db.close()
+        canonical=self.root/'canonical.sqlite3';canonical.write_bytes(raw.read_bytes())
+        self.kwargs['canonical']={'state.sqlite3':{'path':str(canonical),'sha256':self.pin(canonical)}}
+        return self.raw/'state.sqlite3-journal'
+
+    def test_empty_journal_with_canonical_parent_is_preserved_in_both_copies(self):
+        journal=self.canonical_fixture();journal.touch();before=self.pin(journal)
+        result=self.build()
+        self.assertEqual((self.out/journal.name).read_bytes(),b'')
+        self.assertEqual(self.pin(journal),before)
+        self.assertEqual(result['policies'][journal.name],'verified_empty_sqlite_journal')
+
+    def test_nonempty_journal_is_rejected_even_with_canonical_parent(self):
+        journal=self.canonical_fixture();journal.write_bytes(b'\0')
+        with self.assertRaisesRegex(ValueError,'journal'):self.build()
+        self.assertFalse(self.out.exists());self.assertEqual(journal.read_bytes(),b'\0')
+
+    def test_empty_journal_without_canonical_parent_still_requires_adjudication(self):
+        (self.raw/'orphan.db-journal').touch()
+        with self.assertRaisesRegex(ValueError,'journal'):self.build()
+        self.assertFalse(self.out.exists())
+
+    def test_empty_journal_cannot_validate_a_non_sqlite_raw_parent(self):
+        journal=self.canonical_fixture();journal.touch();(self.raw/'state.sqlite3').write_bytes(b'not sqlite')
+        with self.assertRaisesRegex(ValueError,'journal'):self.build()
+        self.assertFalse(self.out.exists())
+
     def test_real_hot_sqlite3_journal_cannot_roll_back_canonical_data(self):
         raw=self.raw/'state.sqlite3'
         db=sqlite3.connect(raw)
