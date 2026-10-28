@@ -167,7 +167,13 @@ def build_plan(intent, receipt, intent_sha, snapshot, remote, *, now, activated)
                 or not number(receipt.get('stopped_at')) or not 0 < receipt['stopped_at'] <= now):
             raise ValueError('intent_bound_stop_receipt_required')
         if not any(x.get('status') == 'stopped' for x in rows):
-            raise ValueError('no_source_stop_recorded')
+            # An explicit failed-attempt reconciliation can prove all five old
+            # trees still intact. A bare all-unaffected receipt remains invalid.
+            pin=receipt.get('reconciled_from_sha256')
+            if (receipt.get('stop_attempt_only') is not True or not isinstance(pin,str)
+                    or len(pin)!=64 or any(c not in '0123456789abcdef' for c in pin)
+                    or not all(x.get('status')=='unaffected' for x in rows)):
+                raise ValueError('no_source_stop_recorded')
         processes = snapshot['processes']
         if any(not identity(p) for p in processes) or len({p['pid'] for p in processes}) != len(processes):
             raise ValueError('invalid_process_observation')

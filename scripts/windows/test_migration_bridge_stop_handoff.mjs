@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import http from 'node:http';
 import {fixture} from '../../test/helpers/migration_bridge_fixture.mjs';
-import {connectCurrentBridgeProducerFence} from './migration_bridge_producer_adapter.mjs';
+import {connectCurrentBridgeProducerFence,installCurrentBridgeFenceOnInspectedSource} from './migration_bridge_producer_adapter.mjs';
 const handoff=await import('./migration_bridge_stop_handoff.mjs').catch(()=>({}));
 const sha=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const intent='a'.repeat(64),id='SYNTHETIC-CONTROLLER';
@@ -18,6 +18,14 @@ function options(f,kind){
       async readCommand(){return command;},async invalidateReady(){command=null;},
       async acknowledgeStop(ack){if(kind==='stop'&&!scheduled){scheduled=true;setTimeout(()=>process.kill(f.expected.pid,'SIGKILL'),30);}return {sha256:sha(ack)};}}};
 }
+
+test('the parent can fence producers, drain accepted workers, then connect the same fence for HTTP closure',async t=>{
+  const f=await fixture(t,{actual:true,transport:'gateway'}),config=options(f,'abort');
+  const producer=await installCurrentBridgeFenceOnInspectedSource(f.ws,f.expected,config.token);
+  await producer.fence();
+  const report=await handoff.holdCurrentBridgeForStop({...config,producerMode:'connect'});
+  assert.equal(report.aborted,true);await producer.resume();
+});
 
 test('a closed-source abort restores HTTP and retains the parent-owned producer fence',async t=>{
   assert.equal(typeof handoff.holdCurrentBridgeForStop,'function','parent stop handoff participant required');

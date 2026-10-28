@@ -2,7 +2,7 @@
 // or authorizes a complete source stop. Parent owns OS birth checks and all other
 // gateways, voice, Slack, watcher, scheduled writers and recovery obligations.
 import {createHash} from 'node:crypto';
-import {installCurrentBridgeFenceOnInspectedSource} from './migration_bridge_producer_adapter.mjs';
+import {connectCurrentBridgeProducerFence,installCurrentBridgeFenceOnInspectedSource} from './migration_bridge_producer_adapter.mjs';
 import {withCurrentBridgeHttpClosure} from './migration_bridge_http_adapter.mjs';
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -27,14 +27,19 @@ function settled(report,expected,now) {
 }
 
 export async function holdCurrentBridgeForStop({url,expected,token,intentSha256,controllerId,io,
-  maxWaitMs=300000,pollMs=250,closeWaitMs=60000}) {
+  maxWaitMs=300000,pollMs=250,closeWaitMs=60000,producerMode='install'}) {
   if(!hash(intentSha256)||typeof controllerId!=='string'||controllerId.length<8
       ||!['publish','readCommand','sourceAlive','invalidateReady','acknowledgeStop'].every(k=>typeof io?.[k]==='function')
       ||!Number.isSafeInteger(maxWaitMs)||maxWaitMs<1||maxWaitMs>3600000
-      ||!Number.isSafeInteger(pollMs)||pollMs<10||pollMs>5000)throw Error('Invalid bridge handoff contract');
+      ||!Number.isSafeInteger(pollMs)||pollMs<10||pollMs>5000
+      ||!['install','connect'].includes(producerMode))throw Error('Invalid bridge handoff contract');
   if(await io.sourceAlive()!==true)throw Error('Expected source is not alive');
-  const producer=await installCurrentBridgeFenceOnInspectedSource(url,expected,token);
-  await producer.fence();
+  const producer=await (producerMode==='connect'?connectCurrentBridgeProducerFence:installCurrentBridgeFenceOnInspectedSource)(url,expected,token);
+  if(producerMode==='install')await producer.fence();
+  else {
+    const existing=await producer.snapshot();
+    if(existing.mode!=='fenced'||existing.producers_owned!==true)throw Error('Existing parent producer fence is not engaged');
+  }
   const deadline=Date.now()+maxWaitMs,recent=new Map();let acceptedStop=null,expectedExitObserved=false,participantError=null;
   try {
     return await withCurrentBridgeHttpClosure(url,expected,token,async control=>{

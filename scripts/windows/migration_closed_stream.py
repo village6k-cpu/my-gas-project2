@@ -14,7 +14,7 @@ import time
 import migration_closed_capture as closed
 
 
-def stream(roots, destination, control, gate, trees, transport, ssh):
+def stream(roots, destination, control, gate, trees, transport, ssh, *, baseline_catalog=None):
     control=Path(control).resolve()
     local=control/'closed-stream-v1'
     closed.validate_roots(roots,local)
@@ -23,6 +23,8 @@ def stream(roots, destination, control, gate, trees, transport, ssh):
         raise ValueError('unexpected_inactive_snapshot_destination')
     if getattr(transport,'SUPPORTS_EXACT_RELATIVE_EXCLUSIONS',False) is not True:
         raise ValueError('exact_exclusion_transport_required')
+    if baseline_catalog is not None and getattr(transport,'SUPPORTS_WINDOWS_BYTE_CACHE',False) is not True:
+        raise ValueError('explicit_byte_cache_transport_required')
     if shutil.disk_usage(control).free < closed.MARGIN:
         raise ValueError('insufficient_metadata_and_log_reserve')
     before=closed.check_gate(gate())
@@ -41,7 +43,9 @@ def stream(roots, destination, control, gate, trees, transport, ssh):
     closed.check_gate(gate(),before)
     local.mkdir(mode=0o700)
     config=local/'transport.json'
-    closed.save_new(config,{'ssh':ssh,'destination':destination,'roots':transfer_roots})
+    transport_config={'ssh':ssh,'destination':destination,'roots':transfer_roots}
+    if baseline_catalog is not None:transport_config['baseline_catalog']=baseline_catalog
+    closed.save_new(config,transport_config)
     report={'schema':'village-current-closed-stream/v1','before':before,
             'destination':destination,'started_unix':time.time(),
             'payload_transferred':False,'cold_capture_verified':False,

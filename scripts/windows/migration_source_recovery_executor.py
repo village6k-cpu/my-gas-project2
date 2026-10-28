@@ -34,6 +34,7 @@ def execute_recovery(adapter, *, resume_watcher=False):
     plan = adapter.gate()
     if any(x['method'] not in reusable for x in plan['steps'] if x['role'] in ('bridge','relay')):
         adapter.start_guarded_pair()
+    adapter.restore_preserved_bridge_producers()
     adapter.wait_guarded_pair()
     for role in ('root','voice'):
         plan = adapter.gate()
@@ -81,6 +82,23 @@ def powershell(script, *, timeout=30):
 def write_new(path, value):
     with Path(path).open('x',encoding='utf-8') as f:
         json.dump(value,f,separators=(',',':'));f.flush();os.fsync(f.fileno())
+
+
+def validate_producer_dependencies(config,directory):
+    directory=Path(directory).resolve()
+    names={'migration_bridge_stop_cli.mjs','migration_bridge_stop_handoff.mjs',
+        'migration_bridge_inspector_session.mjs','migration_bridge_producer_adapter.mjs',
+        'migration_bridge_producer_fence.mjs','migration_bridge_http_adapter.mjs',
+        'migration_bridge_http_closure.mjs','migration_bridge_work_probe.mjs','migration_bridge_promise_census.mjs'}
+    refs=config.get('dependencies',[])
+    if (not directory.is_relative_to(checks.BASE.resolve()) or len(refs)!=len(names)
+            or {Path(r['path']).name for r in refs}!=names):
+        raise RecoveryError('producer_dependency_inventory_changed')
+    for row in refs:
+        original=Path(row['path']).absolute();p=original.resolve()
+        if (p.parent!=directory or checks.norm(str(original))!=checks.norm(str(p))
+                or sha(p.read_bytes())!=row['sha256']):
+            raise RecoveryError('producer_dependency_changed_before_import')
 
 
 def validate_voice_ingress(evidence, expected, intake):
@@ -354,6 +372,61 @@ class WindowsAdapter:
     def wait_guarded_pair(self):
         self.wait_owner('bridge');self.wait_owner('relay')
         self.guard_healthy()
+
+    def restore_preserved_bridge_producers(self):
+        plan=self.gate()
+        bridge=next(x for x in plan['steps'] if x['role']=='bridge')
+        if bridge['method']!='preserve_unaffected':return {'required':False}
+        if (self.receipt.get('stop_attempt_only') is not True
+                or any(r['status']!='unaffected' for r in self.receipt['profiles'])
+                or any(r['method']!='preserve_unaffected' for r in plan['steps'])):
+            raise RecoveryError('all_original_owners_required_for_producer_abort')
+        binding=self.inputs.get('bridge_producer_recovery')
+        if not isinstance(binding,dict):raise RecoveryError('bound_producer_recovery_required')
+        config_path,config=self.reference(binding)
+        if (config.get('schema')!='village-current-bridge-stop-participant/v1'
+                or config.get('intent')!=self.inputs['intent']):
+            raise RecoveryError('producer_recovery_intent_changed')
+        validate_producer_dependencies(config,config_path.parent)
+        node=self.inputs.get('producer_node',{})
+        expected=Path('C:/Users/ssper/AppData/Local/Microsoft/WinGet/Packages/OpenJS.NodeJS.LTS_Microsoft.Winget.Source_8wekyb3d8bbwe/node-v24.18.0-win-x64/node.exe')
+        if (Path(node.get('path','')).resolve()!=expected.resolve()
+                or sha(expected.read_bytes())!=node.get('sha256')):
+            raise RecoveryError('producer_recovery_node_changed')
+        # Every original backend is intact; remove only our two migration
+        # drains before enabling the original producer functions and timers.
+        for role in ('worker','root'):self.prepare_profile(role)
+        for role in ('worker','root','bridge','relay','voice'):self.wait_owner(role)
+        self.gate()
+        journal=self.control/'preserved-producer-resume-request.json'
+        completed=self.control/'preserved-producer-resumed.json'
+        request={'intent_sha256':self.inputs['intent']['sha256'],'participant_sha256':binding['sha256'],
+                 'stop_sha256':self.stop_sha}
+        if completed.exists():
+            row=json.loads(completed.read_text())
+            if row.get('request')!=request or row.get('original_bindings_restored') is not True:
+                raise RecoveryError('producer_resume_receipt_changed')
+            return row
+        if journal.exists():raise RecoveryError('uncertain_producer_resume_requires_inspection')
+        write_new(journal,request)
+        validate_producer_dependencies(config,config_path.parent)
+        cli=(config_path.parent/'migration_bridge_stop_cli.mjs').as_uri()
+        module=(config_path.parent/'migration_bridge_producer_adapter.mjs').as_uri()
+        code=("const {loadParticipantConfiguration}=await import("+json.dumps(cli)+");"
+              "const loaded=await loadParticipantConfiguration(process.argv[1],process.argv[2]);"
+              "const {connectCurrentBridgeProducerFence}=await import("+json.dumps(module)+");"
+              "const p=await connectCurrentBridgeProducerFence(loaded.url,loaded.expected,loaded.config.token);"
+              "const before=await p.snapshot();if(before.mode!=='fenced'||before.producers_owned!==true)throw Error('Owned producer fence required');"
+              "await p.resume();console.log(JSON.stringify({original_bindings_restored:true}));")
+        result=subprocess.run([str(expected),'--input-type=module','-e',code,str(config_path),binding['sha256']],
+                              capture_output=True,text=True,timeout=45)
+        if result.returncode:raise RecoveryError('owned_producer_resume_failed_preserve_fences')
+        if json.loads(result.stdout).get('original_bindings_restored') is not True:
+            raise RecoveryError('producer_resume_readback_missing')
+        self.gate()
+        row={'request':request,'original_bindings_restored':True,'at':time.time()}
+        write_new(completed,row)
+        return row
 
     def guard_healthy(self):
         self.reload()

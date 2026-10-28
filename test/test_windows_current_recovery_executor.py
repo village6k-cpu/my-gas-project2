@@ -31,6 +31,7 @@ class Adapter:
         if 'worker' not in self.live:raise RecoveryError('worker must precede guarded health')
         self.events.append('guarded');self.live.update(('bridge','relay'))
     def wait_guarded_pair(self):self.events.append('guarded-ready')
+    def restore_preserved_bridge_producers(self):self.events.append('preserved-producers')
     def verify_all(self):
         self.events.append('all-ready')
         if self.live != {'root','worker','bridge','relay','voice'}:raise RecoveryError('incomplete')
@@ -43,6 +44,47 @@ class Adapter:
 
 
 class CurrentExecutorTests(unittest.TestCase):
+    def test_preserved_producers_are_recovered_before_guard_readiness_and_watcher(self):
+        a=Adapter();execute_recovery(a,resume_watcher=True)
+        self.assertLess(a.events.index('preserved-producers'),a.events.index('guarded-ready'))
+        self.assertLess(a.events.index('preserved-producers'),a.events.index('resume'))
+
+    def test_failed_producer_recovery_never_restores_watcher_or_publishes_ready(self):
+        a=Adapter()
+        def fail():raise RecoveryError('owned producer recovery not proven')
+        a.restore_preserved_bridge_producers=fail
+        with self.assertRaises(RecoveryError):execute_recovery(a,resume_watcher=True)
+        self.assertNotIn('resume',a.events);self.assertNotIn('receipt',a.events)
+
+    def test_preserved_bridge_requires_explicit_bound_recovery_input(self):
+        a=WindowsAdapter.__new__(WindowsAdapter);a.inputs={}
+        a.receipt={'stop_attempt_only':True,'profiles':[{'role':r,'status':'unaffected'} for r in ('root','worker','bridge','relay','voice')]}
+        a.gate=lambda:{'steps':[{'role':r,'method':'preserve_unaffected'} for r in ('root','worker','bridge','relay','voice')]}
+        with self.assertRaisesRegex(RecoveryError,'bound_producer_recovery_required'):
+            a.restore_preserved_bridge_producers()
+
+    def test_changed_cli_is_rejected_before_node_launch_or_any_drain_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();intent={'path':'fixture-intent','sha256':'a'*64}
+            config={'schema':'village-current-bridge-stop-participant/v1','intent':intent,'dependencies':[]}
+            for name in ('migration_bridge_stop_cli.mjs','migration_bridge_stop_handoff.mjs',
+                    'migration_bridge_inspector_session.mjs','migration_bridge_producer_adapter.mjs',
+                    'migration_bridge_producer_fence.mjs','migration_bridge_http_adapter.mjs',
+                    'migration_bridge_http_closure.mjs','migration_bridge_work_probe.mjs','migration_bridge_promise_census.mjs'):
+                p=root/name;p.write_bytes(b'// SYNTHETIC only')
+                config['dependencies'].append({'path':str(p),'sha256':sha(p.read_bytes())})
+            (root/'migration_bridge_stop_cli.mjs').write_bytes(b'throw Error("changed CLI must never execute")')
+            a=WindowsAdapter.__new__(WindowsAdapter)
+            a.inputs={'intent':intent,'bridge_producer_recovery':{'path':'bound','sha256':'b'*64}}
+            a.receipt={'stop_attempt_only':True,'profiles':[{'role':r,'status':'unaffected'} for r in ('root','worker','bridge','relay','voice')]}
+            a.gate=lambda:{'steps':[{'role':r,'method':'preserve_unaffected'} for r in ('root','worker','bridge','relay','voice')]}
+            a.reference=lambda _: (root/'config.json',config)
+            a.prepare_profile=lambda _:self.fail('drain was removed before dependency check')
+            with patch('migration_source_recovery_executor.checks.BASE',root),patch('migration_source_recovery_executor.subprocess.run') as launch:
+                with self.assertRaisesRegex(RecoveryError,'dependency_changed_before_import'):
+                    a.restore_preserved_bridge_producers()
+                launch.assert_not_called()
+
     def test_missing_bound_voice_recovery_plan_cannot_launch_a_keeper(self):
         a=WindowsAdapter.__new__(WindowsAdapter);a.inputs={}
         a.gate=lambda:None;a.verify_all=lambda:{'profiles':[]}

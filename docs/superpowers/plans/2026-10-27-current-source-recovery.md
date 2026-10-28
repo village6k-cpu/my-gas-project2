@@ -184,6 +184,36 @@ the canonicalization/reconstruction stage remain pending.
 
 ## October 28 runtime changes and source voice controller
 
+The current five-role stop transaction and private Windows adapter are now
+implemented in `migration_source_stop.py` and `migration_source_stop_runtime.py`.
+They require actual scheduler, watcher, profile-drain, quiet-window, public voice
+HOLD, external-lease and native-inactivity receipts. A complete recursive child
+inventory and accepted-work receipt precede every termination. The bridge's
+separate pinned Node participant acknowledges the exact fresh idle observation
+durably before the parent can terminate its independently verified process.
+
+Failed attempts keep a separate partial receipt. Fresh reconciliation can prove
+an entirely absent old tree or all original identities intact; a remaining old
+child never becomes an invented closed status. An all-unaffected abort cancels
+only owned drains and restores the original producer callbacks before watcher
+or scheduler recovery. The Python executor verifies all nine participant module
+hashes before importing Node code. An uncertain resume remains fenced for
+inspection instead of being repeated.
+
+Closed transport can use the explicitly bound Windows byte-cache catalog on the
+Mac. The sender hashes every final Windows source file. The receiver validates
+each baseline hash, reconstructs into new files with APFS copy-on-write, then
+checks the full final hash and nanosecond modification time for every file.
+The catalog and live byte cache are never source-closure or activation authority.
+An actual synthetic Windows-to-Mac CLI rehearsal verified reuse, changed blocks,
+truncation, raw files and source/native manifest equality without stopping any
+source process. Native tests verify that APFS cloning does not modify baselines.
+
+The private preparation plan has verified executable bindings and all five real
+owner contracts. It deliberately contains pending operational receipts and
+cannot pass stop gates. No actual task fence, quiet window, source stop, final
+cold capture, promotion or activation has occurred as part of this preparation.
+
 The source Root, worker, relay and browser processes had exited or restarted
 before this continuation. The old PID-bound voice renewer had stopped with HOLD;
 the intake contained zero requests and zero conflicts. Both public voice routes

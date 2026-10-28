@@ -269,7 +269,16 @@ def main():
             raise ValueError('stream_capture_dependency_changed')
         ssh=['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',
              '-i',checks.SSH_KEY,checks.REMOTE_HOST]
-        report=streamer.stream(roots,config['stream_destination'],control,gate,trees,sender,ssh)
+        baseline=None
+        if config.get('stream_baseline_catalog') is not None:
+            ref=config['stream_baseline_catalog'];adapter.reference(ref)
+            baseline={'local_path':ref['path'],'remote_path':ref['remote_path'],'sha256':ref['sha256']}
+            # Same verified SSH host key, bypassing only Tailscale bulk overhead.
+            # No shell command, username, key or arbitrary destination override.
+            if config.get('stream_direct_lan') is True:
+                ssh=['C:/Windows/System32/OpenSSH/ssh.exe','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
+                     '-o','HostKeyAlias=100.103.83.1','-o','ConnectTimeout=8','-i',checks.SSH_KEY,'choijaehyeong@192.168.1.139']
+        report=streamer.stream(roots,config['stream_destination'],control,gate,trees,sender,ssh,baseline_catalog=baseline)
         print(json.dumps({k:report[k] for k in ('cold_capture_verified','verified_files',
             'verified_bytes','local_full_payload_copy','production_activated')}));return
     required = sum(sum(v[0] for v in trees.inventory(r['source'],frozenset(r['excluded']))[0].values())

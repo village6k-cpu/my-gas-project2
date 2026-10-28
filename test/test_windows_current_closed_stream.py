@@ -32,6 +32,7 @@ class StreamTests(unittest.TestCase):
     def send(self):
         self.transport_calls+=1
         config=Path(sys.argv[1]);cfg=json.loads(config.read_text())
+        self.last_config=cfg
         files=[{'path':r['name']+'/payload','bytes':7,'sha256':'c'*64} for r in cfg['roots']]
         manifest={'files':files,'directories':[r['name'] for r in cfg['roots']],
                   'errors':[],'changed_during_read':[]}
@@ -83,6 +84,17 @@ class StreamTests(unittest.TestCase):
     def test_changed_files_or_missing_hash_blocks_proof(self):
         self.mutation=lambda manifest:manifest['changed_during_read'].append('root-profile/payload')
         with self.assertRaises(ValueError):self.run_stream()
+
+    def test_byte_cache_reference_reaches_only_a_declared_delta_transport(self):
+        baseline={'local_path':'PRIVATE-CATALOG.json','remote_path':'/private/windows-catalog.json','sha256':'d'*64}
+        self.transport.SUPPORTS_WINDOWS_BYTE_CACHE=True
+        result=m.stream(self.roots,self.destination,self.control,self.gate,self.trees,self.transport,['fixture-ssh'],baseline_catalog=baseline)
+        self.assertTrue(result['cold_capture_verified']);self.assertEqual(self.last_config['baseline_catalog'],baseline)
+
+    def test_ordinary_transport_cannot_silently_ignore_a_byte_cache_plan(self):
+        with self.assertRaisesRegex(ValueError,'byte_cache_transport'):
+            m.stream(self.roots,self.destination,self.control,self.gate,self.trees,self.transport,['fixture-ssh'],baseline_catalog={'sha256':'d'*64})
+        self.assertEqual(self.transport_calls,0)
 
 
 if __name__=='__main__':unittest.main()
