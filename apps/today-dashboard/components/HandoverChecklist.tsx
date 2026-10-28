@@ -34,7 +34,7 @@ function catalogExactKey(value: string) {
 }
 
 function SetSingleList({ children }: { children: ReactNode }) {
-  return <ul className="divide-y divide-brand-200/70 overflow-hidden rounded-xl bg-brand-50 shadow-card ring-1 ring-brand-200">{children}</ul>;
+  return <ul className="divide-y divide-line/60 overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-line">{children}</ul>;
 }
 
 export function HandoverChecklist({ trade, phase, onPackingCommand, preview = false }: { trade: Trade; phase: Phase; onPackingCommand?: (version: number, command: PackingCommand) => Promise<void>; preview?: boolean }) {
@@ -175,10 +175,10 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false, 
   const checkoutMemo = String(e.memoCheckout || "").trim();
   const checkinMemo = String(e.memoCheckin || "").trim();
   const baselineLocked = isCheckoutBaselineLocked(t);
-  if (preview) return <li className="px-3"><div className="flex justify-between py-3 text-sm font-bold"><span>{actualName}</span><span>×{e.qty}</span></div><PackingDevice ownerId={e.scheduleId} /></li>;
+  if (preview) return <li className="bg-white px-3"><div className={`flex justify-between py-3 text-sm font-bold ${setTone ? "-mx-3 bg-brand-50 px-3" : ""}`}><span>{actualName}</span><span>×{e.qty}</span></div><PackingDevice ownerId={e.scheduleId} /></li>;
   return (
-    <li className={`px-3 ${setTone ? "bg-brand-50" : rowTint(e, excluded)}`}>
-      <div className="flex items-center gap-2.5 py-2.5">
+    <li className={`px-3 ${setTone ? "bg-white" : rowTint(e, excluded)}`}>
+      <div className={`flex items-center gap-2.5 py-2.5 ${setTone ? "-mx-3 bg-brand-50 px-3" : ""}`}>
         {setBadge && <span className="shrink-0 rounded-md bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">세트</span>}
         <button
           onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "taken")}
