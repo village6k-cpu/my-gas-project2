@@ -16,7 +16,7 @@ import type {
   Trade,
 } from "../domain/types";
 import { equipmentActualTakenQty } from "../domain/equipmentActual";
-import { packingBlockers, type PackingCommand } from "../domain/packing";
+import { packingBlockers, optimisticPackingCheck, type PackingCommand } from "../domain/packing";
 import { authFetch } from "./authFetch";
 import { buildSeed } from "./seed";
 import { isSupabase, supabase } from "../supabase/client";
@@ -2353,7 +2353,10 @@ export async function cancelTrade(tradeId: string): Promise<{ ok: true; warning?
 
 export async function savePacking(tradeId: string, version: number, command: PackingCommand): Promise<void> {
   if (hasTradePending(tradeId)) throw new Error("이 거래의 저장을 마친 뒤 다시 시도해주세요");
+  const before=state.trades.find(t=>t.tradeId===tradeId);
+  const preview=before ? optimisticPackingCheck(before,version,command) : undefined;
   const saveId = beginTradeTransition(tradeId);
+  if (preview) mutateTrade(tradeId,t=>({...t,packing:preview}),false);
   try {
     const response = await authFetch("/api/packing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tradeId, version, command }), signal: AbortSignal.timeout(20_000) });
     const result = await response.json();
@@ -2361,6 +2364,8 @@ export async function savePacking(tradeId: string, version: number, command: Pac
     mutateTrade(tradeId, t => ({ ...t, packing: result.packing }), false);
     finishTradeSave(tradeId, saveId, "saved", "구성품 저장됨");
   } catch (error) {
+    // 조회까지 실패해도 저장되지 않은 체크를 완료처럼 남기지 않는다.
+    if (preview) mutateTrade(tradeId,t=>t.packing===preview ? {...t,packing:before!.packing} : t,false);
     // 응답 유실/다른 직원의 수정 후에는 서버 사실을 다시 받아 중복 추가를 막는다.
     const fresh = await fetchTradesByIds([tradeId]).catch(() => []);
     if (fresh.length) set({ trades: mergeTradeChanges(state.trades, fresh) });

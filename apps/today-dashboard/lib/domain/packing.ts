@@ -35,6 +35,15 @@ export type PackingCommand =
   | { action: "model"; ownerId: string; model: string }
   | { action: "receive"; partId: string; count: ReturnCount };
 
+/** 체크만 바꾼 요청은 화면에 먼저 반영한다. 구성 변경·확정은 서버 응답을 기다린다. */
+export function optimisticPackingCheck(t: Trade, version: number, command: PackingCommand): PackingManifest | undefined {
+  const p=t.packing;
+  if (!p || p.version!==version || p.phase!=="draft" || command.action!=="save" || command.note!==p.note || command.entries.length!==p.entries.length) return;
+  const withoutCheck=(e: PackingEntry)=>JSON.stringify({...e,checked:false});
+  if (!command.entries.every((e,i)=>typeof e.checked==="boolean" && withoutCheck(e)===withoutCheck(p.entries[i]))) return;
+  return transitionPacking(t,command,new Date().toISOString());
+}
+
 function componentTokens(name: string) {
   return name.replace(/SDI\s*\/\s*HDMI/gi, "SDI or HDMI").split(/\s*,\s*|\s+\/\s+/);
 }
