@@ -39,9 +39,30 @@ class Adapter:
         self.verify_voice_ingress(self.verify_all());self.events.append('resume')
     def publish(self,proof):self.events.append('receipt');return proof
     def verify_voice_ingress(self,proof):self.events.append('voice-ingress-ready')
+    def restore_voice_authority(self,proof):self.events.append('restore-voice-authority')
 
 
 class CurrentExecutorTests(unittest.TestCase):
+    def test_missing_bound_voice_recovery_plan_cannot_launch_a_keeper(self):
+        a=WindowsAdapter.__new__(WindowsAdapter);a.inputs={}
+        a.gate=lambda:None;a.verify_all=lambda:{'profiles':[]}
+        with patch('migration_source_recovery_executor.subprocess.Popen') as launch:
+            with self.assertRaisesRegex(RecoveryError,'bound_voice_recovery_plan_required'):
+                a.restore_voice_authority({'profiles':[]})
+            launch.assert_not_called()
+
+    def test_voice_authority_is_restored_after_all_backends_and_before_watcher(self):
+        a=Adapter();execute_recovery(a,resume_watcher=True)
+        self.assertLess(a.events.index('all-ready'),a.events.index('restore-voice-authority'))
+        self.assertLess(a.events.index('restore-voice-authority'),a.events.index('resume'))
+
+    def test_failed_voice_authority_restore_keeps_watcher_and_receipt_fenced(self):
+        a=Adapter()
+        def fail(_):raise RecoveryError('native closure belongs to another stop')
+        a.restore_voice_authority=fail
+        with self.assertRaises(RecoveryError):execute_recovery(a,resume_watcher=True)
+        self.assertNotIn('resume',a.events);self.assertNotIn('receipt',a.events)
+
     def test_authority_revoked_by_slow_resume_gate_cannot_resume_watcher(self):
         a=WindowsAdapter.__new__(WindowsAdapter);a.resumed=False
         a.browser={};a.pause_path=Path('fixture-pause')

@@ -80,11 +80,20 @@ The bounded source voice controller was rehearsed while both public routes
 bypassed the intake. The running native pump evaluated a fresh Windows lease for
 the current Root/voice owners, then returned to HOLD after an owned stop. No speech
 was submitted, no route changed and no business service stopped. Its version1
-configuration is now permanently stopped and must not be reused. Parent recovery
-integration and current accepted-work closure remain necessary before live stop.
+configuration is now permanently stopped and must not be reused.
+
+The recovery executor now binds the actual recovered five-backend receipt to a
+new private voice controller. Under the shared native transition lock it can
+archive only the exact closure bound to this intent and stop, while refusing
+activation or loaded native owners. It leaves HOLD until the new controller
+proves current Windows owners. Keeper identity, evaluated native forwarding and
+both public intake routes must pass before watcher resume or recovery publication.
+An uncertain keeper launch is not repeated. The operational plan still needs the
+actual stop/closure receipts; the prepared template cannot authorize execution.
+This is tested recovery code, not evidence of an actual production rollback.
 
 Native verification of the current recovery, voice, raw restoration and phase
-helpers passed118 cases, with all ten incumbent file hashes unchanged. These
+helpers passed123 cases, with all ten incumbent file hashes unchanged. These
 synthetic and off-route checks do not certify an actual production transition.
 
 ## Preparation readback and outstanding gates

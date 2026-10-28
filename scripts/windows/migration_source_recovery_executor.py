@@ -4,6 +4,7 @@ No queue/data rewind, normal-send bridge task or scheduler enable is supported.
 The caller must supply hash-bound current stop and recovery input receipts.
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -45,6 +46,7 @@ def execute_recovery(adapter, *, resume_watcher=False):
     result = dict(schema=1, source_backends_ready=True, source_ready=False, ready_to_unfence=False,
                   task_states_restored=False, destination_activated=False)
     if resume_watcher:
+        adapter.restore_voice_authority(proof)
         adapter.resume_watcher()
         adapter.gate()
         proof = adapter.verify_all()
@@ -389,6 +391,145 @@ class WindowsAdapter:
         module.operate(self.browser,'resume',self.pause_path)
         self.resumed=True
         self.inspect_watcher()
+
+    def restore_voice_authority(self,proof):
+        """Start a newly bound controller only after real backend recovery.
+
+        The private plan is prepared by the actual stop controller. An uncertain
+        launch is never repeated; failure leaves the browser and tasks fenced.
+        """
+        self.gate()
+        if self.verify_all()!=proof:raise RecoveryError('backend_owners_changed_before_voice_recovery')
+        if 'voice_recovery' not in self.inputs:raise RecoveryError('bound_voice_recovery_plan_required')
+        _,plan=self.reference(self.inputs['voice_recovery'])
+        if plan.get('schema')!='village-current-voice-recovery-plan/v1':
+            raise RecoveryError('bound_voice_recovery_plan_required')
+        import migration_voice_source_lease as lease
+        template_path,template=self.reference(plan['controller_template'])
+        lease.validate_private_configuration(template,checks.BASE)
+        if (template['intake_preparation']!=self.inputs['voice_intake']
+                or plan.get('previous_controller_sha256')!=plan['controller_template']['sha256']):
+            raise RecoveryError('original_intake_and_previous_controller_must_remain_bound')
+        for role,contract in template['contracts'].items():
+            original=next(x for x in self.intent['profiles'] if x['role']==role)
+            if not checks.same_contract(original,contract):raise RecoveryError('voice_recovery_source_contract_changed')
+        prior=template['prior_writers']+plan['prior_writers']
+        if not plan['prior_writers'] or any(not checks.identity(p) for p in prior):
+            raise RecoveryError('all_prior_voice_writer_identities_required')
+        import psutil
+        for old in prior:
+            try:
+                if abs(psutil.Process(old['pid']).create_time()-old['started'])<.01:
+                    raise RecoveryError('previous_voice_writer_still_live')
+            except psutil.NoSuchProcess:pass
+        receipt=dict(schema='village-source-backends-recovered/v1',inputs_sha256=self.inputs_sha,
+                     intent_sha256=self.inputs['intent']['sha256'],stop_sha256=self.stop_sha,
+                     destination_ever_activated=False,profiles=proof['profiles'])
+        encoded=json.dumps(receipt,sort_keys=True,separators=(',',':')).encode();backends_sha=sha(encoded)
+        backends=self.control/('BACKENDS-RECOVERED-'+backends_sha+'.json')
+        def exact_new(path,raw):
+            if path.is_symlink():raise RecoveryError('linked_recovery_artifact')
+            if path.exists():
+                if path.read_bytes()!=raw:raise RecoveryError('recovery_artifact_changed')
+            else:
+                with path.open('xb') as f:f.write(raw);f.flush();os.fsync(f.fileno())
+        exact_new(backends,encoded)
+        directory=self.control/('voice-source-recovery-'+backends_sha[:16])
+        if directory.is_symlink():raise RecoveryError('linked_recovery_controller_directory')
+        directory.mkdir(exist_ok=True,mode=0o700);(directory/'helper-home').mkdir(exist_ok=True,mode=0o700)
+        (directory/'code').mkdir(exist_ok=True,mode=0o700)
+        dependencies=[]
+        for ref in template['dependencies']:
+            source=Path(ref['path']).resolve()
+            if (not source.is_relative_to(checks.BASE.resolve()) or source.name not in
+                    ('migration_voice_source_lease.py','migration_source_recovery.py')
+                    or sha(source.read_bytes())!=ref['sha256']):raise RecoveryError('voice_controller_code_changed')
+            target=directory/'code'/source.name;exact_new(target,source.read_bytes())
+            dependencies.append({'path':str(target),'sha256':ref['sha256']})
+        if {Path(r['path']).name for r in dependencies}!={'migration_voice_source_lease.py','migration_source_recovery.py'}:
+            raise RecoveryError('complete_voice_controller_code_required')
+        def reference(path):return {'path':str(path),'sha256':sha(path.read_bytes())}
+        config=json.loads(json.dumps(template))
+        config.update(dependencies=dependencies,prior_writers=prior,native_phase_writer=plan['native_phase_writer'],
+            previous_controller_sha256=plan['previous_controller_sha256'],
+            historical_stop_marker=reference(self.control/'SOURCE_STOP_REQUESTED'),
+            recovery_authorization={'inputs':reference(self.control/'recovery-inputs.json'),
+                'stop':reference(self.control/'source-stop-receipt.json'),'backends':reference(backends)})
+        lease.validate_private_configuration(config,checks.BASE)
+        raw=json.dumps(config,sort_keys=True,separators=(',',':')).encode();config_sha=sha(raw)
+        config_path=directory/'config.json';exact_new(config_path,raw)
+        auth={'schema':'village-current-voice-recovery/v1','inputs_sha256':self.inputs_sha,
+            'intent_sha256':self.inputs['intent']['sha256'],'stop_sha256':self.stop_sha,
+            'backends_sha256':backends_sha,'intake_config_sha256':config['intake_config_sha256'],
+            'epoch':config['epoch'],'origin_source':config['origin_source'],
+            'previous_controller_sha256':plan['previous_controller_sha256'],
+            'controller_config_sha256':config_sha,'closure_sha256':plan.get('closure_sha256')}
+        payload={'authorization':auth,'helper':plan['native_phase_writer'],'labels':checks.FUTURE_LABELS}
+        native=r'''from pathlib import Path
+import base64,hashlib,importlib.util,json,os,subprocess
+C=Path('/Users/choijaehyeong/VillageMigration/20260930-windows/candidate')
+p=json.loads(base64.b64decode(PAYLOAD));ref=p['helper'];helper=Path(ref['path']).resolve()
+assert helper.is_relative_to(C/'state/voice-ingress-v1') and hashlib.sha256(helper.read_bytes()).hexdigest()==ref['sha256']
+spec=importlib.util.spec_from_file_location('bound_voice_recovery_phase',helper)
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+def inactive():
+ if os.getuid()!=501:return False
+ domain='gui/501'
+ q=subprocess.run(['/bin/launchctl','print',domain],capture_output=True,text=True,timeout=3)
+ if q.returncode:return False
+ files=list((C/'refresh-20261027-v2/control/launchd').glob('*.plist'))
+ if {x.stem for x in files}!=set(p['labels']):return False
+ for label in p['labels']:
+  q=subprocess.run(['/bin/launchctl','print',domain+'/'+label],capture_output=True,text=True,timeout=3)
+  if q.returncode!=113 or q.stderr.strip()!='Bad request.\nCould not find service "'+label+'" in domain for user gui: 501':return False
+ return True
+print(json.dumps(m.recover_source_phase(C,p['authorization'],is_inactive=inactive)))
+'''.replace('PAYLOAD',repr(base64.b64encode(json.dumps(payload).encode()).decode()))
+        self.gate()
+        if self.verify_all()!=proof:raise RecoveryError('backend_owners_changed_before_native_recovery')
+        command=['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',
+                 '-i',checks.SSH_KEY,checks.REMOTE_HOST,checks.CANDIDATE+'/venv-root/bin/python -']
+        run=subprocess.run(command,input=native.encode(),capture_output=True,timeout=25)
+        if run.returncode or json.loads(run.stdout).get('recovered') is not True:
+            raise RecoveryError('owned_native_voice_closure_not_recovered')
+        self.gate()
+        if self.verify_all()!=proof:raise RecoveryError('backend_owners_changed_before_voice_controller_start')
+        launch=directory/'LAUNCH-ATTEMPT.json'
+        if not launch.exists():
+            write_new(launch,{'config_sha256':config_sha,'inputs_sha256':self.inputs_sha,'at':time.time()})
+            env=dict(os.environ);env['HERMES_HOME']=str(directory/'helper-home');env.pop('PYTHONPATH',None)
+            with (directory/'stdout.log').open('ab') as out,(directory/'stderr.log').open('ab') as err:
+                subprocess.Popen([PYTHON,str(directory/'code/migration_voice_source_lease.py'),
+                    '--config',str(config_path),'--config-sha',config_sha,'--run'],cwd=directory,env=env,
+                    stdin=subprocess.DEVNULL,stdout=out,stderr=err,
+                    creationflags=subprocess.CREATE_NO_WINDOW|subprocess.CREATE_NEW_PROCESS_GROUP)
+        elif read_bound(launch,sha(launch.read_bytes())).get('config_sha256')!=config_sha:
+            raise RecoveryError('different_or_uncertain_voice_controller_launch')
+        expected={r['role']:{'pid':r['pid'],'started':r['start_time']/100} for r in proof['profiles']
+                  if r['role'] in ('root','voice')}
+        deadline=time.monotonic()+30
+        while time.monotonic()<deadline:
+            path=directory/'STATUS.json'
+            if path.is_file():
+                status=json.loads(path.read_text(encoding='utf-8'))
+                if (status.get('config_sha256')==config_sha and status.get('status')=='windows_lease_current'
+                        and checks.number(status.get('at_windows')) and 0<=time.time()-status['at_windows']<=15
+                        and all(checks.same_identity(status.get('effective_owners',{}).get(r),v) for r,v in expected.items())):
+                    try:
+                        owner=psutil.Process(status['pid']);env=owner.environ()
+                        if (abs(owner.create_time()-status['started'])>=.01
+                                or checks.norm(owner.cwd())!=checks.norm(str(directory))
+                                or env.get('HERMES_HOME')!=str(directory/'helper-home') or env.get('PYTHONPATH')
+                                or owner.cmdline()[1:]!=[str(directory/'code/migration_voice_source_lease.py'),
+                                    '--config',str(config_path),'--config-sha',config_sha,'--run']):
+                            raise RecoveryError('restored_voice_keeper_process_identity_changed')
+                    except psutil.Error:
+                        raise RecoveryError('restored_voice_keeper_process_not_live') from None
+                    self.verify_voice_ingress(proof)
+                    return
+                if status.get('terminal') is True:break
+            time.sleep(.5)
+        raise RecoveryError('restored_voice_authority_not_observed_leave_fenced')
 
     def verify_voice_ingress(self,proof):
         # Read-only route/authority check. It never writes phase, renews a lease,
