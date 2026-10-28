@@ -4,14 +4,15 @@ import { createContext, useContext, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
 import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor } from "@/lib/domain/packingCatalog";
-import { savePacking } from "@/lib/data/store";
+import { savePacking, savePackingCheck } from "@/lib/data/store";
 
-type PackingContextValue = { trade: Trade; busy: boolean; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
+type PackingContextValue = { trade: Trade; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
 const PackingContext = createContext<PackingContextValue | null>(null);
 const button = "tap rounded-lg px-3 py-2 text-sm font-bold ring-1 ring-line disabled:opacity-40";
 
 export function PackingChecklist({ trade, phase, onCommand, children }: { trade: Trade; phase: Phase; onCommand?: (version: number, command: PackingCommand) => Promise<void>; children?: ReactNode }) {
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(0);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<PackingEntry | null>(null);
   const [editingVersion, setEditingVersion] = useState(0);
@@ -19,7 +20,7 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
   const [noteVersion, setNoteVersion] = useState(0);
   const p = trade.packing;
   const run = async (command: PackingCommand, version = p?.version ?? 0) => {
-    if (busy) return false;
+    if (busy || checking > 0) return false;
     setBusy(true); setError("");
     try { if (onCommand) await onCommand(version, command); else await savePacking(trade.tradeId, version, command); return true; }
     catch (e) { setError(e instanceof Error ? e.message : "저장 실패. 다시 확인해주세요"); return false; }
@@ -34,7 +35,14 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
   const total = groups.reduce((n, g) => n + g.expected, 0);
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
   const devices = packingDevices(trade);
-  const context = { trade, busy, update, open: openEditor, run };
+  const check = async (e: PackingEntry) => {
+    if (onCommand) { await update(e, { checked: !e.checked }); return; }
+    setChecking(n => n + 1); setError("");
+    try { await savePackingCheck(trade.tradeId, e.id, !e.checked); }
+    catch (error) { setError(error instanceof Error ? error.message : "체크 저장 실패. 다시 확인해주세요"); }
+    finally { setChecking(n => n - 1); }
+  };
+  const context = { trade, busy: busy || checking > 0, checkBusy: busy, check, update, open: openEditor, run };
   return <PackingContext.Provider value={context}><section aria-label="구성품 검수" className="mb-3">
     <div className="flex flex-wrap items-center justify-between gap-2 bg-brand-50 px-3 py-3">
       <div><h3 className="text-sm font-extrabold text-brand-700">구성품 검수</h3>
@@ -56,7 +64,7 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
             <textarea value={note ?? p.note} onChange={e => { if (note === null) setNoteVersion(p.version); setNote(e.target.value); }} maxLength={2000} className="w-full rounded-lg border border-line p-2 text-sm" placeholder="예: 고객 요청으로 D탭 라인 대신 더미 사용" />
             {note !== null && <><button className={button} onClick={async () => { if (await run({ action: "save", entries: p.entries, note }, noteVersion)) setNote(null); }}>메모 저장</button><button className={button} onClick={() => setNote(null)}>입력 취소</button></>}
             <details className="text-xs text-ink-mute"><summary>예약 장비가 변경됐나요?</summary><button className={button} onClick={() => run({ action: "refresh" })}>예약 변경 내용 불러오기</button></details>
-            <button className={`${button} w-full bg-brand-600 text-white`} disabled={packingNeedsUpgrade(p) || p.entries.some(e => !e.checked || (e.qty > 0 && e.unresolved)) || devices.some(e => needsDeviceModel(e) && !p.deviceModels?.[e.scheduleId]) || note !== null} onClick={() => run({ action: "seal" })}>이 구성으로 반출 준비 확정</button>
+            <button className={`${button} w-full bg-brand-600 text-white`} disabled={checking > 0 || packingNeedsUpgrade(p) || p.entries.some(e => !e.checked || (e.qty > 0 && e.unresolved)) || devices.some(e => needsDeviceModel(e) && !p.deviceModels?.[e.scheduleId]) || note !== null} onClick={() => run({ action: "seal" })}>이 구성으로 반출 준비 확정</button>
           </> : <><p className="rounded-lg bg-checkin-bg p-3 text-sm font-bold text-checkin-fg">✓ 반출 구성품 확정 · 반납 때 이 수량과 대조합니다.</p>
             {p.note && <p className="whitespace-pre-wrap text-sm text-ink-soft">반출 메모: {p.note}</p>}
             {!packingStarted(trade) && <button className={button} onClick={() => run({ action: "revise" })}>구성 다시 준비</button>}</>}
@@ -81,7 +89,7 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
       const entries = add || !exists ? [...p.entries, updated] : p.entries.map(e => e.id === entry.id ? updated : e);
       if (await save(entries, editingVersion)) setEditing(null);
     }} />}
-    {busy && <p className="px-3 pb-2 text-xs text-brand-700" role="status">저장 중…</p>}
+    {(busy || checking > 0) && <p className="px-3 pb-2 text-xs text-brand-700" role="status">저장 중…</p>}
   </section></PackingContext.Provider>;
 }
 
@@ -89,7 +97,7 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
 export function PackingDevice({ ownerId, common = false }: { ownerId?: string; common?: boolean }) {
   const ctx = useContext(PackingContext);
   if (!ctx?.trade.packing) return null;
-  const { trade, busy, update, open, run } = ctx;
+  const { trade, busy, checkBusy, check, update, open, run } = ctx;
   const p=trade.packing!;
   if (packingNeedsUpgrade(p)) return null;
   const owner=packingDevices(trade).find(e=>e.scheduleId===ownerId);
@@ -108,9 +116,9 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
       <select aria-label="기존 영상선 연결" value="" disabled={busy || p.phase!=="draft"} onChange={event=>{const row=existingVideo.find(e=>e.id===event.target.value);if(row) update(row,{ownerId,device,checked:false});}} className="mt-1 w-full rounded border border-line bg-white p-2 text-sm"><option value="" disabled>이 장비에 연결할 선 선택</option>{existingVideo.map(e=><option key={e.id} value={e.id}>{e.name} ×{e.qty}</option>)}</select>
     </label>}
     {entries.map(e=><div key={e.id} className="border-b border-line/50 py-2 last:border-0">
-      <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={busy || p.phase !== "draft" || (e.qty>0 && e.unresolved) || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>update(e,{checked:!e.checked})} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : ""}</button>
+      <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={checkBusy || p.phase !== "draft" || (e.qty>0 && e.unresolved) || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>check(e)} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : ""}</button>
         <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span><strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>
-      {p.phase === "draft" && <div className="mt-1 flex flex-wrap gap-1 pl-8"><button className={`${button} text-brand-700`} onClick={()=>open(e)}>교체·수량</button><button className={`${button} text-ink-mute`} onClick={()=>update(e,{qty:e.qty?0:1,checked:false})}>{e.qty ? "제외" : "포함"}</button></div>}
+      {p.phase === "draft" && <div className="mt-1 flex flex-wrap gap-1 pl-8"><button disabled={busy} className={`${button} text-brand-700`} onClick={()=>open(e)}>교체·수량</button><button disabled={busy} className={`${button} text-ink-mute`} onClick={()=>update(e,{qty:e.qty?0:1,checked:false})}>{e.qty ? "제외" : "포함"}</button></div>}
     </div>)}
     {p.phase === "draft" && <button className="tap mt-2 text-xs font-bold text-brand-700" disabled={busy || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>{const id=crypto.randomUUID();open({id,ownerId,device,name:"",partId:"",qty:1,checked:false});}}>+ 구성품 추가</button>}
   </div>;

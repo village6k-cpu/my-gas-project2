@@ -1,5 +1,7 @@
 "use client";
 
+import { createPackingCheckQueue } from "./packingCheckQueue";
+
 // 클라이언트 옵티미스틱 스토어 (프로토타입).
 // 변이는 즉시 반영 + "저장 중 → 저장됨" 시뮬레이션. 추후 이 레이어만 Supabase 호출로 교체.
 
@@ -2349,6 +2351,36 @@ export async function cancelTrade(tradeId: string): Promise<{ ok: true; warning?
     finishTradeSave(tradeId, saveId, "error", `⚠️ 예약 취소 실패 — ${message}`);
     return { ok: false, error: message };
   }
+}
+
+const packingCheckQueue = createPackingCheckQueue({
+  read: id => state.trades.find(t => t.tradeId === id),
+  show: (id, packing) => mutateTrade(id, t => ({ ...t, packing }), false),
+  start: id => {
+    const token = beginTradeSave(id);
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    if (typeof window !== "undefined") window.addEventListener("beforeunload", warn);
+    return error => {
+      if (typeof window !== "undefined") window.removeEventListener("beforeunload", warn);
+      finishTradeSave(id, token, error ? "error" : "saved", error ? "구성품 체크 저장 실패 — 다시 확인해주세요" : "구성품 체크 저장됨");
+    };
+  },
+  persist: async (tradeId, version, command) => {
+    const response = await authFetch("/api/packing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tradeId, version, command }), signal: AbortSignal.timeout(20_000) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "구성품 저장 실패");
+    if (!result.packing || !Number.isSafeInteger(result.packing.version) || result.packing.version !== version + 1 || !Array.isArray(result.packing.entries)) throw new Error("구성품 저장 응답을 확인할 수 없습니다");
+    return result.packing;
+  },
+  recover: async id => {
+    const fresh = await fetchTradesByIds([id]);
+    if (fresh.length) set({ trades: mergeTradeChanges(state.trades, fresh) });
+  },
+});
+
+export function savePackingCheck(tradeId: string, entryId: string, checked: boolean): Promise<void> {
+  if (!packingCheckQueue.pending(tradeId) && hasTradePending(tradeId)) return Promise.reject(new Error("이 거래의 저장을 마친 뒤 다시 시도해주세요"));
+  return packingCheckQueue.check(tradeId, entryId, checked);
 }
 
 export async function savePacking(tradeId: string, version: number, command: PackingCommand): Promise<void> {
