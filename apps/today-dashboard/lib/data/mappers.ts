@@ -125,6 +125,8 @@ export function itemToRow(e: EquipmentItem, tradeId: string, sort: number): any 
 
 export function tradeFromRow(r: any, items: EquipmentItem[]): Trade {
   return {
+    packing: r.packing_manifest ?? undefined,
+    packingDispatchedAt: r.packing_dispatched_at ?? undefined,
     tradeId: r.trade_id,
     customerName: r.customer_name,
     customerPhone: r.customer_phone ?? "",

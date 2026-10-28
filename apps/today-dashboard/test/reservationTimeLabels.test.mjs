@@ -6,7 +6,9 @@ import ts from 'typescript';
 const source = fs.readFileSync(new URL('../lib/domain/status.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const module = { exports: {} };
-vm.runInNewContext(compiled, { module, exports: module.exports, Date, Intl });
+const packingModule = { exports: {} };
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../lib/domain/packing.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module: packingModule, exports: packingModule.exports, structuredClone });
+vm.runInNewContext(compiled, { module, exports: module.exports, Date, Intl, require: name => { assert.equal(name, './packing'); return packingModule.exports; } });
 const { timeLabel, shortDate, phaseForDate, timeSortKey, timeBand, reservationDay, tradesForTab, searchTradeEvents, tabCounts } = module.exports;
 const originalTZ = process.env.TZ;
 for (const zone of ['Asia/Seoul', 'UTC', 'America/Los_Angeles']) {

@@ -91,6 +91,7 @@ export const ScheduleCard = memo(function ScheduleCard({
     const result = await toggleReturn(trade.tradeId);
     if (result.ok) return;
     setOpen(true);
+    if (trade.packing?.phase === "draft" || result.blockers.some(b => b.scheduleId.startsWith("packing:"))) return;
     // 미확인/초과는 강제 차단하지 않는다 — 작업자가 내용을 보고 결정한다(소프트 가드).
     // 카드는 완료 전까지 계속 살아있고, 미확인 내역은 returnCounts 기록으로 남는다.
     if (result.blockers.length > 0) {

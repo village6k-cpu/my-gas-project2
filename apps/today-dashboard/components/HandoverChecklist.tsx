@@ -23,6 +23,8 @@ import { Check, Plus } from "./icons";
 import { MemoTag, itemMemoEntries } from "./MemoTag";
 import { equipmentActualName, equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
 import { ReturnChecklist } from "./ReturnChecklist";
+import { PackingChecklist } from "./PackingChecklist";
+import { packingSourceIds } from "@/lib/domain/packing";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
@@ -41,10 +43,12 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
   const summary = handoverSummary(trade, phase);
   const toggle = (id: string) => setExpanded((m) => ({ ...m, [id]: !m[id] }));
 
-  const booked = trade.equipments.filter((e) => !e.onsite);
-  const onsite = trade.equipments.filter((e) => e.onsite);
+  const managed = packingSourceIds(trade.packing);
+  const booked = trade.equipments.filter((e) => !e.onsite && !managed.has(e.scheduleId));
+  const onsite = trade.equipments.filter((e) => e.onsite && !managed.has(e.scheduleId));
   return (
     <div className="mt-1.5">
+      <PackingChecklist key={trade.tradeId} trade={trade} phase={phase} />
       {summary.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1">
           {summary.map((s, i) => (

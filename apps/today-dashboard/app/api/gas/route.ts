@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { revalidateTag, unstable_cache } from "next/cache";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isAuthedRequest as isAuthed } from "@/lib/server/authCache";
 import { getInventoryAuditServiceClient } from "@/lib/server/inventoryAuditDb";
 import { getVillageGasInternalKey } from "@/lib/server/gasInternalKey.mjs";
@@ -284,6 +284,10 @@ function allowed(action: string, func?: string): { ok: boolean; isWrite: boolean
 async function callGet(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const action = sp.get("action") ?? "";
+  // 레거시 GET도 같은 완료 검수/lease 경로를 사용한다.
+  if (action === "toggleSetup" || action === "toggleReturn") {
+    return callPost(new NextRequest(req.url, { method: "POST", headers: req.headers, body: JSON.stringify(Object.fromEntries(sp)) }));
+  }
   const func = sp.get("func") ?? "";
   const { ok, isWrite } = allowed(action, func);
   if (!ok) {
@@ -379,7 +383,21 @@ async function callPost(req: NextRequest) {
   // 완료 상태 순서는 GAS mutation 원장이 먼저 결정하고, Supabase 저장은 그 응답을 따른다.
   Object.assign(payload, body, { action, key: getVillageGasInternalKey() });
 
+  let packingLease = false;
+  let packingRelease = false;
+  const packingToken = createHash("sha256").update(`${action}:${String(payload.tid ?? "")}:${String(payload.mutationId || randomUUID())}`).digest("hex");
   try {
+    if (completionAction) {
+      const { data, error } = await getInventoryAuditServiceClient().rpc("lock_packing_completion", {
+        p_trade_id: String(payload.tid ?? ""), p_kind: action === "toggleSetup" ? "setup" : "return",
+        p_done: completionDoneValue(payload.done), p_token: packingToken,
+      });
+      if (error) {
+        const rejected = ["P0001", "P0002", "22P02"].includes(error.code);
+        return NextResponse.json({ error: error.message, retryable: !rejected, code: error.code === "55P03" ? "BUSY" : rejected ? "PACKING_INCOMPLETE" : "REMOTE_RETRY" }, { status: rejected ? 409 : 503 });
+      }
+      packingLease = data === true;
+    }
     const r = await fetch(GAS_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -410,6 +428,7 @@ async function callPost(req: NextRequest) {
               : "",
             remoteContractStatus: confirmed.contractStatus ?? "",
           });
+          packingRelease = true;
           // 느린 옛 요청이 CAS에서 기각되면 DB가 돌려준 최신 정본으로 브라우저도 수렴한다.
           confirmed[field] = authority.done;
           confirmed.completionRevision = authority.revision;
@@ -445,6 +464,11 @@ async function callPost(req: NextRequest) {
     }
     return NextResponse.json({ error: "GAS 호출 실패: " + (e instanceof Error ? e.message : String(e)) }, { status: 502 });
   } finally {
+    if (packingLease && packingRelease) {
+      await getInventoryAuditServiceClient().from("trades")
+        .update({ packing_completion_token: null, packing_completion_until: null })
+        .eq("trade_id", String(payload.tid ?? "")).eq("packing_completion_token", packingToken);
+    }
     // 업로드가 실제로 끝난 뒤 응답만 끊겨도 이전 공유 사진 목록을 남기지 않는다.
     if (photoWrite) invalidateCacheForWrite(action);
   }

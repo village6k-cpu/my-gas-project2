@@ -10,7 +10,9 @@ const statusUrl = pathToFileURL(statusPath).href;
 const script = `
   import assert from 'node:assert';
 
-  const status = await import(${JSON.stringify(statusUrl)});
+  import { createRequire } from 'node:module';
+  const require = createRequire(import.meta.url);
+  const status = require(${JSON.stringify(path.join(root, 'test/helpers/load-typescript.cjs'))}).load(${JSON.stringify(statusPath)});
   assert.strictEqual(
     typeof status.tradesForTab,
     'function',

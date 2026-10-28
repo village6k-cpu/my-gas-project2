@@ -52,7 +52,7 @@ assert.match(
 
 assert.match(
   route,
-  /import \{ revalidateTag, unstable_cache \} from "next\/cache"[\s\S]*import \{ createHash \} from "node:crypto"[\s\S]*const PERSISTENT_PHOTO_CACHE_TAG = "dashboard-photos-v1"/,
+  /import \{ revalidateTag, unstable_cache \} from "next\/cache"[\s\S]*import \{ createHash(?:, randomUUID)? \} from "node:crypto"[\s\S]*const PERSISTENT_PHOTO_CACHE_TAG = "dashboard-photos-v1"/,
   'authenticated photo reads must use the shared Next data cache rather than only an instance-local Map'
 );
 
