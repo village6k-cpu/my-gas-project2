@@ -35,8 +35,18 @@ export type PackingCommand =
   | { action: "model"; ownerId: string; model: string }
   | { action: "receive"; partId: string; count: ReturnCount };
 
+function componentTokens(name: string) {
+  return name.replace(/SDI\s*\/\s*HDMI/gi, "SDI or HDMI").split(/\s*,\s*|\s+\/\s+/);
+}
+function componentMatches(setName: string, label: string) {
+  const template = templateFor(setName);
+  const choices = /^(SDI|HDMI)$/i.test(label) ? template.map(r => ({...r, name: r.name.replace(/SDI\s*(?:or|\/)\s*HDMI/i, label.toUpperCase())})) : template;
+  return choices.filter(r => partKey(r.name) === partKey(label) || partKey(r.name).endsWith("용" + partKey(label)));
+}
 export function packingCandidates(t: Trade): EquipmentItem[] {
-  return t.equipments.filter(e => e.isComponent && !e.isSetHeader && e.checkoutState !== "excluded" && !e.synthetic && (ACCESSORY.test(e.name) || e.name.includes("용 ")));
+  return t.equipments.filter(e => e.isComponent && !e.isSetHeader && e.checkoutState !== "excluded" && !e.synthetic &&
+    (ACCESSORY.test(e.name) || e.name.includes("용 ") || componentTokens(e.name).some(token =>
+      componentMatches(e.setName ?? "", token.replace(/\s*[*×]\s*\d+\s*$/, "").trim()).some(r => ACCESSORY.test(r.name) || r.name.includes("용 ")))));
 }
 export function packingDevices(t: Trade) {
   const managed = new Set(packingCandidates(t).map(e => e.scheduleId));
@@ -88,8 +98,7 @@ function defaultOwner(t: Trade, source: EquipmentItem, name: string): EquipmentI
 }
 function initialEntries(t: Trade, e: EquipmentItem): PackingEntry[] {
   // 이전 예약 묶음의 수량은 명시값 또는 확인된 마스터 대응 행으로만 분리한다.
-  const template = templateFor(e.setName || "");
-  const tokens = e.name.replace(/SDI\s*\/\s*HDMI/gi, "SDI or HDMI").split(/\s*,\s*|\s+\/\s+/);
+  const tokens = componentTokens(e.name);
   const bundled = tokens.length > 1;
   // 과거 FX9/PYXIS 묶음의 '4'는 세트 개수가 아니다. 확인된 기본 묶음만 세트 수로 환산한다.
   const cameraBundle = /풀세트/.test(e.setName ?? "") && tokens.length === 3 &&
@@ -99,8 +108,7 @@ function initialEntries(t: Trade, e: EquipmentItem): PackingEntry[] {
   return tokens.map((token,index) => {
     const match = token.match(/^(.*?)\s*[*×]\s*(\d+)\s*$/);
     const label = (match?.[1] ?? token).trim();
-    const choices = /^(SDI|HDMI)$/i.test(label) ? template.map(r => ({...r, name: r.name.replace(/SDI\s*(?:or|\/)\s*HDMI/i, label.toUpperCase())})) : template;
-    const matches = choices.filter(r => partKey(r.name) === partKey(label) || partKey(r.name).endsWith("용" + partKey(label)));
+    const matches = componentMatches(e.setName ?? "", label);
     const master = matches.length === 1 ? matches[0] : undefined;
     const name = master?.name ?? label;
     const quantity = match ? Number(match[2]) : bundled ? master?.qty : 1;
@@ -187,15 +195,33 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       return fresh;
     }
     fresh.deviceModels = { ...prev.deviceModels };
+    const absorbedDefaults = new Set<string>();
     fresh.entries = fresh.entries.map(e => {
       const old=prev.entries.find(x=>x.id===e.id);
       const before=prev.sources.find(x=>x.id===e.sourceId), after=fresh.sources.find(x=>x.id===e.sourceId);
+      if (old?.modelDefault && old.ownerId===e.ownerId) {
+        const priorOwner=prev.sources.find(s=>s.device && s.id===old.ownerId);
+        const nextOwner=fresh.sources.find(s=>s.device && s.id===e.ownerId);
+        if (priorOwner && nextOwner && priorOwner.name===nextOwner.name && priorOwner.qty===nextOwner.qty) return old;
+      }
+      // 기존 묶음을 새로 인식하면 자동 생성했던 동일 구성품을 원본 행에 연결한다.
+      // 직원의 확인/교체/수량 변경은 옮겨 담고, 자동 행을 다시 더하지 않는다.
+      if (!old && before?.device && after && before.name===after.name && before.qty===after.qty) {
+        const owner=packingDevices(t).find(d=>d.scheduleId===e.ownerId);
+        const defaults=templateFor(prev.deviceModels?.[e.ownerId ?? ""] ?? owner?.name ?? "").filter(r=>ACCESSORY.test(r.name)||r.name.includes("용 "));
+        const matching=defaults.flatMap((r,i)=>canonicalPart(r.name).id===e.partId ? [i] : []);
+        const prior=matching.length===1 ? prev.entries.find(x=>x.modelDefault && !x.sourceId && x.id===`default:${e.ownerId}:${matching[0]}` && x.ownerId===e.ownerId && !absorbedDefaults.has(x.id)) : undefined;
+        if (prior) {
+          absorbedDefaults.add(prior.id);
+          return {...prior,id:e.id,sourceId:e.sourceId,modelDefault:undefined};
+        }
+      }
       const legacyOvercount = old && before && !old.checked && before.name === "SDI 롱라인, SDI 라인, 노가암" &&
         old.partId === e.partId && old.qty === before.qty && old.qty !== e.qty;
       return old && before && after && before.name===after.name &&
         !legacyOvercount && (before.qty===after.qty || (old.partId===e.partId && old.qty===e.qty && old.ownerId===e.ownerId)) ? old : e;
     });
-    for (const e of prev.entries) if (!fresh.entries.some(x=>x.id===e.id)) {
+    for (const e of prev.entries) if (!absorbedDefaults.has(e.id) && !fresh.entries.some(x=>x.id===e.id)) {
       if (!e.sourceId && (!e.ownerId || packingDevices(t).some(d=>d.scheduleId===e.ownerId))) fresh.entries.push(e);
       else if (e.sourceId) fresh.entries.push({...e,qty:0,checked:false});
     }
