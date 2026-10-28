@@ -13,6 +13,18 @@ BASE=Path('C:/Village/migration-staging/studio-20260930/prepared-helpers-v7/sour
 BASE_SHA='d2664be61e3eaa58370101c05fbd30fbb84eb9183fb151961b6eaef66319febc'
 INJECTOR=Path('C:/Village/runtimes/my-gas-project2-production/tools/kakao-dom-bridge/inject-watcher-cdp.py')
 PORT=9223
+MANAGEMENT_EXPRESSION="""new Promise((resolve,reject)=>{
+  if(location.origin!=='chrome://extensions'||!chrome.developerPrivate?.getExtensionsInfo){reject(Error('API unavailable'));return;}
+  const accept=rows=>{
+    if(chrome.runtime.lastError||!Array.isArray(rows)){reject(Error('Complete inventory unavailable'));return;}
+    resolve({api:'chrome.developerPrivate.getExtensionsInfo',complete:true,
+      extensions:rows.map(r=>({id:r.id,state:r.state,type:r.type,location:r.location}))});
+  };
+  try{
+    const pending=chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true},accept);
+    if(pending&&typeof pending.then==='function')pending.then(accept,reject);
+  }catch(error){reject(error);}
+})"""
 
 def extensions_absent(response,management):
     if (not isinstance(response,dict) or 'error' in response
@@ -74,8 +86,7 @@ def runtime_extensions_absent(browser_cdp,page):
     # getExtensions alone lists only unpacked extensions. The privileged Chrome
     # management page also covers packed/store/policy extensions, including
     # disabled and terminated entries. Missing/error APIs never imply absence.
-    expression="new Promise((resolve,reject)=>{if(location.origin!=='chrome://extensions'||!chrome.developerPrivate?.getExtensionsInfo){reject(Error('API unavailable'));return;}chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true},rows=>{if(chrome.runtime.lastError||!Array.isArray(rows)){reject(Error('Complete inventory unavailable'));return;}resolve({api:'chrome.developerPrivate.getExtensionsInfo',complete:true,extensions:rows.map(r=>({id:r.id,state:r.state,type:r.type,location:r.location}))});});})"
-    q=page.call('Runtime.evaluate',{'expression':expression,'returnByValue':True,'awaitPromise':True})
+    q=page.call('Runtime.evaluate',{'expression':MANAGEMENT_EXPRESSION,'returnByValue':True,'awaitPromise':True})
     if q.get('error') or q.get('result',{}).get('exceptionDetails'):raise RuntimeError('Complete extension management query failed')
     management=q.get('result',{}).get('result',{}).get('value')
     unpacked=browser_cdp.call('Extensions.getExtensions',{})

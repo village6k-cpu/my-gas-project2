@@ -6,7 +6,33 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from migration_source_recovery import build_plan, collect_source, FUTURE_LABELS, CANDIDATE, REMOTE_HOST, confirmed_label_absence
+from migration_source_recovery import build_plan, collect_source, FUTURE_LABELS, CANDIDATE, REMOTE_HOST, confirmed_label_absence, same_contract
+
+
+class WindowsBootstrapPathTests(unittest.TestCase):
+    def contract(self,path):
+        return dict(exe='C:/python.exe',cwd='C:/agent',home='C:/home',
+                    argv=['C:/python.exe','-m','hermes_cli.main','gateway','run'],pythonpath=path)
+
+    def test_only_complete_identical_search_sequence_repetitions_are_equivalent(self):
+        paths='C:/agent;C:/agent/venv/Lib/site-packages'
+        self.assertTrue(same_contract(self.contract(paths+';'+paths),self.contract(paths)))
+        self.assertTrue(same_contract(self.contract(';'.join([paths]*3)),self.contract(';'.join([paths]*2))))
+
+    def test_new_reordered_missing_or_empty_search_roots_are_rejected(self):
+        paths='C:/agent;C:/agent/venv/Lib/site-packages'
+        for other in (paths+';C:/other','C:/agent/venv/Lib/site-packages;C:/agent',
+                      'C:/agent',paths+';',paths+';;'+paths,paths+';C:/agent'):
+            with self.subTest(other=other):self.assertFalse(same_contract(self.contract(other),self.contract(paths)))
+
+    def test_path_repetition_does_not_allow_other_execution_contract_drift(self):
+        expected=self.contract('C:/agent;C:/site');actual=self.contract('C:/agent;C:/site;C:/agent;C:/site')
+        for field,value in (('home','C:/wrong'),('cwd','C:/wrong'),('exe','C:/wrong.exe'),('argv',['C:/wrong.exe'])):
+            with self.subTest(field=field):self.assertFalse(same_contract(dict(actual,**{field:value}),expected))
+
+    def test_no_path_and_literal_empty_path_remain_distinct(self):
+        self.assertTrue(same_contract(self.contract(None),self.contract(None)))
+        self.assertFalse(same_contract(self.contract(''),self.contract(None)))
 
 
 class SourceRecoveryTests(unittest.TestCase):

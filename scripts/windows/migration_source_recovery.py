@@ -54,10 +54,30 @@ def norm(path):
     return ntpath.normcase(ntpath.normpath(path)) if isinstance(path, str) else None
 
 
+def same_python_search_path(actual, expected):
+    """Allow only full repetitions of the same ordered Windows search roots.
+
+    Windows gateway startup prepends its project/site pair to the inherited
+    PYTHONPATH. Reusing a captured environment can repeat that complete pair.
+    A different root, order, omitted entry or empty component remains drift.
+    """
+    if actual == expected:return True
+    if not isinstance(actual,str) or not isinstance(expected,str):return False
+    def primitive(value):
+        parts=value.split(';')
+        if len(parts)>64 or not all(parts):return None
+        for size in range(1,len(parts)+1):
+            if len(parts)%size==0 and parts==parts[:size]*(len(parts)//size):return parts[:size]
+    left,right=primitive(actual),primitive(expected)
+    return left is not None and left==right
+
+
 def same_contract(actual, expected):
     return (all(norm(actual.get(k)) == norm(expected[k]) for k in ('exe', 'cwd'))
             and all(k in actual and actual[k] == expected[k]
-                    for k in ('argv', 'home', 'pythonpath')))
+                    for k in ('argv', 'home'))
+            and 'pythonpath' in actual
+            and same_python_search_path(actual['pythonpath'],expected['pythonpath']))
 
 
 def same_entrypoint(actual, expected):
