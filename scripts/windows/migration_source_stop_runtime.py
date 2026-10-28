@@ -352,6 +352,9 @@ print(json.dumps({'config_sha256':hashlib.sha256(raw).hexdigest(),'epoch':cfg['e
         if stage!='before_participant' and 'bridge' not in self.closed:
             if any(c['port']==8787 for c in snapshot['listeners']):raise ValueError('bridge_http_listener_not_closed')
             next(r for r in projection['profiles'] if r['role']=='bridge')['ports']=[]
+        # Retained queue verification may hash gigabytes. Its initial native
+        # observation must not become stale authority for the final decision.
+        remote=self.inspect_native()
         plan=checks.build_plan(projection,receipt,self.intent_sha,snapshot,remote,now=time.time(),activated=(self.control/'MAC_EVER_ACTIVATED').exists())
         if not plan['ready']:raise ValueError('source_stop_ownership_gate:'+','.join(plan['errors']))
         self.assert_fence_lease()

@@ -12,6 +12,7 @@ from urllib.request import urlopen
 BASE=Path('C:/Village/migration-staging/studio-20260930/prepared-helpers-v7/source_watcher_fence.py')
 BASE_SHA='d2664be61e3eaa58370101c05fbd30fbb84eb9183fb151961b6eaef66319febc'
 INJECTOR=Path('C:/Village/runtimes/my-gas-project2-production/tools/kakao-dom-bridge/inject-watcher-cdp.py')
+PORT=9223
 
 def extensions_absent(response,management):
     if (not isinstance(response,dict) or 'error' in response

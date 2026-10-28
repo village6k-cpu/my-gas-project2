@@ -4,6 +4,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts/windows'))
 import migration_source_watcher_fence as watcher
 
 class WatcherInventoryTests(unittest.TestCase):
+    def test_stop_controller_can_use_pinned_cdp_port(self):
+        self.assertEqual(watcher.PORT,9223)
     def management(self,rows):
         return {'api':'chrome.developerPrivate.getExtensionsInfo','complete':True,'extensions':rows}
     def test_explicit_empty_runtime_inventory(self):

@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -87,10 +88,21 @@ def validate_scheduler_fence(expected,actual):
             raise RecoveryError('scheduler_owner_enabled_or_definition_changed')
 
 
+def native_powershell_environment(environ=None):
+    env=dict(os.environ if environ is None else environ)
+    system_root=env.get('SystemRoot') or env.get('SYSTEMROOT')
+    if system_root:
+        # Windows PowerShell 5 can otherwise inherit Core 7 modules through
+        # Python, even after unsetting PSModulePath (persisted paths reappear).
+        env={k:v for k,v in env.items() if k.casefold()!='psmodulepath'}
+        env['PSModulePath']=ntpath.join(system_root,'System32','WindowsPowerShell','v1.0','Modules')
+    return env
+
+
 def powershell(script, *, timeout=30):
     result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',
                            "$ErrorActionPreference='Stop';"+script],
-                          capture_output=True,text=True,timeout=timeout)
+                          capture_output=True,text=True,timeout=timeout,env=native_powershell_environment())
     if result.returncode:raise RecoveryError('scoped_source_operation_failed')
     return result.stdout
 
@@ -374,7 +386,7 @@ class WindowsAdapter:
         self.wait_owner('worker');self.begin()
         write_new(self.control/'launch-guarded-pair.json',{'at':time.time(),'inputs_sha256':self.inputs_sha})
         result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
-            '-File',str(INCIDENT/'guarded-runtime.ps1')],capture_output=True,text=True,timeout=120)
+            '-File',str(INCIDENT/'guarded-runtime.ps1')],capture_output=True,text=True,timeout=120,env=native_powershell_environment())
         if result.returncode:raise RecoveryError('guarded_recovery_failed_preserve_started_processes')
 
     def wait_owner(self,role):
@@ -457,7 +469,7 @@ class WindowsAdapter:
     def guard_healthy(self):
         self.reload()
         r=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
-            '-File',str(INCIDENT/'guarded-runtime.ps1'),'-CheckHealthy'],capture_output=True,text=True,timeout=30)
+            '-File',str(INCIDENT/'guarded-runtime.ps1'),'-CheckHealthy'],capture_output=True,text=True,timeout=30,env=native_powershell_environment())
         if r.returncode:raise RecoveryError('guarded_readiness_failed')
         row=json.loads(r.stdout)
         if row.get('healthy') is not True or row.get('mutated') is not False:

@@ -249,3 +249,33 @@ were reproduced and fixed. A private controller configuration and native lock
 helper are prepared. The actual `--verify-only` source observation hit a health
 timeout and wrote no phase. The controller has not been run, recovery-parent
 integration remains pending, and rollback_ready remains false.
+
+### October 28 actual attempt and recovery
+
+The real source-stop attempt failed before the first termination. Its final gate
+correctly rejected an aged native-inactivity observation after hashing the large
+retained queue. All five original process identities and their captured children
+remained alive. The reconciled receipt explicitly says `source_closed=false`
+and `stop_attempt_only=true`; it cannot authorize a cold transfer or activation.
+
+Recovery restored the original producer callbacks, removed only owned drains,
+verified the resumed watcher and Windows voice authority, and published the actual
+source-recovery receipt. All 21 scheduled task definitions and original enable
+states were independently read back (20 enabled, one originally disabled).
+Both public voice handlers now use their original direct Windows paths. The
+temporary voice keeper exited only after those routes were verified and the
+durable intake had no queued, dispatching, uncertain or conflicting requests.
+The native candidate remains inactive; no Mac business consumer was activated.
+
+The source-stop adapter now refreshes native inactivity immediately before its
+final decision, after expensive local hashing. It retains the existing freshness
+limit and every ownership check. Recovery PowerShell children explicitly use the
+native Windows PowerShell module directory: the inherited Core module path made
+the Windows PowerShell child unable to load `Get-FileHash`. This changes only the
+child environment. The watcher wrapper also exports the required CDP port to its
+runtime caller. All 69 focused tests passed, including child-environment and
+watcher-inventory cases; the fresh review found no material issue in this patch.
+
+The exhausted attempt and all receipts remain preserved. Another attempt requires
+new bound control files and complete final restoration/promotion/activation
+preparation; the recovered receipt must never be relabeled as source closure.
