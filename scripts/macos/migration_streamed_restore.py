@@ -5,6 +5,7 @@ on import or verification. Caller-supplied hashes must come from the actual
 Windows stop/capture controller. Offline verification is not current authority.
 """
 import hashlib
+import argparse
 import importlib.util
 import json
 import math
@@ -15,7 +16,36 @@ import os
 import shutil
 import sqlite3
 import struct
+import subprocess
+import sys
 from contextlib import closing
+
+CANDIDATE=Path('/Users/choijaehyeong/VillageMigration/20260930-windows/candidate')
+
+
+def capture_recovery_rules():
+    p=Path(__file__).resolve().parents[1]/'windows/migration_source_recovery.py'
+    spec=importlib.util.spec_from_file_location('current_native_owner_rules',p)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module
+
+
+def native_inactive(candidate):
+    """Read actual native launchd ownership; unknown diagnostics are not absence."""
+    if sys.platform!='darwin' or os.getuid()!=501:return False
+    candidate=Path(candidate).resolve();marker=candidate/'MIGRATION-INACTIVE'
+    if not marker.is_file() or marker.is_symlink() or (candidate/'ACTIVATION.json').exists():return False
+    rules=capture_recovery_rules();labels=rules.FUTURE_LABELS;domain='gui/501'
+    files=list((candidate/'refresh-20261027-v2/control/launchd').glob('*.plist'))
+    if len(files)!=16 or {p.stem for p in files}!=set(labels) or any(p.is_symlink() for p in files):return False
+    try:
+        q=subprocess.run(['/bin/launchctl','print',domain],capture_output=True,text=True,timeout=3)
+        if q.returncode:return False
+        for label in labels:
+            q=subprocess.run(['/bin/launchctl','print',domain+'/'+label],capture_output=True,text=True,timeout=3)
+            if not rules.confirmed_label_absence(True,q.returncode,q.stderr,label,501):return False
+    except (OSError,subprocess.SubprocessError):return False
+    return True
 
 
 def digest(path):
@@ -321,3 +351,39 @@ def restore_snapshot(snapshot,provenance,pins,output,candidate,*,is_inactive):
                 json.dump(report,f,indent=2);f.flush();os.fsync(f.fileno())
         except OSError:pass
         raise
+
+
+def main(argv=None):
+    from migration_voice_phase import PhaseBusy,PhaseTransitionLock
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--bindings',type=Path,required=True)
+    parser.add_argument('--bindings-sha',required=True)
+    mode=parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--verify-only',action='store_true');mode.add_argument('--restore',action='store_true')
+    args=parser.parse_args(argv)
+    try:
+        candidate=CANDIDATE.resolve();path=args.bindings.absolute()
+        if not path.resolve().is_relative_to(candidate):raise ValueError('private_native_restoration_plan_required')
+        plan=bound(path,args.bindings_sha)
+        if (set(plan)!={'schema','snapshot','provenance','pins','output'}
+                or plan['schema']!='village-current-native-restoration-plan/v1'):
+            raise ValueError('current_native_restoration_plan_required')
+        if not native_inactive(candidate):raise ValueError('native_business_owners_not_proven_inactive')
+        if args.verify_only:
+            result=verify_snapshot(plan['snapshot'],plan['provenance'],plan['pins'])
+            if not native_inactive(candidate):raise ValueError('native_owners_changed_during_verification')
+            result.update(restoration_executed=False)
+        else:
+            with PhaseTransitionLock(candidate):
+                report=restore_snapshot(plan['snapshot'],plan['provenance'],plan['pins'],plan['output'],candidate,
+                                        is_inactive=lambda:native_inactive(candidate))
+            result={'restoration_executed':True,'complete':report['complete'],
+                    'sqlite_databases':sum(len(r) for r in report['canonical'].values()),
+                    'gbrain_logical_validation_pending':True,'promoted':False,'activated':False,
+                    'current_source_closure_verified':False,'business_completion_verified':False}
+        print(json.dumps(result));return 0
+    except (OSError,ValueError,KeyError,TypeError,sqlite3.Error,subprocess.SubprocessError,PhaseBusy):
+        print(json.dumps({'verified':False,'complete':False,'promoted':False,'activated':False}));return 2
+
+
+if __name__=='__main__':raise SystemExit(main())

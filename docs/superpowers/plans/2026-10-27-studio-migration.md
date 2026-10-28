@@ -93,8 +93,16 @@ actual stop/closure receipts; the prepared template cannot authorize execution.
 This is tested recovery code, not evidence of an actual production rollback.
 
 Native verification of the current recovery, voice, raw restoration and phase
-helpers passed123 cases, with all ten incumbent file hashes unchanged. These
+helpers passed127 cases, with all ten incumbent file hashes unchanged. These
 synthetic and off-route checks do not certify an actual production transition.
+
+`scripts/macos/migration_streamed_restore.py` now has a SHA-bound private-plan CLI.
+`--verify-only` performs readback without creating a restoration; `--restore`
+holds the native transition lock and performs the isolated reconstruction. The
+real Mac CLI passed both modes on explicitly synthetic six-tree payloads and ten
+SQLite/WAL pairs using the actual launchd guard. Raw hashes/mtimes, native voice
+phase and incumbent services remained unchanged. Real current source capture,
+GBrain logical validation and final profile assembly are still required.
 
 ## Preparation readback and outstanding gates
 

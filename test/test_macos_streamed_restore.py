@@ -10,6 +10,9 @@ from contextlib import closing
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stdout
+from io import StringIO
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts/macos'))
 
@@ -226,6 +229,60 @@ class StreamedRestoreTests(unittest.TestCase):
         candidate=self.base/'candidate';candidate.mkdir();(candidate/'MIGRATION-INACTIVE').touch()
         with self.assertRaises(ValueError):self.m.restore_snapshot(self.snapshot,self.proofs,self.pins,candidate/'out',candidate,is_inactive=lambda:False)
         self.assertFalse((candidate/'out').exists())
+
+    def cli_fixture(self):
+        candidate=self.base/'candidate';candidate.mkdir();(candidate/'MIGRATION-INACTIVE').touch()
+        (candidate/'state/voice-ingress-v1').mkdir(parents=True)
+        config=candidate/'bindings.json'
+        config.write_text(json.dumps({'schema':'village-current-native-restoration-plan/v1',
+            'snapshot':str(self.snapshot),'provenance':str(self.proofs),'pins':self.pins,
+            'output':str(candidate/'restored')}),encoding='utf-8')
+        return candidate,config,self.digest(config.read_bytes())
+
+    def test_cli_verify_only_is_bound_and_never_creates_restoration(self):
+        candidate,config,pin=self.cli_fixture()
+        with patch.object(self.m,'CANDIDATE',candidate),patch.object(self.m,'native_inactive',return_value=True),redirect_stdout(StringIO()):
+            self.assertEqual(self.m.main(['--bindings',str(config),'--bindings-sha',pin,'--verify-only']),0)
+            self.assertFalse((candidate/'restored').exists())
+            config.write_bytes(config.read_bytes()+b' ')
+            self.assertNotEqual(self.m.main(['--bindings',str(config),'--bindings-sha',pin,'--restore']),0)
+            self.assertFalse((candidate/'restored').exists())
+
+    def test_cli_restore_executes_real_reconstruction_under_transition_lock(self):
+        self.prepare_sqlite_payloads();candidate,config,pin=self.cli_fixture()
+        with patch.object(self.m,'CANDIDATE',candidate),patch.object(self.m,'native_inactive',return_value=True),redirect_stdout(StringIO()):
+            self.assertEqual(self.m.main(['--bindings',str(config),'--bindings-sha',pin,'--restore']),0)
+        report=json.loads((candidate/'restored/RESTORATION.json').read_text())
+        self.assertTrue(report['complete']);self.assertFalse(report['activated'])
+        self.assertEqual(sum(len(r) for r in report['canonical'].values()),10)
+        self.assertTrue(report['gbrain_logical_validation_pending'])
+
+    def test_cli_busy_transition_lock_reports_failure_without_starting_restoration(self):
+        import migration_voice_phase as phase
+        candidate,config,pin=self.cli_fixture();stdout=StringIO()
+        with patch.object(self.m,'CANDIDATE',candidate),patch.object(self.m,'native_inactive',return_value=True), \
+                patch.object(phase,'PhaseTransitionLock',side_effect=phase.PhaseBusy('synthetic contention')), \
+                patch.object(self.m,'restore_snapshot') as restore,redirect_stdout(stdout):
+            self.assertNotEqual(self.m.main(['--bindings',str(config),'--bindings-sha',pin,'--restore']),0)
+            restore.assert_not_called()
+        self.assertFalse(json.loads(stdout.getvalue())['complete'])
+
+    def test_native_guard_rejects_unknown_or_loaded_labels_and_requires_all_sixteen(self):
+        from types import SimpleNamespace
+        candidate,_,_=self.cli_fixture();manifest=candidate/'refresh-20261027-v2/control/launchd'
+        manifest.mkdir(parents=True)
+        labels=self.m.capture_recovery_rules().FUTURE_LABELS
+        for label in labels:(manifest/(label+'.plist')).touch()
+        def result(argv,**kwargs):
+            if argv[-1]=='gui/501':return SimpleNamespace(returncode=0,stderr='')
+            label=argv[-1].split('/')[-1]
+            return SimpleNamespace(returncode=113,stderr='Bad request.\nCould not find service "'+label+'" in domain for user gui: 501')
+        with patch.object(self.m.sys,'platform','darwin'),patch.object(self.m.os,'getuid',return_value=501,create=True),patch.object(self.m.subprocess,'run',side_effect=result) as run:
+            self.assertTrue(self.m.native_inactive(candidate));self.assertEqual(run.call_count,17)
+            with patch.object(self.m.subprocess,'run',return_value=SimpleNamespace(returncode=1,stderr='unknown')):
+                self.assertFalse(self.m.native_inactive(candidate))
+            with patch.object(self.m.subprocess,'run',return_value=SimpleNamespace(returncode=0,stderr='')):
+                self.assertFalse(self.m.native_inactive(candidate))
 
 
 if __name__=='__main__':unittest.main()
