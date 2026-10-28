@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import {once} from 'node:events';
 import {createHash} from 'node:crypto';
 import {fixture} from '../../test/helpers/migration_bridge_fixture.mjs';
-import {atOwnedBridgeBoundary} from './migration_bridge_inspector_session.mjs';
+import {atOwnedBridgeBoundary,withVerifiedBridgeInspector} from './migration_bridge_inspector_session.mjs';
 
 const adapter = await import('./migration_bridge_work_probe.mjs').catch(() => ({}));
 const sha = b => createHash('sha256').update(b).digest('hex');
@@ -27,6 +27,36 @@ async function debugOwner(url) {
 
 test('probe is implemented before use', () => {
   assert.equal(typeof adapter.observeBridgePrivateWork,'function','read-only private-work observer is required');
+});
+
+test('a foreign debugger pause arriving during loaded-source checks prevents the verified callback',async t=>{
+  const {ws,expected}=await fixture(t);const other=await debugOwner(ws);await other.command('Debugger.enable');
+  const Original=globalThis.WebSocket;let injected=false,called=false,pendingRequest,pauseConfirmed=false;
+  globalThis.WebSocket=class extends Original {
+    send(data){
+      if(!injected && JSON.parse(data).method==='Debugger.getScriptSource') {
+        injected=true;
+        void (async()=>{await other.command('Debugger.pause');
+          pendingRequest=fetch(`http://127.0.0.1:${expected.port}/migration-private-work/11111111-1111-1111-1111-111111111111`);
+          const until=Date.now()+1500;
+          while(!other.paused && Date.now()<until)await wait(5);pauseConfirmed=!!other.paused;super.send(data);})();
+      }else super.send(data);
+    }
+  };
+  try {
+    await assert.rejects(withVerifiedBridgeInspector(ws,expected,()=>{called=true;}),/Unowned debugger pause/);
+    assert.equal(called,false);assert.ok(other.paused,'foreign owner retains pause');
+  } finally {
+    globalThis.WebSocket=Original;if(other.paused)await other.command('Debugger.resume');
+    if(pendingRequest)await (await pendingRequest).arrayBuffer();
+    await other.command('Debugger.disable');other.socket.close();assert.equal(pauseConfirmed,true,'pause injection must actually pause target');
+  }
+});
+
+test('an enabled poller whose first sweep has never started is observed through its private running binding',async t=>{
+  const {ws,expected}=await fixture(t,{busy:'action-idle'});
+  const result=await adapter.observeBridgePrivateWork(ws,expected);assert.equal(result.idle,true,JSON.stringify(result));
+  assert.equal(result.action_poller_running,false);
 });
 
 test('a retained reader observes live flags after the nonce request has completed',async t=>{
@@ -54,7 +84,7 @@ test('real closure maps and promise states are observed without leaking private 
   assert.equal((await fetch(`http://127.0.0.1:${expected.port}/health`)).status,200,'debugger always resumes');
 });
 
-for (const busy of ['http','app','audit','channel','manual','worker','recovery','chain','registration','p0-active','p0-catchup','shadow']) {
+for (const busy of ['http','app','audit','channel','manual','worker','recovery','chain','registration','p0-active','p0-catchup','shadow','action-poll']) {
   test(`preexisting ${busy} work blocks idle observation`, async t => {
     const {ws,expected} = await fixture(t,{busy});
     const before=Date.now();

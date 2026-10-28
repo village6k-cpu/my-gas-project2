@@ -44,7 +44,7 @@ function checked(result) {
   return result.result;
 }
 
-export async function atOwnedBridgeBoundary(url,expected,callback,{afterResume}={}) {
+export async function withVerifiedBridgeInspector(url,expected,callback) {
   const endpoint=new URL(url);
   if(endpoint.protocol!=='ws:' || endpoint.hostname!=='127.0.0.1' || endpoint.username || endpoint.password) throw Error('Loopback inspector required');
   if(!Number.isSafeInteger(expected?.pid) || expected.pid<=0 || !Number.isSafeInteger(expected.port)
@@ -63,7 +63,6 @@ export async function atOwnedBridgeBoundary(url,expected,callback,{afterResume}=
     socket.addEventListener('error',()=>{clearTimeout(timer);reject(Error('Inspector connection failed'));},{once:true});
   });
   const client=new Inspector(socket);
-  let breakpoint,requestPromise,pauseTimer,ownedPause;
   try {
     const identity=await client.evaluate('({pid:process.pid,exe:process.execPath,cwd:process.cwd()})');
     if(identity.pid!==expected.pid || normalize(identity.exe)!==normalize(expected.exe)
@@ -78,6 +77,18 @@ export async function atOwnedBridgeBoundary(url,expected,callback,{afterResume}=
       const loaded=await client.command('Debugger.getScriptSource',{scriptId:matches[0].scriptId});
       if(sha(loaded.scriptSource)!==row.sha256) throw Error('Loaded source hash differs: '+name);
     }
+    if(client.paused)throw Error('Unowned debugger pause during source verification');
+    return await callback({client,identity,sources,scripts});
+  } finally {
+    if(!client.paused) await client.command('Debugger.disable').catch(()=>{});
+    socket.close();
+  }
+}
+
+export async function atOwnedBridgeBoundary(url,expected,callback,{afterResume}={}) {
+  return withVerifiedBridgeInspector(url,expected,async({client,identity,sources,scripts})=>{
+    let breakpoint,requestPromise,pauseTimer,ownedPause;
+    try {
     const lines=sources.server.split('\n').map((line,i)=>line.includes("const url = new URL(req.url || '/',")?i:-1).filter(i=>i>=0);
     if(lines.length!==1) throw Error('Reviewed request boundary unavailable');
     // /health queues gatewayChannel.status() behind mutationTail. An unknown
@@ -108,8 +119,7 @@ export async function atOwnedBridgeBoundary(url,expected,callback,{afterResume}=
     if(breakpoint) await client.command('Debugger.removeBreakpoint',{breakpointId:breakpoint}).catch(()=>{});
     if(client.paused && client.paused===ownedPause) await client.command('Debugger.resume').catch(()=>{});
     // A different debugger's pause must be left to that debugger.
-    if(!client.paused) await client.command('Debugger.disable').catch(()=>{});
-    socket.close();
     if(requestPromise) await requestPromise;
   }
+  });
 }

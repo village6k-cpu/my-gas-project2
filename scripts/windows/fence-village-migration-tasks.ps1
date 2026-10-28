@@ -13,7 +13,7 @@ $stage=[IO.Path]::GetFullPath('C:/Village/migration-staging/studio-20260930/resu
 $control=[IO.Path]::GetFullPath($ControlDirectory)
 if($control -ine (Join-Path $stage 'scheduler-fence-v2')){throw 'Unexpected control directory'}
 $manifestFile=[IO.Path]::GetFullPath($ManifestPath)
-if($manifestFile -ine (Join-Path $stage 'scheduler-fence-manifest-v6.json')){throw 'Unexpected manifest location'}
+if($manifestFile -ine (Join-Path $stage 'scheduler-fence-manifest-v7.json')){throw 'Unexpected manifest location'}
 if((Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash -ine $ManifestSha256){throw 'Manifest hash changed'}
 $manifest=Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
 if($manifest.schema -cne 'village-scheduler-fence/v1'){throw 'Unexpected scheduler manifest'}

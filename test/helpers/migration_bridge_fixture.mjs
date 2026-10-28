@@ -40,7 +40,8 @@ export async function fixture(t, {busy = '', actual = false, transport = 'cli', 
       import {create as createHttp} from './hermes-gateway-http.mjs';
       import {create as createChannel} from './hermes-gateway-channel.mjs';
       const CONFIG = {port: Number(process.env.PORT) + (process.env.FIXTURE_MISMATCH === '1' ? 1 : 0)};
-      const workOrchestratorActionPoller = {enabled:false};
+      function actionRuntime(){let running=process.env.FIXTURE_BUSY==='action-poll';return {enabled:['action-poll','action-idle'].includes(process.env.FIXTURE_BUSY),async poll(){return running;}};}
+      const workOrchestratorActionPoller=actionRuntime();
       function timerRuntime(kind) {let timer=null;return {state:{digestRunning:false,noticeCleanupRunning:process.env.FIXTURE_BUSY==='timer-start' && kind==='notice'},async start(){return timer;},stop(){timer=null;}};}
       const workOrchestratorDigestRuntime=timerRuntime('digest');
       const workOrchestratorNoticeCleanupRuntime=timerRuntime('notice');
@@ -64,6 +65,7 @@ export async function fixture(t, {busy = '', actual = false, transport = 'cli', 
       const state = {workerRunning:false,slackActionPollRunning:false,p0SlackEscalationRunning:false,recoverySweepRunning:false,tabCleanupRunning:false,
         activeWorkerRuns:0,workerQueueLength:0,rooms:new Map(),activeWorkerJobIds:new Set(),workOrchestrator:{noticeCleanupRunning:false,digestRunning:false,workActionPollRunning:false}};
       if (process.env.FIXTURE_BUSY === 'worker') state.workerRunning = true;
+      if(process.env.FIXTURE_BUSY==='action-idle')delete state.workOrchestrator.workActionPollRunning;
       globalThis.__fixtureToggleWorker=()=>{state.workerRunning=!state.workerRunning;};
       const server = http.createServer(async (req,res) => {
         const url = new URL(req.url || '/', 'http://127.0.0.1');

@@ -1,7 +1,7 @@
 // Reversible HTTP-close observation session. Never stops the process or grants
 // SourceStop authority. A failed/unfinished close retains the verification hold.
 import {createHash} from 'node:crypto';
-import {atOwnedBridgeBoundary} from './migration_bridge_inspector_session.mjs';
+import {atOwnedBridgeBoundary,withVerifiedBridgeInspector} from './migration_bridge_inspector_session.mjs';
 import {installCurrentBridgeProducerFence} from './migration_bridge_producer_fence.mjs';
 import {installBridgeHttpClosure} from './migration_bridge_http_closure.mjs';
 import {captureBridgePrivateWorkReader,readCapturedBridgePrivateWork} from './migration_bridge_work_probe.mjs';
@@ -14,15 +14,35 @@ function checked(result) {
   if(result.exceptionDetails||!result.result)throw Error('Owned HTTP closure evaluation rejected');return result.result;
 }
 
-export async function withCurrentBridgeHttpClosure(url,expected,token,callback,{closeWaitMs=10000}={}) {
-  if(typeof token!=='string'||token.length<8||typeof callback!=='function'
-      ||!Number.isSafeInteger(closeWaitMs)||closeWaitMs<1||closeWaitMs>60000)throw Error('Invalid HTTP observation session contract');
+function ownerLookup(expected,token) {
   const producerBinding={pid:expected.pid,source_sha256:Object.fromEntries(['server','http','channel'].map(k=>[k,expected.modules[k].sha256])),
     fence_code_sha256:sha(installCurrentBridgeProducerFence.toString()),owner_token_sha256:sha(token)};
   const binding={...producerBinding,http_code_sha256:sha(installBridgeHttpClosure.toString())};
   const lookup=`(() => {const p=globalThis[${JSON.stringify(producerKey)}],c=globalThis[${JSON.stringify(key)}];
     if(process.pid!==${expected.pid} || !p || JSON.stringify(p.binding)!==${JSON.stringify(JSON.stringify(producerBinding))}
       || !c || JSON.stringify(c.binding)!==${JSON.stringify(JSON.stringify(binding))})throw Error('HTTP closure owner mismatch');return c;})()`;
+  return {producerBinding,binding,lookup};
+}
+
+// This entry needs no HTTP request: it still verifies exact live PID/exe/cwd and
+// disk/loaded modules before recovering only this token/code-bound controller.
+export async function recoverCurrentBridgeHttpClosure(url,expected,token) {
+  if(typeof token!=='string'||token.length<8)throw Error('Private HTTP closure owner required');
+  const {lookup}=ownerLookup(expected,token);
+  return withVerifiedBridgeInspector(url,expected,async({client})=>{
+    const result=checked(await client.command('Runtime.evaluate',{expression:`(async()=>{const c=${lookup},s=c.snapshot();
+      if(s.http_closed!==true || !['closed','reopen_failed'].includes(s.mode))throw Error('Owned HTTP close is not settled');
+      await c.abort(${JSON.stringify(token)});const http=c.release(${JSON.stringify(token)});
+      delete globalThis[${JSON.stringify(key)}];return {http,producer:globalThis[${JSON.stringify(producerKey)}].snapshot(),source_stopped:false};
+    })()`,awaitPromise:true,returnByValue:true}));
+    return result.value;
+  });
+}
+
+export async function withCurrentBridgeHttpClosure(url,expected,token,callback,{closeWaitMs=10000}={}) {
+  if(typeof token!=='string'||token.length<8||typeof callback!=='function'
+      ||!Number.isSafeInteger(closeWaitMs)||closeWaitMs<1||closeWaitMs>60000)throw Error('Invalid HTTP observation session contract');
+  const {producerBinding,binding,lookup}=ownerLookup(expected,token);
   let installed=false;
   return atOwnedBridgeBoundary(url,expected,async({client,frame,identity})=>{
     const reader=await captureBridgePrivateWorkReader(client,frame,expected);

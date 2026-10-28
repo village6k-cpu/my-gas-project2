@@ -69,6 +69,7 @@ export async function captureBridgePrivateWorkReader(client,frame,expected) {
           audit:kakaoAutomationAuditCoordinator?.projectPending ?? null,channel:gatewayChannel?.status ?? null,
           manual:manualSendInFlight,slots:queuedWorkerSlotsByRoom,workerChain,
           recovery:gatewayFailureNotificationCoordinator?.recover ?? null,p0:workOrchestratorP0Runtime.sweep,
+          action:workOrchestratorActionPoller.poll,
           shadow:workOrchestratorShadowRuntime.settled,
           flags:{workerRunning:state.workerRunning,slackActionPollRunning:state.slackActionPollRunning,
             p0SlackEscalationRunning:state.p0SlackEscalationRunning,recoverySweepRunning:state.recoverySweepRunning,
@@ -102,19 +103,22 @@ export async function readCapturedBridgePrivateWork(client,reader,identity,expec
     const p0={cutover_enabled:p0Cutover,catch_up_pending:p0CatchUp,
       active_sweep:await directPromiseState(client,p0Active,'activeSweep')};
     const shadowPending=await setSize(client,await binding(client,get('shadow'),'active'));
+    const actionRunning=(await binding(client,get('action'),'running')).value;
+    if(typeof actionRunning!=='boolean')throw Error('Private action-poller state unavailable');
     const flagDetails=await properties(client,get('flags'));
     const flags=Object.fromEntries(flagDetails.result.map(p=>[p.name,p.value?.value]));
     const booleanFlags=['workerRunning','slackActionPollRunning','p0SlackEscalationRunning','recoverySweepRunning',
       'tabCleanupRunning','noticeCleanupRunning','digestRunning','registrationRetryRunning'];
     const countFlags=['activeWorkerRuns','workerQueueLength','rooms','activeWorkerJobIds'];
     const idle=booleanFlags.every(k=>flags[k]===false) && countFlags.every(k=>flags[k]===0)
-      && (flags.workActionPollEnabled===false || (flags.workActionPollEnabled===true && flags.workActionPollRunning===false))
+      && typeof flags.workActionPollEnabled==='boolean' && actionRunning===false
       && Object.values(http).every(n=>n===0) && manual===0 && slots===0
       && p0.catch_up_pending===false && p0.active_sweep==='absent' && shadowPending===0
       && Object.values(promises).every(s=>s==='absent'||s==='fulfilled');
     const report={schema:'village-bridge-private-work-observation/v1',observed_unix_ms:Date.now(),
       owner:identity,source_sha256:Object.fromEntries(Object.entries(expected.modules).map(([k,v])=>[k,v.sha256])),
-      http_in_flight:http,promises,p0,shadow_pending:shadowPending,manual_in_flight:manual,queued_room_slots:slots,flags,idle,
+      http_in_flight:http,promises,p0,shadow_pending:shadowPending,action_poller_running:actionRunning,
+      manual_in_flight:manual,queued_room_slots:slots,flags,idle,
       observation_only:true,stop_authorized:false};
     return report;
 }

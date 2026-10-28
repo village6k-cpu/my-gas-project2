@@ -55,3 +55,23 @@ test('a different owner cannot close the source listener',async t=>{
   await assert.rejects(adapter.withCurrentBridgeHttpClosure(ws,expected,'fixture-wrong-owner',async()=>{}),/owner|evaluation rejected/i);
   assert.equal((await fetch(`http://127.0.0.1:${expected.port}/health`)).status,200);await producer.resume();
 });
+
+test('a disconnected controller can recover an owned reopen failure without any HTTP nonce',async t=>{
+  assert.equal(typeof adapter.recoverCurrentBridgeHttpClosure,'function','closed-listener recovery entry required');
+  const {ws,expected}=await fixture(t,{actual:true,transport:'gateway'});
+  const producer=await installCurrentBridgeFenceOnInspectedSource(ws,expected,'fixture-recovery-owner');await producer.fence();
+  const occupant=http.createServer((req,res)=>res.end('SYNTHETIC OCCUPANT'));
+  t.after(()=>{if(occupant.listening)occupant.close();});
+  await assert.rejects(adapter.withCurrentBridgeHttpClosure(ws,expected,'fixture-recovery-owner',async()=>{
+    await new Promise((resolve,reject)=>{occupant.once('error',reject);occupant.listen(expected.port,'127.0.0.1',resolve);});
+  }),/evaluation rejected/);
+  await assert.rejects(adapter.recoverCurrentBridgeHttpClosure(ws,expected,'fixture-wrong-owner'),/owner|evaluation rejected/i);
+  assert.equal(occupant.listening,true);
+  await new Promise(resolve=>occupant.close(resolve));
+  const restored=await adapter.recoverCurrentBridgeHttpClosure(ws,expected,'fixture-recovery-owner');
+  assert.equal(restored.http.http_closed,false);assert.equal(restored.http.mode,'released');
+  assert.equal(restored.producer.producers_owned,true);assert.equal(restored.producer.mode,'fenced');
+  assert.equal(restored.source_stopped,false);
+  assert.equal((await fetch(`http://127.0.0.1:${expected.port}/health`)).status,200);
+  await producer.resume();
+});

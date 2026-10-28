@@ -80,6 +80,20 @@ source disconnected claim and repeated close/reopen. No production source was
 fenced, closed or stopped by these fixtures, and current SourceStop orchestration
 still needs its own complete accepted-work proof and failure recovery.
 
+The HTTP recovery entry can now reconnect through the already owned inspector
+without an HTTP nonce when the listener is closed. It verifies the exact live
+process, disk/loaded modules and controller token/code binding, reopens only the
+owned server, and keeps the producer fence. A source-verification-time pause from
+another debugger prevents its callback and remains with its owner. The enabled
+action poller's private `running` binding is checked even before its first sweep
+has created a public state field. The native suite now passes55 cases; the full
+Windows54-case suite plus the changed28-case observer/recovery suite pass.
+
+The current scheduler preparation pins manifest version7 to the recovered Chrome
+and21 current task definitions. Read-only validation passes with20 tasks enabled;
+the version2 control directory remains absent. No administrator broker was
+launched, task state changed, or source closure authorized by this preparation.
+
 ## October 28 continuation: current routing and reconstruction
 
 Windows remains the only business consumer. Both public voice paths currently
