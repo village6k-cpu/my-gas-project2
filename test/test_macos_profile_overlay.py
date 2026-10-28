@@ -34,6 +34,14 @@ class ProfileOverlayTests(unittest.TestCase):
         self.assertTrue((self.out/'empty').is_dir());self.assertFalse((self.out/'gateway_state.json').exists())
         self.assertTrue((self.raw/'gateway_state.json').is_file());self.assertFalse(result['activated'])
 
+    def test_native_path_adaptation_retains_original_learning_modified_time(self):
+        raw=self.raw/'learning.md';native=self.native/'learning.md'
+        os.utime(raw,ns=(1609459200123456700,1609459200123456700))
+        self.kwargs['overrides']={'learning.md':{'source_sha256':self.pin(raw),'native_sha256':self.pin(native)}}
+        self.build()
+        self.assertEqual((self.out/'learning.md').read_bytes(),native.read_bytes())
+        self.assertEqual((self.out/'learning.md').stat().st_mtime_ns,raw.stat().st_mtime_ns)
+
     def drain(self):
         body={'action':'drain','migration_id':'fixture','principal':'village-studio-migration:fixture',
               'owner':{'pid':123,'started':4.5}}

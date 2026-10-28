@@ -108,6 +108,8 @@ def build(raw,native,output,*,overrides,controls,canonical,native_only,excluded,
     for name,p in selected.items():
         target=output/name;target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
         shutil.copy2(p,target);target.chmod(0o700 if p.stat().st_mode&0o111 else 0o600)
+        if name in files and policies[name] in ('verified_native_adaptation','prepared_control'):
+            stamp=files[name].stat();os.utime(target,ns=(stamp.st_atime_ns,stamp.st_mtime_ns))
         with target.open('rb+') as f:f.flush();os.fsync(f.fileno())
         if digest(target)!=hashes[name] or digest(p)!=hashes[name]:raise ValueError('offline_profile_payload_changed')
     if (root/'ACTIVATION.json').exists() or not (root/'MIGRATION-INACTIVE').is_file():

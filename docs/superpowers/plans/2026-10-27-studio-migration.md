@@ -93,7 +93,7 @@ actual stop/closure receipts; the prepared template cannot authorize execution.
 This is tested recovery code, not evidence of an actual production rollback.
 
 Native verification of the current recovery, voice, raw restoration and phase
-helpers passed147 cases, with all ten incumbent file hashes unchanged. These
+helpers passed148 cases, with all ten incumbent file hashes unchanged. These
 synthetic and off-route checks do not certify an actual production transition.
 
 `scripts/macos/migration_streamed_restore.py` now has a SHA-bound private-plan CLI.
@@ -113,6 +113,13 @@ rollback journal. Source worker cron is currently absent and unexpected worker
 cron fails closed; root cron retains its latest execution history and never
 replays missed fires. Both profiles passed an actual guarded native rehearsal
 with explicitly synthetic inputs. None of these results authorizes activation.
+
+The latest Windows/native adaptation comparison checked446 bindings and found
+nine changed learning/operations documents. Their current Windows bytes were
+captured separately and three-way merged with the prepared native path changes;
+all nine merged without conflicts and all446 bindings then matched Windows.
+These preparation records are still not an operational assembly policy. Native
+path-adapted learning also retains the original source modification time.
 
 ## Preparation readback and outstanding gates
 
