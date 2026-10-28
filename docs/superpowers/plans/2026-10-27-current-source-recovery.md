@@ -288,3 +288,18 @@ changed or duplicate marker blocks renewal. The recovery executor carries an
 earlier attempt forward only with that completion proof. Current owner, listener,
 drain, phase-lock and freshness checks remain unchanged. This permits recovery
 without deleting historical attempt evidence or treating it as current closure.
+
+The pure `migration_profile_policy.py` binder now ties a reviewed blueprint to
+the last transport manifest and actual owned drains before profile assembly.
+Changed learning/configuration hashes, a new source file colliding with a
+prepared addition, unknown execution directories and a different drain owner
+all block assembly. The binder cannot establish source closure or activation.
+The focused combined suite passed100 cases on the Mac while candidate services
+remained unloaded and all ten incumbent file hashes remained unchanged.
+
+The next native data blueprint also exposed a missing GBrain source-path mapping.
+The registered `C:/Village/HeyBilly_GBrain` workspace was already copied: both
+working files and its Git HEAD match current Windows exactly. A new separately
+bound path map links it to the installed `gbrain-workspace`; the earlier map,
+workspace and GBrain database remain untouched. The actual final database still
+requires closed-state logical validation and the reviewed path-only relocation.
