@@ -175,9 +175,9 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false, 
   const checkoutMemo = String(e.memoCheckout || "").trim();
   const checkinMemo = String(e.memoCheckin || "").trim();
   const baselineLocked = isCheckoutBaselineLocked(t);
-  if (preview) return <li className="bg-white px-3"><div className={`flex justify-between py-3 text-sm font-bold ${setTone ? "-mx-3 bg-brand-50 px-3" : ""}`}><span>{actualName}</span><span>×{e.qty}</span></div><PackingDevice ownerId={e.scheduleId} /></li>;
+  if (preview) return <li className="flow-root bg-white px-3"><div className={`flex justify-between py-3 text-sm font-bold ${setTone ? "-mx-3 bg-brand-50 px-3" : ""}`}><span>{actualName}</span><span>×{e.qty}</span></div><PackingDevice ownerId={e.scheduleId} /></li>;
   return (
-    <li className={`px-3 ${setTone ? "bg-white" : rowTint(e, excluded)}`}>
+    <li className={`flow-root px-3 ${setTone ? "bg-white" : rowTint(e, excluded)}`}>
       <div className={`flex items-center gap-2.5 py-2.5 ${setTone ? "-mx-3 bg-brand-50 px-3" : ""}`}>
         {setBadge && <span className="shrink-0 rounded-md bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">세트</span>}
         <button
