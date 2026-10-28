@@ -26,3 +26,5 @@ test('legacy camera bundle uses number of sets, never the old aggregate quantity
 test('camera master has one FX3 mattebox and one FX9 LVM per set',()=>{const {templateFor}=load('packingCatalog');assert.equal(templateFor('소니 FX3 풀세트').find(e=>e.name==='매트박스').qty,1);assert.equal(templateFor('소니 FX9 풀세트').find(e=>e.name==='LVM-170A').qty,1);});
 
 test('refresh repairs untouched fourfold draft while preserving already corrected noga',()=>{const t=fixture();t.equipments=t.equipments.slice(0,4);t.equipments[3].qty=4;t.packing=step(t,{action:'start'},now);t.packing.entries.forEach(e=>{if(e.name==='노가암')e.checked=true;else e.qty=4;});t.packing=step(t,{action:'refresh'},now);assert(t.packing.entries.every(e=>e.qty===1));assert.equal(t.packing.entries.find(e=>e.name==='노가암').checked,true);});
+
+test('BURANO basic SDI is one while confirmed full-set wireless and spare lines remain two each',()=>{const {templateFor}=load('packingCatalog');assert.equal(templateFor('소니 BURANO 베이직세트').find(e=>e.name==='SDI 연선').qty,1);for(const name of ['테라덱용 SDI 연선','여분 SDI 연선'])assert.equal(templateFor('소니 BURANO 풀세트').find(e=>e.name===name).qty,2);});
