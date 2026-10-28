@@ -76,9 +76,16 @@ def build(raw,native,output,*,overrides,controls,canonical,native_only,excluded,
             # A zero-byte journal contains no rollback records. Retain the
             # exact empty file, paired only with a verified canonical DB.
             empty_journal=True
-        if (header==b'SQLite format 3\0' or name.endswith(('.db','.sqlite'))) and name not in canonical:
+        empty_placeholder=(name not in canonical and p.stat().st_size==0
+                           and name.endswith(('.db','.sqlite','.sqlite3')))
+        if empty_placeholder and (name+'-journal' in files or any(
+                name+suffix in files and files[name+suffix].stat().st_size!=0 for suffix in ('-wal','-shm'))):
+            raise ValueError('unclassified_sqlite_database_sidecars')
+        if (header==b'SQLite format 3\0' or name.endswith(('.db','.sqlite','.sqlite3'))) and name not in canonical and not empty_placeholder:
             raise ValueError('unclassified_sqlite_database')
-        selected[name]=p;policies[name]='verified_empty_sqlite_journal' if empty_journal else 'latest_raw'
+        selected[name]=p
+        policies[name]=('verified_empty_sqlite_journal' if empty_journal else
+                        'verified_empty_database_placeholder' if empty_placeholder else 'latest_raw')
     for name,binding in overrides.items():
         p=native/name
         if (name not in selected or digest(files[name])!=binding['source_sha256'] or p.is_symlink()

@@ -116,6 +116,44 @@ class ProfileOverlayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'journal'):self.build()
         self.assertFalse(self.out.exists())
 
+    def test_empty_database_placeholders_are_preserved_without_claiming_canonical_data(self):
+        for name in ('cache.db','cache.sqlite','cache.sqlite3'):(self.raw/name).touch()
+        result=self.build()
+        for name in ('cache.db','cache.sqlite','cache.sqlite3'):
+            self.assertEqual((self.out/name).read_bytes(),b'')
+            self.assertEqual(result['policies'][name],'verified_empty_database_placeholder')
+            self.assertTrue((self.raw/name).is_file())
+
+    def test_nonempty_unclassified_database_suffixes_remain_blocked(self):
+        for name in ('unknown.db','unknown.sqlite','unknown.sqlite3'):
+            p=self.raw/name;p.write_bytes(b'unknown')
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'unclassified_sqlite'):self.build()
+            self.assertFalse(self.out.exists());p.unlink()
+
+    def test_empty_database_with_unclassified_sqlite_sidecars_is_not_a_placeholder(self):
+        (self.raw/'cache.db').touch()
+        for suffix in ('-wal','-shm'):
+            p=self.raw/('cache.db'+suffix);p.write_bytes(b'unclassified SQLite transaction payload')
+            with self.subTest(suffix=suffix),self.assertRaisesRegex(ValueError,'unclassified_sqlite'):self.build()
+            self.assertFalse(self.out.exists());p.unlink()
+
+    def test_real_wal_payload_cannot_bypass_canonical_validation_with_empty_main(self):
+        source=self.root/'wal-source.db';db=sqlite3.connect(source)
+        try:
+            db.execute('PRAGMA journal_mode=WAL');db.executescript("CREATE TABLE facts(value TEXT);INSERT INTO facts VALUES('committed WAL payload');");db.commit()
+            wal=Path(str(source)+'-wal').read_bytes();self.assertGreater(len(wal),512)
+            (self.raw/'cache.db').touch();p=self.raw/'cache.db-wal';p.write_bytes(wal)
+            with self.assertRaisesRegex(ValueError,'unclassified_sqlite'):self.build()
+            self.assertFalse(self.out.exists());self.assertEqual(p.read_bytes(),wal)
+        finally:db.close()
+
+    def test_empty_main_and_empty_wal_shm_are_preserved_as_data_free_placeholders(self):
+        for name in ('cache.db','cache.db-wal','cache.db-shm'):(self.raw/name).touch()
+        result=self.build()
+        self.assertEqual(result['policies']['cache.db'],'verified_empty_database_placeholder')
+        for name in ('cache.db','cache.db-wal','cache.db-shm'):
+            self.assertEqual((self.out/name).read_bytes(),b'');self.assertEqual((self.raw/name).read_bytes(),b'')
+
     def test_real_hot_sqlite3_journal_cannot_roll_back_canonical_data(self):
         raw=self.raw/'state.sqlite3'
         db=sqlite3.connect(raw)
