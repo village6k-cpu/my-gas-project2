@@ -71,6 +71,16 @@ leases before and after.47 focused tests and the actual Windows21-task readback
 pass (1.235 seconds); one independent review found no material issues. This
 read-only correction does not stop a source service or authorize activation.
 
+The current Chrome has no extension watcher DOM marker. The owned watcher
+adapter retains the original helper's process, target, version and token checks.
+It accepts an undefined marker only after both complete Chrome extension
+management and unpacked inventories are empty before and after the operation.
+The temporary background management target is journaled and only that target is
+closed. Extensions.getExtensions alone is insufficient because it lists only
+unpacked extensions; an independent review caught this and the packed-extension
+regression now rejects that case.65 focused tests pass, and actual read-only
+Chrome management plus watcher inspection verifies this source configuration.
+
 `migration_pre_stop_abort.py` is restricted to the period before an actual
 `SOURCE_STOP_REQUESTED`. It requires all five original process identities,
 execution contracts and listeners, all sixteen native owners absent, and the

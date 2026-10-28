@@ -196,7 +196,10 @@ class WindowsStopAdapter:
         row=m.operate(browser,'inspect',Path(self.plan['watcher_pause']['path']))
         r=row['readback']
         if (r.get('enabled') is not False or r.get('pauseOwnedByReceipt') is not True
-                or r.get('deepRunning') is not False or r.get('extensionStatus')!='stopped'):
+                or r.get('deepRunning') is not False
+                or not (r.get('extensionStatus')=='stopped'
+                    or (r.get('extensionStatus') is None and r.get('extensionInactiveVerified') is True
+                        and r.get('extensionRuntimeInventoryEmpty') is True))):
             raise ValueError('source_watcher_not_owned_and_paused')
         # Read the existing Playwright binding's callbacks without running it.
         spec=importlib.util.spec_from_file_location('owned_stop_cdp',m.INJECTOR);cdp=importlib.util.module_from_spec(spec);spec.loader.exec_module(cdp)
