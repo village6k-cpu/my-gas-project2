@@ -1,13 +1,7 @@
 import type { EquipmentItem, ReturnCount, Trade } from "./types";
 
-// 용도와 실물 종류는 별개다. 이 목록은 확인된 규격만 합산한다.
-// 단자 수만 같은 케이블을 호환품으로 추정하지 않는다.
-export const PACKING_PARTS = [
-  { id: "smallhd-9v", name: "스몰HD용 D탭 라인 (9V)" },
-  { id: "teradek-2pin", name: "테라덱용 D탭 라인 (2핀)" },
-  { id: "nucleus-m-7pin", name: "뉴클-M 모터용 D탭 라인 (7핀)" },
-  { id: "CBL-003", name: "SDI 연선" },
-] as const;
+import { PACKING_PARTS, ACCESSORY, CHOICE, MONITOR_MODELS, canonicalPart, registeredPart, partKey, templateFor } from "./packingCatalog";
+export { PACKING_PARTS, MONITOR_MODELS } from "./packingCatalog";
 
 export interface PackingEntry {
   id: string;
@@ -17,11 +11,16 @@ export interface PackingEntry {
   qty: number;
   checked: boolean;
   sourceId?: string;
+  ownerId?: string;
+  unresolved?: boolean;
+  modelDefault?: boolean;
 }
 export interface PackingManifest {
   version: number;
+  schemaVersion?: 2;
+  deviceModels?: Record<string, string>;
   phase: "draft" | "sealed";
-  sources: { id: string; name: string; qty: number }[];
+  sources: { id: string; name: string; qty: number; device?: boolean }[];
   entries: PackingEntry[];
   counts: Record<string, ReturnCount>;
   note: string;
@@ -33,23 +32,28 @@ export type PackingCommand =
   | { action: "seal" }
   | { action: "revise" }
   | { action: "refresh" }
+  | { action: "model"; ownerId: string; model: string }
   | { action: "receive"; partId: string; count: ReturnCount };
 
-const ACCESSORY = /라인|케이블|[dDＤｄ][\s-]*탭|디탭|SDI|HDMI|노가암|숏암|클램프|더미|기어링|플레이트|그립/i;
-const CHOICE = /(?:\bor\b|또는|택\s*1|SDI\s*\/\s*HDMI|HDMI\s*\/\s*SDI)/i;
 export function packingCandidates(t: Trade): EquipmentItem[] {
-  return t.equipments.filter(e => e.isComponent && !e.isSetHeader && e.checkoutState !== "excluded" && !e.synthetic && ACCESSORY.test(e.name));
+  return t.equipments.filter(e => e.isComponent && !e.isSetHeader && e.checkoutState !== "excluded" && !e.synthetic && (ACCESSORY.test(e.name) || e.name.includes("용 ")));
 }
+export function packingDevices(t: Trade) {
+  const managed = new Set(packingCandidates(t).map(e => e.scheduleId));
+  return t.equipments.filter(e => !managed.has(e.scheduleId) && e.checkoutState !== "excluded" && !e.synthetic);
+}
+export function needsDeviceModel(e: EquipmentItem) { return e.name === "7인치 모니터"; }
+export function packingAvailable(t: Trade) { return packingCandidates(t).length > 0 || packingDevices(t).some(e => needsDeviceModel(e) || templateFor(e.name).some(r => ACCESSORY.test(r.name))); }
 export function packingStarted(t: Trade): boolean {
   return !!t.packingDispatchedAt || t.setupDone || t.returnDone || t.contractStatus !== "예약" || t.equipments.some(e => (e.takenQty ?? 0) > 0);
 }
 export function packingSourceIds(p?: PackingManifest | null): Set<string> {
-  return new Set(p?.sources.map(s => s.id) ?? []);
+  return new Set(p?.sources.filter(s=>!s.device).map(s => s.id) ?? []);
 }
 export function packingGroups(p?: PackingManifest | null) {
   const groups = new Map<string, { id: string; name: string; expected: number; entries: PackingEntry[]; count: ReturnCount }>();
   for (const e of p?.entries ?? []) {
-    if (!e.qty) continue;
+    if (!e.qty || e.unresolved) continue;
     let group = groups.get(e.partId);
     if (!group) {
       group = { id: e.partId, name: e.name, expected: 0, entries: [], count: p?.counts[e.partId] ?? { good: 0, damaged: 0, lost: 0 } };
@@ -66,17 +70,72 @@ export function packingBlockers(p?: PackingManifest | null) {
     return accounted === g.expected ? [] : [{ scheduleId: `packing:${g.id}`, name: g.name, expected: g.expected, accounted, missing: Math.max(0, g.expected - accounted), over: Math.max(0, accounted - g.expected) }];
   });
 }
-function initialEntry(e: EquipmentItem): PackingEntry {
-  const sdi = ["SDI 연선", "스몰HD용 SDI 연선", "테라덱용 SDI 연선", "여분 SDI 연선"].includes(e.name.trim());
-  const known = PACKING_PARTS.find(p => p.name === e.name.trim());
-  return {
-    id: e.scheduleId, sourceId: e.scheduleId,
-    device: e.name.includes("용 ") ? e.name.split("용 ")[0] : e.setName || "추가 구성품",
-    name: sdi ? "SDI 연선" : e.name,
-    partId: sdi ? "CBL-003" : known?.id ?? `private:${e.scheduleId}`,
-    qty: e.qty, checked: false,
-  };
+function defaultOwner(t: Trade, source: EquipmentItem, name: string): EquipmentItem | undefined {
+  const devices = packingDevices(t).filter(e => e.setName === source.setName);
+  const monitors = devices.filter(e => needsDeviceModel(e) || /스몰HD|포트키|티비로직.*(?:7|F-7)/i.test(e.name));
+  if ((name === "노가암" || /스몰HD용/.test(name)) && monitors.length === 1) return monitors[0];
+  // 운영자 확인: FX6의 일반 SDI는 7인치, 롱라인은 LVM. 다른 세트에 추정 적용하지 않는다.
+  if (source.setName === "소니 FX6 풀세트") {
+    if (name === "소니 FX6 풀세트용 SDI 라인" && monitors.length === 1) return monitors[0];
+    const lvms=devices.filter(e=>/^LVM-/.test(e.name));
+    if (name === "소니 FX6 풀세트용 SDI 롱라인" && lvms.length === 1) return lvms[0];
+  }
+  const target = name.includes("용 ") ? name.split("용 ")[0] : "";
+  const matched = target ? devices.filter(e => partKey(e.name).includes(partKey(target))) : [];
+  if (matched.length === 1) return matched[0];
+  return devices.find(e => e.isSetHeader) ?? devices[0];
 }
+function initialEntries(t: Trade, e: EquipmentItem): PackingEntry[] {
+  // 이전 예약 묶음의 수량은 명시값 또는 확인된 마스터 대응 행으로만 분리한다.
+  const template = templateFor(e.setName || "");
+  const tokens = e.name.replace(/SDI\s*\/\s*HDMI/gi, "SDI or HDMI").split(/\s*,\s*|\s+\/\s+/);
+  const bundled = tokens.length > 1;
+  return tokens.map((token,index) => {
+    const match = token.match(/^(.*?)\s*[*×]\s*(\d+)\s*$/);
+    const label = (match?.[1] ?? token).trim();
+    const matches = template.filter(r => partKey(r.name) === partKey(label) || partKey(r.name).endsWith("용" + partKey(label)));
+    const master = matches.length === 1 ? matches[0] : undefined;
+    const name = master?.name ?? label;
+    const quantity = match ? Number(match[2]) : bundled ? master?.qty : 1;
+    const part = registeredPart(name);
+    const owner = defaultOwner(t,e,name);
+    const unresolved = !part || quantity == null || CHOICE.test(name);
+    return { id: bundled ? `${e.scheduleId}:${index}` : e.scheduleId, sourceId: e.scheduleId,
+      ownerId: owner?.scheduleId, device: owner?.name ?? e.setName ?? "공용 구성품",
+      name: part?.name ?? name, partId: part?.id ?? `unresolved:${e.scheduleId}:${index}`,
+      qty: (quantity ?? 1) * e.qty, checked: false, unresolved };
+  });
+}
+export function unassignedVideo(t: Trade, p: PackingManifest, ownerId: string): PackingEntry[] {
+  const owner=packingDevices(t).find(e=>e.scheduleId===ownerId);
+  if (!owner) return [];
+  return p.entries.filter(e=>e.qty>0 && /SDI|HDMI/i.test(e.name) && e.sourceId &&
+    t.equipments.find(s=>s.scheduleId===e.sourceId)?.setName===owner.setName &&
+    (!e.ownerId || packingDevices(t).some(d=>d.scheduleId===e.ownerId && /세트|셋트|패키지/.test(d.name))));
+}
+function addDeviceDefaults(t: Trade, p: PackingManifest, owner: EquipmentItem, model: string) {
+  const rows = templateFor(model).filter(r => ACCESSORY.test(r.name) || r.name.includes("용 "));
+  rows.forEach((row,index) => {
+    if (p.entries.some(e=>e.id===`default:${owner.scheduleId}:${index}`)) return;
+    const part = registeredPart(row.name);
+    if (t.equipments.some(e=>e.setName===owner.setName && e.checkoutState==="excluded" && (partKey(e.name)===partKey(row.name) || (part && registeredPart(e.name)?.id===part.id)))) return;
+    // 기존에 이미 배분된 선·암을 다시 만들지 않는다. 미결 SDI/HDMI도 기존 영상선이 있으면 대체한다.
+    const existing = p.entries.filter(e => e.ownerId === owner.scheduleId && e.qty > 0);
+    const hasVideo = /SDI|HDMI/i.test(row.name) && (existing.some(e => /SDI|HDMI/i.test(e.name)) || unassignedVideo(t,p,owner.scheduleId).length>0);
+    if (hasVideo || existing.some(e => e.partId === part?.id || e.name === row.name)) return;
+    p.entries.push({ id: `default:${owner.scheduleId}:${index}`, ownerId: owner.scheduleId, device: model,
+      name: part?.name ?? row.name, partId: part?.id ?? `unresolved:${owner.scheduleId}:${index}`,
+      qty: row.qty * owner.qty, checked: false, unresolved: !part || CHOICE.test(row.name), modelDefault: true });
+  });
+}
+function initialManifest(t: Trade, version: number, note = ""): PackingManifest {
+  const candidates = packingCandidates(t);
+  const p: PackingManifest = { schemaVersion: 2, deviceModels: {}, version, phase: "draft",
+    sources: [...candidates.map(e => ({ id:e.scheduleId,name:e.name,qty:e.qty })), ...packingDevices(t).map(e=>({id:e.scheduleId,name:e.name,qty:e.qty,device:true}))], entries:candidates.flatMap(e => initialEntries(t,e)), counts:{}, note };
+  for (const owner of packingDevices(t)) if (!needsDeviceModel(owner) && !/세트|셋트|패키지/.test(owner.name)) addDeviceDefaults(t,p,owner,owner.name);
+  return p;
+}
+export function packingNeedsUpgrade(p?: PackingManifest) { return !!p && p.phase === "draft" && p.schemaVersion !== 2; }
 function validText(value: unknown, label: string, max = 160): string {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new Error(`${label}을 확인해주세요`);
   return value.trim();
@@ -86,9 +145,8 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
   if (t.returnDone || t.contractStatus === "반납완료" || t.contractStatus === "취소") throw new Error("마감·취소 거래의 구성품은 수정할 수 없습니다");
   if (command.action === "start") {
     if (prev || packingStarted(t)) throw new Error("이미 반출을 시작한 거래는 기존 검수 내역을 사용해주세요");
-    const candidates = packingCandidates(t);
-    if (!candidates.length) throw new Error("준비할 세트 구성품이 없습니다");
-    return { version: 1, phase: "draft", sources: candidates.map(e => ({ id: e.scheduleId, name: e.name, qty: e.qty })), entries: candidates.map(initialEntry), counts: {}, note: "" };
+    if (!packingAvailable(t)) throw new Error("준비할 세트 구성품이 없습니다");
+    return initialManifest(t, 1);
   }
   if (!prev) throw new Error("구성품 준비를 먼저 시작해주세요");
   const next = structuredClone(prev);
@@ -114,26 +172,40 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
   }
   if (prev.phase !== "draft") throw new Error("구성 다시 준비를 누른 뒤 변경해주세요");
   if (command.action === "refresh") {
-    const candidates = packingCandidates(t);
-    const byId = new Map(candidates.map(e => [e.scheduleId, e]));
-    const fresh = (e: EquipmentItem) => {
-      const entry = initialEntry(e);
-      if (entry.partId.startsWith("private:") && prev.entries.some(old => old.partId === entry.partId && old.name !== entry.name)) entry.partId += `:v${next.version}`;
-      return entry;
-    };
-    next.entries = prev.entries.map(e => {
-      if (!e.sourceId) return e;
-      const current = byId.get(e.sourceId);
-      const original = prev.sources.find(s => s.id === e.sourceId);
-      if (!current) return { ...e, sourceId: undefined, qty: 0, checked: false };
-      return current.name === original?.name && current.qty === original?.qty ? e : fresh(current);
-    });
-    for (const e of candidates) if (!next.entries.some(row => row.sourceId === e.scheduleId)) {
-      const existing = next.entries.findIndex(row => row.id === e.scheduleId);
-      if (existing >= 0) next.entries[existing] = fresh(e);
-      else next.entries.push(fresh(e));
+    const fresh = initialManifest(t,next.version,prev.note);
+    // 첫 버전의 묶음/자유입력을 표준 목록으로 바꿀 때 변경분은 무단 폐기하지 않는다.
+    if (prev.schemaVersion !== 2) {
+      const changed = prev.entries.filter(e => !e.sourceId || !prev.sources.some(s => s.id === e.sourceId && s.name === e.name && s.qty === e.qty));
+      if (changed.length) throw new Error("기존 직접 변경 내역이 있습니다. 구성품 정리 전 담당자 확인이 필요합니다");
+      return fresh;
     }
-    next.sources = candidates.map(e => ({ id: e.scheduleId, name: e.name, qty: e.qty }));
+    fresh.deviceModels = { ...prev.deviceModels };
+    fresh.entries = fresh.entries.map(e => {
+      const old=prev.entries.find(x=>x.id===e.id);
+      const before=prev.sources.find(x=>x.id===e.sourceId), after=fresh.sources.find(x=>x.id===e.sourceId);
+      return old && before && after && before.name===after.name && before.qty===after.qty ? old : e;
+    });
+    for (const e of prev.entries) if (!fresh.entries.some(x=>x.id===e.id)) {
+      if (!e.sourceId && (!e.ownerId || packingDevices(t).some(d=>d.scheduleId===e.ownerId))) fresh.entries.push(e);
+      else if (e.sourceId) fresh.entries.push({...e,qty:0,checked:false});
+    }
+    for (const [id,model] of Object.entries(fresh.deviceModels)) {
+      const owner=packingDevices(t).find(e=>e.scheduleId===id);
+      if (owner) { fresh.entries.filter(e=>e.ownerId===id).forEach(e=>{e.device=model;}); addDeviceDefaults(t,fresh,owner,model); }
+      else delete fresh.deviceModels[id];
+    }
+    return fresh;
+  }
+  if (prev.schemaVersion !== 2) throw new Error("구성품 목록 업데이트를 먼저 눌러주세요");
+  if (command.action === "model") {
+    const owner=packingDevices(t).find(e=>e.scheduleId===command.ownerId && needsDeviceModel(e));
+    if (!owner || !MONITOR_MODELS.includes(command.model)) throw new Error("등록된 실제 모니터 모델을 선택해주세요");
+    if (prev.deviceModels?.[owner.scheduleId] === command.model) return next;
+    if (next.entries.some(e=>e.ownerId===owner.scheduleId && !e.sourceId && !e.modelDefault)) throw new Error("직접 추가한 구성품을 확인한 뒤 모델을 변경해주세요");
+    next.entries=next.entries.filter(e=>e.ownerId!==owner.scheduleId || !e.modelDefault);
+    next.entries.filter(e=>e.ownerId===owner.scheduleId).forEach(e=>{e.device=command.model;e.checked=false;});
+    next.deviceModels={...prev.deviceModels,[owner.scheduleId]:command.model};
+    addDeviceDefaults(t,next,owner,command.model);
     return next;
   }
   if (command.action === "save") {
@@ -145,13 +217,19 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       seen.add(id);
       if (!Number.isSafeInteger(raw.qty) || raw.qty < 0 || raw.qty > 99) throw new Error("수량은 0~99개로 입력해주세요");
       const part = PACKING_PARTS.find(p => p.id === raw.partId);
-      const shared = prev.entries.find(e => e.partId === raw.partId && e.name === raw.name);
-      const name = part ? part.name : validText(raw.name, "구성품 이름");
       const old = prev.entries.find(e => e.id === id);
-      const sourceId = old?.sourceId; // 클라이언트가 예약 원본 연결을 바꿀 수 없다.
-      const entry = { id, sourceId, device: validText(raw.device, "사용 장비"), name, partId: part?.id ?? shared?.partId ?? `private:${id}:v${next.version}`, qty: raw.qty, checked: raw.checked === true };
-      if (entry.qty > 0 && entry.checked && CHOICE.test(name)) throw new Error("SDI/HDMI 등 선택 항목은 실제 종류로 교체한 뒤 확인해주세요");
-      if (old && (old.name !== entry.name || old.qty !== entry.qty || old.device !== entry.device || old.partId !== entry.partId)) entry.checked = false;
+      const unchangedUnresolved = old?.unresolved && raw.partId === old.partId && raw.name === old.name;
+      if (!part && !unchangedUnresolved) throw new Error("등록된 구성품을 선택해주세요. 이름 직접 입력은 합산할 수 없습니다");
+      const ownerId = raw.ownerId ?? old?.ownerId;
+      const owner = packingDevices(t).find(e=>e.scheduleId===ownerId);
+      if (ownerId && !owner) throw new Error("사용 장비가 예약에서 변경되었습니다. 목록을 업데이트해주세요");
+      const name = part?.name ?? old!.name;
+      const device = owner ? prev.deviceModels?.[owner.scheduleId] ?? owner.name : old?.device ?? validText(raw.device,"사용 장비");
+      const entry: PackingEntry = { id, sourceId: old?.sourceId, ownerId, device, name,
+        partId: part?.id ?? old!.partId, qty: raw.qty, checked: raw.checked === true,
+        unresolved: !part, modelDefault: old?.modelDefault };
+      if (entry.qty > 0 && entry.checked && entry.unresolved) throw new Error("등록된 실제 종류를 선택한 뒤 확인해주세요");
+      if (old && (old.name !== entry.name || old.qty !== entry.qty || old.device !== entry.device || old.partId !== entry.partId || old.ownerId !== entry.ownerId)) entry.checked = false;
       return entry;
     });
     // 원본 줄은 삭제 대신 0개(제외)로 남겨 누락과 의도적 제외를 구분한다.
@@ -161,11 +239,18 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     return next;
   }
   if (command.action !== "seal") throw new Error("지원하지 않는 구성품 작업입니다");
+  for (const e of next.entries) if (e.ownerId && !packingDevices(t).some(owner=>owner.scheduleId===e.ownerId)) throw new Error("사용 장비가 변경되었습니다. 목록을 업데이트해주세요");
+  if (packingCandidates(t).some(e=>!prev.sources.some(s=>s.id===e.scheduleId))) throw new Error("예약 구성품이 추가되었습니다. 목록을 업데이트해주세요");
   for (const s of prev.sources) {
     const current = t.equipments.find(e => e.scheduleId === s.id);
     if (!current || current.checkoutState === "excluded" || current.name !== s.name || current.qty !== s.qty) throw new Error("예약 구성품이 변경되었습니다. 원본과 준비 목록을 확인해주세요");
   }
-  if (next.entries.some(e => !e.checked || (e.qty > 0 && CHOICE.test(e.name)))) throw new Error("각 구성품의 실제 종류·수량과 제외 여부를 확인해주세요");
+  for (const owner of packingDevices(t)) {
+    if (needsDeviceModel(owner) && !prev.deviceModels?.[owner.scheduleId]) throw new Error("7인치 모니터의 실제 모델을 선택해주세요");
+    const model=prev.deviceModels?.[owner.scheduleId] ?? owner.name;
+    if (templateFor(model).some(r=>/SDI|HDMI/i.test(r.name)) && unassignedVideo(t,prev,owner.scheduleId).length>0 && !prev.entries.some(e=>e.ownerId===owner.scheduleId && /SDI|HDMI/i.test(e.name))) throw new Error("기존 영상선을 사용할 장비에 연결해주세요. 새 선을 중복 추가하지 않습니다");
+  }
+  if (next.entries.some(e => !e.checked || (e.qty > 0 && (e.unresolved || CHOICE.test(e.name))))) throw new Error("각 구성품의 실제 종류·수량과 제외 여부를 확인해주세요");
   next.phase = "sealed";
   next.sealedAt = now;
   return next;

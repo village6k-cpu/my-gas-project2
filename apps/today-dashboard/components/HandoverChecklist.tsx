@@ -23,8 +23,8 @@ import { Check, Plus } from "./icons";
 import { MemoTag, itemMemoEntries } from "./MemoTag";
 import { equipmentActualName, equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
 import { ReturnChecklist } from "./ReturnChecklist";
-import { PackingChecklist } from "./PackingChecklist";
-import { packingSourceIds } from "@/lib/domain/packing";
+import { PackingChecklist, PackingDevice } from "./PackingChecklist";
+import { packingSourceIds, type PackingCommand } from "@/lib/domain/packing";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
@@ -37,7 +37,7 @@ function SetSingleList({ children }: { children: ReactNode }) {
   return <ul className="divide-y divide-brand-200/70 overflow-hidden rounded-xl bg-brand-50 shadow-card ring-1 ring-brand-200">{children}</ul>;
 }
 
-export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase }) {
+export function HandoverChecklist({ trade, phase, onPackingCommand, preview = false }: { trade: Trade; phase: Phase; onPackingCommand?: (version: number, command: PackingCommand) => Promise<void>; preview?: boolean }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [adding, setAdding] = useState(false);
   const summary = handoverSummary(trade, phase);
@@ -48,7 +48,7 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
   const onsite = trade.equipments.filter((e) => e.onsite && !managed.has(e.scheduleId));
   return (
     <div className="mt-1.5">
-      <PackingChecklist key={trade.tradeId} trade={trade} phase={phase} />
+      <PackingChecklist key={trade.tradeId} trade={trade} phase={phase} onCommand={onPackingCommand}>
       {summary.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1">
           {summary.map((s, i) => (
@@ -58,7 +58,7 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
       )}
 
       {phase === "checkin" ? (
-        <ReturnChecklist trade={trade} />
+        preview ? null : <ReturnChecklist trade={trade} />
       ) : (
         <>
           {/* 예약분 — 세트별 구획(세트명 헤더) */}
@@ -68,25 +68,26 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
               return g.setName ? (
                 singleSetItem ? (
                   <SetSingleList key={g.key}>
-                    <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
+                    <CheckoutRow key={singleSetItem.scheduleId} preview={preview} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
                   </SetSingleList>
                 ) : (
                   <SetBox
                     key={g.key}
                     name={g.setName}
                     headerRow={realDeviceHeaders(g).map((header) => (
-                      <CheckoutRow key={header.scheduleId} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} setBadge setTone />
+                      <CheckoutRow key={header.scheduleId} preview={preview} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} setBadge setTone />
                     ))}
                   >
                     {g.rows.map((e) => (
-                      <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                      <CheckoutRow key={e.scheduleId} preview={preview} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
                     ))}
+                    {g.headers.filter(h => !realDeviceHeaders(g).some(r => r.scheduleId === h.scheduleId)).map(h => <li key={`packing:${h.scheduleId}`}><PackingDevice ownerId={h.scheduleId} common /></li>)}
                   </SetBox>
                 )
               ) : (
                 <LooseList key={g.key}>
                   {g.rows.map((e) => (
-                    <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                    <CheckoutRow key={e.scheduleId} preview={preview} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
                   ))}
                 </LooseList>
               );
@@ -106,7 +107,7 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                   return g.setName ? (
                     singleSetItem ? (
                       <SetSingleList key={g.key}>
-                        <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
+                        <CheckoutRow key={singleSetItem.scheduleId} preview={preview} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
                       </SetSingleList>
                     ) : (
                       <SetBox
@@ -120,35 +121,37 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                           ]);
                         }}
                         headerRow={realDeviceHeaders(g).map((header) => (
-                          <CheckoutRow key={header.scheduleId} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} setBadge setTone />
+                          <CheckoutRow key={header.scheduleId} preview={preview} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} setBadge setTone />
                         ))}
                       >
                         {g.rows.map((e) => (
-                          <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                          <CheckoutRow key={e.scheduleId} preview={preview} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
                         ))}
+                        {g.headers.filter(h => !realDeviceHeaders(g).some(r => r.scheduleId === h.scheduleId)).map(h => <li key={`packing:${h.scheduleId}`}><PackingDevice ownerId={h.scheduleId} common /></li>)}
                       </SetBox>
                     )
                   ) : (
                     <LooseList key={g.key}>
                       {g.rows.map((e) => (
-                        <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                        <CheckoutRow key={e.scheduleId} preview={preview} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
                       ))}
                     </LooseList>
                   );
                 })}
               </div>
             )}
-            {adding ? (
+            {!preview && (adding ? (
               <OnsiteCombobox tradeId={trade.tradeId} onClose={() => setAdding(false)} />
             ) : (
               <button onClick={() => setAdding(true)} className="tap mt-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand-300 bg-white py-2 text-[13px] font-semibold text-brand-700">
                 <Plus className="h-4 w-4" /> 현장 항목 추가
               </button>
-            )}
+            ))}
           </div>
         </>
       )}
 
+      </PackingChecklist>
     </div>
   );
 }
@@ -161,10 +164,10 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
   return "";
 }
 
-function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean; setTone?: boolean }) {
+function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false, preview = false }: { preview?: boolean; t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean; setTone?: boolean }) {
   const taken = e.checkoutState === "taken";
   const excluded = e.checkoutState === "excluded";
-  const actualName = equipmentActualName(e);
+  const actualName = t.packing?.deviceModels?.[e.scheduleId] ?? equipmentActualName(e);
   const actualQty = equipmentActualTakenQty(e);
   const corrected = hasEquipmentActualCorrection(e);
   const partial = actualQty !== e.qty;
@@ -172,6 +175,7 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
   const checkoutMemo = String(e.memoCheckout || "").trim();
   const checkinMemo = String(e.memoCheckin || "").trim();
   const baselineLocked = isCheckoutBaselineLocked(t);
+  if (preview) return <li className="px-3"><div className="flex justify-between py-3 text-sm font-bold"><span>{actualName}</span><span>×{e.qty}</span></div><PackingDevice ownerId={e.scheduleId} /></li>;
   return (
     <li className={`px-3 ${setTone ? "bg-brand-50" : rowTint(e, excluded)}`}>
       <div className="flex items-center gap-2.5 py-2.5">
@@ -256,6 +260,7 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
           <MemoInput value={checkoutMemo} onSave={(v) => setItemMemo(t.tradeId, e.scheduleId, "checkout", v)} placeholder="이 품목 반출 특이사항 (예: 본인 지참)" />
         </div>
       )}
+      <PackingDevice ownerId={e.scheduleId} />
     </li>
   );
 }
