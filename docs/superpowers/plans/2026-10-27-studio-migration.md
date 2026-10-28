@@ -93,7 +93,7 @@ actual stop/closure receipts; the prepared template cannot authorize execution.
 This is tested recovery code, not evidence of an actual production rollback.
 
 Native verification of the current recovery, voice, raw restoration and phase
-helpers passed127 cases, with all ten incumbent file hashes unchanged. These
+helpers passed147 cases, with all ten incumbent file hashes unchanged. These
 synthetic and off-route checks do not certify an actual production transition.
 
 `scripts/macos/migration_streamed_restore.py` now has a SHA-bound private-plan CLI.
@@ -102,7 +102,17 @@ holds the native transition lock and performs the isolated reconstruction. The
 real Mac CLI passed both modes on explicitly synthetic six-tree payloads and ten
 SQLite/WAL pairs using the actual launchd guard. Raw hashes/mtimes, native voice
 phase and incumbent services remained unchanged. Real current source capture,
-GBrain logical validation and final profile assembly are still required.
+GBrain logical validation and final production profile assembly are still required.
+
+The current profile assembler now rechecks the complete raw manifest and all
+assembled profile files/directories after nesting the worker. Latest learning,
+uncertain payloads and message history are retained; only exact session execution
+directories are relocated. Only this migration's hash/owner-bound drain is omitted
+from execution copies. Every canonical filename is protected against a retained
+rollback journal. Source worker cron is currently absent and unexpected worker
+cron fails closed; root cron retains its latest execution history and never
+replays missed fires. Both profiles passed an actual guarded native rehearsal
+with explicitly synthetic inputs. None of these results authorizes activation.
 
 ## Preparation readback and outstanding gates
 
