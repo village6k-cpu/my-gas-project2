@@ -247,6 +247,19 @@ class SourceRecoveryTests(unittest.TestCase):
                 self.snapshot['listeners']=[dict(port=owner['ports'][0],pid=50)]
                 self.assertTrue(self.plan()['ready'],self.plan()['errors'])
 
+    def test_cross_profile_distinct_tool_child_requires_live_verified_owner(self):
+        root=self.candidate('root',50);bridge=self.candidate('bridge',60)
+        bridge['home']=root['home']
+        old_bridge=next(r for r in self.intent['profiles'] if r['role']=='bridge');old_bridge['home']=root['home']
+        helper=dict(bridge,pid=70,started=996,argv=[bridge['exe'],'C:/tools/review-stock.mjs'],
+                    ancestors=[{'pid':root['pid'],'started':root['started']}])
+        self.snapshot['processes']=[root,bridge,helper]
+        self.snapshot['listeners']=[{'port':o['ports'][0],'pid':o['pid']} for o in (root,bridge)]
+        result=self.plan();self.assertTrue(result['ready'],result['errors'])
+        self.snapshot['processes']=[bridge,helper]
+        self.snapshot['listeners']=[{'port':bridge['ports'][0],'pid':bridge['pid']}]
+        self.assertFalse(self.plan()['ready'])
+
     def test_unowned_helper_under_same_profile_is_not_safe_absence(self):
         helper=self.candidate('root')
         helper['argv']=[helper['exe'],'C:/runtime/unknown.py']

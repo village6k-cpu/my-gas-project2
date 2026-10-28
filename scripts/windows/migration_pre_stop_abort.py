@@ -32,6 +32,7 @@ def validate_original_owners(intent,source,remote,*,now,allow_closed_bridge=Fals
     processes=source['processes'];steps=[]
     if len({p['pid'] for p in processes})!=len(processes) or any(not checks.identity(p) for p in processes):
         raise ValueError('invalid_process_observation')
+    verified_owners=[p for p in processes if any(checks.same_contract(p,o) for o in intent['profiles'])]
     for old in intent['profiles']:
         matches=[p for p in processes if checks.same_contract(p,old)]
         if len(matches)!=1 or not checks.same_identity(matches[0],old):
@@ -40,6 +41,7 @@ def validate_original_owners(intent,source,remote,*,now,allow_closed_bridge=Fals
             near=(p.get('argv')==old['argv'] or (checks.norm(p.get('exe'))==checks.norm(old['exe'])
                 and p.get('home')==old['home'] and (checks.same_entrypoint(p,old)
                     or not checks.owned_descendant(p,old))
+                and not checks.distinct_owned_helper(p,verified_owners)
                 and not any(checks.same_contract(p,r) for r in intent['profiles'])))
             if near and not checks.same_contract(p,old):raise ValueError('near_candidate_execution_contract_changed')
         for port in old['ports']:

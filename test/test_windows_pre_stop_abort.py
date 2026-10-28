@@ -50,6 +50,19 @@ class OriginalOwnerTests(unittest.TestCase):
         self.source['errors']=['unreadable']
         with self.assertRaises(ValueError):self.verify()
 
+    def test_distinct_tool_child_of_other_verified_profile_is_not_a_second_service(self):
+        root=next(r for r in self.intent['profiles'] if r['role']=='root')
+        bridge=next(r for r in self.intent['profiles'] if r['role']=='bridge')
+        bridge['home']=root['home']
+        self.source['processes']=copy.deepcopy(self.intent['profiles'])
+        helper=dict(bridge,pid=900,started=150,argv=[bridge['exe'],'C:/tools/review-stock.mjs'],
+                    ancestors=[{'pid':root['pid'],'started':root['started']}])
+        self.source['processes'].append(helper);self.verify()
+        for changes in ({'ancestors':[]},{'ancestors':[{'pid':root['pid'],'started':root['started']+1}]},
+                        {'argv':[bridge['exe'],'-e','inline()']},{'argv':bridge['argv']}):
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                self.source['processes'][-1]=dict(helper,**changes);self.verify()
+
     def test_keeper_contracts_omit_pid_but_must_match_original_execution(self):
         config={'contracts':{r['role']:{k:v for k,v in r.items() if k not in ('pid','started','ports')}
                              for r in self.intent['profiles'] if r['role'] in ('root','voice')}}

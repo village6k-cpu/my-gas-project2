@@ -144,6 +144,16 @@ def owned_descendant(actual, owner):
     return False
 
 
+def distinct_owned_helper(actual, verified_owners):
+    """A classified different entrypoint in an exact live profile's lineage.
+
+    This only distinguishes a tool child from a competing service candidate.
+    It never exempts the child from accepted-work or writer-closure checks.
+    """
+    return (any(owned_descendant(actual,owner) for owner in verified_owners)
+            and all(not same_entrypoint(actual,owner) for owner in verified_owners))
+
+
 def confirmed_label_absence(domain_verified, code, diagnostic, label, uid):
     expected = 'Bad request.\nCould not find service "' + label + '" in domain for user gui: ' + str(uid)
     return (domain_verified is True and code == 113
@@ -201,6 +211,7 @@ def build_plan(intent, receipt, intent_sha, snapshot, remote, *, now, activated)
             if type(listener.get('port')) is not int or type(listener.get('pid')) is not int:
                 raise ValueError('unknown_listener_owner')
         planned = []
+        verified_owners=[p for p in processes if any(same_contract(p,old) for old in expected)]
         for role in ROLES:
             old = next(x for x in expected if x['role'] == role)
             stop = next(x for x in rows if x['role'] == role)
@@ -232,6 +243,7 @@ def build_plan(intent, receipt, intent_sha, snapshot, remote, *, now, activated)
             for proc in processes:
                 near = (proc.get('argv') == old['argv'] or
                         (norm(proc.get('exe')) == norm(old['exe']) and proc.get('home') == old['home']
+                         and not distinct_owned_helper(proc,verified_owners)
                          and (same_entrypoint(proc, old) or not owned_descendant(proc, selected))
                          and not any(same_contract(proc, other) for other in expected)))
                 if near and not same_contract(proc, old):
@@ -260,7 +272,6 @@ def build_plan(intent, receipt, intent_sha, snapshot, remote, *, now, activated)
         # GBrain's launcher and Bun are outside the five service exe names. An
         # unaccounted interpreter may still own its store after a parent exits.
         # Do not call that a closed source merely because Python/Node are gone.
-        verified_owners=[p for p in processes if any(same_contract(p,old) for old in expected)]
         for proc in processes:
             if (ntpath.basename(proc.get('exe','')).lower() in ('bun.exe','gbrain.exe')
                     and not any(owned_descendant(proc,owner) for owner in verified_owners)):
