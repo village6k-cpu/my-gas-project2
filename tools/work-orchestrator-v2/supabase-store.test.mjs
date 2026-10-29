@@ -53,6 +53,68 @@ const workCandidate = {
   payload: { requires_human_action: true, action_family: 'payment_reconcile' }
 };
 
+const reviewedOwnerPayload = {
+  requires_human_action: true,
+  owner_case_key: 'booking:payment',
+  owner_case_title: '대여 요금과 입금 내역 확인',
+  owner_request_summary: '고객이 대여 요금 확인을 요청했습니다.',
+  owner_problem_summary: '입금 확인에 실패해 결제 내역을 다시 확인해야 합니다.',
+  owner_next_action_summary: '실제 입금 내역과 약정 요금을 대조하세요.',
+  owner_task_key: 'payment-check',
+  owner_case_context_status: 'unavailable'
+};
+
+test('owner presentation rejects forbidden or incomplete metadata before fetch with a typed field error', async () => {
+  const requests = [];
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://example.invalid', serviceRoleKey,
+    fetchImpl: async (...args) => { requests.push(args); return response(); } });
+  for (const [field, value] of [
+    ['owner_case_title', '대여 요금 충돌 확인'],
+    ['owner_case_title', '입금 처리 실패 확인'],
+    ['owner_problem_summary', 'payment timeout을 확인합니다.'],
+    ['owner_problem_summary', 'memoRQ-260101-001을 확인합니다.'],
+    ['owner_request_summary', '고객 연락처 010-1111-2222'],
+    ['owner_next_action_summary', '직원 연락처 02-111-2222'],
+    ['owner_problem_summary', undefined]
+  ]) {
+    await assert.rejects(store.upsertWorkItem({ ...workCandidate,
+      payload: { ...reviewedOwnerPayload, [field]: value } }), error => {
+      assert.equal(error.code, 'owner_presentation_invalid');
+      assert.equal(error.field, `payload.${field}`);
+      assert.ok(!error.message.includes(String(value)));
+      return true;
+    });
+  }
+  assert.equal(requests.length, 0);
+});
+
+test('owner presentation reconciliation store retains typed field errors before fetch', async () => {
+  let fetched = false;
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://example.invalid', serviceRoleKey,
+    fetchImpl: async () => { fetched = true; return response(); } });
+  await assert.rejects(store.reconcileOwnerCases({ apply: false, assignments: [{
+    id: WORK_ID, expectedVersion: 1, caseKey: 'booking:payment', taskKey: 'payment-check',
+    title: '대여 요금 충돌 확인', requestSummary: reviewedOwnerPayload.owner_request_summary,
+    problemSummary: reviewedOwnerPayload.owner_problem_summary,
+    nextActionSummary: reviewedOwnerPayload.owner_next_action_summary
+  }] }), error => error.code === 'owner_presentation_invalid' && error.field === 'owner_case.title');
+  assert.equal(fetched, false);
+});
+
+test('owner presentation accepts corrected business text and preserves legacy metadata-free work', async () => {
+  const requests = [];
+  const store = createWorkOrchestratorStore({ supabaseUrl: 'https://example.invalid', serviceRoleKey,
+    fetchImpl: async (url, init) => {
+      requests.push(JSON.parse(init.body).p_candidate);
+      return response({ data: { applied: true, created: true,
+        row: workRow({ payload: JSON.parse(init.body).p_candidate.payload }) } });
+    } });
+  await store.upsertWorkItem({ ...workCandidate, payload: reviewedOwnerPayload });
+  await store.upsertWorkItem(workCandidate);
+  assert.deepEqual(requests[0].payload, reviewedOwnerPayload);
+  assert.deepEqual(requests[1].payload, workCandidate.payload);
+});
+
 function workRow(overrides = {}) {
   return {
     id: WORK_ID,

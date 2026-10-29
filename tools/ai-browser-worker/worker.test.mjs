@@ -8171,6 +8171,35 @@ test('semantic owner case contract accepts only the exact bounded executive repo
   }
 });
 
+test('owner presentation rejects SQL-forbidden titles without dropping supplied metadata or changing action flags', () => {
+  const ownerCase = {
+    caseKey: 'booking:payment', title: '대여 요금 충돌 확인',
+    requestSummary: '고객이 대여 요금 확인을 요청했습니다.',
+    problemSummary: '입금 확인에 실패해 결제 내역을 다시 확인해야 합니다.',
+    nextActionSummary: '실제 입금 내역과 약정 요금을 대조하세요.'
+  };
+  const decision = completeSheetDecision({ owner_case: ownerCase, follow_up_items: [{
+    type: 'payment_check', route: 'settlement', taskKey: 'payment-check',
+    requiresHumanAction: false, actionFamily: 'none', businessKey: '',
+    title: '대여 요금 확인', customer_name: '고객', summary: '입금 내역 확인이 남아 있습니다.',
+    priority: 'normal', status: 'open'
+  }] });
+  const before = structuredClone(decision);
+  const validation = validateAiDecisionContract(decision, { requireOwnerCase: true });
+  assert.equal(validation.valid, false);
+  assert.match(validation.errors.join('|'), /owner_case\.title/);
+  assert.throws(() => buildFollowUpRows(decision, { roomKey: 'chat:payment' }), error =>
+    error.code === 'owner_presentation_invalid' && error.field === 'owner_case.title');
+  assert.deepEqual(decision, before);
+
+  const corrected = { ...decision, owner_case: { ...ownerCase, title: '대여 요금과 입금 내역 확인' } };
+  assert.equal(validateAiDecisionContract(corrected, { requireOwnerCase: true }).valid, true);
+  const [row] = buildFollowUpRows(corrected, { roomKey: 'chat:payment' });
+  assert.equal(row.payload.owner_case_title, corrected.owner_case.title);
+  assert.equal(row.payload.owner_problem_summary, ownerCase.problemSummary);
+  assert.equal(row.payload.requires_human_action, false);
+});
+
 test('owner card presentation cannot reject a valid inquiry or orphan a completed registration', async () => {
   const card = { caseKey:'booking', title:'예약 확인', requestSummary:'RQ를 확인합니다.',
     problemSummary:'confirmation_request_conflict 상태입니다.', nextActionSummary:'확인하세요.' };

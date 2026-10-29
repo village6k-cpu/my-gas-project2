@@ -41,6 +41,7 @@ export {
 } from './staff-confirmed-registration.mjs';
 import { buildHumanWorkCandidates } from '../work-orchestrator-v2/work-items.mjs';
 import { createWorkOrchestratorStore } from '../work-orchestrator-v2/supabase-store.mjs';
+import { assertOwnerCasePresentation, ownerCaseContractErrors } from '../work-orchestrator-v2/owner-presentation.mjs';
 import { deriveAutomationResolution, deriveCustomerReplyOutcome } from '../work-orchestrator-v2/automation-resolution.mjs';
 import {
   canonicalSourceEventKey,
@@ -891,7 +892,7 @@ TASK:
 
 FINAL OUTPUT FORMAT:
 Print a line containing FINAL_JSON, then a fenced json object.
-owner_case의 다섯 필드는 모두 공백 아닌 문자열이어야 한다. 해결됐으면 problemSummary에 검증 결과를 적고 follow_up_items=[], shouldCreateTask=false로 둔다. 남은 실무만 후속조치로 유지한다. requiresHumanAction=true의 actionFamily는 invoice_issue, reservation_change, payment_reconcile, inventory_check, document_approval 중 하나이며 none은 금지다.
+owner_case 다섯 필드는 비어 있지 않은 문자열. title은 구체적 업무를 적고 오류/실패/충돌은 제외한다. 본문의 업무상 실패 설명은 허용하되 기술용어·연락처는 금지한다. 해결 시 problemSummary에 검증 결과, follow_up_items=[], shouldCreateTask=false. requiresHumanAction=true면 actionFamily=none 금지. 남은 실무만 유지하며 표시 문구 때문에 행동 플래그를 바꾸지 않는다.
 The JSON schema:
 {
   "should_write_to_sheet": boolean,
@@ -1063,16 +1064,6 @@ const AI_ALERT_LEVELS = new Set(['p0', 'none']);
 const AI_MANUAL_ACTION_FAMILIES = new Set(['invoice_issue', 'reservation_change', 'payment_reconcile', 'inventory_check', 'document_approval']);
 const HERMES_WORKER_TOOLSETS = 'terminal,file,web,skills,memory,session_search,vision';
 const CONFIRM_REQUEST_DISCOUNT_TYPES = new Set(['학생', '개인사업자/프리랜서', '단골', '제휴', '일반']);
-const OWNER_CASE_KEYS = ['caseKey', 'title', 'requestSummary', 'problemSummary', 'nextActionSummary'];
-const OWNER_CASE_TEXT_LIMITS = Object.freeze({
-  caseKey: 160,
-  title: 120,
-  requestSummary: 500,
-  problemSummary: 500,
-  nextActionSummary: 500
-});
-const UNSAFE_OWNER_CASE_TEXT = /(?:(?:automation|worker|payload|stack|trace|exception|internal|bridge|gateway)(?:[_ -]?(?:error|failure))?|confirmation_request|\bRQ(?:\b|[-/])|거래\s*ID|^네[.!]?$|(?:\+?82[- ]?)?0\d{1,2}[- ]?\d{3,4}[- ]?\d{4})/i;
-const GENERIC_OWNER_CASE_TEXT = /^(?:\S+\s+)?(?:p0\s+)?(?:문의|예약 확인|스케줄 확인|일정 확인|확인 필요|처리 필요|확인하세요)[.!]?$/i;
 const CUSTOMER_DOCUMENT_ATTACHMENT_KEYS = new Set([
   'village_bankbook_copy',
   'village_business_registration'
@@ -1088,32 +1079,6 @@ function isStrictIsoDate(value = '') {
 
 function isStrictConfirmRequestTime(value = '') {
   return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(text(value).trim());
-}
-
-function ownerCaseContractErrors(value, prefix = 'owner_case') {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return [`${prefix} must be an object`];
-  }
-  const keys = Object.keys(value).sort();
-  if (keys.length !== OWNER_CASE_KEYS.length
-    || keys.some((key, index) => key !== [...OWNER_CASE_KEYS].sort()[index])) {
-    return [`${prefix} must contain exactly ${OWNER_CASE_KEYS.join(', ')}`];
-  }
-  const errors = [];
-  for (const key of OWNER_CASE_KEYS) {
-    const raw = typeof value[key] === 'string' ? value[key] : '';
-    const normalized = raw.trim();
-    if (!normalized || raw !== normalized || normalized.length > OWNER_CASE_TEXT_LIMITS[key]) {
-      errors.push(`${prefix}.${key} must be a non-empty trimmed string up to ${OWNER_CASE_TEXT_LIMITS[key]} characters`);
-      continue;
-    }
-    if (key !== 'caseKey' && UNSAFE_OWNER_CASE_TEXT.test(normalized)) {
-      errors.push(`${prefix}.${key} must contain only owner-facing business facts`);
-    } else if (key !== 'caseKey' && GENERIC_OWNER_CASE_TEXT.test(normalized)) {
-      errors.push(`${prefix}.${key} must contain concrete owner-facing request, problem, or action facts`);
-    }
-  }
-  return errors;
 }
 
 function compactOwnerCaseContext(value) {
@@ -2572,8 +2537,8 @@ export function buildFollowUpRows(decision, job = {}) {
         })).filter((message) => message.message)
       : []
   };
-  const ownerCase = decision?.owner_case && ownerCaseContractErrors(decision.owner_case).length === 0
-    ? decision.owner_case
+  const ownerCase = items.length && Object.hasOwn(decision, 'owner_case')
+    ? assertOwnerCasePresentation(decision.owner_case)
     : null;
   const ownerCaseContextStatus = decision?.owner_case_context_status === 'available'
     ? 'available'

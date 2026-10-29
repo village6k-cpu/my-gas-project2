@@ -2,6 +2,7 @@ import { assertNotificationTransition } from './contracts.mjs';
 import { validateWorkOrchestratorHealthAggregate } from './observability.mjs';
 import { normalizeOwnerCaseAssignments } from './reconcile-owner-cases.mjs';
 import { describeOwnerWorkType, OWNER_WORK_TYPES } from './work-taxonomy.mjs';
+import { assertOwnerPayloadPresentation, OwnerPresentationValidationError } from './owner-presentation.mjs';
 
 const REQUEST_ERROR_PREFIX = 'Work Orchestrator Supabase request failed';
 const MAX_EVENT_KEY_LENGTH = 500;
@@ -304,6 +305,7 @@ function normalizeWorkPayload(payload) {
   if (!isRecord(payload) || payload.requires_human_action !== true) throw invalidInput();
   const allowed = new Set(['requires_human_action', ...Object.keys(WORK_PAYLOAD_TEXT_LIMITS)]);
   if (Object.keys(payload).some((key) => !allowed.has(key))) throw invalidInput();
+  assertOwnerPayloadPresentation(payload);
   const result = { requires_human_action: true };
   for (const [key, limit] of Object.entries(WORK_PAYLOAD_TEXT_LIMITS)) {
     if (payload[key] === undefined) continue;
@@ -1860,7 +1862,8 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
       let candidate;
       try {
         candidate = normalizeWorkCandidate(input);
-      } catch {
+      } catch (error) {
+        if (error instanceof OwnerPresentationValidationError) throw error;
         throw invalidInput();
       }
       const { data } = await request('rpc/upsert_work_item_v2', {
@@ -1954,7 +1957,8 @@ export function createWorkOrchestratorStore({ supabaseUrl, serviceRoleKey, fetch
         if (!exactKeys(input, ['assignments', 'apply']) || typeof input.apply !== 'boolean') throw invalidInput();
         assignments = normalizeOwnerCaseAssignments(input.assignments);
         apply = input.apply;
-      } catch {
+      } catch (error) {
+        if (error instanceof OwnerPresentationValidationError) throw error;
         throw invalidInput();
       }
       const { data } = await request('rpc/reconcile_heybilli_owner_cases_v2', {

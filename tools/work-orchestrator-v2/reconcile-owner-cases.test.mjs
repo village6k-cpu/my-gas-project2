@@ -34,3 +34,16 @@ test('owner case reconciliation rejects private or malformed assignment text bef
   ]) await assert.rejects(reconciliation.runOwnerCaseReconciliation({ store, assignments: invalid }), /invalid/i);
   assert.equal(called, false);
 });
+
+test('owner presentation reconciliation applies the SQL title rule while allowing business failure facts in the body', async () => {
+  const calls = [];
+  const store = { reconcileOwnerCases: async input => { calls.push(input); return { applied: false }; } };
+  await assert.rejects(reconciliation.runOwnerCaseReconciliation({ store,
+    assignments: [{ ...assignments[0], title: '대여 요금 충돌 확인' }] }), error =>
+    error.code === 'owner_presentation_invalid' && error.field === 'owner_case.title');
+  assert.equal(calls.length, 0);
+  const corrected = [{ ...assignments[0], title: '대여 요금과 입금 내역 확인',
+    problemSummary: '입금 확인에 실패해 실제 입금 내역을 다시 확인해야 합니다.' }];
+  await reconciliation.runOwnerCaseReconciliation({ store, assignments: corrected });
+  assert.deepEqual(calls, [{ assignments: corrected, apply: false }]);
+});
