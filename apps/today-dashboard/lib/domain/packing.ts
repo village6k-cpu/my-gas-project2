@@ -35,6 +35,11 @@ export type PackingCommand =
   | { action: "model"; ownerId: string; model: string }
   | { action: "receive"; partId: string; count: ReturnCount };
 
+/** 제외(0개)는 이미 의사결정이 끝난 품목이므로 준비 체크를 요구하지 않는다. */
+export function packingEntryNeedsPreparation(e: PackingEntry): boolean {
+  return e.qty > 0 && (!e.checked || !!e.unresolved || CHOICE.test(e.name));
+}
+
 /** 체크만 바꾼 요청은 화면에 먼저 반영한다. 구성 변경·확정은 서버 응답을 기다린다. */
 export function optimisticPackingCheck(t: Trade, version: number, command: PackingCommand): PackingManifest | undefined {
   const p=t.packing;
@@ -295,7 +300,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     const model=prev.deviceModels?.[owner.scheduleId] ?? owner.name;
     if (templateFor(model).some(r=>/SDI|HDMI/i.test(r.name)) && unassignedVideo(t,prev,owner.scheduleId).length>0 && !prev.entries.some(e=>e.ownerId===owner.scheduleId && /SDI|HDMI/i.test(e.name))) throw new Error("기존 영상선을 사용할 장비에 연결해주세요. 새 선을 중복 추가하지 않습니다");
   }
-  if (next.entries.some(e => !e.checked || (e.qty > 0 && (e.unresolved || CHOICE.test(e.name))))) throw new Error("각 구성품의 실제 종류·수량과 제외 여부를 확인해주세요");
+  if (next.entries.some(packingEntryNeedsPreparation)) throw new Error("각 구성품의 실제 종류·수량과 제외 여부를 확인해주세요");
   next.phase = "sealed";
   next.sealedAt = now;
   return next;
