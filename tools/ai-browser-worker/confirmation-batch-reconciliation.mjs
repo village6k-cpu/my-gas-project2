@@ -4,6 +4,14 @@ const record = value => value !== null && typeof value === 'object' && !Array.is
 const canonical = value => Array.isArray(value) ? value.map(canonical) : record(value)
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+const sameSheetWrite = (left, right) => {
+  if (!record(left) || !record(right)) return same(left, right);
+  // The sealed decision retains its schedule reasoning. FINAL may omit that
+  // explanation after execution; every business field must still match exactly.
+  const { schedule_basis: _leftBasis, ...leftWrite } = left;
+  const { schedule_basis: _rightBasis, ...rightWrite } = right;
+  return same(leftWrite, rightWrite);
+};
 const text = value => String(value ?? '').trim();
 const requestIds = result => [...new Set([result?.reqID, ...(Array.isArray(result?.request_ids) ? result.request_ids : [])]
   .filter(value => typeof value === 'string' && /^RQ-\d{6}-\d{3}$/.test(value)))];
@@ -27,7 +35,7 @@ export function reconcileConfirmationBatchReceipt({ receipt, decision = {}, job 
     || unattempted.some((index, offset) => index !== entries.length + offset)) errors.push('batch_result_coverage_invalid');
   if (decision.authoritative_sheet_result && !same(decision.authoritative_sheet_result, authority)) errors.push('batch_final_authority_contradiction');
   if (Array.isArray(decision.confirmation_requests) && (decision.confirmation_requests.length !== children.length
-    || decision.confirmation_requests.some((child, index) => !same(child?.sheet_row_candidate, children[index]?.sheet_row_candidate)))) {
+    || decision.confirmation_requests.some((child, index) => !sameSheetWrite(child?.sheet_row_candidate, children[index]?.sheet_row_candidate)))) {
     errors.push('batch_final_period_plan_contradiction');
   }
   const groups = children.map((authorized, index) => {

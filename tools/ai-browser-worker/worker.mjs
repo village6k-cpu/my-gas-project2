@@ -1504,6 +1504,22 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
       } else {
         const followUps = Array.isArray(decision.follow_up_items) ? decision.follow_up_items : [];
         const reply = decisionReply(decision);
+        // A semantically declined inquiry has no missing registration to pursue.
+        // This exception only accepts an explicit, grounded closure; it grants
+        // neither a sheet write nor a reply and preserves unresolved work gates.
+        const closedDeclinedInquiry = decision.inquiry_disposition === 'declined'
+          && decision.should_write_to_sheet === false
+          && !decision.staff_confirmed_mutation && !decision.staff_confirmed_registration
+          && !decision.customer_requested_pending_revision && !decision.confirmation_requests
+          && Array.isArray(decision.follow_up_items) && followUps.length === 0
+          && typeof decision.latest_staff_message === 'string' && decision.latest_staff_message.trim()
+          && decision.safety_checks?.kakao_conversation_opened === true
+          && decision.safety_checks?.did_not_classify_from_preview_only === true
+          && decision.safety_checks?.no_auto_reply_sent === true
+          && text(reply.replyMode || reply.reply_mode).trim() === 'no_reply'
+          && !text(reply.text).trim() && reply.shouldCreateTask === false
+          && reply.safetyClass === 'no_send' && reply.alreadyDelivered === true
+          && reply.grounding === 'visible_conversation';
         const preservedAsActionableFollowUp = followUps.some((item) => (
           text(item?.type).trim() === 'reservation_review'
           && (text(item?.route).trim() === 'schedule'
@@ -1515,7 +1531,7 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
         ))
           && text(reply.replyMode || reply.reply_mode).trim() === 'no_reply'
           && reply.shouldCreateTask === true;
-        if (!preservedAsActionableFollowUp) {
+        if (!closedDeclinedInquiry && !preservedAsActionableFollowUp) {
           errors.push('an unregistered already_answered reservation requires an actionable schedule follow-up or inventory review');
         }
       }
