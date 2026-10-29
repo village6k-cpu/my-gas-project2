@@ -59,3 +59,39 @@ test('an ok child lacking any authoritative request or trade target cannot compl
  const result=reconcileConfirmationBatchReceipt({receipt,job});
  assert.equal(result.complete,false);assert.equal(result.valid,false);assert.equal(result.decision.owner_review_required,true);
 });
+
+test('completed batch accepts omitted schedule explanation while retaining sealed child authority', async () => {
+  const receipt = await batch();
+  receipt.authorized_confirmation_requests.forEach(child => { child.sheet_row_candidate.schedule_basis = 'explicit'; });
+  const finalChildren = structuredClone(receipt.authorized_confirmation_requests);
+  finalChildren.forEach(child => { delete child.sheet_row_candidate.schedule_basis; });
+  const result = reconcileConfirmationBatchReceipt({
+    receipt, job, decision: { should_write_to_sheet: true, confirmation_requests: finalChildren }
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.complete, true);
+  assert.equal(result.decision.should_write_to_sheet, false);
+  assert.deepEqual(result.decision.confirmation_requests.map(child => child.sheet_row_candidate.schedule_basis), ['explicit', 'explicit']);
+  assert.deepEqual(result.decision.confirmation_requests.map(child => child.should_write_to_sheet), [false, false]);
+});
+
+test('completed batch still rejects changed business fields alongside omitted schedule explanation', async () => {
+  const receipt = await batch();
+  receipt.authorized_confirmation_requests.forEach(child => { child.sheet_row_candidate.schedule_basis = 'explicit'; });
+  for (const [field, changed] of [
+    ['start_date', '2026-10-09'], ['pickup_time', '11:00'], ['end_date', '2026-10-09'],
+    ['return_time', '20:00'], ['equipment', [{ item: 'Different camera', quantity: 9 }]],
+    ['memo', 'Changed commercial note'], ['phone', '01000000000'], ['discount_type', 'Changed discount'],
+    ['extra_request', 'Changed preparation'], ['equipment_write_mode', 'replace_full_plan'],
+    ['set_component_selections', [{ set_item: 'Synthetic set', component_item: 'A', selected_item: 'B' }]]
+  ]) {
+    const finalChildren = structuredClone(receipt.authorized_confirmation_requests);
+    finalChildren.forEach(child => { delete child.sheet_row_candidate.schedule_basis; });
+    finalChildren[0].sheet_row_candidate[field] = changed;
+    const result = reconcileConfirmationBatchReceipt({ receipt, job, decision: { confirmation_requests: finalChildren } });
+    assert.equal(result.valid, false, field);
+    assert.equal(result.complete, false, field);
+    assert.ok(result.errors.includes('batch_final_period_plan_contradiction'), field);
+    assert.equal(result.decision.should_write_to_sheet, false, field);
+  }
+});

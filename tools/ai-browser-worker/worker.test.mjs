@@ -8376,6 +8376,75 @@ test('already_answered unregistered reservation stays valid when an actionable s
   assert.equal(nonReservation.valid, true);
 });
 
+test('already_answered declined inquiry accepts grounded staff closure without creating work', () => {
+  const decision = {
+    classification: 'already_answered', inquiry_disposition: 'declined', should_write_to_sheet: false,
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    latest_staff_message: 'This rental cannot proceed.',
+    safety_checks: { kakao_conversation_opened: true, did_not_classify_from_preview_only: true, no_auto_reply_sent: true },
+    follow_up_items: [], staff_confirmed_mutation: null, staff_confirmed_registration: null,
+    customer_requested_pending_revision: null,
+    reply_decision: { replyMode: 'no_reply', text: '', shouldCreateTask: false, safetyClass: 'no_send',
+      grounding: 'visible_conversation', alreadyDelivered: true }
+  };
+  assert.deepEqual(validateAiDecisionContract(decision), { valid: true, errors: [] });
+  assert.equal(buildSheetAppendPayload(decision, { apiKey: 'synthetic' }), null);
+});
+
+test('already_answered declined inquiry cannot hide contradictory closure or missing evidence', () => {
+  const base = {
+    classification: 'already_answered', inquiry_disposition: 'declined', should_write_to_sheet: false,
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    latest_staff_message: 'This rental cannot proceed.',
+    safety_checks: { kakao_conversation_opened: true, did_not_classify_from_preview_only: true, no_auto_reply_sent: true },
+    follow_up_items: [],
+    reply_decision: { replyMode: 'no_reply', text: '', shouldCreateTask: false, safetyClass: 'no_send',
+      grounding: 'visible_conversation', alreadyDelivered: true }
+  };
+  const variants = [
+    ['unresolved inquiry', decision => { decision.inquiry_disposition = 'new_inquiry'; }],
+    ['already captured inquiry', decision => { decision.inquiry_disposition = 'already_applied'; }],
+    ['write requested', decision => { decision.should_write_to_sheet = true; }],
+    ['write flag omitted', decision => { delete decision.should_write_to_sheet; }],
+    ['reply requested', decision => { decision.reply_decision.replyMode = 'auto_send'; }],
+    ['reply text retained', decision => { decision.reply_decision.text = 'A second response'; }],
+    ['task requested', decision => { decision.reply_decision.shouldCreateTask = true; }],
+    ['delivery not established', decision => { decision.reply_decision.alreadyDelivered = false; }],
+    ['no visible grounding', decision => { decision.reply_decision.grounding = 'none'; }],
+    ['send class retained', decision => { decision.reply_decision.safetyClass = 'sensitive_commitment'; }],
+    ['no staff evidence', decision => { decision.latest_staff_message = ''; }],
+    ['staff evidence is not text', decision => { decision.latest_staff_message = { text: 'Unbound claim' }; }],
+    ['conversation not opened', decision => { decision.safety_checks.kakao_conversation_opened = false; }],
+    ['preview only', decision => { decision.safety_checks.did_not_classify_from_preview_only = false; }],
+    ['send safety not established', decision => { decision.safety_checks.no_auto_reply_sent = false; }],
+    ['follow-up still present', decision => { decision.follow_up_items = [{ type: 'reply_needed', route: 'other', status: 'open' }]; }],
+    ['follow-up choice omitted', decision => { delete decision.follow_up_items; }],
+    ['typed pending revision', decision => { decision.customer_requested_pending_revision = {}; }],
+    ['typed mutation', decision => { decision.staff_confirmed_mutation = {}; }],
+    ['typed registration', decision => { decision.staff_confirmed_registration = {}; }]
+  ];
+  for (const [label, mutate] of variants) {
+    const decision = structuredClone(base);
+    mutate(decision);
+    assert.equal(validateAiDecisionContract(decision).valid, false, label);
+  }
+});
+
+test('already_answered incomplete existing inquiry retains its unresolved schedule gate', () => {
+  const result = validateAiDecisionContract({
+    classification: 'already_answered', inquiry_disposition: 'already_applied', should_write_to_sheet: false,
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    existing_confirm_request_ids: ['RQ-261001-001'],
+    safety_checks: { latest_customer_message_after_last_staff_reply: false },
+    follow_up_items: [{ type: 'schedule_check', route: 'schedule', status: 'open',
+      taskKey: 'inquiry:missing-times', requiresHumanAction: false, actionFamily: 'none' }],
+    reply_decision: { replyMode: 'no_reply', shouldCreateTask: true, safetyClass: 'no_send',
+      grounding: 'visible_conversation', alreadyDelivered: true }
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some(error => error.includes('actionable schedule follow-up')));
+});
+
 test('buildHermesPrompt asks for concise human staff tone instead of a fixed warm AI persona', () => {
   const prompt = buildHermesPrompt({ id: 'tone-contract', preview_text: '가격 알려주세요' });
 
