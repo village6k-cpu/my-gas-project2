@@ -91,7 +91,7 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
     {editing && p && <PackingEditor key={editing.id} entry={editing} entries={p.entries} devices={devices.map(e=>({id:e.scheduleId,name:p.deviceModels?.[e.scheduleId] ?? e.name}))} busy={busy} error={error} onClose={() => setEditing(null)} onSave={async (entry, add) => {
       const exists = p.entries.some(e => e.id === entry.id);
       let updated = entry;
-      if (add && exists) { const id = crypto.randomUUID(); updated = { ...entry, id, sourceId: undefined }; }
+      if (add && exists) { const id = crypto.randomUUID(); updated = { ...entry, id, partId: entry.custom ? `custom:${id}` : entry.partId, sourceId: undefined }; }
       const entries = add || !exists ? [...p.entries, updated] : p.entries.map(e => e.id === entry.id ? updated : e);
       if (await save(entries, editingVersion)) setEditing(null);
     }} />}
@@ -123,7 +123,7 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
     </label>}
     {entries.map(e=><div key={e.id} className="border-b border-line/50 py-2 last:border-0">
       <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={checkBusy || e.qty === 0 || p.phase !== "draft" || (e.qty>0 && e.unresolved) || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>check(e)} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : ""}</button>
-        <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span><strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>
+        <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.custom && <span className="ml-1 text-xs text-ink-mute">직접 입력</span>}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span><strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>
       {p.phase === "draft" && <div className="mt-1 flex flex-wrap gap-1 pl-8"><button disabled={busy} className={`${button} text-brand-700`} onClick={()=>open(e)}>교체·수량</button><button disabled={busy} className={`${button} text-ink-mute`} onClick={()=>update(e,{qty:e.qty?0:1,checked:false})}>{e.qty ? "제외" : "포함"}</button></div>}
     </div>)}
     {p.phase === "draft" && <button className="tap mt-2 text-xs font-bold text-brand-700" disabled={busy || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>{const id=crypto.randomUUID();open({id,ownerId,device,name:"",partId:"",qty:1,checked:false});}}>+ 구성품 추가</button>}
@@ -134,20 +134,24 @@ function PackingEditor({ entry, entries, devices, busy, error, onClose, onSave }
   const [draft, setDraft] = useState(entry);
   const [mode, setMode] = useState<"replace" | "add">("replace");
   const [query,setQuery]=useState("");
+  const [direct, setDirect] = useState(entry.custom === true);
+  const [customName, setCustomName] = useState(entry.custom ? entry.name : "");
   const exists = entries.some(e => e.id === entry.id);
   const normalized=(s:string)=>s.toLowerCase().replace(/\s/g,"");
   const relevant=(name:string)=>normalized(name).includes(normalized(draft.device).split("용")[0]) || (/스몰HD/.test(draft.device)&&/스몰HD/.test(name)) || (/테라덱/.test(draft.device)&&/테라덱/.test(name)) || name==="노가암" || name==="SDI 연선";
   const options=PACKING_PARTS.filter(p=>query ? normalized(p.name).includes(normalized(query)) : relevant(p.name) || p.id===draft.partId).sort((a,b)=>Number(relevant(b.name))-Number(relevant(a.name)) || a.name.localeCompare(b.name,"ko"));
-  const selected=PACKING_PARTS.find(p=>p.id===draft.partId);
+  const selected=direct ? (customName.trim() ? {id:`custom:${draft.id}`,name:customName.trim()} : undefined) : PACKING_PARTS.find(p=>p.id===draft.partId);
   return <div role="dialog" aria-modal="true" aria-label="구성품 선택" className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/40 p-4" onKeyDown={e => { if (e.key === "Escape" && !busy) onClose(); }}>
-    <form className="max-h-[90dvh] w-full max-w-md space-y-3 overflow-y-auto rounded-2xl bg-white p-4 shadow-xl" onSubmit={e => { e.preventDefault(); if(selected) onSave({ ...draft, name:selected.name, checked: false }, mode === "add"); }}>
+    <form className="max-h-[90dvh] w-full max-w-md space-y-3 overflow-y-auto rounded-2xl bg-white p-4 shadow-xl" onSubmit={e => { e.preventDefault(); if(selected) onSave({ ...draft, name:selected.name, partId:selected.id, custom:direct, checked: false }, mode === "add"); }}>
       <h3 className="font-extrabold">{draft.device} 구성품</h3>
       {error && <p role="alert" className="text-sm font-bold text-attention-fg">{error}</p>}
       <label className="block text-sm">사용 장비<select value={draft.ownerId ?? ""} onChange={e=>{const owner=devices.find(d=>d.id===e.target.value);setDraft({...draft,ownerId:owner?.id,device:owner?.name??draft.device});}} className="mt-1 w-full rounded-lg border p-2"><option value="" disabled>장비 선택</option>{devices.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
-      <label className="block text-sm">등록 구성품 검색<input autoFocus value={query} onChange={e=>setQuery(e.target.value)} placeholder="다른 등록 품목도 검색할 수 있습니다" className="mt-1 w-full rounded-lg border p-2" /></label>
-      <div role="listbox" aria-label="등록 구성품" className="max-h-44 overflow-y-auto rounded-lg border border-line">{options.map(p=><button type="button" role="option" aria-selected={draft.partId===p.id} key={p.id} onClick={()=>setDraft({...draft,name:p.name,partId:p.id})} className={`block w-full border-b border-line/40 px-3 py-2 text-left text-sm ${draft.partId===p.id ? "bg-brand-50 font-bold text-brand-700" : ""}`}>{p.name}</button>)}{!options.length&&<p className="p-3 text-sm">등록된 구성품이 없습니다. 담당자에게 품목 등록을 요청해주세요.</p>}</div>
+      {!direct && <><label className="block text-sm">등록 구성품 검색<input autoFocus value={query} onChange={e=>setQuery(e.target.value)} placeholder="다른 등록 품목도 검색할 수 있습니다" className="mt-1 w-full rounded-lg border p-2" /></label>
+      <div role="listbox" aria-label="등록 구성품" className="max-h-44 overflow-y-auto rounded-lg border border-line">{options.map(p=><button type="button" role="option" aria-selected={draft.partId===p.id} key={p.id} onClick={()=>setDraft({...draft,name:p.name,partId:p.id})} className={`block w-full border-b border-line/40 px-3 py-2 text-left text-sm ${draft.partId===p.id ? "bg-brand-50 font-bold text-brand-700" : ""}`}>{p.name}</button>)}{!options.length&&<p className="p-3 text-sm">검색 결과가 없습니다. 아래에서 직접 입력할 수 있습니다.</p>}</div></>}
+      <button type="button" className={`${button} text-brand-700`} onClick={()=>{setDirect(!direct);if (!direct && !customName) setCustomName(query);}}>{direct ? "등록된 구성품에서 선택" : "목록에 없는 구성품 직접 입력"}</button>
+      {direct && <label className="block text-sm">구성품 이름<input required maxLength={100} value={customName} onChange={e=>setCustomName(e.target.value)} placeholder="예: AX-700용 배터리 충전기" className="mt-1 w-full rounded-lg border p-2" /></label>}
       <p className="text-sm font-bold">선택: {selected?.name ?? "구성품을 선택해주세요"}</p>
-      <p className="text-xs text-ink-mute">같은 등록 품목을 고르면 장비가 달라도 합산됩니다. 검색어는 품목 이름으로 저장되지 않습니다.</p>
+      <p className="text-xs text-ink-mute">{direct ? "직접 입력한 품목은 이 예약에서 별도로 집계하며 반납 때도 확인합니다. 다른 품목과 이름만으로 합산하지 않습니다." : "같은 등록 품목을 고르면 장비가 달라도 합산됩니다. 검색어는 품목 이름으로 저장되지 않습니다."}</p>
       <label className="block text-sm">수량<input required type="number" min={1} max={99} value={draft.qty || ""} onChange={e => setDraft({ ...draft, qty: Number(e.target.value) })} className="ml-3 w-20 rounded-lg border p-2" /></label>
       {exists && <div className="flex flex-wrap gap-3 text-sm"><label><input type="radio" checked={mode === "replace"} onChange={() => setMode("replace")} /> 기존 {entry.qty}개 교체</label><label><input type="radio" checked={mode === "add"} onChange={() => setMode("add")} /> 기존 유지하고 추가</label></div>}
       <div className="flex justify-end gap-2"><button type="button" disabled={busy} className={button} onClick={onClose}>취소</button><button disabled={busy || !selected} className={`${button} bg-brand-600 text-white`}>{mode === "add" || !exists ? "추가 저장" : "교체 저장"}</button></div>

@@ -145,6 +145,10 @@ for (const rows of Object.values(PACKING_TEMPLATES)) for (const row of rows) {
     }
   } else { const p=canonicalPart(row.name); catalog.set(p.id,p); }
 }
+// 현장에서 선택할 수 있는 추가 구성품. 기본 반출 수량에는 자동으로 넣지 않는다.
+for (const name of ["소니 캠 AX-700용 배터리 충전기"]) {
+  const part = canonicalPart(name); catalog.set(part.id, part);
+}
 export const PACKING_PARTS = [...catalog.values()];
 export function registeredPart(name: string) {
   const p=canonicalPart(name); return catalog.get(p.id);
