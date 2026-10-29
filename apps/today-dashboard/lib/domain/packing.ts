@@ -14,6 +14,7 @@ export interface PackingEntry {
   ownerId?: string;
   unresolved?: boolean;
   modelDefault?: boolean;
+  custom?: boolean; // 이 예약의 해당 행에서만 집계하는 직접 입력 품목
 }
 export interface PackingManifest {
   version: number;
@@ -266,18 +267,22 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       if (!/^[\w:-]+$/.test(id) || seen.has(id)) throw new Error("구성품 ID가 중복되거나 올바르지 않습니다");
       seen.add(id);
       if (!Number.isSafeInteger(raw.qty) || raw.qty < 0 || raw.qty > 99) throw new Error("수량은 0~99개로 입력해주세요");
-      const part = PACKING_PARTS.find(p => p.id === raw.partId);
+      const direct = raw.custom === true;
+      const directName = direct ? validText(raw.name, "구성품 이름", 100) : "";
+      if (direct && raw.partId !== `custom:${id}`) throw new Error("직접 입력 구성품 ID를 확인해주세요");
+      if (direct && CHOICE.test(directName)) throw new Error("실제로 나가는 구성품 한 종류를 입력해주세요");
+      const part = direct ? registeredPart(directName) : PACKING_PARTS.find(p => p.id === raw.partId);
       const old = prev.entries.find(e => e.id === id);
       const unchangedUnresolved = old?.unresolved && raw.partId === old.partId && raw.name === old.name;
-      if (!part && !unchangedUnresolved) throw new Error("등록된 구성품을 선택해주세요. 이름 직접 입력은 합산할 수 없습니다");
+      if (!part && !direct && !unchangedUnresolved) throw new Error("등록된 구성품을 선택해주세요. 이름 직접 입력은 합산할 수 없습니다");
       const ownerId = raw.ownerId ?? old?.ownerId;
       const owner = packingDevices(t).find(e=>e.scheduleId===ownerId);
       if (ownerId && !owner) throw new Error("사용 장비가 예약에서 변경되었습니다. 목록을 업데이트해주세요");
-      const name = part?.name ?? old!.name;
+      const name = part?.name ?? (direct ? directName : old!.name);
       const device = owner ? prev.deviceModels?.[owner.scheduleId] ?? owner.name : old?.device ?? validText(raw.device,"사용 장비");
       const entry: PackingEntry = { id, sourceId: old?.sourceId, ownerId, device, name,
-        partId: part?.id ?? old!.partId, qty: raw.qty, checked: raw.checked === true,
-        unresolved: !part, modelDefault: old?.modelDefault };
+        partId: part?.id ?? (direct ? `custom:${id}` : old!.partId), qty: raw.qty, checked: raw.checked === true,
+        unresolved: !part && !direct, modelDefault: old?.modelDefault, ...(direct && !part ? {custom:true} : {}) };
       if (entry.qty > 0 && entry.checked && entry.unresolved) throw new Error("등록된 실제 종류를 선택한 뒤 확인해주세요");
       if (old && (old.name !== entry.name || old.qty !== entry.qty || old.device !== entry.device || old.partId !== entry.partId || old.ownerId !== entry.ownerId)) entry.checked = false;
       return entry;

@@ -127,3 +127,28 @@ test("excluded unchecked accessory does not block sealing; included unchecked ac
   assert.equal(t.packing.entries.find(e=>e.id==="s1").qty,0);
   assert.equal(groups(t.packing).find(g=>g.id==="CBL-003").expected,2);
 });
+
+test("missing accessories can be entered explicitly and survive refresh, sealing and return counts",()=>{
+  const t=started();
+  const custom={id:"field-extra",device:"BURANO",ownerId:"camera",name:"현장용 특수 충전기",partId:"custom:field-extra",custom:true,qty:2,checked:false};
+  save(t,[...t.packing.entries,custom]);
+  t.packing=JSON.parse(JSON.stringify(t.packing));
+  t.packing=step(t,{action:"refresh"},now);
+  assert.equal(t.packing.entries.find(e=>e.id===custom.id).custom,true);
+  seal(t);
+  assert.equal(groups(t.packing).find(g=>g.id===custom.partId).expected,2);
+  t.packing=step(t,{action:"receive",partId:custom.partId,count:{good:1,damaged:0,lost:0}},now);
+  assert.equal(blockers(t.packing).find(g=>g.partId===custom.partId || g.id===custom.partId || g.name===custom.name).missing,1);
+});
+test("custom names never merge by spelling; known registered names resolve to canonical identity",()=>{
+  const t=started();
+  const row={id:"custom-one",device:"BURANO",name:"현장 특수선",partId:"custom:custom-one",custom:true,qty:1,checked:false};
+  save(t,[...t.packing.entries,row,{...row,id:"custom-two",partId:"custom:custom-two"}]);
+  assert.equal(groups(t.packing).filter(g=>g.name===row.name).length,2);
+  save(t,[...t.packing.entries,{...row,id:"known",partId:"custom:known",name:"소니 캠 AX-700용 배터리 충전기"}]);
+  const added=t.packing.entries.find(e=>e.id==="known");
+  assert.equal(added.custom,undefined);assert.equal(added.unresolved,false);assert(!added.partId.startsWith("custom:"));
+  assert.throws(()=>save(t,[...t.packing.entries,{...row,id:"bad",partId:row.partId}]),/ID/);
+  assert.throws(()=>save(t,[...t.packing.entries,{...row,id:"blank",partId:"custom:blank",name:"  "}]),/이름/);
+  assert.throws(()=>save(t,[...t.packing.entries,{...row,id:"choice",partId:"custom:choice",name:"SDI or HDMI"}]),/한 종류/);
+});
