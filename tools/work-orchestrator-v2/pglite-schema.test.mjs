@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
+import { normalizeOwnerCaseAssignments } from './reconcile-owner-cases.mjs';
 
 const migrationsDirectory = join(import.meta.dirname, '..', '..', 'supabase', 'migrations');
 const [migrationName] = readdirSync(migrationsDirectory)
@@ -229,6 +230,43 @@ test('owner-language validator rejects internal workflow jargon before it reache
     assert.equal(result.rows[0].valid, false, JSON.stringify(payload));
   }
   await db.close();
+});
+
+test('owner presentation JavaScript and isolated SQL agree on field-specific title and business-body policy', async () => {
+  const db = await createOwnerLanguageDatabase();
+  const assignment = {
+    id: '11111111-1111-4111-8111-111111111111', expectedVersion: 1,
+    caseKey: 'booking:payment', title: '대여 요금과 입금 내역 확인',
+    requestSummary: '고객이 대여 요금 확인을 요청했습니다.',
+    problemSummary: '입금 확인에 실패해 내역을 다시 확인해야 합니다.',
+    nextActionSummary: '실제 입금 내역과 약정 요금을 대조하세요.', taskKey: 'payment-check'
+  };
+  try {
+    for (const [field, value, expected] of [
+      ['title', assignment.title, true],
+      ['title', '대여 요금 충돌 확인', false],
+      ['title', '입금 처리 실패 확인', false],
+      ['title', '입금 처리 오류 확인', false],
+      ['problemSummary', assignment.problemSummary, true],
+      ['problemSummary', '결제 error와 timeout을 확인합니다.', false],
+      ['problemSummary', 'memoRQ-260101-001을 확인합니다.', false],
+      ['requestSummary', '연락처 010-1111-2222', false]
+    ]) {
+      const candidate = { ...assignment, [field]: value };
+      let jsValid = true;
+      try { normalizeOwnerCaseAssignments([candidate]); } catch { jsValid = false; }
+      const payload = {
+        owner_case_key: candidate.caseKey, owner_case_title: candidate.title,
+        owner_request_summary: candidate.requestSummary, owner_problem_summary: candidate.problemSummary,
+        owner_next_action_summary: candidate.nextActionSummary, owner_task_key: candidate.taskKey,
+        owner_case_context_status: 'unavailable'
+      };
+      const sqlValid = (await db.query('select work_orchestrator_private.is_owner_case_payload_v2($1::jsonb) as valid',
+        [JSON.stringify(payload)])).rows[0].valid;
+      assert.equal(sqlValid, expected, `${field}: SQL`);
+      assert.equal(jsValid, sqlValid, `${field}: JavaScript/SQL parity`);
+    }
+  } finally { await db.close(); }
 });
 
 test('Heybilli fresh start deletes pre-launch cards but keeps today cards and source receipts', async () => {

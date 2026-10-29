@@ -1,3 +1,5 @@
+import { assertOwnerCasePresentation } from './owner-presentation.mjs';
+
 const ASSIGNMENT_KEYS = [
   'id', 'expectedVersion', 'caseKey', 'title', 'requestSummary',
   'problemSummary', 'nextActionSummary', 'taskKey'
@@ -34,14 +36,17 @@ export function normalizeOwnerCaseAssignments(value) {
       throw new Error('owner case reconciliation input invalid');
     }
     ids.add(assignment.id);
+    const presentation = assertOwnerCasePresentation({
+      caseKey: text(assignment.caseKey, 160),
+      title: assignment.title,
+      requestSummary: assignment.requestSummary,
+      problemSummary: assignment.problemSummary,
+      nextActionSummary: assignment.nextActionSummary
+    });
     return {
       id: assignment.id,
       expectedVersion: assignment.expectedVersion,
-      caseKey: text(assignment.caseKey, 160),
-      title: text(assignment.title, 120),
-      requestSummary: text(assignment.requestSummary, 500),
-      problemSummary: text(assignment.problemSummary, 500),
-      nextActionSummary: text(assignment.nextActionSummary, 500),
+      ...presentation,
       taskKey: text(assignment.taskKey, 160)
     };
   });
