@@ -41,6 +41,16 @@ export function packingEntryNeedsPreparation(e: PackingEntry): boolean {
   return e.qty > 0 && (!e.checked || !!e.unresolved || CHOICE.test(e.name));
 }
 
+/** 운영자 지정 필수 동봉품: 준비 중 누락·제외로 사라져도 확정 전에 검증한다. */
+export function packingRequiredIssues(t: Trade): string[] {
+  return packingDevices(t).filter(owner => /^아마란 F2[12]C$/i.test(owner.name)).flatMap(owner => {
+    const part = registeredPart(`${owner.name}용 ㄱ자 클램프`);
+    const rows = t.packing?.entries.filter(e => e.ownerId === owner.scheduleId && e.partId === part?.id) ?? [];
+    const quantity = rows.reduce((n, e) => n + e.qty, 0);
+    return quantity < owner.qty ? [`${owner.name}: ㄱ자 클램프 ${owner.qty}개 필수 (현재 ${quantity}개)`] : [];
+  });
+}
+
 /** 체크만 바꾼 요청은 화면에 먼저 반영한다. 구성 변경·확정은 서버 응답을 기다린다. */
 export function optimisticPackingCheck(t: Trade, version: number, command: PackingCommand): PackingManifest | undefined {
   const p=t.packing;
@@ -305,6 +315,8 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     const model=prev.deviceModels?.[owner.scheduleId] ?? owner.name;
     if (templateFor(model).some(r=>/SDI|HDMI/i.test(r.name)) && unassignedVideo(t,prev,owner.scheduleId).length>0 && !prev.entries.some(e=>e.ownerId===owner.scheduleId && /SDI|HDMI/i.test(e.name))) throw new Error("기존 영상선을 사용할 장비에 연결해주세요. 새 선을 중복 추가하지 않습니다");
   }
+  const requiredIssues = packingRequiredIssues({...t, packing: next});
+  if (requiredIssues.length) throw new Error(requiredIssues.join(" / "));
   if (next.entries.some(packingEntryNeedsPreparation)) throw new Error("각 구성품의 실제 종류·수량과 제외 여부를 확인해주세요");
   next.phase = "sealed";
   next.sealedAt = now;
