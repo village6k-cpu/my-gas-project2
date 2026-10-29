@@ -1,4 +1,5 @@
 // 2026-10-28 세트마스터 A/B/C/F 실조회. 가격·재고와 분리된 동봉품 선택 목록.
+// 2026-10-29 운영자 지정: F21C·F22C는 각 대당 ㄱ자 클램프 1개 필수.
 // 동일 실물은 아래 명시적 별칭만 공유한다. 일반 D탭을 단자/전압 추측으로 합치지 않는다.
 export const PACKING_TEMPLATES: Record<string, {name: string; qty: number}[]> = {
   "레드 코모도 풀세트": [{"name":"레드 코모도 6K 바디(케이지)","qty":1},{"name":"100볼 트라이","qty":1},{"name":"베이비","qty":1},{"name":"하이햇","qty":1},{"name":"7인치 모니터","qty":1},{"name":"AV PRO CF 512","qty":2},{"name":"AV PRO CF 256","qty":1},{"name":"AV PRO CF 리더기","qty":1},{"name":"V마운트 배터리","qty":4},{"name":"V마운트 배터리 충전기","qty":1},{"name":"LVM-170A","qty":1}],
@@ -86,11 +87,11 @@ export const PACKING_TEMPLATES: Record<string, {name: string; qty: number}[]> = 
   "어퓨쳐 600X": [{"name":"어퓨쳐 600X용 헤드","qty":1},{"name":"어퓨쳐 600X용 발라스터","qty":1},{"name":"어퓨쳐 600X용 클램프","qty":1},{"name":"어퓨쳐 600X용 라인","qty":2},{"name":"소프트박스","qty":1},{"name":"C스탠드","qty":1}],
   "아마란 300C": [{"name":"아마란 300C용 AC라인","qty":1},{"name":"A스탠드","qty":1}],
   "시네로이드 CFL-800": [{"name":"시네로이드 CFL-800용 패널","qty":1},{"name":"시네로이드 CFL-800용 발라스터","qty":1},{"name":"시네로이드 CFL-800용 연장라인","qty":1},{"name":"시네로이드 CFL-800용 AC라인","qty":1},{"name":"시네로이드 CFL-800용 루버","qty":1},{"name":"시네로이드 CFL-800용 실크","qty":1},{"name":"A스탠드","qty":1}],
-  "아마란 F22C": [{"name":"아마란 F22C용 패널","qty":1},{"name":"아마란 F22C용 발라스터","qty":1},{"name":"아마란 F22C용 연장라인","qty":1},{"name":"아마란 F22C용 AC라인","qty":1},{"name":"아마란 F22C용 프레임대","qty":1},{"name":"아마란 F22C용 루버","qty":1},{"name":"아마란 F22C용 실크1","qty":1},{"name":"아마란 F22C용 실크2","qty":1},{"name":"C스탠드","qty":1}],
+  "아마란 F22C": [{"name":"아마란 F22C용 패널","qty":1},{"name":"아마란 F22C용 발라스터","qty":1},{"name":"아마란 F22C용 연장라인","qty":1},{"name":"아마란 F22C용 AC라인","qty":1},{"name":"아마란 F22C용 프레임대","qty":1},{"name":"아마란 F22C용 루버","qty":1},{"name":"아마란 F22C용 실크1","qty":1},{"name":"아마란 F22C용 실크2","qty":1},{"name":"C스탠드","qty":1},{"name":"아마란 F22C용 ㄱ자 클램프","qty":1}],
   "어퓨쳐 600C": [{"name":"어퓨쳐 600C용 헤드","qty":1},{"name":"어퓨쳐 600C용 발라스터","qty":1},{"name":"어퓨쳐 600C용 클램프","qty":1},{"name":"어퓨쳐 600C용 라인","qty":2},{"name":"소프트박스","qty":1},{"name":"C스탠드","qty":1}],
   "어퓨쳐 MC4 KIT": [{"name":"어퓨쳐 MC4 KIT용 실리콘 디퓨전","qty":2},{"name":"어퓨쳐 MC4 KIT용 볼헤드","qty":2},{"name":"어퓨쳐 MC4 KIT용 충전케이스","qty":1},{"name":"어퓨쳐 MC4 KIT용 케이블","qty":1}],
   "파보튜브 6C": [{"name":"파보튜브 6C용 조명기","qty":1},{"name":"파보튜브 6C용 파우치","qty":1}],
-  "아마란 F21C": [{"name":"아마란 F21C용 패널","qty":1},{"name":"아마란 F21C용 발라스터","qty":1},{"name":"아마란 F21C용 연장라인","qty":1},{"name":"아마란 F21C용 AC라인","qty":1},{"name":"아마란 F21C용 프레임대","qty":1},{"name":"아마란 F21C용 루버","qty":1},{"name":"아마란 F21C용 실크1","qty":1},{"name":"아마란 F21C용 실크2","qty":1},{"name":"C스탠드","qty":1}],
+  "아마란 F21C": [{"name":"아마란 F21C용 패널","qty":1},{"name":"아마란 F21C용 발라스터","qty":1},{"name":"아마란 F21C용 연장라인","qty":1},{"name":"아마란 F21C용 AC라인","qty":1},{"name":"아마란 F21C용 프레임대","qty":1},{"name":"아마란 F21C용 루버","qty":1},{"name":"아마란 F21C용 실크1","qty":1},{"name":"아마란 F21C용 실크2","qty":1},{"name":"C스탠드","qty":1},{"name":"아마란 F21C용 ㄱ자 클램프","qty":1}],
   "스크림세트": [{"name":"스크림세트용 고보","qty":1},{"name":"스크림세트용 실크","qty":1},{"name":"스크림세트용 싱글","qty":1},{"name":"스크림세트용 더블","qty":1},{"name":"스크림세트용 우드락","qty":1}],
   "어퓨쳐 B7C 8KIT": [{"name":"어퓨쳐 B7C 8KIT용 충전 케이스","qty":1},{"name":"어퓨쳐 B7C 8KIT용 케이블","qty":1}],
   "어퓨쳐 600D": [{"name":"어퓨쳐 600D용 헤드","qty":1},{"name":"어퓨쳐 600D용 발라스터","qty":1},{"name":"어퓨쳐 600D용 클램프","qty":1},{"name":"어퓨쳐 600D용 라인","qty":2},{"name":"소프트박스","qty":1},{"name":"C스탠드","qty":1}],

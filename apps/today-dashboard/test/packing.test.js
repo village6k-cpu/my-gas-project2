@@ -152,3 +152,22 @@ test("custom names never merge by spelling; known registered names resolve to ca
   assert.throws(()=>save(t,[...t.packing.entries,{...row,id:"blank",partId:"custom:blank",name:"  "}]),/이름/);
   assert.throws(()=>save(t,[...t.packing.entries,{...row,id:"choice",partId:"custom:choice",name:"SDI or HDMI"}]),/한 종류/);
 });
+
+test("F21C and F22C require one angle clamp per light, including draft refresh without duplicate defaults",()=>{
+  for(const model of ["아마란 F21C","아마란 F22C"]){
+    const t={...trade(),equipments:[{scheduleId:"light",name:model,qty:2,isSetHeader:true,setName:model,checkoutState:"pending"}]};
+    t.packing=step(t,{action:"start"},now);
+    const clamp=t.packing.entries.find(e=>e.name.includes("ㄱ자 클램프"));
+    assert.equal(clamp.qty,2);
+    t.packing.entries=t.packing.entries.filter(e=>e.id!==clamp.id);
+    assert.throws(()=>step(t,{action:"seal"},now),/ㄱ자 클램프.*필수/);
+    t.packing=step(t,{action:"refresh"},now);
+    t.packing=step(t,{action:"refresh"},now);
+    assert.equal(t.packing.entries.filter(e=>e.partId===clamp.partId).length,1);
+    save(t,t.packing.entries.map(e=>({...e,checked:true})));
+    const excluded=t.packing.entries.map(e=>e.partId===clamp.partId?{...e,qty:0,checked:false}:e);
+    save(t,excluded);assert.throws(()=>step(t,{action:"seal"},now),/ㄱ자 클램프.*필수/);
+    save(t,t.packing.entries.map(e=>e.partId===clamp.partId?{...e,qty:2}:e));
+    seal(t);assert.equal(groups(t.packing).find(g=>g.id===clamp.partId).expected,2);
+  }
+});
