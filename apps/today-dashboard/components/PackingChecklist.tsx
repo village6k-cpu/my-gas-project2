@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
-import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
+import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingEntryNeedsPreparation, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor } from "@/lib/domain/packingCatalog";
 import { savePacking, savePackingCheck } from "@/lib/data/store";
 
@@ -35,6 +35,11 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
   const total = groups.reduce((n, g) => n + g.expected, 0);
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
   const devices = packingDevices(trade);
+  const unfinished = p?.entries.filter(packingEntryNeedsPreparation) ?? [];
+  const sealReason = checking > 0 ? "체크 내용을 저장 중입니다." : p && packingNeedsUpgrade(p) ? "구성품 목록을 먼저 업데이트해주세요."
+    : unfinished.length ? `준비 확인 필요 ${unfinished.length}건: ${unfinished.slice(0, 3).map(e => e.name).join(", ")}${unfinished.length > 3 ? " 외" : ""}`
+    : devices.some(e => needsDeviceModel(e) && !p?.deviceModels?.[e.scheduleId]) ? "7인치 모니터의 실제 모델을 선택해주세요."
+    : note !== null ? "입력한 인계 메모를 저장하거나 취소해주세요." : "";
   const check = async (e: PackingEntry) => {
     if (onCommand) { await update(e, { checked: !e.checked }); return; }
     setChecking(n => n + 1); setError("");
@@ -64,7 +69,8 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
             <textarea value={note ?? p.note} onChange={e => { if (note === null) setNoteVersion(p.version); setNote(e.target.value); }} maxLength={2000} className="w-full rounded-lg border border-line p-2 text-sm" placeholder="예: 고객 요청으로 D탭 라인 대신 더미 사용" />
             {note !== null && <><button className={button} onClick={async () => { if (await run({ action: "save", entries: p.entries, note }, noteVersion)) setNote(null); }}>메모 저장</button><button className={button} onClick={() => setNote(null)}>입력 취소</button></>}
             <details className="text-xs text-ink-mute"><summary>예약 장비가 변경됐나요?</summary><button className={button} onClick={() => run({ action: "refresh" })}>예약 변경 내용 불러오기</button></details>
-            <button className={`${button} w-full bg-brand-600 text-white`} disabled={checking > 0 || packingNeedsUpgrade(p) || p.entries.some(e => !e.checked || (e.qty > 0 && e.unresolved)) || devices.some(e => needsDeviceModel(e) && !p.deviceModels?.[e.scheduleId]) || note !== null} onClick={() => run({ action: "seal" })}>이 구성으로 반출 준비 확정</button>
+            {sealReason && <p id={`packing-seal-reason-${trade.tradeId}`} className="text-xs font-bold text-attention-fg">{sealReason}</p>}
+            <button className={`${button} w-full bg-brand-600 text-white`} disabled={!!sealReason} aria-describedby={sealReason ? `packing-seal-reason-${trade.tradeId}` : undefined} onClick={() => run({ action: "seal" })}>이 구성으로 반출 준비 확정</button>
           </> : <><p className="rounded-lg bg-checkin-bg p-3 text-sm font-bold text-checkin-fg">✓ 반출 구성품 확정 · 반납 때 이 수량과 대조합니다.</p>
             {p.note && <p className="whitespace-pre-wrap text-sm text-ink-soft">반출 메모: {p.note}</p>}
             {!packingStarted(trade) && <button className={button} onClick={() => run({ action: "revise" })}>구성 다시 준비</button>}</>}
@@ -116,7 +122,7 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
       <select aria-label="기존 영상선 연결" value="" disabled={busy || p.phase!=="draft"} onChange={event=>{const row=existingVideo.find(e=>e.id===event.target.value);if(row) update(row,{ownerId,device,checked:false});}} className="mt-1 w-full rounded border border-line bg-white p-2 text-sm"><option value="" disabled>이 장비에 연결할 선 선택</option>{existingVideo.map(e=><option key={e.id} value={e.id}>{e.name} ×{e.qty}</option>)}</select>
     </label>}
     {entries.map(e=><div key={e.id} className="border-b border-line/50 py-2 last:border-0">
-      <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={checkBusy || p.phase !== "draft" || (e.qty>0 && e.unresolved) || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>check(e)} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : ""}</button>
+      <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={checkBusy || e.qty === 0 || p.phase !== "draft" || (e.qty>0 && e.unresolved) || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>check(e)} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : ""}</button>
         <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span><strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>
       {p.phase === "draft" && <div className="mt-1 flex flex-wrap gap-1 pl-8"><button disabled={busy} className={`${button} text-brand-700`} onClick={()=>open(e)}>교체·수량</button><button disabled={busy} className={`${button} text-ink-mute`} onClick={()=>update(e,{qty:e.qty?0:1,checked:false})}>{e.qty ? "제외" : "포함"}</button></div>}
     </div>)}

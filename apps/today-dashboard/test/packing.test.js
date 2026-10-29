@@ -113,3 +113,17 @@ test("booking refresh preserves manual additions and cannot duplicate a removed/
   assert.equal(t.packing.entries.filter(e=>e.id==="s1").length,1);
   seal(t);
 });
+
+test("excluded unchecked accessory does not block sealing; included unchecked accessory still blocks",()=>{
+  const t=started();
+  save(t,t.packing.entries.map(e=>e.id==="s1"?{...e,qty:0,checked:false}:{...e,checked:true}));
+  assert.equal(t.packing.entries.find(e=>e.id==="s1").checked,false);
+  const included=t.packing.entries.find(e=>e.id!=="s1");
+  included.checked=false;
+  assert.throws(()=>step(t,{action:"seal"},now),/실제 종류/);
+  included.checked=true;
+  t.packing=step(t,{action:"seal"},now);
+  assert.equal(t.packing.phase,"sealed");
+  assert.equal(t.packing.entries.find(e=>e.id==="s1").qty,0);
+  assert.equal(groups(t.packing).find(g=>g.id==="CBL-003").expected,2);
+});
