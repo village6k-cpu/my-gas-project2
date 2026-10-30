@@ -309,3 +309,64 @@ test("미확인 구성품과 확정 저장 실패는 반출 완료를 기록하�
     const result=await h.toggleSetup("T-1");assert.equal(result.ok,false);assert.match(result.error,/확인|실패/);assert.equal(h.outboxPuts.length,0);assert.equal(h.state.trades[0].setupDone,false);
   }
 });
+
+function actualPackingDomain() {
+  const ts=require('typescript'), cache=new Map();
+  function load(name){
+    if(cache.has(name))return cache.get(name);
+    const module={exports:{}};cache.set(name,module.exports);
+    const source=read(`lib/domain/${name}.ts`);
+    const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+    vm.runInNewContext(code,{module,exports:module.exports,require:n=>load(n.replace('./','')),structuredClone,Date,Intl,Map,Set,Error});
+    return module.exports;
+  }
+  return load('packing');
+}
+function readyWirelessFixture(domain) {
+  // 문준호 사고의 구성·수량·상태를 재현한다. 고객 개인정보는 포함하지 않는다.
+  const set='DJI SDR 트랜스미션';
+  const t={tradeId:'T-1',contractStatus:'예약',setupDone:false,returnDone:false,equipments:[
+    {scheduleId:'body',name:'소니 FX3 바디(케이지)',qty:1,checkoutState:'taken'},
+    {scheduleId:'battery',name:'NP-FZ100',qty:6,checkoutState:'taken'},
+    {scheduleId:'charger',name:'NP-FZ100 충전기',qty:2,checkoutState:'taken'},
+    {scheduleId:'sdr',name:set,setName:set,isSetHeader:true,qty:1,checkoutState:'taken'},
+    {scheduleId:'dummy',name:set+'용 970더미',setName:set,isComponent:true,qty:2,checkoutState:'pending'},
+    {scheduleId:'video',name:set+'용 SDI or HDMI',setName:set,isComponent:true,qty:2,checkoutState:'pending'},
+    {scheduleId:'arm',name:set+'용 숏암',setName:set,isComponent:true,qty:2,checkoutState:'pending'},
+  ]};
+  t.packing=domain.transitionPacking(t,{action:'start'},'2026-10-30T00:00:00Z');
+  const hdmi=domain.PACKING_PARTS.find(p=>p.name===set+'용 HDMI');
+  t.packing=domain.transitionPacking(t,{action:'save',note:'',entries:t.packing.entries.map(e=>e.id==='dummy'?{...e,name:'970배터리',custom:true,partId:'custom:dummy',qty:6}:e.id==='video'?{...e,partId:hdmi.id}:e)},'2026-10-30T00:01:00Z');
+  t.packing=domain.transitionPacking(t,{action:'save',note:'',entries:t.packing.entries.map(e=>({...e,checked:true}))},'2026-10-30T00:02:00Z');
+  t.packing.version=10;
+  return t;
+}
+test('실제 사고 구성: 체크 완료 draft를 한 번의 클릭으로 확정하며 직접 입력 수량을 보존한다',async()=>{
+  const domain=actualPackingDomain(),h=toggleHarness(),t=readyWirelessFixture(domain);
+  h.state.trades=[t];h.packingPreparationTrade=domain.packingPreparationTrade;h.transitionPacking=domain.transitionPacking;
+  const entries=JSON.stringify(t.packing.entries),actions=[];
+  h.savePacking=async(id,version,command)=>{
+    assert.equal(id,'T-1');assert.equal(version,10);actions.push(command.action);
+    h.state.trades[0]={...h.state.trades[0],packing:domain.transitionPacking(h.state.trades[0],command,'2026-10-31T00:00:00Z')};
+  };
+  const result=await h.toggleSetup('T-1');
+  assert.equal(result.ok,true);assert.deepEqual(actions,['seal']);
+  assert.equal(h.state.trades[0].packing.phase,'sealed');assert.equal(h.state.trades[0].packing.version,11);
+  assert.equal(JSON.stringify(h.state.trades[0].packing.entries),entries);
+  assert.equal(h.outboxPuts.length,1);assert.equal(h.outboxPuts[0].target,true);
+});
+test('실제 사고 구성: 체크가 하나라도 빠지면 구성 확정과 반출 완료를 모두 거절한다',async()=>{
+  const domain=actualPackingDomain(),h=toggleHarness(),t=readyWirelessFixture(domain);
+  t.packing.entries.find(e=>e.id==='arm').checked=false;
+  h.state.trades=[t];h.packingPreparationTrade=domain.packingPreparationTrade;h.transitionPacking=domain.transitionPacking;
+  h.savePacking=async()=>assert.fail('미확인 구성은 저장 전에 차단되어야 한다');
+  const result=await h.toggleSetup('T-1');assert.equal(result.ok,false);assert.match(result.error,/실제 종류·수량/);assert.equal(h.outboxPuts.length,0);
+});
+test('완료 거절 이유는 카드 오류로 표시하며 처리 중 잠금은 반드시 해제한다',async()=>{
+  const source=sourceFunction(read('components/ScheduleCard.tsx'),'async function handleDoneToggle()','\n  // 완료되면 상세 자동 접힘');
+  const calls=[];const ctx={memoBlocked:false,isCheckout:true,completing:false,trade:{tradeId:'T-1'},toggleSetup:async()=>({ok:false,error:'구성품 수량 확인 필요'}),
+    setCompleting:value=>calls.push(['busy',value]),setCompletionError:value=>calls.push(['error',value]),setOpen:value=>calls.push(['open',value]),Error};
+  vm.runInNewContext(source+'\nthis.run=handleDoneToggle;',ctx);await ctx.run();
+  assert(calls.some(([kind,value])=>kind==='error'&&value==='구성품 수량 확인 필요'));
+  assert.deepEqual(calls.at(-1),['busy',false]);
+});
