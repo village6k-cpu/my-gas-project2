@@ -171,3 +171,29 @@ test("F21C and F22C require one angle clamp per light, including draft refresh w
     seal(t);assert.equal(groups(t.packing).find(g=>g.id===clamp.partId).expected,2);
   }
 });
+
+test("replaced equipment retires old accessory rows without blocking future saves or sealing",()=>{
+  const t={...trade(),equipments:[{scheduleId:"old",name:"아마란 PT4C 4KIT",qty:1,setName:"아마란 PT4C 4KIT",isSetHeader:true,checkoutState:"taken"},{scheduleId:"old-part",name:"아마란 PT4C 4KIT용 충전기",qty:4,setName:"아마란 PT4C 4KIT",isComponent:true,checkoutState:"pending"}]};
+  t.packing=step(t,{action:"start"},now);
+  const {packingReservationChanges}=load("packing");
+  t.equipments=[{scheduleId:"new",name:"파보튜브 II 30X",qty:4,setName:"파보튜브 II 30X",isSetHeader:true,checkoutState:"taken",memoCheckout:"충전기4 그립4 스탠드4"}];
+  assert.equal(packingReservationChanges(t).length,3);
+  t.packing=step(t,{action:"refresh"},now);
+  assert(t.packing.entries.every(e=>e.qty===0));
+  assert.equal(packingReservationChanges(t).length,0);
+  assert.deepEqual(JSON.parse(JSON.stringify(setupProgress(t,"checkout"))),{done:1,total:1});
+  save(t,t.packing.entries);
+  t.packing=step(t,{action:"seal"},now);
+  assert.equal(t.packing.phase,"sealed");
+  assert.equal(t.equipments[0].memoCheckout,"충전기4 그립4 스탠드4");
+});
+test("refresh of changed body quantities preserves explicitly checked custom accessory quantities",()=>{
+  const t=started();const {packingReservationChanges}=load("packing");
+  save(t,t.packing.entries.map(e=>e.id==="s1"?{...e,custom:true,name:"970배터리",partId:`custom:${e.id}`,qty:6,checked:true}:{...e,checked:true}));
+  save(t,t.packing.entries.map(e=>({...e,checked:true})));
+  t.equipments.find(e=>e.scheduleId==="camera").qty=2;
+  assert.equal(packingReservationChanges(t).length,1);
+  t.packing=step(t,{action:"refresh"},now);
+  assert.equal(packingReservationChanges(t).length,0);
+  const custom=t.packing.entries.find(e=>e.id==="s1");assert.equal(custom.qty,6);assert.equal(custom.checked,true);assert.equal(custom.custom,true);
+});
