@@ -49,6 +49,8 @@ export const ScheduleCard = memo(function ScheduleCard({
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [completing, setCompleting] = useState(false);
+  const [completionError, setCompletionError] = useState("");
   // 고객 카드 시트 — 이름 탭하면 "이 사람 누구지?" (5년 프로필 + 라이브 이력)
   const [customerOpen, setCustomerOpen] = useState(false);
   const cancelled = isCancelledTrade(trade);
@@ -67,7 +69,7 @@ export const ScheduleCard = memo(function ScheduleCard({
   const memoBlocked = !completionRecorded && (editingNotes || (hasNotes && !notesChecked));
 
   useEffect(() => { setAcknowledgedNotes(null); }, [notesKey, completionRecorded]);
-  useEffect(() => { setEditingNotes(false); }, [trade.tradeId, phase]);
+  useEffect(() => { setEditingNotes(false); setCompletionError(""); }, [trade.tradeId, phase]);
 
   function handleNoteEditingChange(editing: boolean) {
     setEditingNotes(editing);
@@ -83,8 +85,14 @@ export const ScheduleCard = memo(function ScheduleCard({
   async function handleDoneToggle() {
     if (memoBlocked) return;
     if (isCheckout) {
-      const result = await toggleSetup(trade.tradeId);
-      if (!result.ok) setOpen(true);
+      if (completing) return;
+      setCompleting(true); setCompletionError("");
+      try {
+        const result = await toggleSetup(trade.tradeId);
+        if (!result.ok) { setCompletionError(result.error); setOpen(true); }
+      } catch (error) {
+        setCompletionError(error instanceof Error ? error.message : "반출 완료 처리 실패"); setOpen(true);
+      } finally { setCompleting(false); }
       return;
     }
     if (returnBlockers.length > 0) setOpen(true);
@@ -233,7 +241,7 @@ export const ScheduleCard = memo(function ScheduleCard({
         <button
           type="button"
           onClick={handleDoneToggle}
-          disabled={memoBlocked}
+          disabled={memoBlocked || completing}
           aria-describedby={memoBlocked ? memoHelpId : undefined}
           className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 disabled:cursor-not-allowed disabled:opacity-50 ${
             done
@@ -247,7 +255,7 @@ export const ScheduleCard = memo(function ScheduleCard({
             <Check className="h-3.5 w-3.5" />
           </span>
           {isCheckout
-            ? done ? "반출 완료됨" : "반출 완료"
+            ? completing ? "구성 확인 중…" : done ? "반출 완료됨" : "반출 완료"
             : done ? "반납 완료됨"
             : returnBlockers.length ? "수량 확인 후 반납완료" : "반납 완료"}
         </button>
@@ -262,6 +270,7 @@ export const ScheduleCard = memo(function ScheduleCard({
         </button>
       </div>
 
+      {completionError && <p role="alert" className="mx-4 mt-2 rounded-lg bg-attention-bg p-2 text-sm font-bold text-attention-fg">{completionError}</p>}
       {!isCheckout && returnBlockers.length > 0 && (
         <button
           type="button"

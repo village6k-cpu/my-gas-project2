@@ -18,7 +18,7 @@ import type {
   Trade,
 } from "../domain/types";
 import { equipmentActualTakenQty } from "../domain/equipmentActual";
-import { packingBlockers, optimisticPackingCheck, type PackingCommand } from "../domain/packing";
+import { packingBlockers, optimisticPackingCheck, transitionPacking, type PackingCommand } from "../domain/packing";
 import { authFetch } from "./authFetch";
 import { buildSeed } from "./seed";
 import { isSupabase, supabase } from "../supabase/client";
@@ -2416,11 +2416,22 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
   const current = state.trades.find((t) => t.tradeId === tradeId);
   if (!current) return { ok: false, error: "거래를 찾을 수 없습니다" };
   const done = !current.setupDone;
-  if (done && current.packing?.phase === "draft") return { ok: false, error: "구성품 준비를 먼저 확정해주세요" };
   if (isSupabase && !writeBackEnabled) {
     const error = `반출 상태 변경 실패: ${writeBackDisabledReason}`;
     set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
     return { ok: false, error };
+  }
+
+  // 체크가 끝난 준비 목록은 같은 클릭에서 먼저 확정한다. 서버 확정 전에는 반출 완료를 표시하지 않는다.
+  if (done && current.packing?.phase === "draft") {
+    try {
+      transitionPacking(current, { action: "seal" }, new Date().toISOString());
+      await savePacking(tradeId, current.packing.version, { action: "seal" });
+      if (state.trades.find(t => t.tradeId === tradeId)?.packing?.phase !== "sealed") throw new Error("구성품 확정 상태를 확인할 수 없습니다");
+      if (state.trades.find(t => t.tradeId === tradeId)?.setupDone) return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "구성품 확정 실패. 준비 목록을 확인해주세요" };
+    }
   }
 
   // ── 즉시 확정 UX ──

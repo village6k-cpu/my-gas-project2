@@ -292,3 +292,19 @@ test("Vercel과 GAS의 반출 기준선 SHA-256 지문은 품목 순서와 무�
     .digest("hex");
   assert.equal(context.fingerprint("260723-006", items), expected);
 });
+
+test("준비 완료된 draft는 구성 확정 응답 후 반출 outbox로 이어진다", async()=>{
+  const h=toggleHarness();h.state.trades[0].packing={phase:"draft",version:10};
+  let release; const wait=new Promise(r=>release=r);
+  h.transitionPacking=()=>({phase:"sealed",version:11});
+  h.savePacking=async(id,version,cmd)=>{assert.equal(version,10);assert.equal(cmd.action,"seal");await wait;h.state.trades[0].packing={phase:"sealed",version:11};};
+  const action=h.toggleSetup("T-1");assert.equal(h.outboxPuts.length,0);assert.equal(h.state.trades[0].setupDone,false);
+  release();const result=await action;assert.equal(result.ok,true);assert.equal(h.outboxPuts.length,1);assert.equal(h.state.trades[0].setupDone,true);
+});
+test("미확인 구성품과 확정 저장 실패는 반출 완료를 기록하지 않고 이유를 반환한다",async()=>{
+  for(const failure of ["unchecked","save"]){const h=toggleHarness();h.state.trades[0].packing={phase:"draft",version:2};
+    h.transitionPacking=()=>{if(failure==="unchecked")throw new Error("각 구성품의 실제 종류·수량을 확인해주세요");return {};};
+    h.savePacking=async()=>{throw new Error("구성품 저장 실패");};
+    const result=await h.toggleSetup("T-1");assert.equal(result.ok,false);assert.match(result.error,/확인|실패/);assert.equal(h.outboxPuts.length,0);assert.equal(h.state.trades[0].setupDone,false);
+  }
+});
