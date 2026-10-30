@@ -197,3 +197,22 @@ test("refresh of changed body quantities preserves explicitly checked custom acc
   assert.equal(packingReservationChanges(t).length,0);
   const custom=t.packing.entries.find(e=>e.id==="s1");assert.equal(custom.qty,6);assert.equal(custom.checked,true);assert.equal(custom.custom,true);
 });
+
+test("first display and first save use identical structured rows without a start step",()=>{
+  const t=trade(),before=JSON.stringify(t);const {packingPreparationTrade}=load("packing");
+  const view=packingPreparationTrade(t);assert.equal(JSON.stringify(t),before);assert.equal(view.packing.version,0);
+  const ids=view.packing.entries.map(e=>e.id);
+  const command={action:"save",entries:view.packing.entries.map((e,i)=>({...e,checked:i===0})),note:""};
+  const next=step(t,command,now);assert.equal(next.version,1);assert.equal(next.entries[0].checked,true);
+  assert.deepEqual(JSON.parse(JSON.stringify(next.entries.map(e=>e.id))),JSON.parse(JSON.stringify(ids)));
+  assert.equal(setupProgress(t,"checkout").total,setupProgress({...t,packing:next},"checkout").total);
+  assert.equal(setupProgress({...t,packing:next},"checkout").done,setupProgress(t,"checkout").done+1);
+});
+test("first model selection initializes once while read-only and dispatched cards keep stored history",()=>{
+  const {packingPreparationTrade}=load("packing");const t={...trade(),equipments:[{scheduleId:"monitor",name:"7인치 모니터",qty:1,checkoutState:"pending"}]};
+  const view=packingPreparationTrade(t);assert(view.packing);assert.equal(t.packing,undefined);
+  const next=step(t,{action:"model",ownerId:"monitor",model:"스몰HD 인디7"},now);assert.equal(next.version,1);assert.equal(next.deviceModels.monitor,"스몰HD 인디7");
+  assert.equal(packingPreparationTrade(t,"checkin"),t);
+  const out={...t,setupDone:true};assert.equal(packingPreparationTrade(out),out);
+  const existing={...t,packing:next};assert.equal(packingPreparationTrade(existing),existing);
+});

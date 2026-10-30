@@ -1,7 +1,7 @@
 // 상태/시간 헬퍼 — 한국어 시간 정렬, 확인필요 집계, 인계 요약
 
 import type { EquipmentItem, ReturnCount, Trade, TabKey, Phase } from "./types";
-import { packingBlockers, packingGroups, packingSourceIds } from "./packing";
+import { packingBlockers, packingGroups, packingSourceIds, packingPreparationTrade } from "./packing";
 
 function equipmentActualName(item: EquipmentItem): string {
   return String(item.actualName || item.name || "").trim();
@@ -573,6 +573,7 @@ export function setupProgress(t: Trade, phase: "checkout" | "checkin"): { done: 
     const aggs = aggregateReturns(t);
     return { done: aggs.filter(isReturnDone).length, total: aggs.length };
   }
+  t = packingPreparationTrade(t);
   const managed = packingSourceIds(t.packing);
   const list = checkableItems(t, "checkout").filter(e => !managed.has(e.scheduleId));
   const entries = t.packing?.entries.filter(e => e.qty > 0) ?? [];

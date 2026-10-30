@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
-import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingEntryNeedsPreparation, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
+import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingEntryNeedsPreparation, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor } from "@/lib/domain/packingCatalog";
 import { savePacking, savePackingCheck } from "@/lib/data/store";
 
@@ -10,7 +10,8 @@ type PackingContextValue = { trade: Trade; busy: boolean; checkBusy: boolean; ch
 const PackingContext = createContext<PackingContextValue | null>(null);
 const button = "tap rounded-lg px-3 py-2 text-sm font-bold ring-1 ring-line disabled:opacity-40";
 
-export function PackingChecklist({ trade, phase, onCommand, children }: { trade: Trade; phase: Phase; onCommand?: (version: number, command: PackingCommand) => Promise<void>; children?: ReactNode }) {
+export function PackingChecklist({ trade: savedTrade, phase, onCommand, children }: { trade: Trade; phase: Phase; onCommand?: (version: number, command: PackingCommand) => Promise<void>; children?: ReactNode }) {
+  const trade = packingPreparationTrade(savedTrade, phase);
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(0);
   const [error, setError] = useState("");
@@ -56,7 +57,6 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
     <div className="flex flex-wrap items-center justify-between gap-2 bg-brand-50 px-3 py-3">
       <div><h3 className="text-sm font-extrabold text-brand-700">구성품 검수</h3>
         <p className="mt-1 text-xs text-ink-mute">{p ? `${p.phase === "sealed" ? "확정된 반출" : "반출 준비"} · ${total}개${unresolvedQty ? ` · 종류 미선택 ${unresolvedQty}개` : ""}${phase === "checkin" ? ` · 미반납 ${missing}개` : ""}` : "실제 챙기는 종류와 개수를 장비별로 기록합니다."}</p></div>
-      {!p && <button className={`${button} bg-brand-600 text-white`} disabled={busy} onClick={() => run({ action: "start" })}>구성품 준비 시작</button>}
     </div>
     <div aria-live="polite">{error && <p role="alert" className="m-3 rounded-lg bg-attention-bg p-2 text-sm font-bold text-attention-fg">{error}</p>}</div>
     {!p && children}

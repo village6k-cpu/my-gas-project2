@@ -190,6 +190,12 @@ function initialManifest(t: Trade, version: number, note = ""): PackingManifest 
   for (const owner of packingDevices(t)) if (!needsDeviceModel(owner) && !/세트|셋트|패키지/.test(owner.name)) addDeviceDefaults(t,p,owner,owner.name);
   return p;
 }
+/** 첫 수정 전에도 저장 후와 동일한 목록을 표시한다. 조회만으로 DB에 쓰지 않는다. */
+export function packingPreparationTrade(t: Trade, phase: "checkout" | "checkin" = "checkout"): Trade {
+  if (t.packing || phase !== "checkout" || packingStarted(t) || !packingAvailable(t)) return t;
+  return {...t, packing: initialManifest(t, 0)};
+}
+
 export function packingNeedsUpgrade(p?: PackingManifest) { return !!p && p.phase === "draft" && p.schemaVersion !== 2; }
 function validText(value: unknown, label: string, max = 160): string {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new Error(`${label}을 확인해주세요`);
@@ -203,7 +209,11 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     if (!packingAvailable(t)) throw new Error("준비할 세트 구성품이 없습니다");
     return initialManifest(t, 1);
   }
-  if (!prev) throw new Error("구성품 준비를 먼저 시작해주세요");
+  if (!prev) {
+    const prepared = packingPreparationTrade(t);
+    if (!prepared.packing) throw new Error("준비할 구성품이 없습니다");
+    return transitionPacking(prepared, command, now);
+  }
   const next = structuredClone(prev);
   next.version += 1;
   if (command.action === "receive") {
