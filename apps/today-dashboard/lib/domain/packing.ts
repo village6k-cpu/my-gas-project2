@@ -51,6 +51,21 @@ export function packingRequiredIssues(t: Trade): string[] {
   });
 }
 
+/** 준비 목록의 예약 스냅샷과 현재 유효 장비를 비교한다. 확정된 반출 기록은 재작성하지 않는다. */
+export function packingReservationChanges(t: Trade): string[] {
+  const p=t.packing;
+  if (!p || p.phase !== "draft") return [];
+  const current=[...packingCandidates(t), ...packingDevices(t)];
+  const changes: string[]=[];
+  for (const source of p.sources) {
+    const row=current.find(e=>e.scheduleId===source.id);
+    if (!row) changes.push(`${source.name} 제외됨`);
+    else if (row.name!==source.name || row.qty!==source.qty) changes.push(`${source.name} 변경됨`);
+  }
+  for (const row of current) if (!p.sources.some(s=>s.id===row.scheduleId)) changes.push(`${row.name} 추가됨`);
+  return changes;
+}
+
 /** 체크만 바꾼 요청은 화면에 먼저 반영한다. 구성 변경·확정은 서버 응답을 기다린다. */
 export function optimisticPackingCheck(t: Trade, version: number, command: PackingCommand): PackingManifest | undefined {
   const p=t.packing;
@@ -287,7 +302,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       if (!part && !direct && !unchangedUnresolved) throw new Error("등록된 구성품을 선택해주세요. 이름 직접 입력은 합산할 수 없습니다");
       const ownerId = raw.ownerId ?? old?.ownerId;
       const owner = packingDevices(t).find(e=>e.scheduleId===ownerId);
-      if (ownerId && !owner) throw new Error("사용 장비가 예약에서 변경되었습니다. 목록을 업데이트해주세요");
+      if (ownerId && !owner && !(raw.qty === 0 && old?.ownerId === ownerId)) throw new Error("사용 장비가 예약에서 변경되었습니다. 목록을 업데이트해주세요");
       const name = part?.name ?? (direct ? directName : old!.name);
       const device = owner ? prev.deviceModels?.[owner.scheduleId] ?? owner.name : old?.device ?? validText(raw.device,"사용 장비");
       const entry: PackingEntry = { id, sourceId: old?.sourceId, ownerId, device, name,
@@ -304,7 +319,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     return next;
   }
   if (command.action !== "seal") throw new Error("지원하지 않는 구성품 작업입니다");
-  for (const e of next.entries) if (e.ownerId && !packingDevices(t).some(owner=>owner.scheduleId===e.ownerId)) throw new Error("사용 장비가 변경되었습니다. 목록을 업데이트해주세요");
+  for (const e of next.entries) if (e.qty > 0 && e.ownerId && !packingDevices(t).some(owner=>owner.scheduleId===e.ownerId)) throw new Error("사용 장비가 변경되었습니다. 목록을 업데이트해주세요");
   if (packingCandidates(t).some(e=>!prev.sources.some(s=>s.id===e.scheduleId))) throw new Error("예약 구성품이 추가되었습니다. 목록을 업데이트해주세요");
   for (const s of prev.sources) {
     const current = (s.device ? packingDevices(t) : t.equipments).find(e => e.scheduleId === s.id);

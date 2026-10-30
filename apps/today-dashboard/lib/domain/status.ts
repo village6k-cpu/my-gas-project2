@@ -575,7 +575,7 @@ export function setupProgress(t: Trade, phase: "checkout" | "checkin"): { done: 
   }
   const managed = packingSourceIds(t.packing);
   const list = checkableItems(t, "checkout").filter(e => !managed.has(e.scheduleId));
-  const entries = t.packing?.entries ?? [];
+  const entries = t.packing?.entries.filter(e => e.qty > 0) ?? [];
   const done = list.filter((e) => e.checkoutState !== "pending").length + entries.filter(e => e.checked).length;
   return { done, total: list.length + entries.length };
 }

@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
-import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingEntryNeedsPreparation, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
+import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingEntryNeedsPreparation, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor } from "@/lib/domain/packingCatalog";
 import { savePacking, savePackingCheck } from "@/lib/data/store";
 
@@ -35,9 +35,11 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
   const total = groups.reduce((n, g) => n + g.expected, 0);
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
   const devices = packingDevices(trade);
+  const reservationChanges = packingReservationChanges(trade);
   const requiredIssues = p?.phase === "draft" ? packingRequiredIssues(trade) : [];
   const unfinished = p?.entries.filter(packingEntryNeedsPreparation) ?? [];
   const sealReason = checking > 0 ? "체크 내용을 저장 중입니다." : p && packingNeedsUpgrade(p) ? "구성품 목록을 먼저 업데이트해주세요."
+    : reservationChanges.length ? "예약 장비 변경 내용을 준비 목록에 반영해주세요."
     : requiredIssues.length ? requiredIssues.join(" / ")
     : unfinished.length ? `준비 확인 필요 ${unfinished.length}건: ${unfinished.slice(0, 3).map(e => e.name).join(", ")}${unfinished.length > 3 ? " 외" : ""}`
     : devices.some(e => needsDeviceModel(e) && !p?.deviceModels?.[e.scheduleId]) ? "7인치 모니터의 실제 모델을 선택해주세요."
@@ -60,6 +62,7 @@ export function PackingChecklist({ trade, phase, onCommand, children }: { trade:
     {!p && children}
     {p && <fieldset disabled={busy} className="min-w-0 disabled:opacity-60">
       {phase === "checkout" ? <>
+        {reservationChanges.length > 0 && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm" role="status"><p className="font-bold">예약 장비가 변경되었습니다</p><p>{reservationChanges.join(" / ")}</p><button className={`${button} mt-2 bg-white`} onClick={() => run({action:"refresh"})}>예약 변경 내용 반영</button></div>}
         {requiredIssues.length > 0 && !packingNeedsUpgrade(p) && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm"><p>{requiredIssues.join(" / ")}</p><button className={`${button} mt-2 bg-white`} onClick={() => run({action:"refresh"})}>구성품 목록 새로고침</button></div>}
         {packingNeedsUpgrade(p) ? <div className="my-3 rounded-lg bg-warn-bg p-3 text-sm"><p>이전 묶음 목록을 장비별 표준 구성품으로 업데이트해야 합니다.</p><button className={`${button} mt-2 bg-white`} onClick={() => run({ action: "refresh" })}>구성품 목록 업데이트</button></div> : null}
         {children ?? devices.map(device => <div key={device.scheduleId} className="my-3 rounded-xl border border-line p-3"><h4 className="font-extrabold">{p.deviceModels?.[device.scheduleId] ?? device.name}</h4><PackingDevice ownerId={device.scheduleId} /></div>)}
