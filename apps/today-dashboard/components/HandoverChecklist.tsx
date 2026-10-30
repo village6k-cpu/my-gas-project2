@@ -24,7 +24,7 @@ import { MemoTag, itemMemoEntries } from "./MemoTag";
 import { equipmentActualName, equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
 import { ReturnChecklist } from "./ReturnChecklist";
 import { PackingChecklist, PackingDevice } from "./PackingChecklist";
-import { packingSourceIds, type PackingCommand } from "@/lib/domain/packing";
+import { packingSourceIds, packingPreparationTrade, type PackingCommand } from "@/lib/domain/packing";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
@@ -37,7 +37,8 @@ function SetSingleList({ children }: { children: ReactNode }) {
   return <ul className="divide-y divide-line/60 overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-line">{children}</ul>;
 }
 
-export function HandoverChecklist({ trade, phase, onPackingCommand, preview = false }: { trade: Trade; phase: Phase; onPackingCommand?: (version: number, command: PackingCommand) => Promise<void>; preview?: boolean }) {
+export function HandoverChecklist({ trade: savedTrade, phase, onPackingCommand, preview = false }: { trade: Trade; phase: Phase; onPackingCommand?: (version: number, command: PackingCommand) => Promise<void>; preview?: boolean }) {
+  const trade = packingPreparationTrade(savedTrade, phase);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [adding, setAdding] = useState(false);
   const summary = handoverSummary(trade, phase);
@@ -48,7 +49,7 @@ export function HandoverChecklist({ trade, phase, onPackingCommand, preview = fa
   const onsite = trade.equipments.filter((e) => e.onsite && !managed.has(e.scheduleId));
   return (
     <div className="mt-1.5">
-      <PackingChecklist key={trade.tradeId} trade={trade} phase={phase} onCommand={onPackingCommand}>
+      <PackingChecklist key={trade.tradeId} trade={savedTrade} phase={phase} onCommand={onPackingCommand}>
       {summary.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1">
           {summary.map((s, i) => (

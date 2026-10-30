@@ -18,7 +18,7 @@ import type {
   Trade,
 } from "../domain/types";
 import { equipmentActualTakenQty } from "../domain/equipmentActual";
-import { packingBlockers, optimisticPackingCheck, transitionPacking, type PackingCommand } from "../domain/packing";
+import { packingBlockers, optimisticPackingCheck, packingPreparationTrade, transitionPacking, type PackingCommand } from "../domain/packing";
 import { authFetch } from "./authFetch";
 import { buildSeed } from "./seed";
 import { isSupabase, supabase } from "../supabase/client";
@@ -2354,7 +2354,7 @@ export async function cancelTrade(tradeId: string): Promise<{ ok: true; warning?
 }
 
 const packingCheckQueue = createPackingCheckQueue({
-  read: id => state.trades.find(t => t.tradeId === id),
+  read: id => { const t=state.trades.find(t => t.tradeId === id); return t ? packingPreparationTrade(t) : undefined; },
   show: (id, packing) => mutateTrade(id, t => ({ ...t, packing }), false),
   start: id => {
     const token = beginTradeSave(id);
@@ -2413,7 +2413,8 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
       : "반출 상태 변경이 이미 진행 중입니다";
     return { ok: false, error };
   }
-  const current = state.trades.find((t) => t.tradeId === tradeId);
+  const saved = state.trades.find((t) => t.tradeId === tradeId);
+  const current = saved ? packingPreparationTrade(saved) : undefined;
   if (!current) return { ok: false, error: "거래를 찾을 수 없습니다" };
   const done = !current.setupDone;
   if (isSupabase && !writeBackEnabled) {

@@ -30,6 +30,7 @@ function toggleHarness() {
     );
   const trade = { tradeId: "T-1", setupDone: false, setupDoneAt: null };
   const context = {
+    packingPreparationTrade: t => t,
     state: { trades: [trade], savingTrades: {}, toast: null },
     isSupabase: false,
     writeBackEnabled: true,
