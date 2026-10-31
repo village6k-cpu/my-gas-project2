@@ -6719,7 +6719,8 @@ test('live dated staff approval reaches AI without an unread badge', () => {
   assert.equal(shouldQueueTopRowEvent(event,{now:new Date('2026-09-11T14:13:06Z')}),true);
   assert.equal(shouldQueueTopRowEvent({...event,reason:'top_rows_backstop'},
     {now:new Date('2026-09-11T14:13:06Z')}),false);
-  assert.equal(shouldQueueTopRowEvent(event,{now:new Date('2026-09-12T14:13:06Z')}),false);
+  assert.equal(shouldQueueTopRowEvent(event,{now:new Date('2026-09-12T14:13:06Z')}),true);
+  assert.equal(shouldQueueTopRowEvent(event,{now:new Date('2026-09-14T14:13:06Z')}),false);
 });
 
 test('generic DOM unreadSignal does not turn a read top-row backstop into a worker job', () => {
@@ -7509,3 +7510,12 @@ for (const [label, alter] of [
     assert.match(observed.failure.error.message, /gateway_durable_tool_receipt_set_invalid/);
   });
 }
+
+// A changed room first observed after midnight must not disappear because its date is yesterday.
+test('recent dated changed room survives midnight catchup without replaying read backstops', () => {
+  const event = { reason: 'top_row_changed', previewText: '중요 고객 그리고 혹시 v마운트 99wh 작은 용량 사이즈도 있을까요? 10월 30일', unreadCount: null };
+  const now = new Date('2026-10-30T15:14:59.363Z');
+  assert.equal(shouldQueueTopRowEvent(event, { now }), true);
+  assert.equal(shouldQueueTopRowEvent({ ...event, reason: 'top_rows_backstop' }, { now }), false);
+  assert.equal(shouldQueueTopRowEvent(event, { now: new Date('2026-11-02T00:00:00Z') }), false);
+});
