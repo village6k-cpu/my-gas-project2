@@ -3,7 +3,7 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
 import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingEntryNeedsPreparation, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
-import { templateFor } from "@/lib/domain/packingCatalog";
+import { templateFor, registeredPart } from "@/lib/domain/packingCatalog";
 import { savePacking, savePackingCheck } from "@/lib/data/store";
 
 type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
@@ -136,9 +136,14 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
       <select aria-label="기존 영상선 연결" value="" disabled={busy || p.phase!=="draft"} onChange={event=>{const row=existingVideo.find(e=>e.id===event.target.value);if(row) update(row,{ownerId,device,checked:false});}} className="mt-1 w-full rounded border border-line bg-white p-2 text-sm"><option value="" disabled>이 장비에 연결할 선 선택</option>{existingVideo.map(e=><option key={e.id} value={e.id}>{e.name} ×{e.qty}</option>)}</select>
     </label>}
     {entries.map(e=><div key={e.id} className="border-b border-line/50 py-2 last:border-0">
-      <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={checkBusy || e.qty === 0 || p.phase !== "draft" || (e.qty>0 && e.unresolved) || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>check(e)} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : ""}</button>
+      <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={checkBusy || e.qty === 0 || p.phase !== "draft" || (modelNeeded && !p.deviceModels?.[ownerId!])} aria-haspopup={e.unresolved ? "dialog" : undefined} title={e.unresolved ? "실제로 챙기는 종류를 먼저 선택해주세요" : undefined} onClick={()=>e.unresolved ? open(e) : check(e)} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : e.unresolved && e.qty > 0 ? "?" : ""}</button>
         <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.custom && <span className="ml-1 text-xs text-ink-mute">직접 입력</span>}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span><strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>
-      {p.phase === "draft" && <div className="mt-1 flex flex-wrap gap-1 pl-8"><button disabled={busy} className={`${button} text-brand-700`} onClick={()=>open(e)}>교체·수량</button><button disabled={busy} className={`${button} text-ink-mute`} onClick={()=>update(e,{qty:e.qty?0:1,checked:false})}>{e.qty ? "제외" : "포함"}</button></div>}
+      {p.phase === "draft" && <div className="mt-1 flex flex-wrap gap-1 pl-8"><button disabled={busy} className={`${button} text-brand-700`} onClick={()=>open(e)}>{e.unresolved ? "종류 선택" : "교체·수량"}</button><button disabled={busy} className={`${button} text-ink-mute`} onClick={()=>update(e,{qty:e.qty?0:1,checked:false})}>{e.qty ? "제외" : "포함"}</button></div>}
+      {p.phase === "draft" && e.unresolved && e.qty > 0 && <div className="mt-2 rounded-lg bg-warn-bg p-2 text-xs font-bold text-warn-fg"><p>실제로 챙기는 종류를 선택한 뒤 준비 확인해주세요.</p><div className="mt-2 flex flex-wrap gap-2">{["SDI", "HDMI"].map(kind => {
+        const name = e.name.replace(/SDI\s*(?:or|\/)\s*HDMI/i, kind);
+        const part = name !== e.name ? registeredPart(name) : undefined;
+        return part ? <button key={kind} disabled={busy} className={`${button} bg-white`} onClick={()=>update(e,{name:part.name,partId:part.id,checked:false})} aria-label={`${e.device} ${kind} ${e.qty}개 선택`}>{kind} {e.qty}개</button> : null;
+      })}</div></div>}
     </div>)}
     {p.phase === "draft" && <button className="tap mt-2 text-xs font-bold text-brand-700" disabled={busy || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>{const id=crypto.randomUUID();open({id,ownerId,device,name:"",partId:"",qty:1,checked:false});}}>+ 구성품 추가</button>}
   </div>;

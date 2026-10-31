@@ -246,8 +246,11 @@ export function checkableItems(t: Trade, phase: "checkout" | "checkin"): Equipme
   const pool = phase === "checkin"
     ? t.equipments.filter((e) => e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0)
     : t.equipments;
-  const booked = pool.filter((e) => !e.onsite);
-  const onsite = pool.filter((e) => e.onsite);
+  // 별도 검수로 이동한 구성품이 본체를 대신하는 행으로 오인되지 않도록 먼저 분리한다.
+  const managed = packingSourceIds(t.packing);
+  const visible = pool.filter(e => !managed.has(e.scheduleId));
+  const booked = visible.filter((e) => !e.onsite);
+  const onsite = visible.filter((e) => e.onsite);
   return [...flatGroupCheckable(booked), ...flatGroupCheckable(onsite)];
 }
 
