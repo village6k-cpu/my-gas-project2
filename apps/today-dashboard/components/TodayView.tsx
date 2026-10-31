@@ -9,7 +9,6 @@ import {
   ATTENTION_FACETS,
   ATTENTION_FACET_LABEL,
   type AttentionFacet,
-  type AttentionInbox,
   buildAttentionInbox,
   cardDone,
   formatDateLabel,
@@ -35,11 +34,6 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "all", label: "전체" },
   { key: "attention", label: "확인필요" },
 ];
-
-const EMPTY_ATTENTION_INBOX: AttentionInbox = {
-  current: [], archived: [], currentTotal: 0, archivedTotal: 0,
-  facetCounts: { return_mismatch: 0, damaged: 0, lost: 0, overdue: 0, deposit: 0, payment: 0, risk: 0 },
-};
 
 export function TodayView() {
   const [date, setDate] = useState("");
@@ -81,7 +75,8 @@ export function TodayView() {
   );
 
   const attentionInbox = useMemo(
-    () => tab === "attention" ? buildAttentionInbox(data.trades, date || ymd(new Date()), attentionFacet, 7, attentionQuery) : EMPTY_ATTENTION_INBOX,
+    // 상단 배지는 어느 탭에서도 현재 건수를 표시한다. 숨겨진 사유별 상세 집계만 생략한다.
+    () => buildAttentionInbox(data.trades, date || ymd(new Date()), attentionFacet, 7, attentionQuery, tab === "attention"),
     [data.trades, date, tab, attentionFacet, attentionQuery],
   );
 
