@@ -3731,9 +3731,10 @@ export function shouldQueueTopRowEvent(event, { now = new Date() } = {}) {
   if (hasUnreadCount(event)) return !hasDatedPreview(event.previewText) || isRecentDatedPreview(event.previewText);
   if (event.reason === 'top_rows_backstop') return false;
   // A changed row is a new observation even after staff read/replied. Kakao may
-  // render today's date instead of a clock; the unread badge is not authority.
+  // render yesterday's date after midnight. Keep recent changed observations
+  // within the catchup window; read-only backstop snapshots stay excluded.
   return event.reason === 'top_row_changed'
-    && (isLiveTopRowPreview(event.previewText, now) || daysSinceDatedPreview(event.previewText, now) === 0);
+    && (isLiveTopRowPreview(event.previewText, now) || isRecentDatedPreview(event.previewText, now));
 }
 
 function hasLivePreviewTime(text) {
