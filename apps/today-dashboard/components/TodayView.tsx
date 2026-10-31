@@ -9,6 +9,7 @@ import {
   ATTENTION_FACETS,
   ATTENTION_FACET_LABEL,
   type AttentionFacet,
+  type AttentionInbox,
   buildAttentionInbox,
   cardDone,
   formatDateLabel,
@@ -34,6 +35,11 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "all", label: "전체" },
   { key: "attention", label: "확인필요" },
 ];
+
+const EMPTY_ATTENTION_INBOX: AttentionInbox = {
+  current: [], archived: [], currentTotal: 0, archivedTotal: 0,
+  facetCounts: { return_mismatch: 0, damaged: 0, lost: 0, overdue: 0, deposit: 0, payment: 0, risk: 0 },
+};
 
 export function TodayView() {
   const [date, setDate] = useState("");
@@ -70,13 +76,13 @@ export function TodayView() {
 
   // 확인필요 숫자를 '주된 이유'별로 분해 — 왜 이 숫자인지 한눈에. 합계 = counts.attention.
   const attnBreakdown = useMemo(
-    () => (data.trades.length ? attentionBreakdown(data.trades, date) : null),
-    [data.trades, date],
+    () => (tab === "attention" && data.trades.length ? attentionBreakdown(data.trades, date) : null),
+    [data.trades, date, tab],
   );
 
   const attentionInbox = useMemo(
-    () => buildAttentionInbox(data.trades, date || ymd(new Date()), attentionFacet, 7, attentionQuery),
-    [data.trades, date, attentionFacet, attentionQuery],
+    () => tab === "attention" ? buildAttentionInbox(data.trades, date || ymd(new Date()), attentionFacet, 7, attentionQuery) : EMPTY_ATTENTION_INBOX,
+    [data.trades, date, tab, attentionFacet, attentionQuery],
   );
 
   const searching = q.trim().length > 0;
