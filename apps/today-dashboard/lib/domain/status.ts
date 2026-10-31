@@ -155,20 +155,15 @@ export function groupBySet(items: EquipmentItem[]): SetGroup[] {
   const groups: SetGroup[] = [];
   const bySet = new Map<string, SetGroup>();
   const setNameByKey = new Map<string, string>();
-  const keys = new Map<string | null | undefined, string>();
-  const keyOf = (value?: string | null) => {
-    if (!keys.has(value)) keys.set(value, setKeyOf(value));
-    return keys.get(value)!;
-  };
   items.forEach((e) => {
-    if (e.setName) setNameByKey.set(keyOf(e.setName), e.setName);
+    if (e.setName) setNameByKey.set(setKeyOf(e.setName), e.setName);
   });
 
   for (const e of items) {
-    const inferredSetName = e.setName ?? setNameByKey.get(keyOf(e.name));
+    const inferredSetName = e.setName ?? setNameByKey.get(setKeyOf(e.name));
     if (inferredSetName) {
-      const inferredSetHeader = !!e.isSetHeader || (!e.setName && (!!keyOf(e.name) && keyOf(e.name) === keyOf(inferredSetName)));
-      const groupKey = keyOf(inferredSetName);
+      const inferredSetHeader = !!e.isSetHeader || (!e.setName && sameSetKey(e.name, inferredSetName));
+      const groupKey = setKeyOf(inferredSetName);
       let g = bySet.get(groupKey);
       if (!g) {
         g = { key: "set:" + inferredSetName, setName: inferredSetName, headers: [], rows: [] };
