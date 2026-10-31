@@ -432,10 +432,11 @@ export function buildAttentionInbox(
   selectedFacet: AttentionFacet | null,
   recentDays = 7,
   query = "",
+  includeFacets = true,
 ): AttentionInbox {
   const all = tradesForTab(trades, date, "attention");
   const facetCounts = Object.fromEntries(
-    ATTENTION_FACETS.map((facet) => [facet, all.filter((t) => attentionFacetMatches(t, date, facet)).length]),
+    ATTENTION_FACETS.map((facet) => [facet, includeFacets ? all.filter((t) => attentionFacetMatches(t, date, facet)).length : 0]),
   ) as Record<AttentionFacet, number>;
   const cutoff = addDays(date, -(Math.max(1, recentDays) - 1));
   const currentAll: Trade[] = [];

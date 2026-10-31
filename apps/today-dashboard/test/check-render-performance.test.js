@@ -92,3 +92,29 @@ test('파손·분실이 없는 과거 거래의 확인필요 배지는 장비 �
   assert.equal(status.attentionReason(trade, '2026-10-31'), 'damage');
   assert.ok(equipmentReads > 0, '실제 파손/분실은 유효한 반출 행인지 집계해야 한다');
 });
+
+test('반출 탭 성능 최적화 후에도 확인필요 배지의 최근 건수는 유지', () => {
+  const { load } = domainHarness(); const status = load('status');
+  const base = { customerName: '테스트', customerPhone: '', contractStatus: '예약', setupDone: false, returnDone: false, equipments: [], photos: [], riskWarnings: [] };
+  const trades = [
+    { ...base, tradeId: 'recent', checkoutAt: '2026-10-29T12:00:00+09:00', returnAt: '2026-10-30T12:00:00+09:00' },
+    { ...base, tradeId: 'archived', checkoutAt: '2026-09-01T12:00:00+09:00', returnAt: '2026-09-02T12:00:00+09:00' },
+  ];
+  const summary = status.buildAttentionInbox(trades, '2026-10-31', null, 7, '', false);
+  const detailed = status.buildAttentionInbox(trades, '2026-10-31', null, 7);
+  assert.equal(summary.currentTotal, 1); assert.equal(summary.archivedTotal, 1);
+  assert.equal(summary.currentTotal, detailed.currentTotal);
+  const React = require('react'); let stateIndex = 0;
+  const react = { ...React, useState(initial) { return [stateIndex++ === 0 ? '2026-10-31' : initial, () => {}]; }, useEffect() {}, useMemo(fn) { return fn(); } };
+  const module = { exports: {} };
+  const code = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../components/TodayView.tsx'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  vm.runInNewContext(code, { module, exports: module.exports, require(n) {
+    if (n === 'react') return react;
+    if (n === 'react/jsx-runtime') return require(n);
+    if (n.endsWith('/store')) return { useDashboard: () => ({ trades, notes: [], remoteStatus: 'ready' }) };
+    if (n.endsWith('/status')) return status;
+    return new Proxy({}, { get() { return () => null; } });
+  }, Date, Map, Set });
+  const html = require('react-dom/server').renderToStaticMarkup(React.createElement(module.exports.TodayView));
+  assert.match(html, /확인필요<\/span><span[^>]*>1<\/span>/, '실제 반출 화면에서도 확인필요 배지는 0으로 바뀌면 안 된다');
+});
