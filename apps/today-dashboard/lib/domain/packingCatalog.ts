@@ -154,10 +154,13 @@ export const PACKING_PARTS = [...catalog.values()];
 export function registeredPart(name: string) {
   const p=canonicalPart(name); return catalog.get(p.id);
 }
+// 변경되지 않는 표준 목록은 한 번만 정규화한다. 체크마다 전체 마스터를 순회하지 않는다.
+const templatesByKey = new Map(Object.entries(PACKING_TEMPLATES).map(([name, rows]) => [partKey(name), rows]));
+const indie7Key = partKey("스몰HD INDIE7");
+const emptyTemplate: {name: string; qty: number}[] = [];
 export function templateFor(name: string) {
   // 운영 예약에서 사용하는 동일 모델의 영문 표기. 다른 모니터를 추정하지 않는다.
-  const model = partKey(name) === partKey("스몰HD INDIE7") ? "스몰HD 인디7" : name;
-  const key = Object.keys(PACKING_TEMPLATES).find(n => partKey(n) === partKey(model));
-  return key ? PACKING_TEMPLATES[key] : [];
+  const key = partKey(name);
+  return templatesByKey.get(key === indie7Key ? partKey("스몰HD 인디7") : key) ?? emptyTemplate;
 }
 export const MONITOR_MODELS = ["스몰HD 인디7", "포트키 BM7", "티비로직 F-7HS", "티비로직 LVM-074W", "파이로 7"];

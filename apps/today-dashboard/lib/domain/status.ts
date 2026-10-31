@@ -20,13 +20,19 @@ const reservationClock = new Intl.DateTimeFormat("en-GB", {
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
   second: "2-digit", fractionalSecondDigits: 3,
 });
+// 시각 문자열의 해석은 체크 상태와 무관하다. 동일 일시를 매 카드 갱신마다 재파싱하지 않는다.
+const reservationPartsCache = new Map<string, Record<string, string> | null>();
 function reservationParts(iso: string): Record<string, string> | null {
+  const cacheKey = String(iso || "");
+  if (reservationPartsCache.has(cacheKey)) return reservationPartsCache.get(cacheKey)!;
   // GAS의 시간대 없는 일시는 매장 한국 시각이다. 브라우저/서버의 시간대를 적용하지 않는다.
   let value = String(iso || "").trim().replace(" ", "T");
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(value)) value += "+09:00";
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return Object.fromEntries(reservationClock.formatToParts(date).map(part => [part.type, part.value]));
+  const parts = Number.isNaN(date.getTime()) ? null : Object.fromEntries(reservationClock.formatToParts(date).map(part => [part.type, part.value]));
+  if (reservationPartsCache.size >= 2048) reservationPartsCache.delete(reservationPartsCache.keys().next().value!);
+  reservationPartsCache.set(cacheKey, parts);
+  return parts;
 }
 function isReservationMidnight(p: Record<string, string>): boolean {
   return p.hour === "00" && p.minute === "00" && p.second === "00" && p.fractionalSecond === "000";
@@ -149,15 +155,20 @@ export function groupBySet(items: EquipmentItem[]): SetGroup[] {
   const groups: SetGroup[] = [];
   const bySet = new Map<string, SetGroup>();
   const setNameByKey = new Map<string, string>();
+  const keys = new Map<string | null | undefined, string>();
+  const keyOf = (value?: string | null) => {
+    if (!keys.has(value)) keys.set(value, setKeyOf(value));
+    return keys.get(value)!;
+  };
   items.forEach((e) => {
-    if (e.setName) setNameByKey.set(setKeyOf(e.setName), e.setName);
+    if (e.setName) setNameByKey.set(keyOf(e.setName), e.setName);
   });
 
   for (const e of items) {
-    const inferredSetName = e.setName ?? setNameByKey.get(setKeyOf(e.name));
+    const inferredSetName = e.setName ?? setNameByKey.get(keyOf(e.name));
     if (inferredSetName) {
-      const inferredSetHeader = !!e.isSetHeader || (!e.setName && sameSetKey(e.name, inferredSetName));
-      const groupKey = setKeyOf(inferredSetName);
+      const inferredSetHeader = !!e.isSetHeader || (!e.setName && (!!keyOf(e.name) && keyOf(e.name) === keyOf(inferredSetName)));
+      const groupKey = keyOf(inferredSetName);
       let g = bySet.get(groupKey);
       if (!g) {
         g = { key: "set:" + inferredSetName, setName: inferredSetName, headers: [], rows: [] };
@@ -368,7 +379,8 @@ export const ATTENTION_FACET_LABEL: Record<AttentionFacet, string> = {
 export const ATTENTION_FACETS: AttentionFacet[] = ["lost", "damaged", "return_mismatch", "overdue", "deposit", "payment", "risk"];
 
 function attentionFacetMatches(t: Trade, date: string, facet: AttentionFacet): boolean {
-  const aggs = aggregateReturns(t);
+  // 수량 집계는 수량 필터에서만 필요하다.
+  const aggs = facet === "damaged" || facet === "lost" ? aggregateReturns(t) : [];
   if (facet === "return_mismatch") return t.returnDone && returnCompletionBlockers(t).length > 0;
   if (facet === "damaged") return aggs.some((a) => a.count.damaged > 0);
   if (facet === "lost") return aggs.some((a) => a.count.lost > 0);

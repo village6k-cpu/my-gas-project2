@@ -1,12 +1,12 @@
 "use client";
 
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
 import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingEntryNeedsPreparation, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor } from "@/lib/domain/packingCatalog";
 import { savePacking, savePackingCheck } from "@/lib/data/store";
 
-type PackingContextValue = { trade: Trade; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
+type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
 const PackingContext = createContext<PackingContextValue | null>(null);
 const button = "tap rounded-lg px-3 py-2 text-sm font-bold ring-1 ring-line disabled:opacity-40";
 
@@ -20,6 +20,15 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const [note, setNote] = useState<string | null>(null);
   const [noteVersion, setNoteVersion] = useState(0);
   const p = trade.packing;
+  const devices = useMemo(() => packingDevices(trade), [trade.equipments]);
+  const entriesByOwner = useMemo(() => {
+    const rows = new Map<string | undefined, PackingEntry[]>();
+    for (const entry of p?.entries ?? []) {
+      const group = rows.get(entry.ownerId) ?? [];
+      group.push(entry); rows.set(entry.ownerId, group);
+    }
+    return rows;
+  }, [p?.entries]);
   const run = async (command: PackingCommand, version = p?.version ?? 0) => {
     if (busy || checking > 0) return false;
     setBusy(true); setError("");
@@ -35,7 +44,6 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const unresolvedQty = p?.entries.filter(e=>e.unresolved).reduce((n,e)=>n+e.qty,0) ?? 0;
   const total = groups.reduce((n, g) => n + g.expected, 0);
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
-  const devices = packingDevices(trade);
   const reservationChanges = packingReservationChanges(trade);
   const requiredIssues = p?.phase === "draft" ? packingRequiredIssues(trade) : [];
   const unfinished = p?.entries.filter(packingEntryNeedsPreparation) ?? [];
@@ -52,7 +60,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
     catch (error) { setError(error instanceof Error ? error.message : "체크 저장 실패. 다시 확인해주세요"); }
     finally { setChecking(n => n - 1); }
   };
-  const context = { trade, busy: busy || checking > 0, checkBusy: busy, check, update, open: openEditor, run };
+  const context = { trade, devices, entriesByOwner, busy: busy || checking > 0, checkBusy: busy, check, update, open: openEditor, run };
   return <PackingContext.Provider value={context}><section aria-label="구성품 검수" className="mb-3">
     <div className="flex flex-wrap items-center justify-between gap-2 bg-brand-50 px-3 py-3">
       <div><h3 className="text-sm font-extrabold text-brand-700">구성품 검수</h3>
@@ -75,7 +83,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
             <textarea value={note ?? p.note} onChange={e => { if (note === null) setNoteVersion(p.version); setNote(e.target.value); }} maxLength={2000} className="w-full rounded-lg border border-line p-2 text-sm" placeholder="예: 고객 요청으로 D탭 라인 대신 더미 사용" />
             {note !== null && <><button className={button} onClick={async () => { if (await run({ action: "save", entries: p.entries, note }, noteVersion)) setNote(null); }}>메모 저장</button><button className={button} onClick={() => setNote(null)}>입력 취소</button></>}
             <details className="text-xs text-ink-mute"><summary>예약 장비가 변경됐나요?</summary><button className={button} onClick={() => run({ action: "refresh" })}>예약 변경 내용 불러오기</button></details>
-            {sealReason && <p id={`packing-seal-reason-${trade.tradeId}`} className="text-xs font-bold text-attention-fg">{sealReason}</p>}
+            <p id={`packing-seal-reason-${trade.tradeId}`} className="h-12 overflow-y-auto text-xs font-bold text-attention-fg">{sealReason}</p>
             <button className={`${button} w-full bg-brand-600 text-white`} disabled={!!sealReason} aria-describedby={sealReason ? `packing-seal-reason-${trade.tradeId}` : undefined} onClick={() => run({ action: "seal" })}>이 구성으로 반출 준비 확정</button>
           </> : <><p className="rounded-lg bg-checkin-bg p-3 text-sm font-bold text-checkin-fg">✓ 반출 구성품 확정 · 반납 때 이 수량과 대조합니다.</p>
             {p.note && <p className="whitespace-pre-wrap text-sm text-ink-soft">반출 메모: {p.note}</p>}
@@ -101,7 +109,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
       const entries = add || !exists ? [...p.entries, updated] : p.entries.map(e => e.id === entry.id ? updated : e);
       if (await save(entries, editingVersion)) setEditing(null);
     }} />}
-    {(busy || checking > 0) && <p className="px-3 pb-2 text-xs text-brand-700" role="status">저장 중…</p>}
+    <p className="h-6 px-3 text-xs text-brand-700" role="status">{busy || checking > 0 ? "저장 중…" : ""}</p>
   </section></PackingContext.Provider>;
 }
 
@@ -109,11 +117,11 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
 export function PackingDevice({ ownerId, common = false }: { ownerId?: string; common?: boolean }) {
   const ctx = useContext(PackingContext);
   if (!ctx?.trade.packing) return null;
-  const { trade, busy, checkBusy, check, update, open, run } = ctx;
+  const { trade, devices, entriesByOwner, busy, checkBusy, check, update, open, run } = ctx;
   const p=trade.packing!;
   if (packingNeedsUpgrade(p)) return null;
-  const owner=packingDevices(trade).find(e=>e.scheduleId===ownerId);
-  const entries=p.entries.filter(e=>e.ownerId===ownerId);
+  const owner=devices.find(e=>e.scheduleId===ownerId);
+  const entries=entriesByOwner.get(ownerId) ?? [];
   const modelNeeded=!!owner && needsDeviceModel(owner);
   const device=p.deviceModels?.[ownerId ?? ""] ?? owner?.name ?? "공용 구성품";
   const existingVideo = ownerId && templateFor(device).some(r=>/SDI|HDMI/i.test(r.name)) && !entries.some(e=>/SDI|HDMI/i.test(e.name)) ? unassignedVideo(trade,p,ownerId) : [];
