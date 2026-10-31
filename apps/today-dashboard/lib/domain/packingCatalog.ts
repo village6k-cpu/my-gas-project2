@@ -112,7 +112,16 @@ export const PACKING_TEMPLATES: Record<string, {name: string; qty: number}[]> = 
   "타스캠 레코더": [{"name":"마이크로SD 32기가","qty":1}],
 };
 
-export const partKey = (s: string) => s.normalize("NFC").trim().toLowerCase().replace(/\s+/g, "");
+// 같은 표준 품목명이 반복되는 검수 경로에서 유니코드/공백 정규화를 재실행하지 않는다.
+const normalizedPartNames = new Map<string, string>();
+export const partKey = (s: string): string => {
+  const cached = normalizedPartNames.get(s);
+  if (cached !== undefined) return cached;
+  const key = s.normalize("NFC").trim().toLowerCase().replace(/\s+/g, "");
+  if (normalizedPartNames.size >= 2048) normalizedPartNames.delete(normalizedPartNames.keys().next().value!);
+  normalizedPartNames.set(s, key);
+  return key;
+};
 const aliases: Record<string, string> = {
   "스몰HD용 D탭": "smallhd-9v", "스몰HD 인디7용 D탭": "smallhd-9v",
   "스몰HD용 D탭 라인 (9V)": "smallhd-9v",

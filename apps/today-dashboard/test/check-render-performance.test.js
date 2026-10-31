@@ -77,3 +77,18 @@ test('저장 대기 전후에도 상태 표시와 확정 안내 영역 높이를
   assert.match(pending, /저장 중…/);
   assert.doesNotMatch(idle, /저장 중…/);
 });
+
+test('파손·분실이 없는 과거 거래의 확인필요 배지는 장비 행을 재분류하지 않는다', () => {
+  const { load } = domainHarness(); const status = load('status');
+  let equipmentReads = 0;
+  const trade = { returnDone: false, setupDone: false, returnAt: '2026-11-01T12:00:00+09:00', riskWarnings: [],
+    returnCounts: { camera: { good: 1, damaged: 0, lost: 0 } },
+    get equipments() { equipmentReads++; return [{ scheduleId: 'camera', name: '카메라', qty: 1, checkoutState: 'taken' }]; } };
+  assert.equal(status.attentionReason(trade, '2026-10-31'), null);
+  assert.equal(equipmentReads, 0, '단순 체크 시 파손 없는 전체 과거 장비를 재분류하면 안 된다');
+  trade.returnCounts.camera = { good: 0, damaged: 1, lost: 0 };
+  assert.equal(status.attentionReason(trade, '2026-10-31'), 'damage');
+  trade.returnCounts.camera = { good: 0, damaged: 0, lost: 1 };
+  assert.equal(status.attentionReason(trade, '2026-10-31'), 'damage');
+  assert.ok(equipmentReads > 0, '실제 파손/분실은 유효한 반출 행인지 집계해야 한다');
+});

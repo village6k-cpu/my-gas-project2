@@ -316,8 +316,14 @@ export const ATTENTION_REASON_LABEL: Record<AttentionReason, string> = {
   risk: "위험",
 };
 
+function hasReturnIncidentCounts(t: Trade): boolean {
+  return Object.values(t.returnCounts ?? {}).some(c => c.damaged > 0 || c.lost > 0)
+    || Object.values(t.packing?.counts ?? {}).some(c => c.damaged > 0 || c.lost > 0);
+}
+
 export function attentionReason(t: Trade, date: string): AttentionReason | null {
-  const aggs = aggregateReturns(t);
+  // 정상 수량만 있는 거래는 파손/분실 검사를 위해 전체 세트 행을 다시 만들 필요가 없다.
+  const aggs = hasReturnIncidentCounts(t) ? aggregateReturns(t) : [];
   // 이미 닫힌 과거 데이터라도 수량이 맞지 않으면 완료로 숨기지 않고 즉시 다시 드러낸다.
   if (t.returnDone && returnCompletionBlockers(t).length > 0) return "return_mismatch";
   if (aggs.some((a) => a.count.damaged > 0 || a.count.lost > 0)) return "damage";
@@ -375,7 +381,7 @@ export const ATTENTION_FACETS: AttentionFacet[] = ["lost", "damaged", "return_mi
 
 function attentionFacetMatches(t: Trade, date: string, facet: AttentionFacet): boolean {
   // 수량 집계는 수량 필터에서만 필요하다.
-  const aggs = facet === "damaged" || facet === "lost" ? aggregateReturns(t) : [];
+  const aggs = (facet === "damaged" || facet === "lost") && hasReturnIncidentCounts(t) ? aggregateReturns(t) : [];
   if (facet === "return_mismatch") return t.returnDone && returnCompletionBlockers(t).length > 0;
   if (facet === "damaged") return aggs.some((a) => a.count.damaged > 0);
   if (facet === "lost") return aggs.some((a) => a.count.lost > 0);
