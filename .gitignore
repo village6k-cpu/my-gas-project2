@@ -9,6 +9,7 @@ __pycache__/
 .superpowers/
 .playwright-cli/
 tools/kakao-dom-bridge/queue/
+/queue/
 tools/kakao-dom-bridge/.env
 .env
 .env.*
