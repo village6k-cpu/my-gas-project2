@@ -24,7 +24,8 @@ export async function POST(req: NextRequest) {
     if (!command || typeof command.action !== "string") throw new Error("구성품 작업을 확인해주세요");
     const next = transitionPacking(trade, command, new Date().toISOString());
     const { data, error } = await db.rpc("save_packing_manifest", {
-      p_trade_id: body.tradeId, p_version: body.version, p_next: next, p_actor: user.id, p_action: command.action,
+      p_trade_id: body.tradeId, p_version: body.version, p_next: next, p_actor: user.id,
+      p_action: command.action === "reconcile" && command.confirmed ? "reconcileConfirmed" : command.action,
     });
     if (error) return NextResponse.json({ error: error.message }, { status: error.code === "40001" ? 409 : 422 });
     return NextResponse.json({ packing: data }, { headers: { "cache-control": "no-store" } });

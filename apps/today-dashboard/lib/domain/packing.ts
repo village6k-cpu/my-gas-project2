@@ -33,6 +33,7 @@ export type PackingCommand =
   | { action: "seal" }
   | { action: "revise" }
   | { action: "refresh" }
+  | { action: "reconcile"; ownerId: string; name: string; confirmed?: boolean }
   | { action: "model"; ownerId: string; model: string }
   | { action: "receive"; partId: string; count: ReturnCount };
 
@@ -97,6 +98,28 @@ export function needsDeviceModel(e: EquipmentItem) { return e.name === "7인치 
 export function packingAvailable(t: Trade) { return packingCandidates(t).length > 0 || packingDevices(t).some(e => needsDeviceModel(e) || templateFor(e.name).some(r => ACCESSORY.test(r.name))); }
 export function packingStarted(t: Trade): boolean {
   return !!t.packingDispatchedAt || t.setupDone || t.returnDone || t.contractStatus !== "예약" || t.equipments.some(e => (e.takenQty ?? 0) > 0);
+}
+/** 본체의 이름/수량 변경은 확정된 준비 목록에서도 놓치지 않는다. */
+export function packingDeviceReplacements(t: Trade) {
+  if (!t.packing || t.packing.schemaVersion !== 2 || t.returnDone || ["반납완료", "취소"].includes(t.contractStatus)) return [];
+  return packingDevices(t).filter(owner => t.packing!.sources.some(s => s.device && s.id === owner.scheduleId && (s.name !== owner.name || s.qty !== owner.qty)));
+}
+/** 새 장비의 표준 구성과 직접 추가품을 미리 보여준다. 이전 장비 전용품은 0개로 기록을 남긴다. */
+export function packingReplacementEntries(t: Trade, ownerId: string): PackingEntry[] {
+  const owner = packingDeviceReplacements(t).find(e => e.scheduleId === ownerId);
+  if (!owner || !t.packing) return [];
+  const old = t.packing.entries.filter(e => e.ownerId === ownerId);
+  const rows = templateFor(owner.name).filter(r => ACCESSORY.test(r.name) || r.name.includes("용 "));
+  const desired = rows.map(row => {
+    const part = registeredPart(row.name);
+    const existing = old.find(e => e.partId === part?.id && !e.custom);
+    return { id: existing?.id ?? `replacement:${ownerId}:${part?.id ?? partKey(row.name)}`, ownerId, device: owner.name,
+      name: part?.name ?? row.name, partId: part?.id ?? `unresolved:${ownerId}:${partKey(row.name)}`,
+      ...(existing?.sourceId ? { sourceId: existing.sourceId } : {}), qty: row.qty * owner.qty,
+      checked: false, unresolved: !part || CHOICE.test(row.name), modelDefault: true };
+  });
+  return [...old.filter(e => !desired.some(d => d.id === e.id)).map(e => ({ ...e, device: owner.name,
+    qty: !e.modelDefault && !e.sourceId ? e.qty : 0, checked: false })), ...desired];
 }
 export function packingSourceIds(p?: PackingManifest | null): Set<string> {
   return new Set(p?.sources.filter(s=>!s.device).map(s => s.id) ?? []);
@@ -216,6 +239,24 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
   }
   const next = structuredClone(prev);
   next.version += 1;
+  if (command.action === "reconcile") {
+    const owner = packingDeviceReplacements(t).find(e => e.scheduleId === command.ownerId && e.name === command.name);
+    if (!owner) throw new Error("장비 변경 내용을 다시 확인해주세요");
+    const old = prev.entries.filter(e => e.ownerId === owner.scheduleId);
+    if (old.some(e => { const c = prev.counts[e.partId]; return c && c.good + c.damaged + c.lost > 0; })) throw new Error("교체 전 구성품의 반납 기록을 먼저 확인해주세요");
+    const entries = packingReplacementEntries(t, owner.scheduleId);
+    if (packingStarted(t)) {
+      if (!command.confirmed) throw new Error("교체 구성품의 실제 반출 여부를 확인해주세요");
+      if (prev.phase !== "sealed" || entries.some(e => e.qty > 0 && e.unresolved)) throw new Error("반출한 구성품의 실제 종류를 먼저 확인해주세요");
+      entries.forEach(e => { e.checked = e.qty > 0; });
+    } else {
+      next.phase = "draft";
+      delete next.sealedAt;
+    }
+    next.entries = [...prev.entries.filter(e => e.ownerId !== owner.scheduleId), ...entries];
+    next.sources = prev.sources.map(s => s.device && s.id === owner.scheduleId ? { ...s, name: owner.name, qty: owner.qty } : s);
+    return next;
+  }
   if (command.action === "receive") {
     if (prev.phase !== "sealed") throw new Error("반출 구성품을 먼저 확정해주세요");
     const group = packingGroups(prev).find(g => g.id === command.partId);

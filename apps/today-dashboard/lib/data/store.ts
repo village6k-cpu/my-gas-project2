@@ -170,7 +170,7 @@ function createLedgerMutationId(scope: string): string {
   return `${scope}:${uuid}`.replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, 120);
 }
 
-function hasTradePending(tradeId: string): boolean {
+export function hasTradePending(tradeId: string): boolean {
   return pendingRemoveEquipmentTrades.has(tradeId) || hasTradePendingExcludingRemove_(tradeId);
 }
 
