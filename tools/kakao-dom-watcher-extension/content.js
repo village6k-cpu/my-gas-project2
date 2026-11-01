@@ -2,7 +2,7 @@
   'use strict';
 
   const GLOBAL_KEY = '__villageKakaoWatcherInstance';
-  const WATCHER_VERSION = '2026-08-13-cdp-health-v16';
+  const WATCHER_VERSION = '2026-11-02-read-room-catchup-v17';
   const CDP_BRIDGE_SEND = typeof globalThis.__villageKakaoBridgeSend === 'function'
     ? globalThis.__villageKakaoBridgeSend
     : null;
@@ -255,7 +255,7 @@
 
   function createEvent(row, reason, changedText) {
     const rowText = normalizeText(row?.innerText || row?.textContent || changedText || '');
-    const isTopRowEvent = reason === 'top_row_changed' || reason === 'top_rows_backstop';
+    const isTopRowEvent = reason === 'top_row_changed' || reason === 'top_rows_backstop' || reason === 'read_room_catchup';
     const topRowText = canonicalTopRowText(rowText);
     const roomKey = buildRoomKey(row, rowText);
     const customerName = extractCustomerName(row);
@@ -473,11 +473,11 @@
           if (posted >= STATE.config.deepBackstopMaxRows) break;
           if (seen.has(row.signature)) continue;
           seen.add(row.signature);
-          // A deep scan is only a recovery path for genuinely unread rows. Do
-          // not emit every historical chat row just because it is visible.
-          if (!hasUnreadSignal(row.row, row.text) && !extractUnreadCount(row.text)) continue;
+          // Read status is not a registration receipt. The bridge bounds
+          // recent read recovery and deduplicates against its durable queue.
           posted += 1;
-          postEvent(createEvent(row.row, 'top_rows_backstop', row.text));
+          const unread = hasUnreadSignal(row.row, row.text) || extractUnreadCount(row.text);
+          postEvent(createEvent(row.row, unread ? 'top_rows_backstop' : 'read_room_catchup', row.text));
         }
         const nextTop = Math.min(scroller.scrollTop + Math.max(240, Math.floor(scroller.clientHeight * 0.85)), scroller.scrollHeight - scroller.clientHeight);
         if (!Number.isFinite(nextTop) || nextTop <= scroller.scrollTop + 4) break;
@@ -549,9 +549,9 @@
       if (signature === STATE.lastTopRowsSignature && !backstopDue) return;
       const changed = signature === STATE.lastTopRowsSignature ? [] : changedRows(previousRows, currentRows);
       const unreadBackstop = currentRows.filter((row) => hasUnreadSignal(row.row, row.text));
-      // The bridge already handles live row changes. Periodically re-posting
-      // every read row caused stale conversations to be classified as new.
-      const readBackstop = [];
+      // Offer unchanged read rows on the recovery channel, never as live
+      // customer messages. The durable bridge receipt prevents reprocessing.
+      const readBackstop = backstopDue ? currentRows.filter((row) => !hasUnreadSignal(row.row, row.text)) : [];
       const toPost = [];
       const seen = new Set();
       for (const row of [...changed, ...unreadBackstop, ...readBackstop].slice(0, STATE.config.topRowsPostLimit || 30)) {
@@ -566,7 +566,7 @@
       const changedKeys = new Set(changed.map((row) => row.signature));
       for (const row of toPost) {
         const key = row.signature;
-        postEvent(createEvent(row.row, changedKeys.has(key) ? 'top_row_changed' : 'top_rows_backstop', row.text));
+        postEvent(createEvent(row.row, changedKeys.has(key) ? 'top_row_changed' : hasUnreadSignal(row.row, row.text) ? 'top_rows_backstop' : 'read_room_catchup', row.text));
       }
     }, 2000);
   }

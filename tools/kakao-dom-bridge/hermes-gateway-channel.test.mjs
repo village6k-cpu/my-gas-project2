@@ -1929,3 +1929,16 @@ test('composite receipt persists as one operation and keeps the different-second
 });
 
 test('external allocation receipt is persisted and returned after restart without executing again',async()=>{await withChannel(async({channel,directory})=>{await channel.enqueue(event('external-allocation','external-room',1));const claim=await channel.claim({consumerId:'test'});const reserved=await channel.reserveToolOperation(registeredReservationChangeOperation(claim));const receipt=registeredReservationChangeReceipt(claim,reserved.reservation.operation_id,undefined,{mutation_kind:'external_supply_allocation'});await channel.recordToolReceipt(receipt);const restarted=createHermesGatewayChannel({directory});const job=await restarted.get(claim.job_id);assert.equal(job.tool_operation.state,'completed');assert.equal(job.tool_receipts[0].mutation_kind,'external_supply_allocation')})});
+
+test('durable room observation survives process restart without exposing mutable state', async () => {
+  await withChannel(async ({channel,directory,clock}) => {
+    const input={...event('job-read-observation','room-read-observation',1),previewText:'테스트 고객 네 감사합니다 오전 8:50',detectedAt:'2026-11-01T03:45:00Z'};
+    await channel.enqueue(input);
+    const restarted=createHermesGatewayChannel({directory,leaseMs:1000,maxAttempts:2,now:()=>clock.now});
+    const observed=await restarted.latestRoomObservation('room-read-observation');
+    assert.equal(observed.event.previewText,input.previewText);
+    observed.event.previewText='changed by caller';
+    assert.equal((await restarted.latestRoomObservation('room-read-observation')).event.previewText,input.previewText);
+    assert.equal(await restarted.latestRoomObservation('room-never-observed'),null);
+  });
+});

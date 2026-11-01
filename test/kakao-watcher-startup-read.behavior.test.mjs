@@ -55,3 +55,56 @@ test('real watcher startup offers read rows to bounded bridge reconciliation wit
   assert.equal(offered[0].unreadCount, null);
   assert.match(offered[0].previewText, /추가해드리겠습니다/);
 });
+
+test('unchanged read row is periodically offered for durable catchup', async () => {
+  class Row {
+    innerText = '중요 테스트 고객 장비 추가해드리겠습니다 오후 4:10';
+    textContent = this.innerText;
+    closest() { return this; }
+    getBoundingClientRect() { return { top: 100, left: 0, width: 300, height: 60 }; }
+    getAttribute(name) { return name === 'data-chat-id' ? 'fixture-room' : ''; }
+    querySelector(selector) {
+      if (selector.includes('.txt_name')) return { textContent: '테스트 고객' };
+      if (selector === '.txt_info') return { textContent: '장비 추가해드리겠습니다' };
+      if (selector === '.txt_date') return { textContent: '오후 4:10' };
+      return null;
+    }
+  }
+  const row = new Row();
+  const events = [];
+  const timers = [];
+  const intervals = [];
+  const document = {
+    title: '테스트 채팅 목록', visibilityState: 'visible',
+    documentElement: { dataset: {} }, body: {},
+    querySelectorAll(selector) { return selector.includes('list_board') ? [row] : []; }
+  };
+  const context = {
+    document, Element: Row, console, Date,
+    location: { hostname: 'business.kakao.com', pathname: '/_test/chats',
+      href: 'https://business.kakao.com/_test/chats', origin: 'https://business.kakao.com' },
+    navigator: { userAgent: 'test' },
+    MutationObserver: class { observe() {} disconnect() {} },
+    getComputedStyle() { return { visibility: 'visible', display: 'block' }; },
+    addEventListener() {},
+    setTimeout(callback, ms) { timers.push({ callback, ms }); return timers.length; },
+    setInterval(callback, ms) { intervals.push({callback,ms}); return intervals.length; }, clearTimeout() {}, clearInterval() {},
+    chrome: {
+      storage: { sync: { get(defaults, callback) { callback(defaults); } }, onChanged: { addListener() {} } },
+      runtime: { id: 'fixture-extension', async sendMessage(message) { events.push(message.event); return { ok: true }; } }
+    }
+  };
+  context.window = context;
+  const source = await readFile(new URL('../tools/kakao-dom-watcher-extension/content.js', import.meta.url), 'utf8');
+  vm.runInNewContext(source, context);
+  await Promise.resolve();
+  await Promise.resolve();
+  const poll = intervals.find(timer => timer.ms === 2000);
+  assert.ok(poll, 'poll scheduled');
+  poll.callback();
+  await Promise.resolve();
+  const offered = events.filter(event => event.reason === 'read_room_catchup');
+  assert.equal(offered.length, 1, 'read room must not depend on a new mutation');
+  assert.equal(offered[0].roomKey, 'chat:fixture-room');
+  assert.equal(offered[0].unreadCount, null);
+});

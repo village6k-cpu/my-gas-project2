@@ -479,8 +479,8 @@ assert.match(
 
 assert.match(
   content,
-  /const readBackstop = \[\];/,
-  'Watcher must not periodically re-post every read row as a new customer event'
+  /const readBackstop = backstopDue \? currentRows\.filter/,
+  'Read rows must use periodic durable recovery rather than synthetic live messages'
 );
 
 assert.match(

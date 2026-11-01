@@ -1,0 +1,61 @@
+--- a/hermes_state.py
++++ b/hermes_state.py
+@@ -2001,6 +2001,7 @@
+         # _live_connections.  close() drains this set.
+         self._read_conns: "set[sqlite3.Connection]" = set()
+         self._read_conns_lock = threading.Lock()
++        self._read_conn_owners = {}
+         # Set when close() begins.  _get_read_conn checks this under the
+         # lock so a reader that finishes opening after the drain finds the
+         # shutdown in progress and closes its own connection immediately.
+@@ -2234,6 +2235,16 @@
+ 
+     # ── Read-path split ──
+ 
++    def _prune_retired_readers(self) -> None:
++        """Release only readers whose owning thread has already terminated."""
++        with self._read_conns_lock:
++            for conn, owner in list(self._read_conn_owners.items()):
++                if owner.is_alive():
++                    continue
++                conn.close()
++                self._read_conns.discard(conn)
++                self._read_conn_owners.pop(conn, None)
++
+     def _get_read_conn(self) -> Optional[sqlite3.Connection]:
+         """Per-thread read-only connection, or None when unavailable.
+ 
+@@ -2249,6 +2260,7 @@
+         """
+         if not self._wal_active or self.read_only:
+             return None
++        self._prune_retired_readers()
+         conn = getattr(self._read_local, "conn", None)
+         if conn is not None:
+             return conn
+@@ -2261,6 +2273,9 @@
+                 uri=True,
+                 timeout=5.0,
+                 isolation_level=None,
++                # The owning thread is the sole reader. Cleanup may happen
++                # after that thread exits or during SessionDB.close().
++                check_same_thread=False,
+             )
+             conn.row_factory = sqlite3.Row
+             apply_database_pragmas(conn, db_label="state.db")
+@@ -2278,6 +2293,7 @@
+                     self._read_local.failed = True
+                     return None
+                 self._read_conns.add(conn)
++                self._read_conn_owners[conn] = threading.current_thread()
+         except sqlite3.Error:
+             # Mark this thread failed so we don't retry the open on every
+             # query; the locked writer connection still serves reads.
+@@ -2842,6 +2858,7 @@
+             self._read_conns_closed = True
+             read_conns = list(self._read_conns)
+             self._read_conns.clear()
++            self._read_conn_owners.clear()
+         for conn in read_conns:
+             try:
+                 conn.close()

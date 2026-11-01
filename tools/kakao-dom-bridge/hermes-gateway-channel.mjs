@@ -759,6 +759,16 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   }
 
   return {
+    async latestRoomObservation(roomKey) {
+      const key = requiredString(roomKey, 'roomKey');
+      return mutate(async () => {
+        const metadata = authoritativeJob(key);
+        if (!metadata) return null;
+        const job = await hydrateJob(metadata);
+        return clone({ roomRevision: job.room_revision, state: job.state, event: job.event });
+      });
+    },
+
     async latestRoomRevision(roomKey) {
       const key = requiredString(roomKey, 'roomKey');
       return mutate(async () => Number(authoritativeJob(key)?.room_revision || 0));
