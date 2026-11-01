@@ -7512,6 +7512,25 @@ for (const [label, alter] of [
 }
 
 // A changed room first observed after midnight must not disappear because its date is yesterday.
+test('delayed clock-only changed room reaches catchup after staff already read it', () => {
+  const event = { reason: 'top_row_changed', previewText: '중요 테스트 고객 감사합니다! 총 금액이 어떻게 될까요? 오전 8:50', unreadCount: null };
+  for (const time of ['2026-11-01T03:45:09.857Z', '2026-11-01T03:55:09.857Z']) {
+    const now = new Date(time);
+    assert.equal(shouldQueueTopRowEvent(event, { now }), true);
+    assert.equal(shouldQueueTopRowEvent({ ...event, reason: 'top_rows_backstop' }, { now }), false);
+  }
+});
+
+test('changed clock catchup rejects body clocks and future or invalid display clocks', () => {
+  for (const [previewText, time] of [
+    ['중요 고객 오전 8:50 예약 부탁드립니다', '2026-11-01T03:45:00Z'],
+    ['중요 고객 예약 확정 오후 11:55', '2026-11-01T15:05:00Z'],
+    ['중요 고객 예약 확정 오후 0:77', '2026-11-01T03:45:00Z']
+  ]) {
+    assert.equal(shouldQueueTopRowEvent({ reason: 'top_row_changed', previewText, unreadCount: 0 }, { now: new Date(time) }), false);
+  }
+});
+
 test('recent dated changed room survives midnight catchup without replaying read backstops', () => {
   const event = { reason: 'top_row_changed', previewText: '중요 고객 그리고 혹시 v마운트 99wh 작은 용량 사이즈도 있을까요? 10월 30일', unreadCount: null };
   const now = new Date('2026-10-30T15:14:59.363Z');

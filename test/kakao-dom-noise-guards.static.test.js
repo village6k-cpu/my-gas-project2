@@ -84,8 +84,8 @@ assert.match(
 
 assert.match(
   bridge,
-  /function isLiveTopRowPreview\(text, now = new Date\(\)\)/,
-  'Bridge must distinguish live chat-list changes from dated backstop rows'
+  /function isRecentClockPreview\(text, now = new Date\(\)\)/,
+  'Bridge must recognize bounded clock-only catchup observations'
 );
 
 assert.match(
@@ -108,8 +108,8 @@ assert.match(
 
 assert.match(
   bridge,
-  /ageMinutes <= CONFIG\.topRowLiveWindowMinutes/,
-  'Bridge must use recency only for read top-row changes'
+  /ageMinutes <= CONFIG\.readBackstopLookbackHours \* 60/,
+  'Read changed rows must survive late detection within the catchup window'
 );
 
 assert.match(
@@ -329,13 +329,13 @@ assert.match(
 assert.match(
   bridge,
   /function isRecentReadCatchupPreview\(text, now = new Date\(\)\)/,
-  'Bridge may keep an explicit catch-up helper, but stale read top-row changes must not enter the live worker path'
+  'Bridge must share bounded read catchup classification'
 );
 
-assert.doesNotMatch(
+assert.match(
   bridge,
-  /event\.reason === 'top_row_changed'\s+&& \(isLiveTopRowPreview\(event\.previewText\) \|\| isRecentReadCatchupPreview\(event\.previewText\)\)/,
-  'Bridge must not reopen hours-old read rows through the catch-up window'
+  /event\.reason === 'top_row_changed'\s+&& isRecentReadCatchupPreview\(event\.previewText, now\)/,
+  'A new changed observation must reach catchup even after staff read the room'
 );
 
 assert.match(
@@ -364,8 +364,8 @@ assert.match(
 
 assert.match(
   bridge,
-  /if \(diff < -1\) diff \+= 1440;/,
-  'Bridge must treat previous-evening clock previews as recent overnight catch-up rows'
+  /now\.getHours\(\) \* 60 \+ now\.getMinutes\(\) - previewMinutes/,
+  'Clock-only catchup must compare today directly instead of wrapping future clocks into yesterday'
 );
 
 // Hermes 결정 타임아웃은 바깥 브리지 수명(WORKER_TIMEOUT_MS)을 상속하면 안 된다.

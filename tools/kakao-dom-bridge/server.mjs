@@ -3577,15 +3577,6 @@ function parseKoreanPreviewTimeMinutes(text) {
   return (hour * 60) + minute;
 }
 
-function minutesSincePreviewTime(text, now = new Date()) {
-  const previewMinutes = parseKoreanPreviewTimeMinutes(text);
-  if (previewMinutes === null) return null;
-  const nowMinutes = (now.getHours() * 60) + now.getMinutes();
-  let diff = nowMinutes - previewMinutes;
-  if (diff < -1) diff += 1440;
-  return diff;
-}
-
 function kstDateParts(now = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Seoul',
@@ -3671,14 +3662,7 @@ export function classifyInitialScanIngress(event = {}, {
   // Startup is recovery, not live polling: downtime can exceed the 20-minute
   // polling window. Kakao's clock-only row is today's row. Do not wrap a future
   // clock back into yesterday, or enqueue date-only history/UI chrome.
-  const preview = String(event.previewText || '');
-  const displayClock = /(?:오전|오후)\s*(?:0?[1-9]|1[0-2]):[0-5]\d\s*$/.exec(preview);
-  const previewMinutes = displayClock === null ? null : parseKoreanPreviewTimeMinutes(displayClock[0]);
-  const readAgeMinutes = previewMinutes === null ? null
-    : (now.getHours() * 60) + now.getMinutes() - previewMinutes;
-  const recoverableReadClock = !isActionChromePreview(preview) && !hasDatedPreview(preview)
-    && (/(?:방금|몇\s*분\s*전)\s*$/.test(preview) || (readAgeMinutes !== null
-      && readAgeMinutes >= -1 && readAgeMinutes <= CONFIG.readBackstopLookbackHours * 60));
+  const recoverableReadClock = isRecentClockPreview(event.previewText, now);
   if (!hasUnreadCount(event) && (!gatewayEnabled || !recoverableReadClock)) {
     return { action: 'ignore', reason: 'initial_scan_without_unread' };
   }
@@ -3704,7 +3688,15 @@ function isRecentDatedPreview(text, now = new Date()) {
 }
 
 function isRecentClockPreview(text, now = new Date()) {
-  const ageMinutes = minutesSincePreviewTime(text, now);
+  const preview = String(text || '');
+  if (isActionChromePreview(preview) || hasDatedPreview(preview)) return false;
+  if (/(?:방금|몇\s*분\s*전)\s*$/.test(preview)) return true;
+  // Only Kakao's trailing display clock identifies today's observation. A clock
+  // in the message body or a future clock must not be treated as recent history.
+  const displayClock = /(?:오전|오후)\s*(?:0?[1-9]|1[0-2]):[0-5]\d\s*$/.exec(preview);
+  const previewMinutes = displayClock === null ? null : parseKoreanPreviewTimeMinutes(displayClock[0]);
+  const ageMinutes = previewMinutes === null ? null
+    : now.getHours() * 60 + now.getMinutes() - previewMinutes;
   return ageMinutes !== null
     && ageMinutes >= -1
     && ageMinutes <= CONFIG.readBackstopLookbackHours * 60;
@@ -3716,16 +3708,6 @@ function isRecentReadCatchupPreview(text, now = new Date()) {
   return isRecentClockPreview(preview, now) || isRecentDatedPreview(preview, now);
 }
 
-function isLiveTopRowPreview(text, now = new Date()) {
-  const preview = String(text || '');
-  if (isActionChromePreview(preview)) return false;
-  if (/방금|몇\s*분\s*전/.test(preview)) return true;
-  const ageMinutes = minutesSincePreviewTime(preview, now);
-  return ageMinutes !== null
-    && ageMinutes >= -1
-    && ageMinutes <= CONFIG.topRowLiveWindowMinutes;
-}
-
 export function shouldQueueTopRowEvent(event, { now = new Date() } = {}) {
   if (isActionChromePreview(event.previewText)) return false;
   if (hasUnreadCount(event)) return !hasDatedPreview(event.previewText) || isRecentDatedPreview(event.previewText);
@@ -3734,7 +3716,7 @@ export function shouldQueueTopRowEvent(event, { now = new Date() } = {}) {
   // render yesterday's date after midnight. Keep recent changed observations
   // within the catchup window; read-only backstop snapshots stay excluded.
   return event.reason === 'top_row_changed'
-    && (isLiveTopRowPreview(event.previewText, now) || isRecentDatedPreview(event.previewText, now));
+    && isRecentReadCatchupPreview(event.previewText, now);
 }
 
 function hasLivePreviewTime(text) {
