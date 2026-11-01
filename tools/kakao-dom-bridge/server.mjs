@@ -3719,6 +3719,26 @@ export function shouldQueueTopRowEvent(event, { now = new Date() } = {}) {
     && isRecentReadCatchupPreview(event.previewText, now);
 }
 
+export function classifyReadRoomCatchup(event, latest = null, { now = new Date() } = {}) {
+  if (!isRecentReadCatchupPreview(event.previewText, now)) {
+    return { action: 'ignore', reason: 'stale_read_room_catchup' };
+  }
+  const observed = latest?.event;
+  const day = (value) => {
+    const date = new Date(value || '');
+    return Number.isFinite(date.getTime()) ? JSON.stringify(kstDateParts(date)) : '';
+  };
+  const sameDay = hasDatedPreview(event.previewText)
+    || (day(event.detectedAt) && day(event.detectedAt) === day(observed?.detectedAt));
+  // A failed/uncertain job is not silently replayed either: its existing
+  // reconciliation/failure-notification path owns the outcome.
+  if (observed && sameDay && semanticRoomEventIdentity(observed) === semanticRoomEventIdentity(event)) {
+    return { action: 'ignore', reason: 'read_room_observation_already_queued' };
+  }
+  return { action: 'queue', event: { ...event, reason: 'startup_catchup',
+    originalReason: 'read_room_catchup', recoveryOnly: true } };
+}
+
 function hasLivePreviewTime(text) {
   const preview = String(text || '');
   return /방금|몇\s*분\s*전/.test(preview) || parseKoreanPreviewTimeMinutes(preview) !== null;
@@ -6552,6 +6572,21 @@ export async function handleEvent(req, res, dependencies = {}) {
   if (event.status === 'dom_diagnostic' || event.reason === 'top_rows_snapshot') {
     appendEvent('diagnostics.ndjson', event);
     return json(res, 202, { ok: true, diagnostic: true, queuedForAi: false });
+  }
+
+  const eventGateway = dependencies.gatewayChannel || gatewayChannel;
+  if (event.reason === 'read_room_catchup') {
+    if (!eventGateway?.latestRoomObservation) {
+      return json(res, 202, { ok: true, ignored: 'read_catchup_requires_durable_gateway', queuedForAi: false });
+    }
+    const key = roomKeyForDebounce(event);
+    const pending = dependencies.pendingRoomObservation?.(key) || state.rooms.get(key)?.events?.at(-1);
+    const latest = pending ? { event: pending } : await eventGateway.latestRoomObservation(key);
+    const catchup = classifyReadRoomCatchup(event, latest);
+    if (catchup.action === 'ignore') {
+      return json(res, 202, { ok: true, ignored: catchup.reason, queuedForAi: false });
+    }
+    event = catchup.event;
   }
 
   if ((event.reason === 'top_rows_backstop' || event.reason === 'top_row_changed') && !shouldQueueTopRowEvent(event)) {

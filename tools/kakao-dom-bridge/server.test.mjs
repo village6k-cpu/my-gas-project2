@@ -7538,3 +7538,45 @@ test('recent dated changed room survives midnight catchup without replaying read
   assert.equal(shouldQueueTopRowEvent({ ...event, reason: 'top_rows_backstop' }, { now }), false);
   assert.equal(shouldQueueTopRowEvent(event, { now: new Date('2026-11-02T00:00:00Z') }), false);
 });
+
+test('read-room catchup recovers a missed observation without treating it as a new reply', async () => {
+  const { classifyReadRoomCatchup } = await import('./server.mjs');
+  const event = { roomKey:'chat:fixture-read-room', reason:'read_room_catchup', previewText:'중요 테스트 고객 네 감사합니다 오전 8:50', detectedAt:'2026-11-01T03:45:00Z' };
+  const now = new Date('2026-11-01T03:45:00Z');
+  const result = classifyReadRoomCatchup(event, null, {now});
+  assert.equal(result.action,'queue');
+  assert.equal(result.event.reason,'startup_catchup');
+  assert.equal(result.event.recoveryOnly,true);
+  for (const state of ['ready','claimed','completed','failed']) {
+    assert.equal(classifyReadRoomCatchup(event,{event:{...event},state},{now}).action,'ignore');
+  }
+  assert.equal(classifyReadRoomCatchup({...event,previewText:'중요 테스트 고객 변경 확정 오후 12:40'}, {event}, {now}).action,'queue');
+  assert.equal(classifyReadRoomCatchup({...event,previewText:'중요 테스트 고객 네 10월 27일'},null,{now}).action,'ignore');
+  assert.equal(classifyReadRoomCatchup({...event,previewText:'내 채팅 설정'},null,{now}).action,'ignore');
+});
+
+test('HTTP read-room recovery queues once and marks the job no-send', async () => {
+  const now = new Date(); const hour = now.getHours() % 12 || 12;
+  const period = now.getHours() < 12 ? '오전' : '오후';
+  const event = { source:'kakao_channel_manager_dom',status:'pending_ai_review',reason:'read_room_catchup',roomKey:'chat:fixture-http-read-catchup',customerName:'테스트 고객',previewText:`테스트 고객 네 감사합니다 ${period} ${hour}:${String(now.getMinutes()).padStart(2,'0')}`,detectedAt:now.toISOString(),eventHash:'fixture-http-read-catchup',unreadCount:0 };
+  const scheduled = []; let latest=null;
+  const deps = {appendNdjson(){},writeSupabaseEvent:async()=>({ok:true}),scheduleDebouncedJob:event=>scheduled.push(event),gatewayChannel:{latestRoomObservation:async()=>latest},shadowRuntime:{enabled:false},immediateRuntime:{enabled:false}};
+  const first = await postShadowEvent(event,deps);
+  assert.equal(first.status,202);
+  assert.equal(scheduled.length,1);
+  assert.equal(scheduled[0].reason,'startup_catchup');
+  assert.equal(scheduled[0].recoveryOnly,true);
+  latest={event:scheduled[0],state:'completed'};
+  const again = await postShadowEvent(event,deps);
+  assert.equal(again.body.queuedForAi,false);
+  assert.equal(scheduled.length,1);
+});
+
+test('read catchup cannot add a recovery-only marker to a pending live turn', async () => {
+  const now=new Date();const hour=now.getHours()%12||12;const period=now.getHours()<12?'오전':'오후';
+  const event={source:'kakao_channel_manager_dom',status:'pending_ai_review',reason:'read_room_catchup',roomKey:'chat:pending-live-fixture',previewText:`테스트 고객 네 감사합니다 ${period} ${hour}:${String(now.getMinutes()).padStart(2,'0')}`,detectedAt:now.toISOString(),eventHash:'pending-live-fixture',unreadCount:0};
+  const scheduled=[];
+  const response=await postShadowEvent(event,{appendNdjson(){},writeSupabaseEvent:async()=>({ok:true}),scheduleDebouncedJob:e=>scheduled.push(e),gatewayChannel:{latestRoomObservation:async()=>null},pendingRoomObservation:()=>({...event,reason:'top_row_changed'}),shadowRuntime:{enabled:false},immediateRuntime:{enabled:false}});
+  assert.equal(response.body.queuedForAi,false);
+  assert.equal(scheduled.length,0);
+});
