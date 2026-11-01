@@ -765,7 +765,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const metadata = authoritativeJob(key);
         if (!metadata) return null;
         const job = await hydrateJob(metadata);
-        return clone({ roomRevision: job.room_revision, state: job.state, event: job.event });
+        const observation = job.local_context?.job || job.event?.raw?.job || job.event;
+        return clone({ roomRevision: job.room_revision, state: job.state, event: observation });
       });
     },
 
