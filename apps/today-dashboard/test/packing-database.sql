@@ -72,6 +72,9 @@ begin
  select packing_dispatched_at into dispatched from village.trades where trade_id='991231-996';
  update village.schedule_items set name='아마란 F21C',set_name='아마란 F21C' where schedule_id='991231-996-1';
  caught:=false;
+ begin perform village.lock_packing_completion('991231-996','return',true,'replacement-return'); exception when others then caught:=sqlerrm like '%교체 장비%'; end;
+ assert caught,'replacement must block return before the GAS mutation starts';
+ caught:=false;
  begin update village.trades set return_done=true where trade_id='991231-996'; exception when others then caught:=sqlerrm like '%교체 장비%'; end;
  assert caught,'stale replacement must not close return against old baseline';
  n := jsonb_set(p,'{sources,0,name}','"아마란 F21C"') || jsonb_build_object('version',4,'entries',jsonb_set(jsonb_set(p->'entries','{1,qty}','0'),'{1,checked}','false')||'[{"id":"new-clamp","ownerId":"991231-996-1","device":"아마란 F21C","name":"아마란 F21C용 ㄱ자 클램프","partId":"clamp","qty":1,"checked":true}]'::jsonb);
