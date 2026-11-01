@@ -1,5 +1,6 @@
 // 2026-10-28 세트마스터 A/B/C/F 실조회. 가격·재고와 분리된 동봉품 선택 목록.
 // 2026-10-29 운영자 지정: F21C·F22C는 각 대당 ㄱ자 클램프 1개 필수.
+// 2026-11-02 운영자 지정: GM 줌렌즈는 각 대당 해당 렌즈용 UV필터 1개 필수.
 // 동일 실물은 아래 명시적 별칭만 공유한다. 일반 D탭을 단자/전압 추측으로 합치지 않는다.
 export const PACKING_TEMPLATES: Record<string, {name: string; qty: number}[]> = {
   "레드 코모도 풀세트": [{"name":"레드 코모도 6K 바디(케이지)","qty":1},{"name":"100볼 트라이","qty":1},{"name":"베이비","qty":1},{"name":"하이햇","qty":1},{"name":"7인치 모니터","qty":1},{"name":"AV PRO CF 512","qty":2},{"name":"AV PRO CF 256","qty":1},{"name":"AV PRO CF 리더기","qty":1},{"name":"V마운트 배터리","qty":4},{"name":"V마운트 배터리 충전기","qty":1},{"name":"LVM-170A","qty":1}],
@@ -79,6 +80,13 @@ export const PACKING_TEMPLATES: Record<string, {name: string; qty: number}[]> = 
   "포트키 BM7": [{"name":"포트키 BM7용 D탭","qty":1},{"name":"포트키 BM7용 SDI or HDMI","qty":1}],
   "티비로직 LVM-074W": [{"name":"티비로직 LVM-074W용 티비로직 D탭","qty":1},{"name":"티비로직 LVM-074W용 SDI or HDMI","qty":1}],
   "아템 미니 익스트림": [{"name":"아템 미니 익스트림용 AC라인","qty":1}],
+  "소니 GM 16-35mm": [{"name":"소니 GM 16-35mm용 UV필터","qty":1}],
+  "소니 GM 16-35mm II": [{"name":"소니 GM 16-35mm II용 UV필터","qty":1}],
+  "소니 GM 24-70mm": [{"name":"소니 GM 24-70mm용 UV필터","qty":1}],
+  "소니 GM 24-70mm II": [{"name":"소니 GM 24-70mm II용 UV필터","qty":1}],
+  "소니 GM 70-200mm": [{"name":"소니 GM 70-200mm용 UV필터","qty":1}],
+  "소니 GM 70-200mm II": [{"name":"소니 GM 70-200mm II용 UV필터","qty":1}],
+  "소니 GM 100-400mm": [{"name":"소니 GM 100-400mm용 UV필터","qty":1}],
   "소니 GM 렌즈 세트(16-35, 24-70, 70-200)": [{"name":"소니 GM 16-35mm","qty":1},{"name":"소니 GM 24-70mm","qty":1},{"name":"소니 GM 70-200mm","qty":1}],
   "시그마 아트 줌렌즈 세트": [{"name":"시그마 아트 18-35mm","qty":1},{"name":"시그마 아트 50-100mm","qty":1}],
   "미니 매트박스": [{"name":"미니 매트박스용 67mm 업링","qty":1},{"name":"미니 매트박스용 72mm 업링","qty":1},{"name":"미니 매트박스용 77mm 업링","qty":1},{"name":"미니 매트박스용 82mm 업링","qty":1}],
@@ -135,7 +143,7 @@ const names: Record<string, string> = {
   "teradek-2pin": "테라덱용 D탭 라인 (2핀)", "nucleus-m-7pin": "뉴클-M 모터용 D탭 라인 (7핀)", "CBL-003": "SDI 연선",
 };
 export const CHOICE = /(?:\bor\b|또는|택\s*1|SDI\s*\/\s*HDMI|HDMI\s*\/\s*SDI)/i;
-export const ACCESSORY = /라인|케이블|[dDＤｄ][\s-]*탭|디탭|SDI|HDMI|노가암|숏암|클램프|더미|기어링|플레이트|그립|안테나/i;
+export const ACCESSORY = /라인|케이블|[dDＤｄ][\s-]*탭|디탭|SDI|HDMI|노가암|숏암|클램프|더미|기어링|플레이트|그립|안테나|UV\s*필터/i;
 const ids = new Map(Object.entries(aliases).map(([n,id]) => [partKey(n), id]));
 // UTF-16 문자열 전체를 ID로 인코딩해 해시 충돌/등록 순서 변화에 의존하지 않는다.
 function catalogId(name: string) { return "part:" + Array.from(partKey(name)).map(c => c.codePointAt(0)!.toString(16)).join("-"); }
