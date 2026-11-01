@@ -7580,3 +7580,18 @@ test('read catchup cannot add a recovery-only marker to a pending live turn', as
   assert.equal(response.body.queuedForAi,false);
   assert.equal(scheduled.length,0);
 });
+
+test('read catchup deduplicates a real seven-field Gateway envelope after restart', async () => {
+  const {classifyReadRoomCatchup}=await import('./server.mjs');
+  const directory=await mkdtemp(path.join(tmpdir(),'read-observation-envelope-'));
+  const now=new Date('2026-11-01T03:45:00Z');
+  const job={jobId:'read-envelope-job',roomKey:'chat:read-envelope',roomRevision:1,previewText:'테스트 고객 감사합니다 오전 8:50',detectedAt:now.toISOString(),displayTime:'오전 8:50'};
+  try {
+    const channel=createHermesGatewayChannel({directory});
+    await channel.enqueue({schema:'village-kakao-event/v1',job_id:job.jobId,room_key:job.roomKey,room_revision:1,prompt:'fixture',detected_at:job.detectedAt,raw:{job,snapshot:{},evidence:{}}},{localContext:{job,turn_internal:{}}});
+    const restarted=createHermesGatewayChannel({directory});
+    const observed=await restarted.latestRoomObservation(job.roomKey);
+    assert.equal(observed.event.previewText,job.previewText);
+    assert.equal(classifyReadRoomCatchup({...job,reason:'read_room_catchup'},observed,{now}).action,'ignore');
+  } finally { await rm(directory,{recursive:true,force:true}); }
+});
