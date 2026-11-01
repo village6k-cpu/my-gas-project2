@@ -249,3 +249,34 @@ test('replacement rejects a stale device name and cannot rewrite returned shared
   assert.throws(()=>step(t,{action:'reconcile',ownerId:'light',name:'아마란 300C'},now),/장비.*변경/);
   assert.throws(()=>step(t,{action:'reconcile',ownerId:'light',name:'아마란 F21C',confirmed:true},now),/반납 기록/);
 });
+
+test('every GM zoom requires one UV filter per lens, rejects exclusion and preserves return quantities',()=>{
+  for(const model of ['소니 GM 16-35mm','소니 GM 16-35mm II','소니 GM 24-70mm','소니 GM 24-70mm II','소니 GM 70-200mm','소니 GM 70-200mm II','소니 GM 100-400mm']){
+    const t={...trade(),equipments:[{scheduleId:'lens',name:model,qty:2,checkoutState:'pending'}]};
+    t.packing=step(t,{action:'start'},now);
+    const uv=t.packing.entries.find(e=>e.name===`${model}용 UV필터`);
+    assert.ok(uv,model); assert.equal(uv.qty,2);assert.equal(uv.checked,false);
+    assert.throws(()=>step(t,{action:'seal'},now),/각 구성품/);
+    t.packing.entries=[];
+    assert.throws(()=>step(t,{action:'seal'},now),/UV필터.*필수/);
+    t.packing=step(t,{action:'refresh'},now);t.packing=step(t,{action:'refresh'},now);
+    assert.equal(t.packing.entries.length,1);
+    save(t,t.packing.entries.map(e=>({...e,qty:0,checked:false})));
+    assert.throws(()=>step(t,{action:'seal'},now),/UV필터.*필수/);
+    save(t,t.packing.entries.map(e=>({...e,qty:2})));seal(t);
+    assert.equal(groups(t.packing)[0].expected,2);
+    t.packing=step(t,{action:'receive',partId:uv.partId,count:{good:1,damaged:0,lost:0}},now);
+    assert.equal(blockers(t.packing)[0].missing,1);
+    t.packing=step(t,{action:'receive',partId:uv.partId,count:{good:2,damaged:0,lost:0}},now);
+    assert.equal(blockers(t.packing).length,0);
+  }
+});
+
+test('GM zoom bundle checks each lens filter once and does not extend the rule to G zooms or GM primes',()=>{
+  const models=['소니 GM 16-35mm','소니 GM 24-70mm','소니 GM 70-200mm'];
+  const t={...trade(),equipments:models.map((name,i)=>({scheduleId:`lens-${i}`,name,qty:2,setName:'소니 GM 렌즈 세트(16-35, 24-70, 70-200)',isComponent:true,checkoutState:'pending'}))};
+  t.packing=step(t,{action:'start'},now);
+  assert.equal(t.packing.entries.length,3);assert.equal(t.packing.entries.reduce((n,e)=>n+e.qty,0),6);
+  const {templateFor}=load('packingCatalog');
+  for(const name of ['소니 단렌즈 GM 135mm','소니 G 24-105mm'])assert.equal(templateFor(name).some(e=>/UV필터/.test(e.name)),false);
+});

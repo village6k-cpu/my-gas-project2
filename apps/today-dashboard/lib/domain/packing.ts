@@ -44,11 +44,17 @@ export function packingEntryNeedsPreparation(e: PackingEntry): boolean {
 
 /** 운영자 지정 필수 동봉품: 준비 중 누락·제외로 사라져도 확정 전에 검증한다. */
 export function packingRequiredIssues(t: Trade): string[] {
-  return packingDevices(t).filter(owner => /^아마란 F2[12]C$/i.test(owner.name)).flatMap(owner => {
-    const part = registeredPart(`${owner.name}용 ㄱ자 클램프`);
-    const rows = t.packing?.entries.filter(e => e.ownerId === owner.scheduleId && e.partId === part?.id) ?? [];
-    const quantity = rows.reduce((n, e) => n + e.qty, 0);
-    return quantity < owner.qty ? [`${owner.name}: ㄱ자 클램프 ${owner.qty}개 필수 (현재 ${quantity}개)`] : [];
+  return packingDevices(t).flatMap(owner => {
+    const required = /^아마란 F2[12]C$/i.test(owner.name)
+      ? [{name: `${owner.name}용 ㄱ자 클램프`, label: "ㄱ자 클램프", qty: 1}]
+      : templateFor(owner.name).filter(row => /용 UV필터$/.test(row.name)).map(row => ({...row, label: "UV필터"}));
+    return required.flatMap(item => {
+      const part = registeredPart(item.name);
+      const rows = t.packing?.entries.filter(e => e.ownerId === owner.scheduleId && e.partId === part?.id) ?? [];
+      const quantity = rows.reduce((n, e) => n + e.qty, 0);
+      const expected = item.qty * owner.qty;
+      return quantity < expected ? [`${owner.name}: ${item.label} ${expected}개 필수 (현재 ${quantity}개)`] : [];
+    });
   });
 }
 
