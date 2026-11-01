@@ -18,8 +18,9 @@ Hermes interprets the request and chooses the relevant evidence and tool. Determ
 ## Authority
 
 - The current user may authorize internal Village work in the current request.
+- Standing owner authorization (2026-11-02): when every billable item, quantity, unit price, rental period, applicable discount, VAT, and customer recipient is verified, send the needed price answer or quotation without asking the owner again. Verify the current calculation/document and prior delivery first. Missing catalog prices that would require 0, unclear discounts/details, or conflicts with an earlier quoted amount require one focused owner question; never invent a free item or discount. This authorization covers price answers and quotations only, not tax-invoice issuance or refunds.
 - An internal write approval does not authorize a customer-facing send.
-- Kakao, SMS, iMessage, email, or proactive/cross-channel Slack delivery needs separate explicit approval for the exact recipient and content.
+- Other Kakao, SMS, iMessage, email, or proactive/cross-channel Slack delivery needs explicit approval for the exact recipient and content; the standing verified-price/quotation authorization above is already approval within its scope.
 - Final registration authorizes only the normal completion Alimtalk built into the selected approved runner. If that runner explicitly disables notification, send none. Correction, preview, and `sendEstimate` never inherit this authorization.
 - Preview, draft, lookup, calculation, and readback are not final registration or delivery.
 - Passwords, 2FA, CAPTCHA, device approval, and account recovery remain with the user.
