@@ -2,11 +2,12 @@
 
 Staff corrections from multi-resend quote threads.
 
-## Preview gate
+## Current owner authorization (2026-11-02)
 
-- After any staff correction, show verified lines/total (CSV/PDF) before customer send.
-- Send only when the *current* turn has `보내`/`발송`/`보내라`/`전송` for that corrected payload.
-- Auto-sending without fresh showback is a hard failure mode.
+- The owner has explicitly authorized needed customer price answers and quotation delivery without asking for approval each time when every billable item, quantity, unit price, period, discount applicability/rate, VAT and recipient is verified.
+- Re-read the authoritative calculation and corrected document before sending, and check existing delivery to avoid duplicates. A fresh owner `보내` message or an owner-facing preview is not required for a fully verified quotation.
+- Ask the owner only about missing catalog prices that would require a zero placeholder, unresolved details/discounts, or a conflict with the earlier quoted amount. Never make a missing price free or invent a discount to reconcile totals.
+- A known included set component is not a separately billable missing-price item. This standing authorization does not authorize tax-invoice issuance, refunds, or unrelated customer messages.
 
 ## Listed extras
 
