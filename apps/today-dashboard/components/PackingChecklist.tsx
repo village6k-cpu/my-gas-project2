@@ -1,10 +1,11 @@
 "use client";
 
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
 import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingEntryNeedsPreparation, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor, registeredPart } from "@/lib/domain/packingCatalog";
-import { savePacking, savePackingCheck } from "@/lib/data/store";
+import { savePacking, savePackingCheck, hasTradePending } from "@/lib/data/store";
+import { packingDeviceReplacements, packingReplacementEntries } from "@/lib/domain/packing";
 
 type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
 const PackingContext = createContext<PackingContextValue | null>(null);
@@ -20,6 +21,26 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const [note, setNote] = useState<string | null>(null);
   const [noteVersion, setNoteVersion] = useState(0);
   const p = trade.packing;
+  const replacements = useMemo(() => packingDeviceReplacements(trade), [p, trade.equipments, trade.setupDone, trade.returnDone, trade.contractStatus]);
+  const replacementKey = JSON.stringify(replacements.map(e => [e.scheduleId, e.name, e.qty]));
+  const syncAttempted = useRef("");
+  useEffect(() => {
+    if (!p || phase !== "checkout" || onCommand || packingStarted(trade) || !replacements.length) return;
+    const key = `${trade.tradeId}:${p.version}:${replacementKey}`;
+    if (syncAttempted.current === key) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const sync = async () => {
+      // 본체의 낙관적 표시를 원장 저장보다 먼저 구성품 사실로 확정하지 않는다.
+      if (hasTradePending(trade.tradeId)) { timer = setTimeout(sync, 400); return; }
+      syncAttempted.current = key;
+      const owner = replacements[0];
+      try { await savePacking(trade.tradeId, p.version, { action: "reconcile", ownerId: owner.scheduleId, name: owner.name }); }
+      catch (e) { if (!cancelled) setError(e instanceof Error ? e.message : "교체 구성품 반영 실패. 다시 확인해주세요"); }
+    };
+    timer = setTimeout(sync, 100);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [trade.tradeId, p?.version, replacementKey, phase, onCommand, trade.setupDone, trade.packingDispatchedAt, trade.contractStatus]);
   const devices = useMemo(() => packingDevices(trade), [trade.equipments]);
   const entriesByOwner = useMemo(() => {
     const rows = new Map<string | undefined, PackingEntry[]>();
@@ -125,9 +146,18 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
   const modelNeeded=!!owner && needsDeviceModel(owner);
   const device=p.deviceModels?.[ownerId ?? ""] ?? owner?.name ?? "공용 구성품";
   const existingVideo = ownerId && templateFor(device).some(r=>/SDI|HDMI/i.test(r.name)) && !entries.some(e=>/SDI|HDMI/i.test(e.name)) ? unassignedVideo(trade,p,ownerId) : [];
-  if (!entries.length && !modelNeeded && !existingVideo.length) return null;
+  const replacement = packingDeviceReplacements(trade).find(e => e.scheduleId === ownerId);
+  const replacementEntries = replacement ? packingReplacementEntries(trade, replacement.scheduleId) : [];
+  if (!entries.length && !modelNeeded && !existingVideo.length && !replacement) return null;
   return <div className="my-2 ml-8 border-l-2 border-brand-200 bg-white px-3 py-2" data-packing-owner={ownerId}>
     {common && <p className="mb-2 text-xs font-bold text-ink-mute">공용·여분 구성품</p>}
+    {replacement && <div role="status" className="space-y-2 text-sm">
+      <p className="font-bold text-brand-700">교체 장비의 구성품</p>
+      {replacementEntries.map(e => <div key={e.id} className={`flex justify-between gap-2 ${e.qty ? "" : "line-through text-ink-faint"}`}><span>{e.name}</span><strong>{e.qty ? `×${e.qty}` : "제외"}</strong></div>)}
+      {!replacementEntries.some(e=>e.qty>0) && <p>등록된 기본 동봉품이 없습니다. 추가로 챙긴 품목은 구성품에 기록해주세요.</p>}
+      <p className="text-xs text-ink-mute">{packingStarted(trade) ? "반출 완료 후 장비가 변경됐습니다. 위 구성품이 실제로 반출됐는지 확인해주세요." : "새 장비의 기본 구성품을 자동으로 반영합니다. 새로 들어온 구성품은 다시 체크해주세요."}</p>
+      <button className={`${button} text-brand-700`} disabled={busy} onClick={()=>run({action:"reconcile",ownerId:replacement.scheduleId,name:replacement.name,...(packingStarted(trade)?{confirmed:true}:{})})}>{packingStarted(trade) ? "이 구성품으로 교체 반출 확인" : "교체 구성품 반영"}</button>
+    </div>}
     {modelNeeded && <label className="mb-2 block text-xs font-bold">실제 모니터 모델
       <select aria-label="실제 모니터 모델" disabled={busy || p.phase !== "draft" || packingStarted(trade)} value={p.deviceModels?.[ownerId!] ?? ""} onChange={e => run({action:"model",ownerId:ownerId!,model:e.target.value})} className="mt-1 w-full rounded-lg border border-line bg-white p-2 text-sm">
         <option value="" disabled>실제로 나가는 모델 선택</option>{MONITOR_MODELS.map(name=><option key={name}>{name}</option>)}
@@ -135,7 +165,7 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
     {(!modelNeeded || p.deviceModels?.[ownerId!]) && existingVideo.length>0 && <label className="mb-2 block rounded-lg bg-warn-bg p-2 text-xs font-bold">기존 영상선 연결 (추가 수량 없음)
       <select aria-label="기존 영상선 연결" value="" disabled={busy || p.phase!=="draft"} onChange={event=>{const row=existingVideo.find(e=>e.id===event.target.value);if(row) update(row,{ownerId,device,checked:false});}} className="mt-1 w-full rounded border border-line bg-white p-2 text-sm"><option value="" disabled>이 장비에 연결할 선 선택</option>{existingVideo.map(e=><option key={e.id} value={e.id}>{e.name} ×{e.qty}</option>)}</select>
     </label>}
-    {entries.map(e=><div key={e.id} className="border-b border-line/50 py-2 last:border-0">
+    {(!replacement ? entries : []).map(e=><div key={e.id} className="border-b border-line/50 py-2 last:border-0">
       <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={checkBusy || e.qty === 0 || p.phase !== "draft" || (modelNeeded && !p.deviceModels?.[ownerId!])} aria-haspopup={e.unresolved ? "dialog" : undefined} title={e.unresolved ? "실제로 챙기는 종류를 먼저 선택해주세요" : undefined} onClick={()=>e.unresolved ? open(e) : check(e)} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : e.unresolved && e.qty > 0 ? "?" : ""}</button>
         <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.custom && <span className="ml-1 text-xs text-ink-mute">직접 입력</span>}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span><strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>
       {p.phase === "draft" && <div className="mt-1 flex flex-wrap gap-1 pl-8"><button disabled={busy} className={`${button} text-brand-700`} onClick={()=>open(e)}>{e.unresolved ? "종류 선택" : "교체·수량"}</button><button disabled={busy} className={`${button} text-ink-mute`} onClick={()=>update(e,{qty:e.qty?0:1,checked:false})}>{e.qty ? "제외" : "포함"}</button></div>}

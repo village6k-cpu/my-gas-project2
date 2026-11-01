@@ -216,3 +216,36 @@ test("first model selection initializes once while read-only and dispatched card
   const out={...t,setupDone:true};assert.equal(packingPreparationTrade(out),out);
   const existing={...t,packing:next};assert.equal(packingPreparationTrade(existing),existing);
 });
+
+test('device replacement adds its own defaults and preserves other devices, notes and explicit exclusions',()=>{
+  const t={...trade(),equipments:[{scheduleId:'light',name:'어퓨쳐 스톰 300C',qty:1,setName:'어퓨쳐 스톰 300C',isSetHeader:true,checkoutState:'taken'},{scheduleId:'stand',name:'C스탠드',qty:1,isSetHeader:true,checkoutState:'taken'}]};
+  t.packing=step(t,{action:'start'},now);
+  save(t,t.packing.entries.map(e=>({...e,qty:0,checked:false})));t.packing.note='원래 인계 메모';
+  const other=JSON.stringify(t.packing.entries);t.equipments[0]={...t.equipments[0],name:'아마란 300C',setName:'아마란 300C'};
+  const next=step(t,{action:'reconcile',ownerId:'light',name:'아마란 300C'},now);
+  assert.equal(next.entries.find(e=>e.ownerId==='light'&&e.name==='아마란 300C용 AC라인').qty,1);
+  assert.equal(next.entries.find(e=>e.ownerId==='light'&&e.qty>0).checked,false);
+  assert.equal(JSON.stringify(next.entries.filter(e=>e.ownerId!=='light')),other);
+  assert.equal(next.note,'원래 인계 메모');assert.equal(next.sources.find(s=>s.id==='light').name,'아마란 300C');
+  assert.throws(()=>step({...t,packing:next},{action:'reconcile',ownerId:'light',name:'아마란 300C'},now),/변경/);
+});
+test('sealed replacement requires recheck before dispatch; after dispatch requires explicit physical confirmation',()=>{
+  const t={...trade(),equipments:[{scheduleId:'light',name:'아마란 300C',qty:1,setName:'아마란 300C',isSetHeader:true,checkoutState:'taken'}]};
+  t.packing=step(t,{action:'start'},now);seal(t);const original=structuredClone(t.packing);
+  t.equipments[0]={...t.equipments[0],name:'아마란 F21C',setName:'아마란 F21C'};
+  const draft=step(t,{action:'reconcile',ownerId:'light',name:'아마란 F21C'},now);
+  assert.equal(draft.phase,'draft');assert.equal(draft.entries.find(e=>e.name==='아마란 300C용 AC라인').qty,0);
+  assert(draft.entries.filter(e=>e.qty>0).every(e=>!e.checked));
+  t.setupDone=true;t.packingDispatchedAt=now;
+  assert.throws(()=>step(t,{action:'reconcile',ownerId:'light',name:'아마란 F21C'},now),/실제 반출/);
+  const fixed=step(t,{action:'reconcile',ownerId:'light',name:'아마란 F21C',confirmed:true},now);
+  assert.equal(fixed.phase,'sealed');assert(fixed.entries.filter(e=>e.qty>0).every(e=>e.checked));
+  assert.equal(JSON.stringify(t.packing),JSON.stringify(original));
+});
+test('replacement rejects a stale device name and cannot rewrite returned shared-part facts',()=>{
+  const t={...trade(),equipments:[{scheduleId:'light',name:'아마란 300C',qty:1,isSetHeader:true,checkoutState:'taken'}]};
+  t.packing=step(t,{action:'start'},now);seal(t);const old=t.packing.entries[0];t.packing.counts[old.partId]={good:1,damaged:0,lost:0};
+  t.equipments[0]={...t.equipments[0],name:'아마란 F21C'};
+  assert.throws(()=>step(t,{action:'reconcile',ownerId:'light',name:'아마란 300C'},now),/장비.*변경/);
+  assert.throws(()=>step(t,{action:'reconcile',ownerId:'light',name:'아마란 F21C',confirmed:true},now),/반납 기록/);
+});
