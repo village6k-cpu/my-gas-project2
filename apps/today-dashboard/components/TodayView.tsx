@@ -171,6 +171,8 @@ export function TodayView() {
           </button>
         </ViewHeader>
 
+        <a href="/follow-ups?section=owner" className="mx-4 mt-2 block rounded-xl bg-warn-bg px-3 py-2 text-[12px] font-bold text-warn-fg ring-1 ring-warn-ring">대표 확인 → 고액 수납·분실·파손·분쟁</a>
+
         {/* 날짜 내비 */}
         <div className="flex items-center gap-2 px-4 pt-2">
           <button onClick={() => go(addDays(date, -1))} className="tap flex h-9 w-9 items-center justify-center rounded-lg bg-white ring-1 ring-line/60 text-ink-soft">
