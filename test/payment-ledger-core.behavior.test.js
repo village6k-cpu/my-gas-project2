@@ -187,10 +187,24 @@ test('front approval replay acknowledges staff-unlinked receipt without automati
   assert.equal(h.state.receipts[0].revision, 3);
   assert.equal(h.calls.rpc.some(call => call.name === 'payment_set_allocations'), false);
 });
-test('missing requested GAS account snapshot rejects refresh and never exposes an old payable account', async () => {
+test('missing requested GAS account snapshot rejects strict refresh and never exposes an old payable account', async () => {
   const h = harness({ accounts: [account()], snapshotAccounts: [] });
   await assert.rejects(h.api.refreshPaymentAccounts(['261020-001']), /장부에서 예약을 찾지 못/);
   assert.equal(h.calls.rpc.some(call => call.name === 'payment_refresh_accounts'), false, 'incomplete snapshot must not be accepted as a current refresh');
-  await assert.rejects(h.api.getPayablePaymentBalances(['261020-001']), /장부에서 예약을 찾지 못/);
+  assert.deepEqual(copy(await h.api.getPayablePaymentBalances(['261020-001'])), []);
   assert.equal(h.calls.queries.some(call => call.table === 'payment_account_balances'), false, 'stale account must not be used after authoritative source omits the reservation');
+});
+test('phone lookup isolates a missing historical ledger row and still returns the currently verified balance', async () => {
+  const current = account({ trade_id: 'CURRENT', balance: 26400 });
+  const h = harness({ accounts: [account({ trade_id: 'HISTORICAL', balance: 99000 }), current], snapshotAccounts: [current] });
+  const payable = await h.api.getPayablePaymentBalances(['HISTORICAL', 'CURRENT']);
+  assert.deepEqual(copy(payable).map(a => [a.trade_id, a.balance]), [['CURRENT', 26400]]);
+  const queried = h.calls.queries.filter(q => q.table === 'payment_account_balances' && q.method === 'in');
+  assert.deepEqual(queried.map(q => q.args), [['trade_id', ['CURRENT']]], 'missing rows must never reuse cached payment accounts');
+  assert.equal(h.calls.gas.length, 1, 'one authoritative snapshot per phone lookup');
+});
+test('a failed authoritative phone snapshot still blocks all payment candidates', async () => {
+  const h = harness({ gasError: 'upstream unavailable' });
+  await assert.rejects(h.api.getPayablePaymentBalances(['261020-001']), /upstream unavailable/);
+  assert.equal(h.calls.queries.length, 0);
 });
