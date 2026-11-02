@@ -26,6 +26,7 @@ test("후속조치 폴링: 숨김 pane·백그라운드 탭에서 멈추고 복�
   const polling = sourceBlock(follow, "if (!paneActive) return;", "const model = snapshot");
   const dependencies = polling.match(/\}, \[([^\]]+)\]\);/)[1].split(",").map(value => value.trim());
   for (const name of ["status", "load", "paneActive"]) assert.ok(dependencies.includes(name), `${name}가 폴링 의존성에 포함되어야 한다`);
+  assert.match(follow, /section === "automation" \|\| section === "invoices" \|\| section === "owner"/, "독립 섹션에서는 일반 업무 폴링을 멈춘다");
 });
 
 test("운영판 폴링: 숨김 pane에서 멈추고 active 전환 시 즉시 1회 로드한다", () => {

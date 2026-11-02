@@ -7,9 +7,12 @@ import { Refresh } from "@/components/icons";
 import { actionBody, buildInboxView } from "@/lib/followups/inbox-model.mjs";
 import { OwnerTriageView } from "@/components/OwnerTriageView";
 import { AutomationAuditView } from "@/components/AutomationAuditView";
+import dynamic from "next/dynamic";
+
+const InvoiceRequestsView = dynamic(() => import("@/components/InvoiceRequestsView").then(mod => mod.InvoiceRequestsView));
 
 type ViewKey = "now" | "snoozed" | "completed";
-type FollowUpSection = ViewKey | "automation" | "owner";
+type FollowUpSection = ViewKey | "automation" | "invoices" | "owner";
 type CategoryKey = "schedule" | "quote" | "settlement" | "customer" | "operations";
 type WorkState = "open" | "in_progress" | "snoozed" | "resolved" | "dismissed";
 type Priority = "p0" | "urgent" | "normal" | "low";
@@ -128,7 +131,11 @@ function caseTone(caseItem: InquiryCase) {
 
 export function FollowUpView({ active: paneActive = true }: { active?: boolean }) {
   const [section, setSection] = useState<FollowUpSection>("now");
-  useEffect(() => { if (new URLSearchParams(window.location.search).get("section") === "owner") setSection("owner"); }, []);
+  useEffect(() => {
+    const initial = new URLSearchParams(window.location.search).get("section");
+    if (initial === "owner") setSection("owner");
+    if (initial === "invoices") { setSection("invoices"); setInvoiceVisited(true); }
+  }, []);
   const [status, setStatus] = useState<FilterState>({ view: "now", category: null });
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [pageCursors, setPageCursors] = useState<(string | null)[]>([null]);
@@ -142,6 +149,9 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
   const [notice, setNotice] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
   const [auditRefreshVersion, setAuditRefreshVersion] = useState(0);
+  const [invoiceRefreshVersion, setInvoiceRefreshVersion] = useState(0);
+  const [invoiceCount, setInvoiceCount] = useState<number | null>(null);
+  const [invoiceVisited, setInvoiceVisited] = useState(false);
   const sheetDragStartY = useRef<number | null>(null);
 
   const closeMobileDetail = useCallback(() => setMobileDetailOpen(false), []);
@@ -195,7 +205,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
 
   useEffect(() => {
     if (!paneActive) return;
-    if (section === "automation" || section === "owner") return;
+    if (section === "automation" || section === "invoices" || section === "owner") return;
     load(status, after);
     const tick = () => {
       if (typeof document !== "undefined" && document.hidden) return;
@@ -211,6 +221,16 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [status, after, section, load, paneActive]);
+
+  useEffect(() => {
+    if (!paneActive) return;
+    let cancelled = false;
+    authFetch("/api/follow-ups/invoices?count=1").then(async response => {
+      const data = await response.json();
+      if (!cancelled && response.ok && data.ok && Number.isSafeInteger(data.count)) setInvoiceCount(data.count);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [paneActive]);
 
   const model = snapshot?.model || null;
   const dataIsCurrent = snapshot?.filterKey === currentFilterKey(status) && snapshot.after === after;
@@ -239,10 +259,11 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
     setUnavailable(false);
     setNotice("");
     setSection(next);
+    if (next === "invoices") setInvoiceVisited(true);
     setPageCursors([null]);
     // status identity also owns the existing polling lifecycle, so changing to the
     // independent audit section tears down the work poll without adding a second poll.
-    setStatus((current) => (next === "automation" || next === "owner") ? { ...current } : { ...current, view: next });
+    setStatus((current) => next === "automation" || next === "invoices" || next === "owner" ? { ...current } : { ...current, view: next });
   }, []);
 
   const submitAction = useCallback(async (stepItem: WorkStep, action: WorkAction) => {
@@ -282,7 +303,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
     <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 border-b border-line/70 bg-paper/95 backdrop-blur-md">
         <ViewHeader title="후속조치">
-          <button type="button" onClick={() => (section === "automation" || section === "owner") ? setAuditRefreshVersion((value) => value + 1) : load(status, after)} aria-label="새로고침" className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink-soft ring-1 ring-line/70 ${loading ? "animate-spin" : ""}`}>
+          <button type="button" onClick={() => (section === "automation" || section === "owner") ? setAuditRefreshVersion((value) => value + 1) : section === "invoices" ? setInvoiceRefreshVersion(value => value + 1) : load(status, after)} aria-label="새로고침" className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink-soft ring-1 ring-line/70 ${loading ? "animate-spin" : ""}`}>
             <Refresh className="h-4 w-4" />
           </button>
         </ViewHeader>
@@ -293,15 +314,17 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
               { key: "now", label: "지금 할 일", count: 0 },
               { key: "snoozed", label: "미뤄둔 일", count: 0 },
               { key: "completed", label: "완료", count: 0 },
-            ] as InboxModel["tabs"])), { key: "owner" as const, label: "대표 확인", count: null }, { key: "automation" as const, label: "자동처리", count: null }].map((tab) => (
+            ] as InboxModel["tabs"])).slice(0, 1), { key: "invoices" as const, label: "계산서 요청", count: invoiceCount },
+            ...(model?.tabs || ([{ key: "snoozed", label: "미뤄둔 일", count: 0 }, { key: "completed", label: "완료", count: 0 }] as InboxModel["tabs"])).filter(tab => tab.key !== "now"),
+            { key: "owner" as const, label: "대표 확인", count: null }, { key: "automation" as const, label: "자동처리", count: null }].map((tab) => (
               <button type="button" key={tab.key} onClick={() => changeSection(tab.key)} className={`tap rounded-full px-3 py-2 text-[13px] font-extrabold ${section === tab.key ? "bg-ink text-white" : "bg-white text-ink-soft ring-1 ring-line/70"}`}>
-                {tab.label}{tab.count === null ? null : <span className="ml-1 tabular-nums opacity-70">{tab.count}</span>}
+                {tab.label}{tab.count === null ? null : <span className={`ml-1 tabular-nums ${tab.key === "invoices" && tab.count > 0 && section !== "invoices" ? "rounded-full bg-brand-600 px-1.5 text-white" : "opacity-70"}`}>{tab.count}</span>}
               </button>
             ))}
           </div>
         </div>
 
-        {section !== "automation" && section !== "owner" && <div className="overflow-x-auto border-t border-line/50 px-3 py-2">
+        {section !== "automation" && section !== "invoices" && section !== "owner" && <div className="overflow-x-auto border-t border-line/50 px-3 py-2">
           <div className="flex min-w-max gap-1.5">
             <CategoryButton active={status.category === null} label="전체" onClick={() => changeFilter({ ...status, category: null })} />
             {(model?.categories || (Object.entries(CATEGORY_LABELS).map(([key, label]) => ({ key, label, count: 0 })) as InboxModel["categories"])).map((category) => (
@@ -311,7 +334,8 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
         </div>}
       </header>
 
-      {section === "owner" ? <OwnerTriageView active={paneActive} refreshVersion={auditRefreshVersion} /> : section === "automation" ? <AutomationAuditView active={paneActive && section === "automation"} refreshVersion={auditRefreshVersion} /> : <main className="flex-1 p-3 pb-24 lg:p-4">
+      {invoiceVisited && <div className={section === "invoices" ? "" : "hidden"}><InvoiceRequestsView active={paneActive && section === "invoices"} refreshVersion={invoiceRefreshVersion} onCount={setInvoiceCount} /></div>}
+      {section === "invoices" ? null : section === "owner" ? <OwnerTriageView active={paneActive} refreshVersion={auditRefreshVersion} /> : section === "automation" ? <AutomationAuditView active={paneActive && section === "automation"} refreshVersion={auditRefreshVersion} /> : <main className="flex-1 p-3 pb-24 lg:p-4">
         {(pageCursors.length > 1 || snapshot?.payload.nextCursor) && (
           <nav aria-label="확인 업무 페이지" className="mb-3 flex items-center justify-between gap-2">
             <button type="button" disabled={pageCursors.length <= 1 || loading || actionBusy} className="tap rounded-lg bg-white px-3 py-2 text-sm font-bold ring-1 ring-line disabled:opacity-40"
@@ -359,7 +383,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
         )}
       </main>}
 
-      {section !== "automation" && section !== "owner" && mobileDetailOpen && selected && (
+      {section !== "automation" && section !== "invoices" && section !== "owner" && mobileDetailOpen && selected && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <button type="button" aria-label="상세 배경 닫기" onClick={closeMobileDetail} className="absolute inset-0 bg-ink/35" />
           <section role="dialog" aria-modal="true" aria-label={`${selected.title} 상세`} className="absolute inset-x-0 bottom-0 max-h-[86vh] overflow-y-auto rounded-t-[24px] bg-white p-3 pb-[calc(env(safe-area-inset-bottom)+12px)] shadow-2xl ring-1 ring-line">
