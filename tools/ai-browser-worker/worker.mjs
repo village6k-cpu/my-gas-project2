@@ -906,7 +906,6 @@ The JSON schema:
   "confidence": "low" | "medium" | "high",
   "classification": "reservation" | "price" | "faq" | "ignore" | "already_answered" | "unclear",
   "price_quote": object | null,
-  "statement_request": optional {"trade_id":string,"booking_customer_name":string} | null,
   "kill_switch_observed": "active" | "paused" | "price_paused" | "not_checked",
   "customer": { "name": string, "source": "Kakao Channel Manager", "chat_status": string | null },
   "owner_case": {"caseKey":string,"title":string,"requestSummary":string,"problemSummary":string,"nextActionSummary":string},
