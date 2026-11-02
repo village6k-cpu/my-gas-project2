@@ -90,3 +90,20 @@ test('Gateway persists the actual reply outcome before refusing a false complete
     if (fails) assert.deepEqual(order, ['begin', 'persist_effect_result', 'failed', 'surface_unresolved', 'failure_recorded']);
   }
 });
+
+test('explicit customer-wait items do not require owner work but human-review intent still does',async()=>{
+  for(const v2 of [false,true]) for(const kind of ['waiting','mixed','missing-items','explicit-review']) {
+    const expected=kind==='waiting';let finalized=false,failure;
+    const job={job_id:`waiting-${v2}-${kind}`,room_key:'chat:waiting',room_revision:1,event:{},local_context:{job:{jobId:'waiting'},turn_internal:{snapshot:{}}},result:{content:'{}'},application:{state:'pending'}};
+    const waiting={requiresHumanAction:false,actionFamily:'none',status:'open',summary:'A question has already been sent; await the customer reply.'};
+    const prepared={status:'ai_prepared',snapshot:{},decision:{reply_decision:{replyMode:'no_reply',text:'',shouldCreateTask:true},
+      follow_up_items:kind==='missing-items'?[]:kind==='mixed'?[waiting,{requiresHumanAction:true}]:[waiting],
+      ...(kind==='explicit-review'?{owner_review_required:true}:{})}};
+    const channel={async claimApplication(){return{claimed:true,application_id:job.job_id,job:structuredClone(job)};},async beginApplication(){},async recordApplicationApplied(){},async finalizeApplication(){finalized=true;},async failApplication({error}){failure=error;return{...job,application:{application_id:job.job_id,error}};},async listPendingApplicationFailureNotifications(){return[];},async markApplicationFailureNotified(){}};
+    const coordinator=createGatewayResultApplicationCoordinator({channel,getConfig:()=>({workOrchestratorV2WorkItemsEnabled:v2}),prepare:async()=>prepared,
+      apply:async()=>({prepared,autoReplyResult:{attempted:false,sent:false}}),finalize:async()=>({...prepared,status:'ai_completed',followUpResult:{skipped:true,rows:[]},workOrchestratorResult:{skipped:true,rows:[]}}),onFailure:async()=>{}});
+    await coordinator.enqueue(job);await coordinator.idle();
+    assert.equal(finalized,expected,`${v2}:${kind}`);
+    if(!expected)assert.match(failure.message,/gateway_owner_review_not_persisted/);
+  }
+});
