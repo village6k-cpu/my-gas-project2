@@ -25,9 +25,19 @@ function inventoryMessageAt(row,capturedAt){
   if(clock){const hour=Number(clock[2])%12+(clock[1]==='오후'?12:0);return new Date(Date.parse(`${date}T${String(hour).padStart(2,'0')}:${clock[3]}:00+09:00`)).toISOString();}
   return capturedAt;
 }
+function previewIdentity(text,name,at){
+  let body=String(text||'').replace(/\s+/g,' ').trim();
+  const prefix='중요 '+String(name||'').replace(/\s+/g,' ').trim();
+  if(!name||!body.startsWith(prefix+' '))return null;
+  body=body.slice(prefix.length).trim();
+  const label=body.match(/(?:\d+월\s*\d+일|(?:오전|오후)\s*\d{1,2}:\d{2})$/)?.[0];
+  if(!label||!Number.isFinite(Date.parse(at)))return null;
+  const messageAt=inventoryMessageAt({displayDate:label},at);
+  return {body:body.slice(0,-label.length).trim(),day:new Date(Date.parse(messageAt)+9*3600000).toISOString().slice(0,10)};
+}
 export function captureGaps({ingress,jobs,inventory=null,manualCaptures=[],now}){
   const captured=new Map();
-  for(const j of jobs){const snap=j.local_context?.turn_internal?.snapshot;if(!snap?.navigation?.conversation_evidence?.messages?.length||snap.navigation.conversation_evidence.capture_integrity?.ok===false)continue;const at=Date.parse(snap.capturedAt||j.created_at);if(!captured.has(j.room_key)||at>captured.get(j.room_key).at)captured.set(j.room_key,{at,preview:String(j.local_context?.job?.previewText||'').replace(/\s+/g,' ').trim()});}
+  for(const j of jobs){const snap=j.local_context?.turn_internal?.snapshot;if(!snap?.navigation?.conversation_evidence?.messages?.length||snap.navigation.conversation_evidence.capture_integrity?.ok===false)continue;const at=Date.parse(snap.capturedAt||j.created_at);if(!captured.has(j.room_key)||at>captured.get(j.room_key).at)captured.set(j.room_key,{at,name:j.local_context?.job?.customerName,preview:String(j.local_context?.job?.previewText||'').replace(/\s+/g,' ').trim()});}
   const manuallyCaptured=new Map(manualCaptures.filter(c=>c.sha256===createHash('sha256').update(c.snapshot||'').digest('hex')&&Number.isFinite(Date.parse(c.capturedAt))&&c.snapshot?.includes('- emphasis:')).map(c=>['chat:'+c.id,Date.parse(c.capturedAt)]));
   const observed=new Map(Object.values(ingress.rooms).map(r=>[r.room,r]));
   for(const r of inventory?.rooms||[])if(!observed.has(r.room))observed.set(r.room,{room:r.room,name:r.name,at:inventoryMessageAt(r,inventory.capturedAt),reason:'live_inventory'});
@@ -35,7 +45,9 @@ export function captureGaps({ingress,jobs,inventory=null,manualCaptures=[],now})
     // A repeated backstop observation of the exact same row is not a new message.
     const samePreview=c?.preview&&c.preview===String(r.preview||'').replace(/\s+/g,' ').trim();
     const sameDay=c&&new Date(c.at+9*3600000).toISOString().slice(0,10)===new Date(Date.parse(r.at)+9*3600000).toISOString().slice(0,10);
-    return Boolean(samePreview&&sameDay);}
+    const a=c&&previewIdentity(c.preview,c.name,new Date(c.at).toISOString()),b=previewIdentity(r.preview,r.name,r.at);
+    const badgeOnly=a?.body&&b?.body&&/^\d+\s/.test(a.body)!==/^\d+\s/.test(b.body)&&a.body.replace(/^\d+\s+/,'')===b.body.replace(/^\d+\s+/,'');
+    return Boolean(samePreview&&sameDay||a?.body&&a.day===b?.day&&(a.body===b.body||badgeOnly));}
   const verifiedKeys=[...observed.values()].filter(hasCapture).map(r=>'capture-reconciliation:'+r.room);
   const gaps=[...observed.values()].filter(r=>!hasCapture(r)).map(r=>({key:'capture-reconciliation:'+r.room,room:r.room,name:r.name,sourceAt:r.at,kind:'ingress_without_capture',priority:'normal',preview:r.preview||'',state:'open'}));
   const inventoryFresh=inventory?.reachedBeforeWindow===true&&Date.parse(now)-Date.parse(inventory.capturedAt)<86400000;
