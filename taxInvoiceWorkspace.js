@@ -5,6 +5,16 @@ function invoiceWorkspaceBuyer_(row) {
     ceoName: invoiceWorkspaceText_(row[2]), email: invoiceWorkspaceText_(row[3]), addr: invoiceWorkspaceText_(row[4]),
     bizType: invoiceWorkspaceText_(row[5]), bizClass: invoiceWorkspaceText_(row[6]) };
 }
+// 계약마스터 E:H는 반출일, 반출시간, 반납일, 반납시간의 네 독립 열이다.
+function invoiceWorkspaceDateTime_(day, clock) {
+  var d = invoiceWorkspaceText_(day).match(/^(\d{4})[-/.]\s*(\d{1,2})[-/.]\s*(\d{1,2})\.?$/);
+  var t = invoiceWorkspaceText_(clock).match(/^(\d{1,2}):(\d{2})(?::00)?$/);
+  if (!d || !t) return '';
+  var y = Number(d[1]), m = Number(d[2]), n = Number(d[3]), h = Number(t[1]), min = Number(t[2]);
+  var check = new Date(Date.UTC(y, m - 1, n));
+  if (check.getUTCFullYear() !== y || check.getUTCMonth() !== m - 1 || check.getUTCDate() !== n || h > 24 || min > 59 || (h === 24 && min !== 0)) return '';
+  return new Date(Date.UTC(y, m - 1, n, h - 9, min)).toISOString();
+}
 function invoiceWorkspaceGuardKey_(tid) { return 'taxInvoiceWorkspacePending_' + tid; }
 function invoiceWorkspacePending_(tid) {
   var raw = PropertiesService.getScriptProperties().getProperty(invoiceWorkspaceGuardKey_(tid));
@@ -45,6 +55,9 @@ function getTaxInvoiceWorkspace_(tids, options) {
     var matched = ledgerRows.filter(function(r) { return invoiceWorkspaceText_(r[4]) === tid; });
     var contractMatches = contractRows.filter(function(r) { return invoiceWorkspaceText_(r[0]) === tid; });
     var reasons = [], row = matched[0] || [], contract = contractMatches[0] || [];
+    var checkoutAt = invoiceWorkspaceDateTime_(contract[4], contract[5]);
+    var checkinAt = invoiceWorkspaceDateTime_(contract[6], contract[7]);
+    if (!checkoutAt || !checkinAt) reasons.push('대여 날짜·시간 확인 필요');
     if (matched.length !== 1) reasons.push(matched.length ? '거래ID 중복 확인 필요' : '거래내역에 연결할 거래가 없습니다');
     if (contractMatches.length !== 1) reasons.push(contractMatches.length ? '계약ID 중복 확인 필요' : '계약 연결 확인 필요');
     if (invoiceWorkspaceText_(contract[9]) === '취소') reasons.push('취소된 예약입니다');
@@ -86,7 +99,7 @@ function getTaxInvoiceWorkspace_(tids, options) {
     var fingerprint = invoiceWorkspaceDigest_({ tid: tid, ledger: row, contract: contract, buyer: buyer,
       master: buyers.filter(function(b) { return b.corpNum === buyer.corpNum; }) });
     return { workspaceKey: target.key, tradeId: tid, customerName: invoiceWorkspaceText_(row[1]), phone: invoiceWorkspaceText_(row[5]),
-      checkoutAt: invoiceWorkspaceText_(contract[4]), checkinAt: invoiceWorkspaceText_(contract[5]),
+      checkoutAt: checkoutAt, checkinAt: checkinAt,
       amount: Number.isSafeInteger(amount) && amount > 0 ? amount : null,
       supplyCost: Number.isSafeInteger(amount) && amount > 0 ? amount - Math.floor(amount / 11) : null,
       tax: Number.isSafeInteger(amount) && amount > 0 ? Math.floor(amount / 11) : null,

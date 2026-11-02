@@ -2,7 +2,7 @@ const test = require('node:test'), assert = require('node:assert/strict'), fs = 
 const { createRequire } = require('node:module');
 const appRoot = path.join(__dirname, '../apps/today-dashboard'), ts = createRequire(path.join(appRoot, 'package.json'))('typescript');
 const source = fs.readFileSync(path.join(appRoot, 'components/InvoiceRequestsView.tsx'), 'utf8');
-const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText + '\nmodule.exports.Card = InvoiceCard;';
+const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText + '\nmodule.exports.Card = InvoiceCard; module.exports.rentalLabel = rentalLabel;';
 function harness() {
   let cursor = 0, states = [], requests = [], row;
   const buyer = { corpNum: '1234567890', corpName: 'A', ceoName: '대표', email: 'a@example.com', addr: '', bizType: '', bizClass: '' };
@@ -19,7 +19,7 @@ function harness() {
     if (id.includes('domain/status')) return { shortDate: () => '', timeLabel: () => '' };
     throw Error(id);
   } });
-  return { requests, render() { cursor = 0; return mod.exports.Card({ row, buyers: [], disabled: false, onUpdate: value => { row = value; }, onBusy() {} }); } };
+  return { requests, rentalLabel: mod.exports.rentalLabel, render() { cursor = 0; return mod.exports.Card({ row, buyers: [], disabled: false, onUpdate: value => { row = value; }, onBusy() {} }); } };
 }
 function all(node, predicate) {
   if (!node || typeof node !== 'object') return [];
@@ -36,4 +36,9 @@ test('editing buyer fields disables issuance and cannot submit the previous reci
   issue.props.onClick(); await new Promise(resolve => setImmediate(resolve)); assert.equal(h.requests.length, 0);
   button(tree, '이 정보로 발행 준비').props.onClick(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.requests[0].action, 'prepare'); assert.equal(h.requests[0].buyer.email, 'new@example.com');
+});
+
+test('date-only and clock-only legacy payloads do not invent a rental clock', () => {
+  const h=harness();
+  for(const value of ['', '2026-10-20', '11:30']) assert.equal(h.rentalLabel(value), '일정 확인 필요');
 });

@@ -24,7 +24,7 @@ function dateLabel(value: string) {
     timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   });
 }
-const rentalLabel = (value: string) => value ? `${shortDate(value)} ${timeLabel(value)}` : '일정 확인 필요';
+const rentalLabel = (value: string) => /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(value || '') ? `${shortDate(value)} ${timeLabel(value)}` : '일정 확인 필요';
 async function api(body: Record<string, unknown>) {
   const response = await authFetch('/api/follow-ups/invoices', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const data = await response.json().catch(() => null);
