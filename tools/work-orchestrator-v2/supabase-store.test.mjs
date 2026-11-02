@@ -775,6 +775,17 @@ test('listHeybilliOwnerCases uses the grouped RPC and accepts overlapping case c
   });
 });
 
+test('case ownerBrief follows the existing 500 character nextActionSummary RPC contract', async () => {
+  for(const length of [162,500,501]) {
+    const text='가'.repeat(length),data=heybilliCases({cases:[heybilliCase({ownerBrief:text,nextActionSummary:text})]});
+    const fetch=createFetch([response({data})]);
+    const store=createWorkOrchestratorStore({supabaseUrl:'https://supabase.example',serviceRoleKey,fetchImpl:fetch.fetchImpl});
+    const call=store.listHeybilliOwnerCases({now:'2026-09-05T09:00:00.000Z',view:'now',category:null,limit:100,after:null});
+    if(length>500)await assert.rejects(call,/response invalid/i);
+    else assert.equal((await call).cases[0].ownerBrief,text);
+  }
+});
+
 test('semantic inquiry case response preserves the three owner-facing business summaries', async () => {
   const semantic = heybilliCases({ cases: [heybilliCase({
     categories: ['schedule', 'settlement'],

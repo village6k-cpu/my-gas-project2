@@ -87,6 +87,18 @@ async function loadModel() {
   return import(`${modelUrl}?test=${Date.now()}-${Math.random()}`);
 }
 
+test('inbox accepts the complete 162 to 500 character next action returned as ownerBrief', async () => {
+  const {buildInboxView}=await loadModel();
+  for(const length of [162,500]) {
+    const text='가'.repeat(length);
+    const cases=orderedCases.map(item=>({...item,ownerBrief:text,nextActionSummary:text}));
+    const model=buildInboxView({payload:payload({cases}),view:'now',category:null,selectedId:null,now});
+    assert.equal(model.rows.length,2);
+  }
+  const cases=orderedCases.map(item=>({...item,ownerBrief:'가'.repeat(501)}));
+  assert.throws(()=>buildInboxView({payload:payload({cases}),view:'now',category:null,selectedId:null,now}));
+});
+
 test("inquiry inbox exposes case counts and allows overlapping business categories", async () => {
   const { buildInboxView } = await loadModel();
   const model = buildInboxView({ payload: payload(), view: "now", category: null, selectedId: null, now });

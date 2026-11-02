@@ -218,7 +218,8 @@ function validateCase(value: unknown, query: { view: string; category: string | 
     || value.state !== query.view || !V2_VIEWS.has(value.state) || !V2_PRIORITIES.has(value.priority)
     || typeof value.title !== "string" || !value.title || value.title !== value.title.trim() || value.title.length > 120
     || typeof value.ownerBrief !== "string" || !value.ownerBrief || value.ownerBrief !== value.ownerBrief.trim()
-    || value.ownerBrief.length > 160
+    // The grouped RPC uses nextActionSummary (up to 500 chars) as ownerBrief.
+    || value.ownerBrief.length > 500
     || typeof value.requestSummary !== "string" || !value.requestSummary || value.requestSummary !== value.requestSummary.trim() || value.requestSummary.length > 500
     || typeof value.problemSummary !== "string" || !value.problemSummary || value.problemSummary !== value.problemSummary.trim() || value.problemSummary.length > 500
     || typeof value.nextActionSummary !== "string" || !value.nextActionSummary || value.nextActionSummary !== value.nextActionSummary.trim() || value.nextActionSummary.length > 500

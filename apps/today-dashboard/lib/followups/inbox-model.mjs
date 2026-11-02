@@ -99,7 +99,7 @@ function safeCase(value, { view, category, now }) {
     || value.state !== view || !VIEWS.has(value.state) || !PRIORITIES.has(value.priority)
     || typeof value.title !== "string" || !value.title || value.title !== value.title.trim() || value.title.length > 120
     || typeof value.ownerBrief !== "string" || !value.ownerBrief || value.ownerBrief !== value.ownerBrief.trim()
-    || value.ownerBrief.length > 160
+    || value.ownerBrief.length > 500
     || typeof value.requestSummary !== "string" || !value.requestSummary || value.requestSummary !== value.requestSummary.trim() || value.requestSummary.length > 500
     || typeof value.problemSummary !== "string" || !value.problemSummary || value.problemSummary !== value.problemSummary.trim() || value.problemSummary.length > 500
     || typeof value.nextActionSummary !== "string" || !value.nextActionSummary || value.nextActionSummary !== value.nextActionSummary.trim() || value.nextActionSummary.length > 500
