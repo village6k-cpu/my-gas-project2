@@ -2577,11 +2577,17 @@ export function createGatewayResultApplicationCoordinator({
     }
     const decision = finalized?.decision || {};
     const reply = decision?.reply_decision || {};
+    // A persisted customer question can leave an explicit no-human-action
+    // waiting item. V2 correctly excludes those from owner work; the legacy
+    // shouldCreateTask hint must not turn that exclusion into a failed job.
+    // Missing/ambiguous items and explicit review intent still fail closed.
+    const followUpItems = Array.isArray(decision.follow_up_items) ? decision.follow_up_items : [];
+    const onlyCustomerWaitItems = followUpItems.length > 0 && followUpItems.every(item =>
+      item?.requiresHumanAction === false && item?.requires_human_action !== true);
     const ownerReviewExpected = replyOutcome.state === 'awaiting_review'
       || decision?.owner_review_required === true
       || decision?.ownerReviewRequired === true
-      || reply?.shouldCreateTask === true
-      || reply?.should_create_task === true;
+      || ((reply?.shouldCreateTask === true || reply?.should_create_task === true) && !onlyCustomerWaitItems);
     const followUp = finalized?.followUpResult || {};
     const persistedRows = Array.isArray(followUp.rows) ? followUp.rows : [];
     const v2OwnerWorkEnabled = config?.workOrchestratorV2WorkItemsEnabled === true;
