@@ -16,8 +16,13 @@ test('owner notice reports verified amount and discount without creating approva
  assert.equal(pricingOwnerNotice({...config,verifiedPricingAutoSendEnabled:false},job,finalized),null);
  const statement=pricingOwnerNotice(config,job,{...finalized,autoReplyResult:{...finalized.autoReplyResult,pricingDocumentReceipt:{documentType:'statement',deliveryConfirmed:true,tradeId:'261024-007',pdfUrl:'https://drive.google.com/file/d/statement-test/view'}}});
  assert.match(statement.text,/거래명세서: 발송 확인/);assert.match(statement.text,/261024-007/);
- const uncertain=pricingOwnerNotice(config,job,{...finalized,autoReplyResult:{sent:false,gate:{reason:'discount_unconfirmed'}}});
+ const uncertain=pricingOwnerNotice(config,job,{...finalized,decision:{...finalized.decision,owner_review_required:true},autoReplyResult:{sent:false,gate:{reason:'discount_unconfirmed'}}});
  assert.match(uncertain.text,/확인 필요/);assert.match(uncertain.text,/discount_unconfirmed/);assert.doesNotMatch(uncertain.text,/7,700/);
+});
+test('already answered statements and customer thanks do not create owner review notifications',()=>{
+ for(const classification of ['ignore','already_answered','price']){
+  assert.equal(pricingOwnerNotice(config,job,{decision:{classification,customer:{name:'검증 고객'},statement_request:{trade_id:'261024-007'},follow_up_items:[],owner_review_required:false},autoReplyResult:{attempted:false,sent:false,gate:{reason:'replyMode_no_reply'}}}),null);
+ }
 });
 test('persisted owner notifications survive Slack failure and retry without resending completed notices',async()=>{
  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'pricing-notice-'));
