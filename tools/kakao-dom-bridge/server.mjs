@@ -1,3 +1,5 @@
+import {pricingOwnerNotice,queuePricingOwnerNotice,flushPricingOwnerNotices} from '../ai-browser-worker/pricing-owner-notices.mjs';
+import {verifiedPricingAudit} from '../ai-browser-worker/verified-pricing.mjs';
 import http from 'node:http';
 import { isIncidentCaptureRetry } from './incident-capture-recovery.mjs';
 import os from 'node:os';
@@ -314,6 +316,9 @@ const CONFIG = {
   workerCommand: process.env.VILLAGE_AI_WORKER_CMD || '',
   workerLive: process.env.AI_WORKER_LIVE === '1',
   autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
+  verifiedPricingAutoSendEnabled: process.env.AI_WORKER_VERIFIED_PRICING_AUTO_SEND === '1',
+  verifiedPricingEnabledAfter: process.env.AI_WORKER_VERIFIED_PRICING_ENABLED_AFTER || '',
+  pricingOwnerSlackUserId: process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID || '',
   workerDryRun: process.env.AI_WORKER_DRY_RUN === '1',
   windowsWritesEnabled: process.env.VILLAGE_WINDOWS_WRITES_ENABLED === '1',
   // Capability flag: recovery/backstop support exists even when startup DOM
@@ -385,6 +390,8 @@ export function buildHealthConfig(config = {}) {
   const health = {
     workerLive: Boolean(config.workerLive),
     autoSendEnabled: Boolean(config.autoSendEnabled),
+    verifiedPricingAutoSendEnabled: Boolean(config.verifiedPricingAutoSendEnabled),
+    verifiedPricingEnabledAfter: config.verifiedPricingEnabledAfter || null,
     workerDryRun: Boolean(config.workerDryRun),
     windowsWritesEnabled: Boolean(config.windowsWritesEnabled),
     startupCatchupSupported: Boolean(config.startupCatchupSupported),
@@ -2705,7 +2712,10 @@ export function createGatewayResultApplicationCoordinator({
       superseded: applied?.superseded === true,
       reply_execution: replyOutcome,
       ...(applied?.autoReplyResult?.executionPolicy ? { execution_policy: applied.autoReplyResult.executionPolicy } : {}),
-      ...(autoReplyReadback ? { auto_reply_readback: autoReplyReadback } : {})
+      ...(autoReplyReadback ? { auto_reply_readback: autoReplyReadback } : {}),
+      ...(verifiedPricingAudit(applied?.autoReplyResult) ? {verified_pricing:verifiedPricingAudit(applied.autoReplyResult)} : {}),
+      ...(applied?.autoReplyResult?.pricingDocumentReceipt ? {automatic_pricing_document:applied.autoReplyResult.pricingDocumentReceipt} : {}),
+      ...(applied?.autoReplyResult?.pricingDocumentFailure ? {automatic_pricing_document:applied.autoReplyResult.pricingDocumentFailure} : {})
     };
     const persistedAppliedJob = await channel.recordApplicationApplied({
       job_id: durableJob.job_id,
@@ -2735,6 +2745,10 @@ export function createGatewayResultApplicationCoordinator({
       }
     });
     triggerAuditProjection({ durableJob, prepared, applied });
+    if (config.verifiedPricingAutoSendEnabled && config.pricingOwnerSlackUserId) {
+      try {await queuePricingOwnerNotice(path.join(config.queueDir || CONFIG.queueDir,'pricing-owner-notices'),pricingOwnerNotice(config,job,finalized));}
+      catch { console.error('pricing_owner_notice_storage_failed', String(job.jobId || job.id || '')); }
+    }
     return finalized;
   }
 
@@ -6992,3 +7006,13 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     workOrchestratorNoticeCleanupRuntime.start().catch(() => {});
   });
 }
+
+let pricingNoticeFlushRunning = false;
+const pricingNoticeTimer = process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID && process.env.AI_WORKER_VERIFIED_PRICING_AUTO_SEND === '1'
+  ? setInterval(async()=>{
+    if(pricingNoticeFlushRunning)return;pricingNoticeFlushRunning=true;
+    try{await flushPricingOwnerNotices(path.join(CONFIG.queueDir,'pricing-owner-notices'),{token:process.env.SLACK_BOT_TOKEN});}
+    catch{ console.error('pricing_owner_notice_flush_failed'); }
+    finally{pricingNoticeFlushRunning=false;}
+  },30000) : null;
+pricingNoticeTimer?.unref();

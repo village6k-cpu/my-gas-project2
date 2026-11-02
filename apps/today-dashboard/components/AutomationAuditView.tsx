@@ -186,6 +186,7 @@ export function AutomationAuditView({ active, refreshVersion = 0 }: { active: bo
 
   return (
     <main className="flex-1 p-3 pb-24 lg:p-4">
+      <p className="mb-3 text-sm text-ink-soft">AI 가격 안내·견적서 발송은 고객별 금액·할인·보낸 내용과 실제 발송 결과로 확인합니다. 완료 내역은 승인 업무가 아닙니다.</p>
       <section aria-label="자동처리 기록 필터" className="mb-3 rounded-xl bg-white p-3 ring-1 ring-line/70">
         <div className="flex flex-wrap gap-1.5">
           {AUDIT_FILTER_OPTIONS.ranges.map(({ value, label }) => (
@@ -261,6 +262,7 @@ function AuditDetail({ row }: { row: AuditRow }) {
     <Detail title="처리 시각"><p>{row.occurredLabel}{row.historicalImport ? " · 과거 기록 복구" : ""}</p></Detail>
     {row.targetId && <Detail title="대상"><p>{row.targetId}</p></Detail>}
     {row.changeLines.length > 0 && <Detail title="변경 내역"><ul className="space-y-1">{row.changeLines.map((line) => <li key={line}>{line}</li>)}</ul></Detail>}
+    {row.changeItems.filter(item => item.field === "document" && item.after && /^https:\/\/(?:drive|docs)\.google\.com\/(?:file|spreadsheets)\/d\/[a-zA-Z0-9_-]+/.test(item.after)).map(item => <Detail key={item.after!} title="발송한 견적서"><a href={item.after!} target="_blank" rel="noopener noreferrer" className="font-bold text-brand-600 underline">견적서 열기</a></Detail>)}
     {row.outboundText && <Detail title="보낸 답변"><p className="whitespace-pre-wrap">{row.outboundText}</p></Detail>}
     {(row.evidence.error_type || row.evidence.attempted_stage) && <Detail title="처리 근거"><p>{row.evidence.error_type || row.evidence.attempted_stage}</p></Detail>}
   </article>;

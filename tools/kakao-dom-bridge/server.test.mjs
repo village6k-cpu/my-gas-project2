@@ -6420,12 +6420,16 @@ test('health config exposes the live safety contract used by supervised restarts
   assert.deepEqual(buildHealthConfig({
     workerLive: true,
     autoSendEnabled: true,
+    verifiedPricingAutoSendEnabled: false,
+    verifiedPricingEnabledAfter: null,
     workerDryRun: false,
     windowsWritesEnabled: true,
     startupCatchupSupported: true
   }), {
     workerLive: true,
     autoSendEnabled: true,
+    verifiedPricingAutoSendEnabled: false,
+    verifiedPricingEnabledAfter: null,
     workerDryRun: false,
     windowsWritesEnabled: true,
     startupCatchupSupported: true,

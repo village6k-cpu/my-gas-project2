@@ -1,3 +1,4 @@
+import { verifiedPricingAudit, pricingDocumentUrl } from '../ai-browser-worker/verified-pricing.mjs';
 import { createHash } from 'node:crypto';
 
 const EVENT_FIELDS = Object.freeze([
@@ -876,7 +877,7 @@ function replyReadbackProof({ durableJob, applied }) {
   return null;
 }
 
-function buildReplyEvent({ durableJob, proof, customerLabel, historicalImport }) {
+function buildReplyEvent({ durableJob, proof, customerLabel, historicalImport, pricing }) {
   if (proof.schema !== 'kakao-auto-reply-readback/v1'
     || typeof proof.receipt_id !== 'string'
     || !REPLY_RECEIPT_PATTERN.test(proof.receipt_id)
@@ -901,8 +902,8 @@ function buildReplyEvent({ durableJob, proof, customerLabel, historicalImport })
       customer_label: customerLabel,
       target_type: 'room',
       target_id: null,
-      summary: '카카오 답변을 전송했습니다.',
-      change_items: [],
+      summary: pricing ? `가격 안내 ${pricing.totalVatIncluded.toLocaleString('ko-KR')}원 · ${pricing.discountType} · 부가세 포함` : '카카오 답변을 전송했습니다.',
+      change_items: pricing ? [{field:'equipment',before:null,after:pricing.items.map(item=>`${item.name} ×${item.qty} · 단가 ${item.price}원`).join(', ')}] : [],
       outbound_text: proof.text,
       evidence: { schema: proof.schema, status: 'sent', readback: true },
       source_message_at: proof.source_message_at ?? sourceMessageAt(durableJob),
@@ -921,6 +922,8 @@ export function buildKakaoAutomationAuditEvents({
 } = {}) {
   if (!isRecord(durableJob)) throw new TypeError('durable job is required');
   const proof = replyReadbackProof({ durableJob, applied });
+  const pricing = verifiedPricingAudit(applied?.autoReplyResult) || durableJob.application?.applied_audit?.verified_pricing;
+  const pricingDocument = applied?.autoReplyResult?.pricingDocumentReceipt || applied?.autoReplyResult?.pricingDocumentFailure || durableJob.application?.applied_audit?.automatic_pricing_document;
   const unresolvedRegistration = unresolvedConfirmedRegistrationOperation(durableJob);
   const customerLabel = safeCustomerLabel({ durableJob, prepared, proof })
     || (unresolvedRegistration ? '고객 식별 미확정' : null);
@@ -944,8 +947,22 @@ export function buildKakaoAutomationAuditEvents({
     }));
   }
   if (proof) {
-    const replyEvent = buildReplyEvent({ durableJob, proof, customerLabel, historicalImport });
+    const replyEvent = buildReplyEvent({ durableJob, proof, customerLabel, historicalImport, pricing });
     if (replyEvent) events.push(replyEvent);
+  }
+  if (pricingDocument?.schema === 'village-auto-pricing-document-receipt/v1' && pricing && /^\d+$/.test(String(pricing.totalVatIncluded))) {
+    const sent = pricingDocument.deliveryConfirmed === true && pricingDocument.status === 'sent' && pricingDocumentUrl(pricingDocument.pdfUrl);
+    events.push(normalizeKakaoAutomationAuditEvent({
+      event_key:authorityEventKey('document_send',pricingDocument.operationId || durableJob.job_id+':pricing-document'),
+      job_id:durableJob.job_id,room_revision:durableJob.room_revision,operation_id:null,receipt_id:null,
+      occurred_at:pricingDocument.occurredAt,effect_type:'document_send',action_type:'send',
+      outcome:sent?'success':'partial_success',customer_label:customerLabel,target_type:'document',target_id:pricingDocument.fileId || null,
+      summary:`자동 견적서 ${pricing.totalVatIncluded.toLocaleString('ko-KR')}원 · ${pricing.discountType} · ${sent?'발송 완료':'발송 결과 확인 필요'}`,
+      change_items:[{field:'equipment',before:null,after:pricing.items.map(item=>`${item.name} ×${item.qty} · 단가 ${item.price}원`).join(', ')},
+        ...(sent?[{field:'document',before:null,after:pricingDocumentUrl(pricingDocument.pdfUrl)}]:[])],outbound_text:null,
+      evidence:{schema:pricingDocument.schema,status:sent?'sent':'unconfirmed',readback:Boolean(sent)},
+      source_message_at:sourceMessageAt(durableJob),historical_import:Boolean(historicalImport)
+    }));
   }
   return events;
 }
