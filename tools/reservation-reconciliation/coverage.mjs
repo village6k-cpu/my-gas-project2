@@ -29,7 +29,7 @@ function previewIdentity(text,name,at){
   let body=String(text||'').replace(/\s+/g,' ').trim();
   const prefix='중요 '+String(name||'').replace(/\s+/g,' ').trim();
   if(!name||!body.startsWith(prefix+' '))return null;
-  body=body.slice(prefix.length).trim().replace(/^\d+\s+/,'');
+  body=body.slice(prefix.length).trim();
   const label=body.match(/(?:\d+월\s*\d+일|(?:오전|오후)\s*\d{1,2}:\d{2})$/)?.[0];
   if(!label||!Number.isFinite(Date.parse(at)))return null;
   const messageAt=inventoryMessageAt({displayDate:label},at);
@@ -46,7 +46,8 @@ export function captureGaps({ingress,jobs,inventory=null,manualCaptures=[],now})
     const samePreview=c?.preview&&c.preview===String(r.preview||'').replace(/\s+/g,' ').trim();
     const sameDay=c&&new Date(c.at+9*3600000).toISOString().slice(0,10)===new Date(Date.parse(r.at)+9*3600000).toISOString().slice(0,10);
     const a=c&&previewIdentity(c.preview,c.name,new Date(c.at).toISOString()),b=previewIdentity(r.preview,r.name,r.at);
-    return Boolean(samePreview&&sameDay||a?.body&&a.body===b?.body&&a.day===b.day);}
+    const badgeOnly=a?.body&&b?.body&&/^\d+\s/.test(a.body)!==/^\d+\s/.test(b.body)&&a.body.replace(/^\d+\s+/,'')===b.body.replace(/^\d+\s+/,'');
+    return Boolean(samePreview&&sameDay||a?.body&&a.day===b?.day&&(a.body===b.body||badgeOnly));}
   const verifiedKeys=[...observed.values()].filter(hasCapture).map(r=>'capture-reconciliation:'+r.room);
   const gaps=[...observed.values()].filter(r=>!hasCapture(r)).map(r=>({key:'capture-reconciliation:'+r.room,room:r.room,name:r.name,sourceAt:r.at,kind:'ingress_without_capture',priority:'normal',preview:r.preview||'',state:'open'}));
   const inventoryFresh=inventory?.reachedBeforeWindow===true&&Date.parse(now)-Date.parse(inventory.capturedAt)<86400000;
