@@ -1,0 +1,13 @@
+# Saved-conversation reservation reconciliation
+
+This independent auditor reuses existing Kakao captures and ingress journals. It reads current booking rows, and reports differences without creating, modifying, cancelling or messaging a reservation. `--publish` updates one internal review card, with a version-guarded reopen when unresolved work was dismissed. A review candidate is not a confirmed omission.
+
+Run `node run.mjs <absolute server-env.json> <absolute bridge queue directory> <absolute private output directory>`. Add `--publish` to update the staff review card. Server credentials are loaded from the existing private configuration and are never embedded in reports or launchd files. Test with `node --test tools/reservation-reconciliation/*.test.mjs`.
+
+On macOS, `node install-macos.mjs <env.json> <queue directory> <private output directory>` installs an independent, five-minute LaunchAgent. It does not restart the bridge, browser or AI worker. The first scan reads retained captures; subsequent scans reuse unchanged files and read only appended ingress bytes. Database pages are read completely; a failed page preserves previous obligations and records failed health.
+
+Output: `report.json`, durable `state.json`, and `health.json`, all private. Open obligations survive the fourteen-day scan window. Worker completion, a follow-up-card dismissal, a later thank-you, or an unrelated later booking never proves fulfillment. Exact customer identity, period, and both missing and excess top-level quantities are compared. Physical stock, model ambiguity, actual checkout/return, pricing and payment claims still require their authoritative sources; this tool does not infer them.
+
+Optional `room-inventory.json` records a read-only scan of **all consultation states** through the beginning of the window. Optional `manual-live-captures.json` holds recently verified missing-room captures. Ingress newer than a capture stays unresolved. These files record audit coverage, not booking approval. Coverage is explicitly incomplete without fresh list evidence; saved capture coverage alone is never advertised as all Kakao conversations verified. Images and deleted/unloaded messages require targeted inspection.
+
+The internal review card remains for human assessment of historical revisions, unresolved model identity and supply decisions. It is not automatically resolved when a model says `already_applied`. A deliberately changed or cancelled historical plan may remain a review candidate until its authoritative transition is reconciled. `health.status=ok` means the audit ran successfully, not that every reservation can be fulfilled.
