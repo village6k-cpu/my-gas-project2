@@ -19,13 +19,14 @@ export async function GET(req: NextRequest) {
   if (!["critical", "archive"].includes(mode) || !Number.isSafeInteger(offset) || offset < 0 || offset > 100000 || search.length > 100) return response({ error: "잘못된 조회" }, 400);
   try {
     const client = db();
+    const pageSize = mode === "critical" ? 200 : 50;
     let query = client.from("work_items_v2").select(fields, { count: "exact" });
     query = mode === "critical" ? query.in("state", ACTIVE_STATES).eq("payload->>owner_triage", "critical") : query.eq("state", "dismissed").eq("resolution_kind", ARCHIVE_KIND);
     if (search) query = query.ilike("title", `%${search.replace(/[\\%_]/g, "")}%`);
     // All rows in a page use deterministic ordering, including equal timestamps.
-    const { data, count, error } = await query.order("updated_at", { ascending: false }).order("id").range(offset, offset + 49);
+    const { data, count, error } = await query.order("updated_at", { ascending: false }).order("id").range(offset, offset + pageSize - 1);
     if (error) throw error;
-    return response({ ok: true, items: (data || []).map(triageItem), total: count || 0, nextOffset: offset + 50 < (count || 0) ? offset + 50 : null });
+    return response({ ok: true, items: (data || []).map(triageItem), total: count || 0, pageSize, nextOffset: offset + pageSize < (count || 0) ? offset + pageSize : null });
   } catch { return response({ error: "확인 목록을 불러오지 못했습니다" }, 503); }
 }
 export async function PATCH(req: NextRequest) {
