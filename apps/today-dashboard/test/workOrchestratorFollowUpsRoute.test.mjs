@@ -258,6 +258,21 @@ test("v2 GET preserves cases when the worker receipt clock is ahead of the datab
   }
 });
 
+test('v2 inbox preserves a full next action as ownerBrief instead of failing the whole page at 160 characters', async () => {
+  const id='11111111-1111-4111-8111-111111111111';
+  for(const length of [162,500,501]) {
+    const text='가'.repeat(length),updatedAt='2026-09-05T08:30:00.000Z';
+    const data={summary:{now:1,snoozed:0,completed:0,p0:0,byCategory:{schedule:1,quote:0,settlement:0,customer:0,operations:0}},
+      cases:[{id,state:'now',priority:'normal',title:'예약 일정 확인',ownerBrief:text,requestSummary:'장비 대여 요청',problemSummary:'일정 확인 필요',nextActionSummary:text,
+        receivedAt:updatedAt,updatedAt,categories:['schedule'],completedStepCount:0,totalStepCount:1,
+        steps:[{id,version:1,category:'schedule',workTypeLabel:'스케줄 확인',priority:'normal',state:'open',taskLabel:'일정 확인',dueAt:null,snoozedUntil:null,updatedAt}]}],nextCursor:null,omittedCount:0};
+    const {GET}=loadRoute({fetchImpl:async()=>response(data)});
+    const result=await GET(getV2Request());
+    assert.equal(result.status,length>500?503:200);
+    if(length<=500)assert.equal((await readBody(result)).cases[0].ownerBrief,text);
+  }
+});
+
 test("v2 GET fails closed when a successful upstream response is not an array", async () => {
   for (const malformed of [{ error: "upstream detail" }, null, "not-an-array"]) {
     const { GET } = loadRoute({ fetchImpl: async () => response(malformed) });

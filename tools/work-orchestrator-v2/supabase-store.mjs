@@ -848,7 +848,7 @@ function heybilliCaseResponse(entry, input) {
     || entry.completedStepCount > entry.totalStepCount) throw heybilliResponseInvalid();
   const id = responseUuid(entry.id);
   responseText(entry.title, 120);
-  responseText(entry.ownerBrief, 160);
+  responseText(entry.ownerBrief, 500);
   responseText(entry.requestSummary, 500);
   responseText(entry.problemSummary, 500);
   responseText(entry.nextActionSummary, 500);
