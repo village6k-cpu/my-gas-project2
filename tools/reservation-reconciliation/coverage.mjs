@@ -27,12 +27,18 @@ function inventoryMessageAt(row,capturedAt){
 }
 export function captureGaps({ingress,jobs,inventory=null,manualCaptures=[],now}){
   const captured=new Map();
-  for(const j of jobs){const snap=j.local_context?.turn_internal?.snapshot;if(!snap?.navigation?.conversation_evidence?.messages?.length||snap.navigation.conversation_evidence.capture_integrity?.ok===false)continue;const at=Date.parse(snap.capturedAt||j.created_at);if(!captured.has(j.room_key)||at>captured.get(j.room_key))captured.set(j.room_key,at);}
+  for(const j of jobs){const snap=j.local_context?.turn_internal?.snapshot;if(!snap?.navigation?.conversation_evidence?.messages?.length||snap.navigation.conversation_evidence.capture_integrity?.ok===false)continue;const at=Date.parse(snap.capturedAt||j.created_at);if(!captured.has(j.room_key)||at>captured.get(j.room_key).at)captured.set(j.room_key,{at,preview:String(j.local_context?.job?.previewText||'').replace(/\s+/g,' ').trim()});}
   const manuallyCaptured=new Map(manualCaptures.filter(c=>c.sha256===createHash('sha256').update(c.snapshot||'').digest('hex')&&Number.isFinite(Date.parse(c.capturedAt))&&c.snapshot?.includes('- emphasis:')).map(c=>['chat:'+c.id,Date.parse(c.capturedAt)]));
   const observed=new Map(Object.values(ingress.rooms).map(r=>[r.room,r]));
   for(const r of inventory?.rooms||[])if(!observed.has(r.room))observed.set(r.room,{room:r.room,name:r.name,at:inventoryMessageAt(r,inventory.capturedAt),reason:'live_inventory'});
-  const gaps=[...observed.values()].filter(r=>!(captured.get(r.room)>=Date.parse(r.at))&&!(manuallyCaptured.get(r.room)>=Date.parse(r.at))).map(r=>({key:'capture-reconciliation:'+r.room,room:r.room,name:r.name,sourceAt:r.at,kind:'ingress_without_capture',priority:'normal',preview:r.preview||'',state:'open'}));
+  function hasCapture(r){const c=captured.get(r.room);if(c?.at>=Date.parse(r.at)||manuallyCaptured.get(r.room)>=Date.parse(r.at))return true;
+    // A repeated backstop observation of the exact same row is not a new message.
+    const samePreview=c?.preview&&c.preview===String(r.preview||'').replace(/\s+/g,' ').trim();
+    const sameDay=c&&new Date(c.at+9*3600000).toISOString().slice(0,10)===new Date(Date.parse(r.at)+9*3600000).toISOString().slice(0,10);
+    return Boolean(samePreview&&sameDay);}
+  const verifiedKeys=[...observed.values()].filter(hasCapture).map(r=>'capture-reconciliation:'+r.room);
+  const gaps=[...observed.values()].filter(r=>!hasCapture(r)).map(r=>({key:'capture-reconciliation:'+r.room,room:r.room,name:r.name,sourceAt:r.at,kind:'ingress_without_capture',priority:'normal',preview:r.preview||'',state:'open'}));
   const inventoryFresh=inventory?.reachedBeforeWindow===true&&Date.parse(now)-Date.parse(inventory.capturedAt)<86400000;
-  return {gaps,coverage:{ingressRooms:Object.keys(ingress.rooms).length,listedRooms:inventory?.rooms?.length||0,inventoryFresh,
+  return {gaps,verifiedKeys,coverage:{ingressRooms:Object.keys(ingress.rooms).length,listedRooms:inventory?.rooms?.length||0,inventoryFresh,
     missingCaptures:gaps.length,manualCaptures:manuallyCaptured.size,allKakaoRoomsVerified:false}};
 }

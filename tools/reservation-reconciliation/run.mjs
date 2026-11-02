@@ -16,7 +16,7 @@ export async function fetchRows(env,schema,table,select,order,fetchImpl=fetch){
 function compactJob(j,file,sha256){const d=parseDecision(j.result?.content),e=j.local_context?.turn_internal?.snapshot?.navigation?.conversation_evidence;
   return {job_id:j.job_id,room_key:j.room_key,created_at:j.created_at,updated_at:j.updated_at,state:j.state,application:j.application,
     result:d?{content:JSON.stringify({inquiry_disposition:d.inquiry_disposition,reservation_inquiry:d.reservation_inquiry,sheet_row_candidate:d.sheet_row_candidate})}:null,
-    local_context:{job:{customerName:j.local_context?.job?.customerName},turn_internal:{snapshot:{capturedAt:j.local_context?.turn_internal?.snapshot?.capturedAt,navigation:{conversation_evidence:e?{capture_integrity:e.capture_integrity,messages:(e.messages||[]).slice(0,1)}:null}}}},source:{file,sha256}};
+    local_context:{job:{customerName:j.local_context?.job?.customerName,previewText:j.local_context?.job?.previewText},turn_internal:{snapshot:{capturedAt:j.local_context?.turn_internal?.snapshot?.capturedAt,navigation:{conversation_evidence:e?{capture_integrity:e.capture_integrity,messages:(e.messages||[]).slice(0,1)}:null}}}},source:{file,sha256}};
 }
 export async function runAudit({envFile,queueDir,outputDir,now=new Date().toISOString(),lookbackDays=14,publish=false,fetchImpl=fetch}){
   if(![envFile,queueDir,outputDir].every(x=>path.isAbsolute(x)))throw Error('absolute configured paths required');
@@ -37,7 +37,7 @@ export async function runAudit({envFile,queueDir,outputDir,now=new Date().toISOS
     const cutoff=Date.parse(new Date(Date.parse(now)+9*3600000-lookbackDays*86400000).toISOString().slice(0,10)+'T00:00:00+09:00'),retainedRooms=new Set(previous.obligations.filter(o=>o.state==='open').map(o=>o.room));
     const index={},jobs=[],dir=path.join(queueDir,'hermes-gateway');let readFiles=0;
     for(const name of fs.readdirSync(dir).filter(n=>/^[a-f0-9]{64}\.json$/.test(n))){
-      const file=path.join(dir,name),s=fs.statSync(file),old=previous.cacheVersion===3?previous.index[name]:null;let entry;
+      const file=path.join(dir,name),s=fs.statSync(file),old=previous.cacheVersion===4?previous.index[name]:null;let entry;
       if(old?.mtime===s.mtimeMs&&old.size===s.size&&(old.job || !(Date.parse(old.createdAt)>=cutoff||retainedRooms.has(old.room))))entry=old;
       else{const raw=fs.readFileSync(file,'utf8'),j=JSON.parse(raw);readFiles++;entry={mtime:s.mtimeMs,size:s.size,createdAt:j.created_at,room:j.room_key};
         if(Date.parse(j.created_at)>=cutoff||retainedRooms.has(j.room_key))entry.job=compactJob(j,file,createHash('sha256').update(raw).digest('hex'));
@@ -54,12 +54,12 @@ export async function runAudit({envFile,queueDir,outputDir,now=new Date().toISOS
     const report=reconcileReservations({jobs,trades,items,aliases,now,windowStart:new Date(cutoff).toISOString()});
     const ingress=readIngress({queueDir,previous:previous.ingress,cutoff});
     const capture=captureGaps({ingress,jobs,inventory:read(path.join(outputDir,'room-inventory.json'),null),manualCaptures:read(path.join(outputDir,'manual-live-captures.json'),[]),now});
-    report.coverage={...report.coverage,...capture.coverage};report.findings.push(...capture.gaps);
+    report.coverage={...report.coverage,...capture.coverage};report.findings.push(...capture.gaps);report.verifiedKeys.push(...capture.verifiedKeys);
     const obligations=reconcileObligations({previous:previous.obligations,findings:report.findings,verifiedKeys:report.verifiedKeys,now});
     const result={...report,obligations,io:{storedJobs:Object.keys(index).length,readFiles,ingressBytesRead:ingress.bytesRead},status:'review_required'};
     atomic(path.join(outputDir,'report.json'),result);
     const publication=publish?await publishReview({report:result,env,now,lastFingerprint:previous.publishedFingerprint,fetchImpl}):{status:'disabled',fingerprint:previous.publishedFingerprint};
-    atomic(stateFile,{cacheVersion:3,index,obligations,ingress,publishedFingerprint:publication.fingerprint});
+    atomic(stateFile,{cacheVersion:4,index,obligations,ingress,publishedFingerprint:publication.fingerprint});
     const heartbeat={status:'ok',checkedAt:now,capturedRooms:report.coverage.capturedRooms,reviewCandidates:report.findings.length,
       openObligations:obligations.filter(o=>o.state==='open').length,allKakaoRoomsVerified:false,publication};
     atomic(path.join(outputDir,'health.json'),heartbeat);return heartbeat;
