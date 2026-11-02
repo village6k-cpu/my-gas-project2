@@ -275,6 +275,7 @@ function channelErrorResponse(error) {
   const status = error?.status || ([
     'stale_lease', 'stale_room_revision', 'completion_conflict', 'receipt_conflict',
     'confirmation_operation_conflict', 'confirmation_operation_unresolved',
+    'unrecorded_reservation_inquiry',
     'operation_fence_required', 'operation_fence_mismatch'
   ].includes(error?.code) ? 409 : 400);
   return {

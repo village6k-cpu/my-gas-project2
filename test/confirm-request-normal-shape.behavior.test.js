@@ -103,6 +103,17 @@ test('unknown dates preserve the same canonical set expansion and formatting as 
   assert.ok(!partial.sheet.rows.some(r => /✅|가용\d/.test(String(r[8]) + String(r[9]))));
 });
 
+test('a contradictory return date can be left unknown without dropping approved equipment or known pickup', () => {
+  const h=harness();
+  const result=h.insert({반출일:'2026-11-02',반출시간:'11:00',반납일:'',반납시간:'23:00',일정미완성:true});
+  assert.equal(result.scheduleComplete,false);
+  assert.deepEqual(h.sheet.rows[1].slice(1,5),['2026-11-02','11:00','','23:00']);
+  assert.equal(h.sheet.rows[1][5],'카메라 세트');
+  assert.equal(h.sheet.rows[1][6],2);
+  assert.equal(h.sheet.rows[2][8],'❓ 일정 확인 필요');
+  assert.equal(h.sheet.rows[2][9],'반납일 확인 필요');
+});
+
 test('rechecking a formerly flat incomplete request expands once and retains known partial fields', () => {
   const h = harness();
   h.insert({반출일:'',반출시간:'18:00',반납일:'2026-09-13',반납시간:'',일정미완성:true});
