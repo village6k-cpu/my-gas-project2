@@ -7028,8 +7028,10 @@ const pricingNoticeTimer = process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID
       const failures=[];
       if(gatewayChannel && process.env.AI_WORKER_RESERVATION_CLARIFICATION_AUTO_SEND === '1') {
         const config=getKakaoWorkerRuntimeConfigForTransport();
-        const pending=[...await gatewayChannel.listPendingFailureNotifications(),
-          ...await gatewayChannel.listPendingApplicationFailureNotifications()];
+        // Filter compact metadata before reading any historical conversation files.
+        const scope={createdAfter:config.reservationRecoveryEnabledAfter};
+        const pending=[...await gatewayChannel.listPendingFailureNotifications(scope),
+          ...await gatewayChannel.listPendingApplicationFailureNotifications(scope)];
         for(const job of pending) {
           const notice=reservationFailureOwnerNotice(config,job);
           if(notice){await queuePricingOwnerNotice(directory,notice);failures.push({job,notice});}

@@ -69,7 +69,7 @@ type InboxModel = {
   selected: InquiryCase | null;
   emptyLabel: string;
 };
-type Snapshot = { filterKey: string; model: InboxModel; payload: InboxPayload };
+type Snapshot = { filterKey: string; after: string | null; model: InboxModel; payload: InboxPayload };
 
 const VIEW_LABELS: Record<ViewKey, string> = {
   now: "지금 할 일",
@@ -129,6 +129,8 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
   const [section, setSection] = useState<FollowUpSection>("now");
   const [status, setStatus] = useState<FilterState>({ view: "now", category: null });
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [pageCursors, setPageCursors] = useState<(string | null)[]>([null]);
+  const after = pageCursors.at(-1) || null;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   const requestIdRef = useRef(0);
@@ -156,11 +158,12 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
     };
   }, [closeMobileDetail, mobileDetailOpen]);
 
-  const load = useCallback(async (filter: FilterState) => {
+  const load = useCallback(async (filter: FilterState, after: string | null = null) => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
     const params = new URLSearchParams({ view: filter.view, limit: "200" });
     if (filter.category) params.set("category", filter.category);
+    if (after) params.set("after", after);
     try {
       const response = await authFetch(`/api/follow-ups?${params.toString()}`);
       const payload = await response.json().catch(() => null);
@@ -173,7 +176,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
         now: new Date().toISOString(),
       }) as InboxModel;
       if (requestId !== requestIdRef.current) return;
-      setSnapshot({ filterKey: currentFilterKey(filter), model, payload: payload as InboxPayload });
+      setSnapshot({ filterKey: currentFilterKey(filter), after, model, payload: payload as InboxPayload });
       const nextSelected = model.selected?.id || null;
       selectedIdRef.current = nextSelected;
       setSelectedId(nextSelected);
@@ -191,24 +194,24 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
   useEffect(() => {
     if (!paneActive) return;
     if (section === "automation") return;
-    load(status);
+    load(status, after);
     const tick = () => {
       if (typeof document !== "undefined" && document.hidden) return;
-      load(status);
+      load(status, after);
     };
     const timer = setInterval(tick, 30_000);
     const onVisible = () => {
-      if (typeof document !== "undefined" && !document.hidden) load(status);
+      if (typeof document !== "undefined" && !document.hidden) load(status, after);
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [status, load, paneActive]);
+  }, [status, after, section, load, paneActive]);
 
   const model = snapshot?.model || null;
-  const dataIsCurrent = snapshot?.filterKey === currentFilterKey(status);
+  const dataIsCurrent = snapshot?.filterKey === currentFilterKey(status) && snapshot.after === after;
   const selected = useMemo(
     () => model?.rows.find((caseItem) => caseItem.id === selectedId) || model?.rows[0] || null,
     [model, selectedId],
@@ -223,6 +226,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
   const changeFilter = useCallback((next: FilterState) => {
     setSection(next.view);
     setStatus(next);
+    setPageCursors([null]);
     setMobileDetailOpen(false);
     setUnavailable(false);
     setNotice("");
@@ -233,6 +237,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
     setUnavailable(false);
     setNotice("");
     setSection(next);
+    setPageCursors([null]);
     // status identity also owns the existing polling lifecycle, so changing to the
     // independent audit section tears down the work poll without adding a second poll.
     setStatus((current) => next === "automation" ? { ...current } : { ...current, view: next });
@@ -250,12 +255,12 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
       });
       const payload = await response.json().catch(() => null);
       if (response.status === 409) {
-        await load(status);
+        await load(status, after);
         setNotice("다른 곳에서 이미 변경되었습니다. 최신 내용으로 다시 확인해 주세요.");
         return;
       }
       if (!response.ok || !payload?.ok || !payload.item) throw new Error("mutation failed");
-      await load(status);
+      await load(status, after);
       if (action.type === "complete") {
         setMobileDetailOpen(false);
         setNotice("완료 처리했습니다.");
@@ -267,15 +272,15 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
     } finally {
       setActionBusy(false);
     }
-  }, [actionBusy, load, status, unavailable]);
+  }, [actionBusy, after, load, status, unavailable]);
 
-  const mutationDisabled = unavailable || !dataIsCurrent || actionBusy;
+  const mutationDisabled = unavailable || !dataIsCurrent || loading || actionBusy;
 
   return (
     <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 border-b border-line/70 bg-paper/95 backdrop-blur-md">
         <ViewHeader title="후속조치">
-          <button type="button" onClick={() => section === "automation" ? setAuditRefreshVersion((value) => value + 1) : load(status)} aria-label="새로고침" className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink-soft ring-1 ring-line/70 ${loading ? "animate-spin" : ""}`}>
+          <button type="button" onClick={() => section === "automation" ? setAuditRefreshVersion((value) => value + 1) : load(status, after)} aria-label="새로고침" className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink-soft ring-1 ring-line/70 ${loading ? "animate-spin" : ""}`}>
             <Refresh className="h-4 w-4" />
           </button>
         </ViewHeader>
@@ -305,6 +310,15 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
       </header>
 
       {section === "automation" ? <AutomationAuditView active={paneActive && section === "automation"} refreshVersion={auditRefreshVersion} /> : <main className="flex-1 p-3 pb-24 lg:p-4">
+        {(pageCursors.length > 1 || snapshot?.payload.nextCursor) && (
+          <nav aria-label="확인 업무 페이지" className="mb-3 flex items-center justify-between gap-2">
+            <button type="button" disabled={pageCursors.length <= 1 || loading || actionBusy} className="tap rounded-lg bg-white px-3 py-2 text-sm font-bold ring-1 ring-line disabled:opacity-40"
+              onClick={() => {selectedIdRef.current=null;setMobileDetailOpen(false);setPageCursors(current=>current.slice(0,-1));}}>이전 목록</button>
+            <span className="text-sm text-ink-mute">{pageCursors.length}쪽</span>
+            <button type="button" disabled={!snapshot?.payload.nextCursor || !dataIsCurrent || loading || unavailable || actionBusy} className="tap rounded-lg bg-white px-3 py-2 text-sm font-bold ring-1 ring-line disabled:opacity-40"
+              onClick={() => {const next=snapshot?.payload.nextCursor;if(next){selectedIdRef.current=null;setMobileDetailOpen(false);setPageCursors(current=>current.at(-1)===next?current:[...current,next]);}}}>다음 목록</button>
+          </nav>
+        )}
         {notice && (
           <div className={`mb-3 rounded-xl px-3.5 py-2.5 text-[13px] font-semibold ring-1 ${unavailable ? "bg-attention-bg text-attention-fg ring-attention-ring" : "bg-checkin-bg text-checkin-fg ring-checkin-ring"}`}>
             {notice}
@@ -324,7 +338,7 @@ export function FollowUpView({ active: paneActive = true }: { active?: boolean }
               {model.rows.map((caseItem) => <CaseRow key={caseItem.id} caseItem={caseItem} selected={selected?.id === caseItem.id} onSelect={() => selectRow(caseItem.id)} />)}
               {(snapshot?.payload.omittedCount ?? 0) > 0 && (
                 <div className="rounded-xl border border-line bg-white px-3 py-2 text-center text-[12px] font-semibold text-ink-mute">
-                  문의가 더 있습니다. 처리하면 다음 항목이 이어서 표시됩니다.
+                  남은 문의 {snapshot?.payload.omittedCount}건은 ‘다음 목록’에서 확인할 수 있습니다.
                 </div>
               )}
             </section>
