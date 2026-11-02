@@ -957,7 +957,7 @@ export function buildKakaoAutomationAuditEvents({
       job_id:durableJob.job_id,room_revision:durableJob.room_revision,operation_id:null,receipt_id:null,
       occurred_at:pricingDocument.occurredAt,effect_type:'document_send',action_type:'send',
       outcome:sent?'success':'partial_success',customer_label:customerLabel,target_type:'document',target_id:pricingDocument.fileId || null,
-      summary:`자동 견적서 ${pricing.totalVatIncluded.toLocaleString('ko-KR')}원 · ${pricing.discountType} · ${sent?'발송 완료':'발송 결과 확인 필요'}`,
+      summary:`자동 ${pricingDocument.documentType==='statement'?'거래명세서':'견적서'} ${pricing.totalVatIncluded.toLocaleString('ko-KR')}원 · ${pricing.discountType} · ${sent?'발송 완료':'발송 결과 확인 필요'}`,
       change_items:[{field:'equipment',before:null,after:pricing.items.map(item=>`${item.name} ×${item.qty} · 단가 ${item.price}원`).join(', ')},
         ...(sent?[{field:'document',before:null,after:pricingDocumentUrl(pricingDocument.pdfUrl)}]:[])],outbound_text:null,
       evidence:{schema:pricingDocument.schema,status:sent?'sent':'unconfirmed',readback:Boolean(sent)},

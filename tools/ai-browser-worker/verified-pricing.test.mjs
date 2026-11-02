@@ -1,9 +1,29 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {automaticQuoteRequest,verifiedPricingIssue,verifiedPricingFreshJob,sendAutomaticPricingDocument,verifiedPricingConfigured,completeVerifiedPricingWork} from './verified-pricing.mjs';
+import {automaticQuoteRequest,automaticStatementRequest,verifiedPricingIssue,verifiedPricingFreshJob,sendAutomaticPricingDocument,verifiedPricingConfigured,completeVerifiedPricingWork} from './verified-pricing.mjs';
 const quote={source:'catalog',customer_name:'테스트',phone:'01012345678',discount_type:'학생',start_date:'2026-11-03',start_time:'10:00',end_date:'2026-11-04',end_time:'10:00',items:[{name:'렌즈',quantity:1}]};
 const decision={customer:{name:'테스트'},price_quote:quote,reply_decision:{safetyClass:'sensitive_commitment',grounding:'authoritative_sheet',requiresRag:false}};
 const verification={complete:true,totalVatIncluded:7700,unresolved:[],calculations:[{discountType:'학생',customerDiscountSource:'conversation',pricedItems:[{name:'렌즈',price:10000,qty:1}],payment:{days:1}}]};
 const job={jobId:'event-one',roomKey:'room-one',roomRevision:2};
+const statementDecision={...decision,price_quote:{source:'trade',id:'261024-007'},statement_request:{trade_id:'261024-007',booking_customer_name:'테스트'}};
+const statementVerification={...verification,calculations:[{...verification.calculations[0],tradeId:'261024-007',customer:'테스트',phone:'01012345678',period:'2026-11-03 10:00 ~ 2026-11-04 10:00'}]};
+test('statements use the exact registered trade and reject an unauthorized delegate',()=>{
+ const request=automaticStatementRequest({decision:statementDecision,verification:statementVerification,job});assert.equal(request.action,'prepareAutomaticStatement');assert.equal(request.expectedTotal,7700);
+ const delegated={...statementDecision,customer:{name:'대리 요청자'}};
+ assert.throws(()=>automaticStatementRequest({decision:delegated,verification:statementVerification,job}),/recipient_authorization/);
+ const config={statementRecipientAuthorizations:[{tradeId:'261024-007',roomKey:'room-one',requesterName:'대리 요청자',bookingCustomerName:'테스트'}]};
+ assert.equal(automaticStatementRequest({config,decision:delegated,verification:statementVerification,job}).id,'261024-007');
+ assert.throws(()=>automaticStatementRequest({config,decision:delegated,verification:statementVerification,job:{...job,roomKey:'other-room'}}),/recipient_authorization/);
+ assert.throws(()=>automaticStatementRequest({decision:statementDecision,verification:{...statementVerification,calculations:[{...statementVerification.calculations[0],tradeId:'261024-008'}]},job}),/trade_mismatch/);
+});
+test('a prepared statement PDF does not count as sent until Kakao readback',async()=>{
+ const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid',documentApiKey:'test'},decision:statementDecision,verification:statementVerification,job,fetchImpl:async()=>({ok:true,json:async()=>({status:'PREPARED',documentType:'statement',tradeID:'261024-007',pdfUrl:'https://drive.google.com/file/d/statement-test/view',totalVatIncluded:7700})})});
+ assert.equal(receipt.documentType,'statement');assert.equal(receipt.deliveryConfirmed,false);
+ const work={type:'contract_document',title:'거래명세서 발송',requiresHumanAction:true},other={type:'contract_document',title:'계약서 수정',requiresHumanAction:true};
+ const prepared={decision:{...statementDecision,follow_up_items:[work,other]},availabilityAwareRows:[work,other]};
+ assert.equal(completeVerifiedPricingWork(prepared,{verifiedPricing:true,pricingDocumentReceipt:receipt}),prepared);
+ const completed=completeVerifiedPricingWork(prepared,{verifiedPricing:true,pricingDocumentReceipt:{...receipt,deliveryConfirmed:true}});
+ assert.deepEqual(completed.decision.follow_up_items,[other]);assert.deepEqual(completed.availabilityAwareRows,[other]);
+});
 test('only explicitly enabled price answers can use scoped automatic delivery',()=>{
  assert.equal(verifiedPricingConfigured({verifiedPricingAutoSendEnabled:true},decision),true);
  assert.equal(verifiedPricingConfigured({},decision),false);
@@ -62,6 +82,12 @@ test('first AI response sends a verified quotation and price with general automa
   sendKakaoMessage:async text=>{calls.push('answer');return{sent:true,readback_confirmed:true,observed_reply_hash:autoReplyTextHash(text)}}
  }});
  assert.equal(result.sent,true,JSON.stringify(result));assert.equal(result.pricingDocumentReceipt.deliveryConfirmed,true);assert.ok(result.readbackReceipt);assert.ok(calls.indexOf('fresh-price')<calls.indexOf('pdf'));assert.ok(calls.indexOf('pdf')<calls.indexOf('answer'));
+ const statement=await maybeAutoSendReply({config,decision:{...currentDecision,...statementDecision,reply_decision:currentDecision.reply_decision},job:{...currentJob,jobId:'statement-job'},dependencies:{
+  buildAuthoritativePriceVerification:async()=>statementVerification,assertFreshBeforeSend:async()=>{},
+  sendAutomaticPricingDocument:async()=>({schema:'village-auto-pricing-document-receipt/v1',documentType:'statement',status:'prepared',deliveryConfirmed:false,pdfUrl:'https://drive.google.com/file/d/statement-test/view'}),
+  sendKakaoMessage:async text=>{assert.match(text,/261024-007/);assert.match(text,/거래명세서 PDF: https/);return{sent:true,readback_confirmed:true,observed_reply_hash:autoReplyTextHash(text)}}
+ }});
+ assert.equal(statement.sent,true);assert.equal(statement.pricingDocumentReceipt.deliveryConfirmed,true);assert.equal(statement.pricingDocumentReceipt.deliveryChannel,'kakao_link');
  const stale=await maybeAutoSendReply({config:{...config,verifiedPricingEnabledAfter:new Date(now.getTime()+60000).toISOString()},decision:currentDecision,job:currentJob});assert.equal(stale.sent,false);assert.equal(stale.gate.reason,'pricing_before_activation_cutoff');
  }finally{await fs.rm(dir,{recursive:true,force:true})}
 });

@@ -28,7 +28,25 @@ export function verifiedPricingIssue(verification = {}, quote = {}) {
 }
 
 export function pricingDocumentRequested(decision = {}) {
-  return (decision.follow_up_items || []).some(item => item.type === 'quote_send');
+  return Boolean(decision.statement_request) || (decision.follow_up_items || []).some(item => item.type === 'quote_send');
+}
+
+export function automaticStatementRequest({config = {}, decision, verification, job}) {
+  const quote=decision.price_quote, request=decision.statement_request;
+  if(verifiedPricingIssue(verification,quote))throw new Error('statement_price_incomplete');
+  const calculation=verification.calculations[0];
+  if(quote.source!=='trade' || !/^\d{6}-\d{3}$/.test(request?.trade_id || '') || quote.id!==request.trade_id
+    || calculation.tradeId!==request.trade_id || request.booking_customer_name!==calculation.customer)throw new Error('statement_trade_mismatch');
+  const requester=decision.customer?.name, room=job.roomKey || job.room_key;
+  const delegated=(config.statementRecipientAuthorizations || []).some(entry=>entry.tradeId===request.trade_id
+    && entry.roomKey===room && entry.requesterName===requester && entry.bookingCustomerName===calculation.customer);
+  if(requester!==calculation.customer && !delegated)throw new Error('statement_recipient_authorization_required');
+  const phone=String(calculation.phone || '').replace(/\D/g,'');
+  if(!/^01[016789]\d{7,8}$/.test(phone) || !calculation.period)throw new Error('statement_identity_incomplete');
+  const body={action:'prepareAutomaticStatement',id:request.trade_id,expectedTotal:verification.totalVatIncluded,
+    expectedCustomerName:calculation.customer,expectedPhone:phone,expectedPeriod:calculation.period,
+    expectedDiscountType:calculation.discountType,expectedItems:calculation.pricedItems.map(item=>({품목:item.name,수량:item.qty,일수:calculation.payment.days,단가:item.price}))};
+  return {...body,operationId:createHash('sha256').update(JSON.stringify({event:job.sourceEventKey || job.eventHash || job.jobId || job.id,room,revision:job.roomRevision || job.room_revision,body})).digest('hex')};
 }
 
 export function automaticQuoteRequest({ decision, verification, job }) {
@@ -56,18 +74,21 @@ export function automaticQuoteRequest({ decision, verification, job }) {
 }
 
 export async function sendAutomaticPricingDocument({ config, decision, verification, job, assertFresh, fetchImpl = fetch }) {
-  const body = automaticQuoteRequest({ decision, verification, job });
+  const statement=Boolean(decision.statement_request);
+  const body = statement ? automaticStatementRequest({config,decision,verification,job}) : automaticQuoteRequest({ decision, verification, job });
   if (!config.documentApiBaseUrl || !config.documentApiKey) throw new Error('quote_delivery_not_configured');
   await assertFresh?.();
   const response = await fetchImpl(config.documentApiBaseUrl, {method:'POST',headers:{'content-type':'application/json'},
     body:JSON.stringify({...body,key:config.documentApiKey}),signal:AbortSignal.timeout(240000)});
   const result = await response.json();
-  if (!response.ok || result.status !== 'OK' || result.deliveryConfirmed !== true
-    || result.totalVatIncluded !== verification.totalVatIncluded || !result.pdfUrl) {
+  if (!response.ok || (statement ? result.status!=='PREPARED' || result.documentType!=='statement' || result.tradeID!==body.id
+      : result.status !== 'OK' || result.deliveryConfirmed !== true)
+    || result.totalVatIncluded !== verification.totalVatIncluded || !pricingDocumentUrl(result.pdfUrl)) {
     const error = new Error('quote_delivery_not_confirmed'); error.result = result; throw error;
   }
   return {schema:'village-auto-pricing-document-receipt/v1',operationId:body.operationId,
-    status:'sent',deliveryConfirmed:true,pdfUrl:result.pdfUrl,fileId:result.fileId,
+    documentType:statement?'statement':'quote',...(statement?{tradeId:body.id}:{}),
+    status:statement?'prepared':'sent',deliveryConfirmed:!statement,pdfUrl:result.pdfUrl,fileId:result.fileId,
     totalVatIncluded:result.totalVatIncluded,discountType:verification.calculations[0].discountType,
     occurredAt:new Date().toISOString()};
 }
@@ -89,10 +110,13 @@ export function completeVerifiedPricingWork(prepared, result) {
   if (!result?.verifiedPricing) return prepared;
   const completed = new Set();
   if (result.sent === true && result.readbackReceipt) {completed.add('reply_needed');completed.add('price_review');}
-  if (result.pricingDocumentReceipt?.deliveryConfirmed === true) completed.add('quote_send');
-  if (!completed.size) return prepared;
-  const remaining=(prepared.decision.follow_up_items || []).filter(item=>!completed.has(item.type));
+  if (result.pricingDocumentReceipt?.deliveryConfirmed === true && result.pricingDocumentReceipt.documentType!=='statement') completed.add('quote_send');
+  const statementDone=result.pricingDocumentReceipt?.deliveryConfirmed===true && result.pricingDocumentReceipt.documentType==='statement';
+  if (!completed.size && !statementDone) return prepared;
+  const fulfilled=item=>completed.has(item.type) || (statementDone && item.type==='contract_document'
+    && /거래명세|statement/i.test([item.title,item.summary,item.taskKey,item.task_key,item.payload?.task_key].join(' ')));
+  const remaining=(prepared.decision.follow_up_items || []).filter(item=>!fulfilled(item));
   return {...prepared,decision:{...prepared.decision,follow_up_items:remaining,
     reply_decision:{...prepared.decision.reply_decision,shouldCreateTask:remaining.some(item=>item.requiresHumanAction===true)}},
-    availabilityAwareRows:(prepared.availabilityAwareRows || []).filter(row=>!completed.has(row.type))};
+    availabilityAwareRows:(prepared.availabilityAwareRows || []).filter(row=>!fulfilled(row))};
 }

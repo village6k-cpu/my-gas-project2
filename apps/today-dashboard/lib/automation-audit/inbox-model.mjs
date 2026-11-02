@@ -176,7 +176,7 @@ function safeItem(value) {
     sourceMessageAt: timestamp(value.sourceMessageAt, true),
     historicalImport: value.historicalImport,
     occurredLabel: formatKst(occurredAt),
-    effectLabel: value.effectType === 'auto_reply' && summary.startsWith('가격 안내 ') ? '가격 자동 안내' : value.effectType === 'document_send' && summary.startsWith('자동 견적서 ') ? '견적서 자동 발송' : EFFECT_LABELS[value.effectType],
+    effectLabel: value.effectType === 'auto_reply' && summary.startsWith('가격 안내 ') ? '가격 자동 안내' : value.effectType === 'document_send' && summary.startsWith('자동 거래명세서 ') ? '거래명세서 자동 발송' : value.effectType === 'document_send' && summary.startsWith('자동 견적서 ') ? '견적서 자동 발송' : EFFECT_LABELS[value.effectType],
     actionLabel: ACTION_LABELS[value.actionType],
     outcomeLabel,
     outcomeIcon,

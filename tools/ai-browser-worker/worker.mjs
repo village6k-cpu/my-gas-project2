@@ -767,8 +767,9 @@ ${INVENTORY_JUDGMENT}
 - A registered rejection with error.details.code=REGISTERED_CORRECTION_PREFLIGHT_REJECTED and noMutationPerformed=true proves this attempt changed nothing. Use the reason plus fresh village_read to correct the typed input yourself, then call the registered tool again within this turn (at most two input corrections). The same payload only returns its old receipt; change it only with grounded evidence. Do not turn an input error into a routine owner task when you can resolve it.
 - Any other blocked/failed result, partial_success, contradictory readback, or uncertain transport remains no-send owner review; never replay an uncertain or already-applied operation. Successful final reconciliation must match the corrected operation and current schedule.
 - INITIAL AUTO PRICING: ${promptPolicyConfig?.prompt?.automatic_pricing_policy || "Owner price authorization unavailable; do not auto-send prices."}
-- Protocol: finish verified prices/quotes in this first AI turn without owner handoff. Use full price_quote.source="catalog", replyMode="auto_send", safetyClass="sensitive_commitment", grounding="authoritative_sheet", requiresRag=false, owner_review_required=false. State exact VAT-inclusive total/discount; no availability/delivery claim. A requested PDF remains one quote_send follow_up_item as HOST EXECUTION INTENT: host rechecks prices, sends, audits and removes completed work. Do not also call village_document_send. Missing/zero prices, unknown discounts or conflicting earlier amounts require focused owner review; never drop items or invent discounts. Verified sends are recorded and reported, not assigned as approval work.
-- Outside initial verified catalog pricing, registered-trade documents use village_document_send with exact trade_id. Use tax_mode="supply_only" only for explicit VAT-exclusive requests; otherwise "vat_included".
+${(() => {try {const entries=JSON.parse(process.env.AI_WORKER_STATEMENT_RECIPIENT_AUTHORIZATIONS || '[]');const current=Array.isArray(entries)?entries.filter(entry=>entry.roomKey===(job.roomKey || job.room_key)):[];return current.length ? '- Owner-confirmed statement recipient authorizations for THIS ROOM: '+JSON.stringify(current)+'\n' : '';}catch{return '';}})()}- For statements, resolve the exact registered trade (including the booking name in the customer request), read kind=quote/source=trade, and set FINAL_JSON.statement_request={trade_id,booking_customer_name}, price_quote={source:"trade",id:trade_id}. Keep one contract_document follow-up titled 거래명세서 as host execution intent. Host verifies the ledger and sends the official PDF link in this room; never substitute an estimate or claim delivery early. The requester must match the booking customer or an exact owner-approved recipient authorization; otherwise ask who may receive it. Reply text includes trade ID and verified VAT total. Do not call village_document_send for statements.
+- Pricing protocol (statements use the trade context above): finish verified prices/quotes in this first AI turn without owner handoff. Use full price_quote.source="catalog", replyMode="auto_send", safetyClass="sensitive_commitment", grounding="authoritative_sheet", requiresRag=false, owner_review_required=false. State exact VAT-inclusive total/discount; no availability/delivery claim. A requested PDF remains one quote_send follow_up_item as HOST EXECUTION INTENT: host rechecks prices, sends, audits and removes completed work. Do not also call village_document_send. Missing/zero prices, unknown discounts or conflicting earlier amounts require focused owner review; never drop items or invent discounts. Verified sends are recorded and reported, not assigned as approval work.
+- Other registered-trade quote sends use village_document_send with exact trade_id. Use tax_mode="supply_only" only for explicit VAT-exclusive requests; otherwise "vat_included".
 - A successful correlated village_document_send receipt is the only delivery authority. Do not promise that a quote was or will be sent without that receipt; on tool failure use draft_only + owner review.
 - A pending quote_send task is not a delivery claim. Preserve it when document prerequisites are missing, while answering independently grounded price/policy questions where possible. State the specific unresolved prerequisite; do not silently replace a requested document with an incomplete price or a generic acknowledgment. Do not omit equipment or assume a missing price is free to make a quote complete.
 - A registration receipt proves registration only. If a later customer also requested a quote document, retain that exact open document follow-up after registration success; do not discard it or mark it delivered. Follow the single-operation receipt boundary and do not replay registration to generate a document.
@@ -5060,6 +5061,7 @@ export function requireConfig() {
     verifiedPricingAutoSendEnabled: process.env.AI_WORKER_VERIFIED_PRICING_AUTO_SEND === '1',
     verifiedPricingEnabledAfter: process.env.AI_WORKER_VERIFIED_PRICING_ENABLED_AFTER || '',
     pricingOwnerSlackUserId: process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID || '',
+    statementRecipientAuthorizations: (()=>{try{const value=JSON.parse(process.env.AI_WORKER_STATEMENT_RECIPIENT_AUTHORIZATIONS || '[]');return Array.isArray(value)?value:[];}catch{return [];}})(),
     documentApiBaseUrl: process.env.VILLAGE_DOCUMENT_API_URL || 'https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec',
     documentApiKey: process.env.VILLAGE_DOCUMENT_API_KEY || process.env.VILLAGE_OPS_KEY || '',
     autoSendLogPath: process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
@@ -8841,6 +8843,7 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
     return result;
   }
+  if(decision.statement_request && !gate.text.includes(decision.statement_request.trade_id))gate={...gate,text:`거래 ${decision.statement_request.trade_id}\n${gate.text}`};
   const dedupeKey = buildAutoReplyDedupeKey({ decision, job, replyText: gate.text });
   if (hasRecentSentAutoReply(config, dedupeKey)) {
     const result = { attempted: false, sent: false, gate: { allowed: false, reason: 'duplicate_recent_auto_reply' } };
@@ -8888,10 +8891,11 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
         config, decision, verification:priceVerification, job, assertFresh:dependencies.assertFreshBeforeSend,
         fetchImpl:config.fetchImpl || fetch
       });
+      if(pricingDocumentReceipt.documentType==='statement')gate={...gate,text:gate.text+'\n거래명세서 PDF: '+pricingDocumentReceipt.pdfUrl};
     } catch (error) {
       return {attempted:false,sent:false,text:gate.text,priceVerification,verifiedPricing:true,
-        pricingDocumentFailure:{schema:'village-auto-pricing-document-receipt/v1',status:'unconfirmed',occurredAt:new Date().toISOString(),error:error.message},
-        gate:{allowed:false,reason:'quote_delivery_not_confirmed'}};
+        pricingDocumentFailure:{schema:'village-auto-pricing-document-receipt/v1',documentType:decision.statement_request?'statement':'quote',status:'unconfirmed',occurredAt:new Date().toISOString(),error:error.message},
+        gate:{allowed:false,reason:decision.statement_request && /^[a-z_]{1,100}$/.test(error.message)?error.message:'quote_delivery_not_confirmed'}};
     }
   }
   if (pricingDocumentReceipt) {
@@ -8930,6 +8934,8 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
       readbackReceipt = null;
     }
   }
+  if(pricingDocumentReceipt?.documentType==='statement' && readbackReceipt)pricingDocumentReceipt={...pricingDocumentReceipt,
+    status:'sent',deliveryConfirmed:true,deliveryChannel:'kakao_link',occurredAt:new Date().toISOString()};
   const result = {
     attempted: true,
     sent: Boolean(sendResult.sent),

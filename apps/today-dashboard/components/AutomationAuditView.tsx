@@ -186,7 +186,7 @@ export function AutomationAuditView({ active, refreshVersion = 0 }: { active: bo
 
   return (
     <main className="flex-1 p-3 pb-24 lg:p-4">
-      <p className="mb-3 text-sm text-ink-soft">AI 가격 안내·견적서 발송은 고객별 금액·할인·보낸 내용과 실제 발송 결과로 확인합니다. 완료 내역은 승인 업무가 아닙니다.</p>
+      <p className="mb-3 text-sm text-ink-soft">AI 가격 안내·견적서·거래명세서 발송은 고객별 금액·할인·보낸 내용과 실제 발송 결과로 확인합니다. 완료 내역은 승인 업무가 아닙니다.</p>
       <section aria-label="자동처리 기록 필터" className="mb-3 rounded-xl bg-white p-3 ring-1 ring-line/70">
         <div className="flex flex-wrap gap-1.5">
           {AUDIT_FILTER_OPTIONS.ranges.map(({ value, label }) => (
