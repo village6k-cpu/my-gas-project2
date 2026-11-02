@@ -7,7 +7,7 @@ const source = fs.readFileSync(require.resolve('../taxInvoiceWorkspace.js'), 'ut
 const clone = x => JSON.parse(JSON.stringify(x));
 const buyer = ['123-45-67890', '빌리지 고객사', '대표자', 'invoice@example.com', '서울', '서비스', '영상'];
 const ledger = () => ['2026-11-02', '고객', '', '', '261102-001', '01012345678', buyer[1], buyer[0], '43,890', '계좌이체(VAT포함)', '세금계산서', '미발행', '미입금', '', ''];
-const contract = () => ['261102-001', '고객', '', '', '2026-11-02 10:00', '2026-11-03 00:00', '', '', '', '예약'];
+const contract = () => ['261102-001', '고객', '', '', '2026-11-02', '10:00', '2026-11-03', '00:00', '', '예약'];
 function harness(options = {}) {
   const rows = options.rows || [ledger()], contracts = options.contracts || [contract()], master = options.buyers || [buyer];
   const props = new Map(), calls = []; let writes = 0;
@@ -109,3 +109,27 @@ test('batch workspace keeps independently prepared buyer for each work and detec
   assert.equal(after.items[0].status, 'needs_info'); assert.equal(after.items[1].status, 'needs_info');
 });
 
+
+test('actual E:H columns combine the checkout and return dates and clocks in Korea time', () => {
+  const h = harness(), r = h.read();
+  assert.equal(r.checkoutAt, '2026-11-02T01:00:00.000Z');
+  assert.equal(r.checkinAt, '2026-11-02T15:00:00.000Z');
+});
+test('midnight and explicit 24:00 represent the same instant across month and year boundaries', () => {
+  const h = harness();
+  for (const [day, next] of [['2026-10-31','2026-11-01'],['2026-12-31','2027-01-01']]) {
+    assert.equal(h.context.invoiceWorkspaceDateTime_(day, '24:00'), h.context.invoiceWorkspaceDateTime_(next, '00:00'));
+  }
+});
+test('missing clocks and impossible dates never default to an invented time or allow issuance', () => {
+  for(const overrides of [{5:''},{6:'2026-02-30'},{7:'24:01'}]) {
+    const h=harness({contracts:[Object.assign(contract(),overrides)]}),r=h.read();
+    assert.equal(r.canIssue,false);assert.match(r.missing.join(' '),/날짜·시간/);
+    assert.equal(h.context.issueTaxInvoiceWorkspace_(h.request(r)).success,false);assert.equal(h.calls.length,0);
+  }
+});
+test('a return-clock change invalidates the reviewed invoice fingerprint', () => {
+  const h=harness(),r=h.read();h.contracts[0][7]='01:00';
+  const out=h.context.issueTaxInvoiceWorkspace_({...h.request(r),dryRun:true});
+  assert.equal(out.code,'STALE_INVOICE');assert.equal(h.calls.length,0);assert.equal(h.writes,0);
+});
