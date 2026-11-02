@@ -2,7 +2,7 @@
 import {refreshKakaoConversationWithoutDraft} from './stale-conversation-refresh.mjs';
 import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
-import {reservationClarificationConfigured, freshReservationJob} from './reservation-intake-guard.mjs';
+import {reservationClarificationConfigured, freshReservationJob, RESERVATION_DATE_POLICY, RESERVATION_PRIORITY_POLICY} from './reservation-intake-guard.mjs';
 import { completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, sendAutomaticPricingDocument } from './verified-pricing.mjs';
 import fs from 'node:fs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
@@ -735,7 +735,10 @@ export function buildHermesPrompt(job, options = {}) {
 - A successful inquiry receipt can require schedule review while its independent, complete price answer is still auto-sendable with price_quote. Keep the schedule review follow-up, but do not claim availability or registration in the price reply. Failed/partial mutations still require no-send owner review.
 - INQUIRY LIFECYCLE에 따라 genuinely new 또는 아직 미반영인 변경 문의만 village_confirmation_request로 접수한다. 이미 처리된 예약/품목, 거절된 요청, 단순 보유 질문은 입력하지 않는다.
 - 일정은 먼저 대화/기존 예약/명시된 1회차 운영 기준으로 해석한다. 그래도 모르는 필드만 빈칸, plan_complete=false로 접수한다.
-- 반납일이 반출일보다 앞서는 등 일정이 모순되어도 최초 접수를 건너뛰지 않는다. 확인된 고객·장비·반출 일시는 유지하고 모순된 반납일만 빈칸으로 village_confirmation_request를 먼저 실행한다. 직원의 예약 승인 뒤 감사·방문 메시지가 왔어도 미등록 문의는 유효하다. 등록 불가와 접수 불가를 혼동하지 마라. 신규 미반영 장비 문의의 native receipt 없는 FINAL_JSON은 완료되지 않고 같은 근거로 재처리된다.
+- 일정 오타는 전체 대화의 의미로 먼저 해석한다. 근거상 유일하게 명백한 정정은 원문과 정정 이유를 보존해 반영한다. 여러 해석이 가능한 일정만 해당 필드를 공란으로 최초 접수한 뒤 고객에게 바로 확인한다. 아래 RESERVATION DATE INTERPRETATION과 RESERVATION PRIORITY AND ALTERNATIVES를 준수한다.
+${RESERVATION_DATE_POLICY}
+${RESERVATION_PRIORITY_POLICY}
+- 직원의 예약 승인 뒤 감사·방문 메시지가 왔어도 미등록 문의는 유효하다. 등록 불가와 접수 불가를 혼동하지 마라. 신규 미반영 장비 문의의 native receipt 없는 FINAL_JSON은 완료되지 않고 같은 근거로 재처리된다.
 - Verify unchanged existing RQs with read-only lookup. Reserve village_confirmation_request for the chosen inquiry write; never consume its operation lease to pre-verify.
 - A pending-RQ addition with typed staff_confirmed_mutation target_scope="pending_request" + kind="equipment_add" requires one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only". candidate.equipment and reservation_inquiry.equipment_requested contain only the additions in the same order; mutation.desired_after is the full final plan. date_change=null when unchanged. Use village_read for the baseline, never the mutating tool as a pre-read.
 - Typed staff_confirmed_mutation target_scope="pending_request" + kind="equipment_remove"/"equipment_replace"/"equipment_quantity_change": one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ.
