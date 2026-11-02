@@ -68,7 +68,7 @@ scripts/kakao-automation status
 완료 기록은 헤이빌리 **후속조치 → 자동처리**에서 고객·품목·금액·할인·PDF·결과로 확인합니다.
 거래명세서는 `statement_request={trade_id,booking_customer_name}`와 해당 거래의
 `price_quote={source:"trade",id:trade_id}`를 사용합니다. 기존 거래의 품목·기간·할인·장부 합계가
-일치해야 공식 PDF를 준비하며, 현재 카카오 대화에서 PDF 링크 전송을 다시 확인한 뒤 완료 처리합니다.
+일치해야 공식 PDF를 준비하며, 원본을 비공개로 유지하고 현재 카카오 대화에서 PDF 파일 첨부 전송을 확인한 뒤 완료 처리합니다. 공개 Drive 링크는 만들지 않습니다.
 예약자와 다른 요청자의 수령 권한은 서버의 `AI_WORKER_STATEMENT_RECIPIENT_AUTHORIZATIONS`
 JSON 배열에 승인된 `{tradeId,roomKey,requesterName,bookingCustomerName}` 조합만 등록합니다.
 결제·증빙 상태는 변경하지 않으며 세금계산서는 이 자동 발송 권한에 포함하지 않습니다.

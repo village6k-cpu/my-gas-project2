@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 
 export function isVerifiedPricingReply(decision = {}) {
   const reply = decision.reply_decision || {};
@@ -83,12 +86,24 @@ export async function sendAutomaticPricingDocument({ config, decision, verificat
   const result = await response.json();
   if (!response.ok || (statement ? result.status!=='PREPARED' || result.documentType!=='statement' || result.tradeID!==body.id
       : result.status !== 'OK' || result.deliveryConfirmed !== true)
-    || result.totalVatIncluded !== verification.totalVatIncluded || !pricingDocumentUrl(result.pdfUrl)) {
+    || result.totalVatIncluded !== verification.totalVatIncluded || (statement
+      ? result.documentAccess!=='private' || result.mimeType!=='application/pdf' || !pricingDocumentUrl(result.ownerUrl)
+      : !pricingDocumentUrl(result.pdfUrl))) {
     const error = new Error('quote_delivery_not_confirmed'); error.result = result; throw error;
+  }
+  let attachment={};
+  if(statement){
+    const bytes=Buffer.from(String(result.pdfBase64 || ''),'base64');
+    if(bytes.length<30 || bytes.length>10*1024*1024 || bytes.subarray(0,5).toString()!=='%PDF-' || createHash('sha256').update(bytes).digest('hex')!==result.pdfSha256)throw new Error('statement_pdf_integrity_failed');
+    const directory=path.join(config.privateStatementDirectory || path.join(os.tmpdir(),'village-private-statements'),body.operationId);
+    fs.mkdirSync(directory,{recursive:true,mode:0o700});
+    const fileName=body.id+'_거래명세서.pdf',attachmentPath=path.join(directory,fileName);
+    fs.writeFileSync(attachmentPath,bytes,{mode:0o600});
+    attachment={privateFile:true,fileName,attachmentPaths:[attachmentPath],ownerDocumentUrl:result.ownerUrl,pdfSha256:result.pdfSha256};
   }
   return {schema:'village-auto-pricing-document-receipt/v1',operationId:body.operationId,
     documentType:statement?'statement':'quote',...(statement?{tradeId:body.id}:{}),
-    status:statement?'prepared':'sent',deliveryConfirmed:!statement,pdfUrl:result.pdfUrl,fileId:result.fileId,
+    status:statement?'prepared':'sent',deliveryConfirmed:!statement,...(!statement?{pdfUrl:result.pdfUrl}:attachment),fileId:result.fileId,
     totalVatIncluded:result.totalVatIncluded,discountType:verification.calculations[0].discountType,
     occurredAt:new Date().toISOString()};
 }
