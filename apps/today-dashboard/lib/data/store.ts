@@ -4729,7 +4729,7 @@ export async function setBillingCompany(tradeId: string, billingCompany: string)
   }
 }
 // 확인요청 M열·계약마스터 K열과 동일한 허용값 — 카드의 할인유형 셀렉터가 사용
-export const DISCOUNT_TYPE_OPTIONS = ["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"];
+export const DISCOUNT_TYPE_OPTIONS = ["일반", "학생", "학생소개", "개인사업자/프리랜서", "단골", "제휴"];
 
 type DiscountTypeOutboxEntry = {
   tradeId: string;

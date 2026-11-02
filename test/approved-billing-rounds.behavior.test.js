@@ -41,7 +41,7 @@ test('source-bound approved half rounds survive worker, Windows and GAS normaliz
   }
 });
 
-function generator({ note = marker, rounds = 2.5, endTime = period.endTime, pendingPrice = false, rawTimeCells = false } = {}) {
+function generator({ note = marker, rounds = 2.5, endTime = period.endTime, pendingPrice = false, rawTimeCells = false, discountType = "일반" } = {}) {
   const ctx = context(), cells = new Map(), formulas = new Map(), events = [];
   function range(row, col, height = 1, width = 1) {
     if (typeof row === 'string') { const m = row.match(/^([A-Z]+)(\d+)$/); col = [...m[1]].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0); row = Number(m[2]); }
@@ -58,7 +58,7 @@ function generator({ note = marker, rounds = 2.5, endTime = period.endTime, pend
     return r;
   }
   const ws = { getRange: range, getLastRow: () => 50, getLastColumn: () => 13 };
-  const row = ['261101-001', '합성고객', 'synthetic-contact', '', period.startDate, period.startTime, period.endDate, endTime, rounds, '예약', '일반', note];
+  const row = ['261101-001', '합성고객', 'synthetic-contact', '', period.startDate, period.startTime, period.endDate, endTime, rounds, '예약', discountType, note];
   const displayRow = row.map(String);
   if (rawTimeCells) { row[5] = new Date('1899-12-30T11:27:52Z'); row[7] = new Date('1899-12-29T17:27:52Z'); }
   const item = ['261101-001-01', '261101-001', '', '카메라', 2, period.startDate, period.startTime, period.endDate, endTime, '대기', pendingPrice ? '[단가확인필요]' : '', pendingPrice ? '' : 10000];
@@ -252,4 +252,12 @@ test('worker never acknowledges a registered trade that omitted or changed appro
     assert.equal(posts, 1);
   }
   }
+});
+
+
+test('student introduction discounts survive initial generation and regeneration without reducing catalog prices',()=>{
+ const h=generator({note:'이번 소개5% 승인',rounds:1,discountType:'학생소개'});h.run();h.run();
+ assert.equal(h.cells.get('40:3'),'학생30%');assert.equal(h.cells.get('41:3'),'소개5%');
+ assert.equal(h.cells.get('15:6'),10000,'original unit price must be preserved');
+ assert.match(h.formulas.get('47:8'),/CEILING/);
 });

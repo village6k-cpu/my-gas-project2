@@ -362,7 +362,7 @@ const CONFIRMED_REGISTRATION_COMPONENT_FIELDS = new Set([
   'set_item', 'component_item', 'quantity'
 ]);
 const CONFIRMED_REGISTRATION_DISCOUNT_TYPES = new Set([
-  '', '일반', '학생', '개인사업자/프리랜서', '단골', '제휴'
+  '', '일반', '학생', '학생소개', '개인사업자/프리랜서', '단골', '제휴'
 ]);
 
 function normalizeConfirmedRegistrationPlan(value, field) {

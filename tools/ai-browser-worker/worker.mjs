@@ -218,6 +218,7 @@ export function normalizeCustomerDbDiscountType(value = '') {
   const normalized = text(value).normalize('NFKC').replace(/\s+/g, '').trim();
   if (!normalized) return '';
   if (normalized === '일반') return '일반';
+  if (normalized === '학생소개' || normalized === '학생30소개5') return '학생소개';
   if (/단골/.test(normalized)) return '단골';
   if (/제휴/.test(normalized)) return '제휴';
   if (/학생|재학|학번|학사|대학|고등|중학/.test(normalized)) return '학생';
@@ -226,9 +227,10 @@ export function normalizeCustomerDbDiscountType(value = '') {
 }
 
 function pickBestCustomerDbDiscount(matches = []) {
-  const rank = { '일반': 1, '개인사업자/프리랜서': 2, '학생': 3, '제휴': 4, '단골': 5 };
+  const rank = { '일반': 1, '개인사업자/프리랜서': 2, '학생': 3, '학생소개': 3, '제휴': 4, '단골': 5 };
   return matches.reduce((best, match) => {
-    const discountType = normalizeCustomerDbDiscountType(match.discount);
+    const normalized = normalizeCustomerDbDiscountType(match.discount);
+    const discountType = normalized === '학생소개' ? '학생' : normalized;
     if (!discountType) return best;
     if (!best.discountType || (rank[discountType] || 0) > (rank[best.discountType] || 0)) {
       return { discountType, source: match.source, matchedBy: match.matchedBy, rawDiscount: match.discount };
@@ -734,6 +736,7 @@ export function buildHermesPrompt(job, options = {}) {
 - If quote.complete=true, answer the customer's actual price question now using totalVatIncluded, clearly saying 부가세 포함. Use classification="price", sensitive_commitment, authoritative_sheet, requiresRag=false. Do not substitute "확인해볼게요/견적 확인 후 안내드릴게요" for a lookup you can do in this turn, or repeat an earlier empty acknowledgement. If a billable item/period is genuinely unresolved, ask the one specific missing question; never present a partial sum as the total. Sending a quote document still requires village_document_send; a computed price is not proof of delivery.
 - A successful inquiry receipt can require schedule review while its independent, complete price answer is still auto-sendable with price_quote. Keep the schedule review follow-up, but do not claim availability or registration in the price reply. Failed/partial mutations still require no-send owner review.
 - INQUIRY LIFECYCLE에 따라 genuinely new 또는 아직 미반영인 변경 문의만 village_confirmation_request로 접수한다. 이미 처리된 예약/품목, 거절된 요청, 단순 보유 질문은 입력하지 않는다.
+- 직원 승인으로 학생30%와 이번 소개5%가 모두 확정되면 이번 거래만 학생소개를 쓴다. 임의 소개할인 금지. 고객DB 기본은 학생으로 유지한다.
 - 일정은 먼저 대화/기존 예약/명시된 1회차 운영 기준으로 해석한다. 그래도 모르는 필드만 빈칸, plan_complete=false로 접수한다.
 - 일정 오타는 전체 대화의 의미로 먼저 해석한다. 근거상 유일하게 명백한 정정은 원문과 정정 이유를 보존해 반영한다. 여러 해석이 가능한 일정만 해당 필드를 공란으로 최초 접수한 뒤 고객에게 바로 확인한다. 아래 RESERVATION DATE INTERPRETATION과 RESERVATION PRIORITY AND ALTERNATIVES를 준수한다.
 ${RESERVATION_DATE_POLICY}
@@ -856,7 +859,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 약어/속어는 AI 의미 판단 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. confidently matchable이면 catalog_match_status="matched"와 정확 카탈로그명을 쓰며, 원문은 정말 매칭 불가능한 경우만 fallback이다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II. 세대가 명시되지 않은 16-35는 소니 GM 16-35mm를 검토할 수 있지만, 16-35 GM2를 근거 없이 그 이름으로 바꾸지 않는다.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
-- 할인유형: 현재 고객·직원의 실제 대화/메모 우선(업체 예시 제외), 부재 시 동일 고객DB, 최종 일반. 예비 미상은 null/공란. 전화 불일치 제외/전화 없으면 이름 단일 매칭. RQ 정정: customer_identity_update.discount_type. M·계약 K·견적 검증.
+- 할인유형(학생/학생소개/개인사업자/프리랜서/단골/제휴/일반): 현재 고객·직원의 실제 대화/메모 우선(업체 예시 제외), 부재 시 동일 고객DB, 최종 일반. 예비 미상은 null/공란. 전화 불일치 제외/전화 없으면 이름 단일 매칭. RQ 정정: customer_identity_update.discount_type. M·계약 K·견적 검증.
 - 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리한다. 없거나 동명이인이어도 확인요청 생성은 막지 말고 sheet_row_candidate.phone=""로 둔다. 연락처는 등록 단계 필수라 follow_up/답장에서는 연락처 요청을 남긴다.
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
 - 유효한 신규 대여 문의는 일정 일부/연락처/모델 세부가 부족해도 누락하지 않는다. 기존 RQ/계약/스케줄은 먼저 대조한다. 모든 장비는 정확 카탈로그명 또는 실제 미해결 원문으로 구분한다. 거절·미보유 품목을 유효한 요청에 섞지 않는다.
@@ -924,7 +927,7 @@ The JSON schema:
     "return_time": string | null,
     "quantity": number | string | null,
     "price": string | null,
-    "discount_type": "학생" | "개인사업자/프리랜서" | "단골" | "제휴" | "일반" | null,
+    "discount_type": string | null,
     "confirmed": boolean,
     "already_registered": boolean
   },
@@ -979,7 +982,7 @@ The JSON schema:
     "pickup_time": string,
     "return_time": string,
     "phone": string,
-    "discount_type": "학생" | "개인사업자/프리랜서" | "단골" | "제휴" | "일반" | "",
+    "discount_type": string,
     "memo": string,
     "extra_request": string
   },
@@ -1071,7 +1074,7 @@ const AI_FOLLOW_UP_STATUSES = new Set(['open', 'done', 'dismissed']);
 const AI_ALERT_LEVELS = new Set(['p0', 'none']);
 const AI_MANUAL_ACTION_FAMILIES = new Set(['invoice_issue', 'reservation_change', 'payment_reconcile', 'inventory_check', 'document_approval']);
 const HERMES_WORKER_TOOLSETS = 'terminal,file,web,skills,memory,session_search,vision';
-const CONFIRM_REQUEST_DISCOUNT_TYPES = new Set(['학생', '개인사업자/프리랜서', '단골', '제휴', '일반']);
+const CONFIRM_REQUEST_DISCOUNT_TYPES = new Set(['학생', '학생소개', '개인사업자/프리랜서', '단골', '제휴', '일반']);
 const OWNER_CASE_KEYS = ['caseKey', 'title', 'requestSummary', 'problemSummary', 'nextActionSummary'];
 const OWNER_CASE_TEXT_LIMITS = Object.freeze({
   caseKey: 160,
@@ -2837,6 +2840,7 @@ function longTermDiscountRate(days) {
 function discountRatesForType(discountType = '') {
   const type = text(discountType).trim();
   if (type === '학생') return [{ label: '학생', rate: 30 }];
+  if (type === '학생소개') return [{ label: '학생', rate: 30 }, { label: '소개', rate: 5 }];
   if (type === '개인사업자/프리랜서') return [{ label: '개인사업자/프리랜서', rate: 20 }];
   if (type === '단골') return [{ label: '개인사업자/프리랜서 기준', rate: 20 }, { label: '단골', rate: 10 }];
   if (type === '제휴') return [{ label: '개인사업자/프리랜서 기준', rate: 20 }, { label: '제휴', rate: 20 }];
@@ -3141,7 +3145,7 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
       requireReadText(quote.customer_name);
       requireReadText(quote.phone, 30, true);
       if (quote.phone && !/^\+?[0-9 -]{7,20}$/.test(quote.phone)) throw new Error('invalid_customer_phone');
-      if (!['','학생','개인사업자/프리랜서','단골','제휴','일반'].includes(quote.discount_type)) throw new Error('invalid_discount_type');
+      if (!['','학생','학생소개','개인사업자/프리랜서','단골','제휴','일반'].includes(quote.discount_type)) throw new Error('invalid_discount_type');
       const dates = ['start','end'].map(prefix => {
         const date = quote[prefix + '_date'], time = quote[prefix + '_time'];
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('invalid_quote_period');

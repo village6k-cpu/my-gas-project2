@@ -5782,7 +5782,7 @@ function dashboardUpdateTradeDetails(tradeId, input) {
 }
 
 // 확인요청 M열 드롭다운과 동일한 허용값 — 등록된 거래의 계약마스터 K열(할인유형) 변경용
-var DASHBOARD_DISCOUNT_TYPES_ = { "일반": true, "학생": true, "개인사업자/프리랜서": true, "단골": true, "제휴": true };
+var DASHBOARD_DISCOUNT_TYPES_ = { "일반": true, "학생": true, "학생소개": true, "개인사업자/프리랜서": true, "단골": true, "제휴": true };
 var DASHBOARD_DISCOUNT_REVISION_PREFIX_ = 'dashboardDiscountRevision_v1_';
 
 function dashboardDiscountRevisionKey_(tid) {
@@ -5905,7 +5905,7 @@ function updateTradeDiscountType(tid, discountType, options) {
   }
   if (!tid) return { error: "거래ID 필수" };
   if (!DASHBOARD_DISCOUNT_TYPES_[discountType]) {
-    return { error: "할인유형은 일반/학생/개인사업자·프리랜서/단골/제휴만 허용" };
+    return { error: "할인유형은 일반/학생/학생소개/개인사업자·프리랜서/단골/제휴만 허용" };
   }
 
   var lock = LockService.getScriptLock();
@@ -11725,9 +11725,9 @@ function refreshEquipmentList(skipIfUnchanged) {
 
     // ── 확인요청 M열(할인유형) 드롭다운 설정 ──
     var mRule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"], true)
+      .requireValueInList(["일반", "학생", "학생소개", "개인사업자/프리랜서", "단골", "제휴"], true)
       .setAllowInvalid(true)
-      .setHelpText("일반=없음 / 학생=30% / 개인사업자/프리랜서=20% / 단골=개사프+10% / 제휴=개사프+20%")
+      .setHelpText("일반=없음 / 학생=30% / 학생소개=학생30%×이번소개5% / 개인사업자/프리랜서=20% / 단골=개사프+10% / 제휴=개사프+20%")
       .build();
     reqSheet.getRange(2, 13, lastDataRow - 1, 1).setDataValidation(mRule);
   }
@@ -11960,6 +11960,7 @@ function _normalizeDiscountTypeOrBlank_(v) {
 
   // 정식값/고객DB 값 그대로 또는 할인율 접미어 포함값 처리
   if (s === "일반") return "일반";
+  if (s === "학생소개" || s === "학생30소개5") return "학생소개";
   if (/단골/.test(s)) return "단골";
   if (/제휴/.test(s)) return "제휴";
   if (/학생|재학|학번|학사|대학|고등|중학/.test(s)) return "학생";
@@ -12052,6 +12053,7 @@ function _bestConfirmRequestCustomerDbDiscount_(matches) {
   var bestRank = 0;
   (matches || []).forEach(function(match) {
     var discount = _normalizeDiscountTypeOrBlank_(match.discount);
+    if (discount === "학생소개") discount = "학생";
     if (!discount) return;
     var score = rank[discount] || 0;
     if (score > bestRank) {
@@ -12169,6 +12171,8 @@ function _planCustomerDbRegistrationWrite_(customerRows, customerName, phone, di
   var nameKey = String(customerName || "").trim();
   var phoneKey = _confirmRequestPhoneKey_(phone);
   var confirmedDiscount = _normalizeDiscountTypeOrBlank_(discountType);
+  // 소개5%는 이 거래의 승인이다. 다음 예약의 고객 기본 할인으로 복제하지 않는다.
+  if (confirmedDiscount === "학생소개") confirmedDiscount = "학생";
   var matchedIndex = -1;
 
   if (phoneKey) {
@@ -12817,7 +12821,7 @@ function _assertPendingCustomerIdentityUpdate_(group, update, req, evidence) {
       ["expected_name", "expected_phone", "name", "phone"].some(function(key) { return typeof update[key] !== "string"; })) {
     throw new Error("고객 정보 보완의 exact identity 형식 오류");
   }
-  if (update.discount_type !== undefined && ["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"].indexOf(update.discount_type) < 0) {
+  if (update.discount_type !== undefined && ["일반", "학생", "학생소개", "개인사업자/프리랜서", "단골", "제휴"].indexOf(update.discount_type) < 0) {
     throw new Error("고객 정보 보완의 할인유형 오류");
   }
   var phone = _confirmRequestPhoneKey_(update.phone);
@@ -16353,7 +16357,7 @@ function _normalizeConfirmedReservationCommit_(input) {
     var discountType = String(candidate.discount_type || "").normalize("NFKC").trim();
     var memo = String(candidate.memo || "").normalize("NFKC").trim();
     var extraRequest = String(candidate.extra_request || "").normalize("NFKC").trim();
-    var allowedDiscounts = { "일반": true, "학생": true, "개인사업자/프리랜서": true, "단골": true, "제휴": true };
+    var allowedDiscounts = { "일반": true, "학생": true, "학생소개": true, "개인사업자/프리랜서": true, "단골": true, "제휴": true };
     if (!customerName || customerName.length > 120 || !phone || phone.length > 80 ||
         !allowedDiscounts[discountType] || memo.length > 500 || extraRequest.length > 1000) {
       throw new Error("pending_request_candidate is invalid");

@@ -54,7 +54,7 @@ type AttachedImage = {
   mediaType: string;
 };
 
-const DISCOUNTS = ["일반", "학생", "개인사업자/프리랜서"] as const;
+const DISCOUNTS = ["일반", "학생", "학생소개", "개인사업자/프리랜서"] as const;
 const CATALOG_SOURCE_LABEL = "dashboardEquipmentCatalog";
 
 function todayValue() {

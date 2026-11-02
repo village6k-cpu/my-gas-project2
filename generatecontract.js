@@ -338,6 +338,8 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   switch (String(contract.할인유형 || "").trim()) {
     case "학생":
       사전할인 = "학생30%"; break;
+    case "학생소개":
+      사전할인 = "학생30%"; 추가할인 = "소개5%"; break;
     case "개인사업자/프리랜서":
       사전할인 = "개인사업자/프리랜서20%"; break;
     case "단골":

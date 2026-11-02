@@ -59,7 +59,7 @@ type Req = {
 
 // 확인요청 M열(할인유형) 선택값. 단골/제휴는 보통 고객DB로 자동 판정되지만,
 // 사장이 직접 지정할 수 있어야 하므로 전부 노출한다.
-const DISCOUNT_OPTIONS = ["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"];
+const DISCOUNT_OPTIONS = ["일반", "학생", "학생소개", "개인사업자/프리랜서", "단골", "제휴"];
 
 const EMPTY_CONFIRM_EQUIPS: Equip[] = [];
 const CONFIRM_LIST_CACHE_KEY = "village-confirm-list-cache-v1";

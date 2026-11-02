@@ -26,7 +26,7 @@ const PENDING_REQUEST_CANDIDATE_REQUIRED_FIELDS = new Set([
 const SET_COMPONENT_SELECTION_FIELDS = new Set(['set_item', 'component_item', 'selected_item']);
 const SET_COMPONENT_BASELINE_FIELDS = new Set(['set_item', 'component_item', 'quantity']);
 const REQUEST_ID = /^RQ-\d{6}-\d{3}$/;
-const DISCOUNT_TYPES = new Set(['일반', '학생', '개인사업자/프리랜서', '단골', '제휴']);
+const DISCOUNT_TYPES = new Set(['일반', '학생', '학생소개', '개인사업자/프리랜서', '단골', '제휴']);
 const REGISTRATION_INPUT_FIELDS = new Set([
   'job', 'roomRevision', 'roomSnapshot', 'registration', 'operationId'
 ]);
