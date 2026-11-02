@@ -8,18 +8,20 @@ export function pricingOwnerNotice(config,job,finalized){
   if(!config.verifiedPricingAutoSendEnabled || !verifiedPricingFreshJob(config,job))return null;
   const decision=finalized.decision || {},result=finalized.autoReplyResult || {};
   const pricing=verifiedPricingAudit(result);
-  const relevant=pricing || ['price','price_review','quote_send'].includes(decision.classification)
+  const relevant=pricing || decision.statement_request || ['price','price_review','quote_send'].includes(decision.classification)
     || (decision.follow_up_items || []).some(item=>['price_review','quote_send'].includes(item.type));
   if(!relevant)return null;
   const priceSent=result.sent===true && Boolean(result.readbackReceipt);
   const document=result.pricingDocumentReceipt,documentSent=document?.deliveryConfirmed===true;
   const confirmed=priceSent || documentSent;
   const customer=clean(decision.customer?.name || job.customerName).slice(0,80) || '고객 확인 필요';
-  const lines=[confirmed?'자동 가격·견적 처리 알림':'자동 가격·견적 확인 필요',`고객: ${customer}`];
+  const label=document?.documentType==='statement' || decision.statement_request ? '거래명세서':'견적서';
+  const lines=[confirmed?'자동 가격·서류 처리 알림':'자동 가격·서류 확인 필요',`고객: ${customer}`];
+  if(document?.tradeId)lines.push('거래: '+clean(document.tradeId));
   if(pricing){lines.push(`금액: ${pricing.totalVatIncluded.toLocaleString('ko-KR')}원 (부가세 포함)`,`할인: ${clean(pricing.discountType)}`);
     lines.push('품목: '+pricing.items.map(item=>`${clean(item.name)} ×${item.qty}`).join(', ').slice(0,2400));}
-  if(confirmed){lines.push(`가격 안내: ${priceSent?'전송 확인':'완료 미확인'}`,`견적서: ${documentSent?'발송 확인':(result.pricingDocumentFailure?'발송 결과 확인 필요':'이번 안내에서 발송하지 않음')}`);
-    if(documentSent && pricingDocumentUrl(document.pdfUrl))lines.push('견적서: '+pricingDocumentUrl(document.pdfUrl));
+  if(confirmed){lines.push(`안내 답변: ${priceSent?'전송 확인':'완료 미확인'}`,`${label}: ${documentSent?'발송 확인':(result.pricingDocumentFailure?'발송 결과 확인 필요':'이번 안내에서 발송하지 않음')}`);
+    if(documentSent && pricingDocumentUrl(document.pdfUrl))lines.push(label+': '+pricingDocumentUrl(document.pdfUrl));
     if(priceSent)lines.push('보낸 안내: '+String(result.text || '').slice(0,1500));
     lines.push('확인된 완료 건은 승인 업무를 만들지 않습니다.');
   }else lines.push('확인 내용: '+clean(result.gate?.reason || decision.reason || '가격·할인 또는 발송 결과 불확실').slice(0,800));

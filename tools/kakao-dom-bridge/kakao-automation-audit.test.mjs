@@ -1001,6 +1001,8 @@ test('verified automatic pricing records amount, discount, lines and PDF without
  const job=baseJob();const pricing={schema:'village-verified-pricing-audit/v1',totalVatIncluded:7700,discountType:'학생',days:1,items:[{name:'테스트 렌즈',qty:1,price:10000}]};
  job.application={applied_audit:{verified_pricing:pricing,automatic_pricing_document:{schema:'village-auto-pricing-document-receipt/v1',operationId:'c'.repeat(64),status:'sent',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/pdf-pricing/view',fileId:'pdf-pricing',occurredAt:'2026-11-02T01:00:00.000Z'}}};
  const events=buildKakaoAutomationAuditEvents({durableJob:job});assert.equal(events.length,1);assert.equal(events[0].effect_type,'document_send');assert.equal(events[0].outcome,'success');assert.match(events[0].summary,/7,700원.*학생/);assert.ok(events[0].change_items.some(item=>item.field==='document'&&item.after.includes('pdf-pricing')));assert.equal(JSON.stringify(events).includes('01012345678'),false);
+ job.application.applied_audit.automatic_pricing_document.documentType='statement';
+ assert.match(buildKakaoAutomationAuditEvents({durableJob:job})[0].summary,/자동 거래명세서.*발송 완료/);
  job.application.applied_audit.automatic_pricing_document.deliveryConfirmed=false;
  const uncertain=buildKakaoAutomationAuditEvents({durableJob:job});assert.equal(uncertain[0].outcome,'partial_success');assert.match(uncertain[0].summary,/확인 필요/);assert.equal(uncertain[0].change_items.some(item=>item.field==='document'),false);
 });

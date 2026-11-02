@@ -14,6 +14,8 @@ test('owner notice reports verified amount and discount without creating approva
  assert.equal(notice.key,pricingOwnerNotice(config,job,finalized).key);
  assert.equal(pricingOwnerNotice(config,{...job,detectedAt:'2026-11-01T00:00:00Z'},finalized),null);
  assert.equal(pricingOwnerNotice({...config,verifiedPricingAutoSendEnabled:false},job,finalized),null);
+ const statement=pricingOwnerNotice(config,job,{...finalized,autoReplyResult:{...finalized.autoReplyResult,pricingDocumentReceipt:{documentType:'statement',deliveryConfirmed:true,tradeId:'261024-007',pdfUrl:'https://drive.google.com/file/d/statement-test/view'}}});
+ assert.match(statement.text,/거래명세서: 발송 확인/);assert.match(statement.text,/261024-007/);
  const uncertain=pricingOwnerNotice(config,job,{...finalized,autoReplyResult:{sent:false,gate:{reason:'discount_unconfirmed'}}});
  assert.match(uncertain.text,/확인 필요/);assert.match(uncertain.text,/discount_unconfirmed/);assert.doesNotMatch(uncertain.text,/7,700/);
 });

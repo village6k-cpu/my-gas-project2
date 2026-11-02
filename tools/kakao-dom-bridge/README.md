@@ -66,6 +66,12 @@ scripts/kakao-automation status
 견적서 요청은 서버의 `VILLAGE_DOCUMENT_API_URL`·`VILLAGE_DOCUMENT_API_KEY`로
 동일 금액을 재검증하고, 발송 확인 후에만 완료 처리합니다. 불확실한 전송은 자동 재발송하지 않습니다.
 완료 기록은 헤이빌리 **후속조치 → 자동처리**에서 고객·품목·금액·할인·PDF·결과로 확인합니다.
+거래명세서는 `statement_request={trade_id,booking_customer_name}`와 해당 거래의
+`price_quote={source:"trade",id:trade_id}`를 사용합니다. 기존 거래의 품목·기간·할인·장부 합계가
+일치해야 공식 PDF를 준비하며, 현재 카카오 대화에서 PDF 링크 전송을 다시 확인한 뒤 완료 처리합니다.
+예약자와 다른 요청자의 수령 권한은 서버의 `AI_WORKER_STATEMENT_RECIPIENT_AUTHORIZATIONS`
+JSON 배열에 승인된 `{tradeId,roomKey,requesterName,bookingCustomerName}` 조합만 등록합니다.
+결제·증빙 상태는 변경하지 않으며 세금계산서는 이 자동 발송 권한에 포함하지 않습니다.
 `AI_WORKER_PRICING_OWNER_SLACK_USER_ID`에 지정된 담당자에게 `SLACK_BOT_TOKEN`으로
 완료/확인 필요 알림을 보내며, Slack 장애는 `queue/pricing-owner-notices`에 저장해 재시도합니다.
 확인된 가격 안내·견적서 발송만으로 승인 업무를 만들지 않으며, 별도 예약 검토 등은 유지합니다.
