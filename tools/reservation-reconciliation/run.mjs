@@ -34,7 +34,11 @@ export async function runAudit({envFile,queueDir,outputDir,now=new Date().toISOS
   fs.writeFileSync(fd,JSON.stringify({pid:process.pid,startedAt:now}));
   try{
     const stateFile=path.join(outputDir,'state.json'),previous=read(stateFile,{index:{},obligations:[]});
-    const cutoff=Date.parse(new Date(Date.parse(now)+9*3600000-lookbackDays*86400000).toISOString().slice(0,10)+'T00:00:00+09:00'),retainedRooms=new Set(previous.obligations.filter(o=>o.state==='open').map(o=>o.room));
+    const cutoff=Date.parse(new Date(Date.parse(now)+9*3600000-lookbackDays*86400000).toISOString().slice(0,10)+'T00:00:00+09:00'),retainedRooms=new Set([
+      ...previous.obligations.filter(o=>o.state==='open').map(o=>o.room),
+      // Resolving a capture gap must not discard its proof on the next scan.
+      ...Object.values(previous.ingress?.rooms||{}).filter(r=>Date.parse(r.at)>=cutoff).map(r=>r.room)
+    ]);
     const index={},jobs=[],dir=path.join(queueDir,'hermes-gateway');let readFiles=0;
     for(const name of fs.readdirSync(dir).filter(n=>/^[a-f0-9]{64}\.json$/.test(n))){
       const file=path.join(dir,name),s=fs.statSync(file),old=previous.cacheVersion===4?previous.index[name]:null;let entry;
