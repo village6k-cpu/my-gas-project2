@@ -32,7 +32,7 @@ export async function allPaymentRows(table: string, db = paymentDb()): Promise<R
   }
   throw new Error("수납 조회 범위를 초과했습니다. 관리자 확인이 필요합니다.");
 }
-export async function refreshPaymentAccounts(tids?: string[], supplied?: Row[], db = paymentDb()) {
+export async function refreshPaymentAccounts(tids?: string[], supplied?: Row[], db = paymentDb(), options: { allowMissing?: boolean } = {}) {
   let accounts = supplied;
   if (!accounts) {
     const result = await gasPost({ action: "paymentLedgerSnapshot", ...(tids ? { tids } : {}) }) as Row;
@@ -42,8 +42,10 @@ export async function refreshPaymentAccounts(tids?: string[], supplied?: Row[], 
   if (!Array.isArray(accounts)) throw new Error("청구액 목록 오류");
   if (tids) {
     const observed = new Set(accounts.map(a => String(a.trade_id)));
-    if (tids.some(id => !observed.has(id))) throw new Error("장부에서 예약을 찾지 못했습니다. 수납 관리에서 확인해주세요.");
+    if (!options.allowMissing && tids.some(id => !observed.has(id))) throw new Error("장부에서 예약을 찾지 못했습니다. 수납 관리에서 확인해주세요.");
+    accounts = accounts.filter(a => tids.includes(String(a.trade_id)));
   }
+  if (!accounts.length) return [];
   checked(await db.rpc("payment_refresh_accounts", { p_accounts: accounts }));
   return accounts.map(a => String(a.trade_id));
 }
@@ -192,8 +194,11 @@ export async function recordFrontPayment(input: Row) {
 
 export async function getPayablePaymentBalances(tids: string[]) {
   const db = paymentDb();
-  await refreshPaymentAccounts(tids, undefined, db);
-  const accounts = await paymentBalances(tids, db);
+  // 전화번호 이력에는 현재 장부에 없는 과거 거래도 섞인다. 누락된 거래만 제외하고,
+  // 이번 정본에서 확인된 ID의 잔액만 읽는다. 쓰기 경로의 전체 거래 검증은 유지한다.
+  const currentIds = await refreshPaymentAccounts(tids, undefined, db, { allowMissing: true });
+  if (!currentIds.length) return [];
+  const accounts = await paymentBalances(currentIds, db);
   // 승인 저장 후 배분이 실패/대기한 예약은 다시 청구하지 않는다.
   const unresolved = checked(await db.from("payment_receipt_balances").select("explicit_trade_id,remaining_amount,status")
     .eq("status", "active").gt("remaining_amount", 0)) ?? [];
