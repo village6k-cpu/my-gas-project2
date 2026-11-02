@@ -1527,6 +1527,17 @@ test('intake clarification grounded in a read does not require a write receipt',
   }
 });
 
+test('incomplete durable intake permits only a safe clarification under scoped recovery', () => {
+  const decision=gatewayDecisionFixture({classification:'reservation',
+    reservation_inquiry:{is_reservation_inquiry:true},
+    trusted_confirmation_receipt:{status:'ok',error:null,authoritative_sheet_result:{success:true,scheduleComplete:false}},
+    reply_decision:{replyMode:'auto_send',text:'반납 날짜와 시간만 다시 알려주세요.',safetyClass:'contact_request',grounding:'visible_conversation',requiresRag:false}});
+  assert.equal(canAutoSendCustomerAnswer(decision,{autoSendEnabled:false,reservationClarificationAutoSendEnabled:true}).allowed,true);
+  assert.equal(canAutoSendCustomerAnswer({...decision,trusted_confirmation_receipt:null},{autoSendEnabled:false,reservationClarificationAutoSendEnabled:true}).allowed,false);
+  assert.equal(canAutoSendCustomerAnswer({...decision,reply_decision:{...decision.reply_decision,text:'예약 확정되었습니다.'}},
+    {autoSendEnabled:false,reservationClarificationAutoSendEnabled:true}).allowed,false);
+});
+
 test('invalid business validation does not erase the original requested reply', async () => {
   const {job,turn}=gatewayTurnFixture();
   const decision=gatewayDecisionFixture({reply_decision:{safetyClass:'sensitive_commitment',grounding:'visible_conversation'}});

@@ -2,6 +2,7 @@
 import {refreshKakaoConversationWithoutDraft} from './stale-conversation-refresh.mjs';
 import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
+import {reservationClarificationConfigured, freshReservationJob} from './reservation-intake-guard.mjs';
 import { completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, sendAutomaticPricingDocument } from './verified-pricing.mjs';
 import fs from 'node:fs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
@@ -734,6 +735,7 @@ export function buildHermesPrompt(job, options = {}) {
 - A successful inquiry receipt can require schedule review while its independent, complete price answer is still auto-sendable with price_quote. Keep the schedule review follow-up, but do not claim availability or registration in the price reply. Failed/partial mutations still require no-send owner review.
 - INQUIRY LIFECYCLE에 따라 genuinely new 또는 아직 미반영인 변경 문의만 village_confirmation_request로 접수한다. 이미 처리된 예약/품목, 거절된 요청, 단순 보유 질문은 입력하지 않는다.
 - 일정은 먼저 대화/기존 예약/명시된 1회차 운영 기준으로 해석한다. 그래도 모르는 필드만 빈칸, plan_complete=false로 접수한다.
+- 반납일이 반출일보다 앞서는 등 일정이 모순되어도 최초 접수를 건너뛰지 않는다. 확인된 고객·장비·반출 일시는 유지하고 모순된 반납일만 빈칸으로 village_confirmation_request를 먼저 실행한다. 직원의 예약 승인 뒤 감사·방문 메시지가 왔어도 미등록 문의는 유효하다. 등록 불가와 접수 불가를 혼동하지 마라. 신규 미반영 장비 문의의 native receipt 없는 FINAL_JSON은 완료되지 않고 같은 근거로 재처리된다.
 - Verify unchanged existing RQs with read-only lookup. Reserve village_confirmation_request for the chosen inquiry write; never consume its operation lease to pre-verify.
 - A pending-RQ addition with typed staff_confirmed_mutation target_scope="pending_request" + kind="equipment_add" requires one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only". candidate.equipment and reservation_inquiry.equipment_requested contain only the additions in the same order; mutation.desired_after is the full final plan. date_change=null when unchanged. Use village_read for the baseline, never the mutating tool as a pre-read.
 - Typed staff_confirmed_mutation target_scope="pending_request" + kind="equipment_remove"/"equipment_replace"/"equipment_quantity_change": one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ.
@@ -5060,6 +5062,8 @@ export function requireConfig() {
     autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
     verifiedPricingAutoSendEnabled: process.env.AI_WORKER_VERIFIED_PRICING_AUTO_SEND === '1',
     verifiedPricingEnabledAfter: process.env.AI_WORKER_VERIFIED_PRICING_ENABLED_AFTER || '',
+    reservationClarificationAutoSendEnabled: process.env.AI_WORKER_RESERVATION_CLARIFICATION_AUTO_SEND === '1',
+    reservationRecoveryEnabledAfter: process.env.AI_WORKER_RESERVATION_RECOVERY_ENABLED_AFTER || '',
     pricingOwnerSlackUserId: process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID || '',
     statementRecipientAuthorizations: (()=>{try{const value=JSON.parse(process.env.AI_WORKER_STATEMENT_RECIPIENT_AUTHORIZATIONS || '[]');return Array.isArray(value)?value:[];}catch{return [];}})(),
     documentApiBaseUrl: process.env.VILLAGE_DOCUMENT_API_URL || 'https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec',
@@ -7754,7 +7758,8 @@ function currencyAmountsInReply(value = '') {
 // Validate the AI's reply plan. Live operator control belongs exclusively to
 // maybeAutoSendReply at the effect boundary, for text and document delivery alike.
 export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = {}) {
-  if (!config.autoSendEnabled && !verifiedPricingConfigured(config, decision)) return { allowed: false, reason: 'auto_send_disabled' };
+  if (!config.autoSendEnabled && !verifiedPricingConfigured(config, decision)
+    && !reservationClarificationConfigured(config, decision)) return { allowed: false, reason: 'auto_send_disabled' };
   const typedPriceReply = isTypedPriceReply(decision);
   if (!hasIndependentCustomerReply(decision) && (decision?.post_action_reconciled === true
     || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object'))) {
@@ -8823,6 +8828,9 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   }
   if (verifiedPricingConfigured(config, decision) && !verifiedPricingFreshJob(config, job)) {
     return {attempted:false,sent:false,gate:{allowed:false,reason:'pricing_before_activation_cutoff'}};
+  }
+  if (reservationClarificationConfigured(config, decision) && !freshReservationJob(config, job)) {
+    return {attempted:false,sent:false,gate:{allowed:false,reason:'clarification_before_activation_cutoff'}};
   }
   const documentGate = canAutoSendCustomerDocumentAssets(decision, config);
   let priceVerification = null;

@@ -11,6 +11,7 @@ import path from 'node:path';
 
 import { normalizeKakaoAutomationAuditEvent } from './kakao-automation-audit.mjs';
 import { MAX_REGISTERED_INPUT_CORRECTIONS, isProvenUnappliedRegisteredReceipt } from '../ai-browser-worker/registered-operation-recovery.mjs';
+import { unrecordedReservationInquiry, INTAKE_REPAIR_INSTRUCTION } from '../ai-browser-worker/reservation-intake-guard.mjs';
 
 const TERMINAL_STATES = new Set(['completed', 'superseded', 'failed']);
 const JOB_STATES = new Set(['ready', 'claimed', 'completed', 'superseded', 'retry_wait', 'failed']);
@@ -928,6 +929,14 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         }
         if (job.state === 'superseded') throw channelError('stale_room_revision', 'superseded jobs cannot complete');
         assertCurrentLease(job, result);
+        if (unrecordedReservationInquiry(result, job.tool_receipts || [])) {
+          // Keep the lease live: the native adapter reports no_final and retries
+          // this same immutable evidence. Never convert FINAL into a host write.
+          if (!String(job.event?.prompt || '').includes('INTAKE COMPLETION GUARD:')) {
+            await update(job, {event:{...job.event,prompt:String(job.event?.prompt || '') + INTAKE_REPAIR_INSTRUCTION}});
+          }
+          throw channelError('unrecorded_reservation_inquiry', 'New unresolved inquiry needs a native intake receipt, including incomplete schedules');
+        }
         const finalReceipt = exactReceiptForToolOperation(job);
         const bookingUnresolved = ['registered_reservation_change', 'confirmed_reservation_commit'].includes(job.tool_operation?.tool)
           && finalReceipt && finalReceipt.status !== 'ok';

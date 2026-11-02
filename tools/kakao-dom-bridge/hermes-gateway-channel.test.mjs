@@ -11,6 +11,25 @@ function event(jobId, roomKey, roomRevision, detectedAt = '2026-08-21T00:00:00.0
   return { job_id: jobId, room_key: roomKey, room_revision: roomRevision, detected_at: detectedAt };
 }
 
+test('missing intake cannot complete; a durable repair hint survives native no-final retry', async () => {
+  await withChannel(async ({channel}) => {
+    await channel.enqueue({...event('missing-intake','room-intake',1),prompt:'original evidence'});
+    const claim=await channel.claim({consumerId:'gateway',waitMs:0});
+    const decision={should_write_to_sheet:false,inquiry_disposition:'new_inquiry',classification:'already_answered',
+      reservation_inquiry:{is_reservation_inquiry:true,already_registered:false,equipment_requested:[{quantity:1}]},
+      sheet_row_candidate:{plan_complete:false,start_date:'2026-11-02',end_date:''}};
+    await assert.rejects(channel.complete({...claim,content:JSON.stringify(decision)}),{code:'unrecorded_reservation_inquiry'});
+    assert.equal((await channel.get(claim.job_id)).state,'claimed');
+    await channel.recordOutcome({...claim,outcome:'no_final'});
+    const retry=await channel.claim({consumerId:'gateway',waitMs:0});
+    assert.match(retry.event.prompt,/INTAKE COMPLETION GUARD/);
+    const reserved=await channel.reserveToolOperation(confirmationOperation(retry));
+    await channel.recordToolReceipt(confirmationReceipt(retry,reserved.reservation.operation_id));
+    const completed=await channel.complete({...retry,content:JSON.stringify(decision)});
+    assert.equal(completed.state,'completed');
+  });
+});
+
 function confirmationOperation(claim, requestDigest = 'request-digest-1') {
   return {
     tool: 'confirmation_request',
