@@ -6,7 +6,7 @@ export function reviewCase(report,now){
   const findings=report.findings.filter(f=>f.kind==='ingress_without_capture'||f.future&&f.priority==='urgent');
   if(!findings.length)return null;
   const rows=findings.map(f=>({name:f.name,kind:f.kind,tradeIds:f.tradeIds||[],desiredPeriod:f.desiredPeriod||null,missing:f.missing||[]})).sort((a,b)=>(a.kind==='ingress_without_capture')-(b.kind==='ingress_without_capture')||a.name.localeCompare(b.name));
-  const fingerprint=createHash('sha256').update(JSON.stringify(rows)).digest('hex').slice(0,24);
+  const fingerprint=createHash('sha256').update(JSON.stringify({presentationVersion:2,rows})).digest('hex').slice(0,24);
   const kinds={approved_period_mismatch:'승인 일정과 불일치',approved_booking_missing:'같은 일정 예약 조회 안 됨',approved_equipment_mismatch:'장비명·수량 대조 필요',duplicate_candidate:'같은 기간 중복 후보',ingress_without_capture:'감지 기록은 있으나 본문 수집 확인 안 됨'};
   const summary=rows.map(f=>`${f.name}: ${kinds[f.kind]||'원장 대조 필요'}${f.tradeIds.length?' · '+f.tradeIds.join(', '):''}${f.desiredPeriod?' · '+f.desiredPeriod.start.slice(0,16).replace('T',' '):''}`).join('\n').slice(0,1800);
   return {fingerprint,candidate:{work_key:'reservation-reconciliation:current-review',source_event_keys:['reservation-reconciliation:'+fingerprint],room_key:'reservation-reconciliation:current',title:`예약 자동 대조 · ${rows.length}건 검토 필요`,summary,
