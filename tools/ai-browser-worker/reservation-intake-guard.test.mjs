@@ -33,10 +33,12 @@ test('blocked reservation work is visible to the owner without customer PII or r
   assert.equal(reservationOwnerNotice(config,job,{...final,decision:{...final.decision,follow_up_items:[]}}),null);
 });
 
-test('exhausted fresh intake retries alert the owner while historical and unrelated failures remain held',()=>{
+test('fresh processing failures alert the owner while historical failures remain held',()=>{
   const config={reservationClarificationAutoSendEnabled:true,reservationRecoveryEnabledAfter:'2026-11-02T03:00:00Z',pricingOwnerSlackUserId:'UOWNER'};
   const job={job_id:'test',room_key:'chat:test',state:'failed',event:{detected_at:'2026-11-02T03:01:00Z',prompt:INTAKE_REPAIR_INSTRUCTION}};
   assert.ok(reservationFailureOwnerNotice(config,job));
   assert.equal(reservationFailureOwnerNotice(config,{...job,event:{...job.event,detected_at:'2026-10-01T03:00:00Z'}}),null);
-  assert.equal(reservationFailureOwnerNotice(config,{...job,event:{...job.event,prompt:'unrelated'}}),null);
+  assert.ok(reservationFailureOwnerNotice(config,{...job,event:{...job.event,prompt:'unrelated'},error:{type:'lease_retry_exhausted'}}));
+  assert.ok(reservationFailureOwnerNotice(config,{...job,state:'completed',application:{state:'failed'}}));
+  assert.equal(reservationFailureOwnerNotice(config,{...job,state:'completed'}),null);
 });

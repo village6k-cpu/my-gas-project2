@@ -7028,7 +7028,9 @@ const pricingNoticeTimer = process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID
       const failures=[];
       if(gatewayChannel && process.env.AI_WORKER_RESERVATION_CLARIFICATION_AUTO_SEND === '1') {
         const config=getKakaoWorkerRuntimeConfigForTransport();
-        for(const job of await gatewayChannel.listPendingFailureNotifications()) {
+        const pending=[...await gatewayChannel.listPendingFailureNotifications(),
+          ...await gatewayChannel.listPendingApplicationFailureNotifications()];
+        for(const job of pending) {
           const notice=reservationFailureOwnerNotice(config,job);
           if(notice){await queuePricingOwnerNotice(directory,notice);failures.push({job,notice});}
         }
@@ -7036,8 +7038,12 @@ const pricingNoticeTimer = process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID
       await flushPricingOwnerNotices(directory,{token:process.env.SLACK_BOT_TOKEN});
       for(const {job,notice} of failures) {
         const delivered=JSON.parse(fs.readFileSync(path.join(directory,notice.key+'.json'),'utf8'));
-        if(delivered.state==='sent')await gatewayChannel.markFailureNotified({job_id:job.job_id,
-          audit:{kind:'reservation_intake_failure',slack_ts:delivered.slackTs}});
+        if(delivered.state==='sent') {
+          const audit={kind:'fresh_automation_failure',slack_ts:delivered.slackTs};
+          if(job.application?.state==='failed')await gatewayChannel.markApplicationFailureNotified({job_id:job.job_id,
+            application_id:job.application.application_id,audit});
+          else await gatewayChannel.markFailureNotified({job_id:job.job_id,audit});
+        }
       }
     }
     catch{ console.error('pricing_owner_notice_flush_failed'); }

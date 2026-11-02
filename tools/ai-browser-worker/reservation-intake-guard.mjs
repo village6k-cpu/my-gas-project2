@@ -63,12 +63,11 @@ export function reservationOwnerNotice(config, job, finalized) {
 export function reservationFailureOwnerNotice(config, job) {
   if (!config.reservationClarificationAutoSendEnabled
     || !freshReservationJob(config,{detectedAt:job.event?.detected_at})
-    || !String(job.event?.prompt || '').includes('INTAKE COMPLETION GUARD:')
-    || job.state !== 'failed') return null;
+    || !(job.state === 'failed' || job.application?.state === 'failed')) return null;
   const notice=reservationOwnerNotice(config,{...job.local_context?.job,detectedAt:job.event.detected_at,
     roomKey:job.room_key},{decision:{customer:{name:job.local_context?.job?.customerName || '상담방 확인'},
       reservation_inquiry:{is_reservation_inquiry:true},owner_case:{caseKey:job.job_id},
       follow_up_items:[{requiresHumanAction:true,route:'schedule',status:'open',taskKey:'intake-failed',
-        title:'예약 접수 재처리 실패',summary:'새 예약 문의의 저장 결과가 없어 자동 완료를 차단했습니다. 대화와 원장 확인이 필요합니다.'}]}});
-  return notice;
+        title:'상담 자동처리 미완료',summary:'자동 처리가 끝나지 않아 대화와 원장을 대조하고 예약·변경 누락을 확인해야 합니다.'}]}});
+  return notice ? {...notice,text:notice.text.replace('예약 자동반영 확인 필요','상담 자동처리 확인 필요')} : null;
 }
