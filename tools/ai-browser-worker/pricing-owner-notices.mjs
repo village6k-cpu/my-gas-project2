@@ -21,7 +21,7 @@ export function pricingOwnerNotice(config,job,finalized){
   if(pricing){lines.push(`금액: ${pricing.totalVatIncluded.toLocaleString('ko-KR')}원 (부가세 포함)`,`할인: ${clean(pricing.discountType)}`);
     lines.push('품목: '+pricing.items.map(item=>`${clean(item.name)} ×${item.qty}`).join(', ').slice(0,2400));}
   if(confirmed){lines.push(`안내 답변: ${priceSent?'전송 확인':'완료 미확인'}`,`${label}: ${documentSent?'발송 확인':(result.pricingDocumentFailure?'발송 결과 확인 필요':'이번 안내에서 발송하지 않음')}`);
-    if(documentSent && pricingDocumentUrl(document.pdfUrl))lines.push(label+': '+pricingDocumentUrl(document.pdfUrl));
+    if(documentSent && pricingDocumentUrl(document.ownerDocumentUrl || document.pdfUrl))lines.push(label+': '+pricingDocumentUrl(document.ownerDocumentUrl || document.pdfUrl));
     if(priceSent)lines.push('보낸 안내: '+String(result.text || '').slice(0,1500));
     lines.push('확인된 완료 건은 승인 업무를 만들지 않습니다.');
   }else lines.push('확인 내용: '+clean(result.gate?.reason || decision.reason || '가격·할인 또는 발송 결과 불확실').slice(0,800));

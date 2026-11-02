@@ -951,7 +951,8 @@ export function buildKakaoAutomationAuditEvents({
     if (replyEvent) events.push(replyEvent);
   }
   if (pricingDocument?.schema === 'village-auto-pricing-document-receipt/v1' && pricing && /^\d+$/.test(String(pricing.totalVatIncluded))) {
-    const sent = pricingDocument.deliveryConfirmed === true && pricingDocument.status === 'sent' && pricingDocumentUrl(pricingDocument.pdfUrl);
+    const ownerDocumentUrl=pricingDocumentUrl(pricingDocument.ownerDocumentUrl || pricingDocument.pdfUrl);
+    const sent = pricingDocument.deliveryConfirmed === true && pricingDocument.status === 'sent' && ownerDocumentUrl;
     events.push(normalizeKakaoAutomationAuditEvent({
       event_key:authorityEventKey('document_send',pricingDocument.operationId || durableJob.job_id+':pricing-document'),
       job_id:durableJob.job_id,room_revision:durableJob.room_revision,operation_id:null,receipt_id:null,
@@ -959,7 +960,7 @@ export function buildKakaoAutomationAuditEvents({
       outcome:sent?'success':'partial_success',customer_label:customerLabel,target_type:'document',target_id:pricingDocument.fileId || null,
       summary:`자동 ${pricingDocument.documentType==='statement'?'거래명세서':'견적서'} ${pricing.totalVatIncluded.toLocaleString('ko-KR')}원 · ${pricing.discountType} · ${sent?'발송 완료':'발송 결과 확인 필요'}`,
       change_items:[{field:'equipment',before:null,after:pricing.items.map(item=>`${item.name} ×${item.qty} · 단가 ${item.price}원`).join(', ')},
-        ...(sent?[{field:'document',before:null,after:pricingDocumentUrl(pricingDocument.pdfUrl)}]:[])],outbound_text:null,
+        ...(sent?[{field:'document',before:null,after:ownerDocumentUrl}]:[])],outbound_text:null,
       evidence:{schema:pricingDocument.schema,status:sent?'sent':'unconfirmed',readback:Boolean(sent)},
       source_message_at:sourceMessageAt(durableJob),historical_import:Boolean(historicalImport)
     }));
