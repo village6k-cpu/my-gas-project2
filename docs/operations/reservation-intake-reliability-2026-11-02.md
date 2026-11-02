@@ -9,7 +9,7 @@
 - AI가 `new_inquiry`, 실제 장비 문의, 미등록으로 명시한 건은 native 접수/등록 receipt 없이 정상 완료할 수 없다. 같은 근거와 보정 지침으로 기존 no-final 재시도 경로를 사용한다. FINAL JSON 자체로 예약을 쓰지는 않는다.
 - 날짜 모순은 해당 필드만 공란으로 접수한다. 장비·고객·알려진 반출 일시는 보존한다. 일정 미완성 접수는 가용/등록 성공을 뜻하지 않는다.
 - `AI_WORKER_RESERVATION_CLARIFICATION_AUTO_SEND=1`과 `AI_WORKER_RESERVATION_RECOVERY_ENABLED_AFTER` 이후의 새 live job만 별도 확인 질문 경로를 사용할 수 있다. 정확히 성공한 일정 미완성 접수 receipt, high confidence, contact_request, visible_conversation이 필요하다. 기존 kill switch·freshness·중복 방지·위험 문구 검사를 모두 적용한다.
-- 미해결 일정/재고 업무와 질문 전송 여부는 기존 대표 Slack outbox에 남긴다. 접수 재시도 소진도 별도로 알린다. 같은 업무의 감사 메시지는 알림을 다시 만들지 않는다.
+- 미해결 일정/재고 업무와 질문 전송 여부는 기존 대표 Slack outbox에 남긴다. 활성화 이후 새 상담의 재시도 소진과 결과 적용 실패도 별도로 알린다. 같은 업무의 감사 메시지는 알림을 다시 만들지 않는다.
 - 기존 과거 작업 보류 manifest, 일반 autoSend=false, 문서/가격 경로와 권한은 유지한다.
 
 ## 검증
