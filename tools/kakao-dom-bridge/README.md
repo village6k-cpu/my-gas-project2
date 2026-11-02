@@ -56,6 +56,20 @@ scripts/kakao-automation status
 
 ## 환경변수
 
+### 검증된 가격 안내·견적서 자동 처리
+
+`AI_WORKER_VERIFIED_PRICING_AUTO_SEND=1`과 ISO UTC 시각의
+`AI_WORKER_VERIFIED_PRICING_ENABLED_AFTER`를 함께 설정하면 해당 시각 이후의 새 실시간
+고객 문의 중 단가·할인·기간·수량이 검증된 가격 답변만 초기 AI 응대에서 발송합니다.
+과거 복구 보류 작업과 일반 자동응답 설정은 그대로 적용됩니다. `설정!A1`의 중지 정책도 유지됩니다.
+
+견적서 요청은 서버의 `VILLAGE_DOCUMENT_API_URL`·`VILLAGE_DOCUMENT_API_KEY`로
+동일 금액을 재검증하고, 발송 확인 후에만 완료 처리합니다. 불확실한 전송은 자동 재발송하지 않습니다.
+완료 기록은 헤이빌리 **후속조치 → 자동처리**에서 고객·품목·금액·할인·PDF·결과로 확인합니다.
+`AI_WORKER_PRICING_OWNER_SLACK_USER_ID`에 지정된 담당자에게 `SLACK_BOT_TOKEN`으로
+완료/확인 필요 알림을 보내며, Slack 장애는 `queue/pricing-owner-notices`에 저장해 재시도합니다.
+확인된 가격 안내·견적서 발송만으로 승인 업무를 만들지 않으며, 별도 예약 검토 등은 유지합니다.
+
 `.env.example` 참고. Node 내장 모듈만 사용하기 위해 자동 dotenv 로딩은 하지 않습니다.
 필요하면 아래처럼 실행합니다.
 

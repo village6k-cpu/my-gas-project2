@@ -2,6 +2,7 @@
 import {refreshKakaoConversationWithoutDraft} from './stale-conversation-refresh.mjs';
 import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
+import { completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, sendAutomaticPricingDocument } from './verified-pricing.mjs';
 import fs from 'node:fs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
 import os from 'node:os';
@@ -765,7 +766,9 @@ ${INVENTORY_JUDGMENT}
 - Link request_id only when the pending RQ's entire top-level equipment plan equals this operation's exact delta. A related customer/date is insufficient. For an unrelated or partially applied RQ, omit request_id; do not duplicate already-applied items or drop the other outstanding additions to force a match.
 - A registered rejection with error.details.code=REGISTERED_CORRECTION_PREFLIGHT_REJECTED and noMutationPerformed=true proves this attempt changed nothing. Use the reason plus fresh village_read to correct the typed input yourself, then call the registered tool again within this turn (at most two input corrections). The same payload only returns its old receipt; change it only with grounded evidence. Do not turn an input error into a routine owner task when you can resolve it.
 - Any other blocked/failed result, partial_success, contradictory readback, or uncertain transport remains no-send owner review; never replay an uncertain or already-applied operation. Successful final reconciliation must match the corrected operation and current schedule.
-- For an explicit registered-trade quote send, call village_document_send with the exact trade_id before FINAL_JSON. Choose tax_mode="supply_only" only for an explicit VAT-exclusive request; otherwise use "vat_included".
+- INITIAL AUTO PRICING: ${promptPolicyConfig?.prompt?.automatic_pricing_policy || "Owner price authorization unavailable; do not auto-send prices."}
+- Protocol: finish verified prices/quotes in this first AI turn without owner handoff. Use full price_quote.source="catalog", replyMode="auto_send", safetyClass="sensitive_commitment", grounding="authoritative_sheet", requiresRag=false, owner_review_required=false. State exact VAT-inclusive total/discount; no availability/delivery claim. A requested PDF remains one quote_send follow_up_item as HOST EXECUTION INTENT: host rechecks prices, sends, audits and removes completed work. Do not also call village_document_send. Missing/zero prices, unknown discounts or conflicting earlier amounts require focused owner review; never drop items or invent discounts. Verified sends are recorded and reported, not assigned as approval work.
+- Outside initial verified catalog pricing, registered-trade documents use village_document_send with exact trade_id. Use tax_mode="supply_only" only for explicit VAT-exclusive requests; otherwise "vat_included".
 - A successful correlated village_document_send receipt is the only delivery authority. Do not promise that a quote was or will be sent without that receipt; on tool failure use draft_only + owner review.
 - A pending quote_send task is not a delivery claim. Preserve it when document prerequisites are missing, while answering independently grounded price/policy questions where possible. State the specific unresolved prerequisite; do not silently replace a requested document with an incomplete price or a generic acknowledgment. Do not omit equipment or assume a missing price is free to make a quote complete.
 - A registration receipt proves registration only. If a later customer also requested a quote document, retain that exact open document follow-up after registration success; do not discard it or mark it delivered. Follow the single-operation receipt boundary and do not replay registration to generate a document.
@@ -5054,6 +5057,11 @@ export function requireConfig() {
       return Number.isFinite(value) ? Math.min(1440, Math.max(30, value)) : 180;
     })(),
     autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
+    verifiedPricingAutoSendEnabled: process.env.AI_WORKER_VERIFIED_PRICING_AUTO_SEND === '1',
+    verifiedPricingEnabledAfter: process.env.AI_WORKER_VERIFIED_PRICING_ENABLED_AFTER || '',
+    pricingOwnerSlackUserId: process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID || '',
+    documentApiBaseUrl: process.env.VILLAGE_DOCUMENT_API_URL || 'https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec',
+    documentApiKey: process.env.VILLAGE_DOCUMENT_API_KEY || process.env.VILLAGE_OPS_KEY || '',
     autoSendLogPath: process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
     // 응대 교정 원장 — 야간 채굴기(mine-kakao-corrections.mjs)가 사장 수동응대 사례를 적재하고
     // 워커가 매 판단마다 읽는다. Village Brain(사업 참모용)과 의도적으로 분리된 카카오 전용 학습면.
@@ -7744,7 +7752,7 @@ function currencyAmountsInReply(value = '') {
 // Validate the AI's reply plan. Live operator control belongs exclusively to
 // maybeAutoSendReply at the effect boundary, for text and document delivery alike.
 export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = {}) {
-  if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
+  if (!config.autoSendEnabled && !verifiedPricingConfigured(config, decision)) return { allowed: false, reason: 'auto_send_disabled' };
   const typedPriceReply = isTypedPriceReply(decision);
   if (!hasIndependentCustomerReply(decision) && (decision?.post_action_reconciled === true
     || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object'))) {
@@ -7829,6 +7837,10 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
     }
     if (verification.complete !== true || !Number.isFinite(Number(verification.totalVatIncluded))) {
       return { allowed: false, reason: 'authoritative_price_verification_incomplete' };
+    }
+    if (verifiedPricingConfigured(config, decision)) {
+      const issue = verifiedPricingIssue(verification, decision.price_quote);
+      if (issue) return { allowed:false, reason:issue };
     }
     const expectedTotal = Number(verification.totalVatIncluded);
     const replyAmounts = currencyAmountsInReply(textValue);
@@ -8807,6 +8819,9 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', preview: job.preview_text || job.previewText || '' });
     return result;
   }
+  if (verifiedPricingConfigured(config, decision) && !verifiedPricingFreshJob(config, job)) {
+    return {attempted:false,sent:false,gate:{allowed:false,reason:'pricing_before_activation_cutoff'}};
+  }
   const documentGate = canAutoSendCustomerDocumentAssets(decision, config);
   let priceVerification = null;
   let gate;
@@ -8815,7 +8830,7 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   } else {
     const preliminaryGate = canAutoSendCustomerAnswer(decision, config);
     if (preliminaryGate.reason === 'authoritative_price_verification_required') {
-      priceVerification = await buildAuthoritativePriceVerification(config, decision);
+      priceVerification = await (dependencies.buildAuthoritativePriceVerification || buildAuthoritativePriceVerification)(config, decision);
       gate = canAutoSendCustomerAnswer(decision, config, { priceVerification });
     } else {
       gate = preliminaryGate;
@@ -8866,6 +8881,27 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   }
   // Reads above may span a newer room event. The caller owns the room revision.
   await dependencies.assertFreshBeforeSend?.();
+  let pricingDocumentReceipt = null;
+  if (verifiedPricingConfigured(config, decision) && pricingDocumentRequested(decision)) {
+    try {
+      pricingDocumentReceipt = await (dependencies.sendAutomaticPricingDocument || sendAutomaticPricingDocument)({
+        config, decision, verification:priceVerification, job, assertFresh:dependencies.assertFreshBeforeSend,
+        fetchImpl:config.fetchImpl || fetch
+      });
+    } catch (error) {
+      return {attempted:false,sent:false,text:gate.text,priceVerification,verifiedPricing:true,
+        pricingDocumentFailure:{schema:'village-auto-pricing-document-receipt/v1',status:'unconfirmed',occurredAt:new Date().toISOString(),error:error.message},
+        gate:{allowed:false,reason:'quote_delivery_not_confirmed'}};
+    }
+  }
+  if (pricingDocumentReceipt) {
+    const latestPolicy = await readCustomerReplyExecutionPolicy(config);
+    const latestGate = canExecuteCustomerReply(decision, latestPolicy);
+    if (!latestGate.allowed) return {attempted:false,sent:false,pricingDocumentReceipt,priceVerification,verifiedPricing:true,gate:latestGate};
+    try { await dependencies.assertFreshBeforeSend?.(); }
+    catch { return {attempted:false,sent:false,pricingDocumentReceipt,priceVerification,verifiedPricing:true,
+      gate:{allowed:false,reason:'superseded_after_quote_delivery'}}; }
+  }
   let sendResult;
   try {
     const sendMessage = dependencies.sendKakaoMessage || sendKakaoMessageViaChrome;
@@ -8903,7 +8939,9 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
     text: gate.text,
     executionPolicy,
     ragSupport,
-    ...(priceVerification ? { priceVerification } : {})
+    ...(priceVerification ? { priceVerification } : {}),
+    ...(verifiedPricingConfigured(config, decision) ? {verifiedPricing:true} : {}),
+    ...(pricingDocumentReceipt ? { pricingDocumentReceipt } : {})
   };
   logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey, roomReplyKey, ragSupport });
   return result;
@@ -12224,7 +12262,8 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
           ? await sendReply({ config, decision: prepared.decision, job, navigationContext, dependencies: replyDependencies })
           : { attempted: false, sent: false, reason: 'sheet_write_rejected_no_auto_send', sheetErrorType: prepared.sheetResult.error_type })
       : await sendReply({ config, decision: prepared.decision, job, navigationContext, dependencies: replyDependencies });
-    result = { prepared, freshSnapshot, snapshotChanged: false, autoReplyResult, closeResult };
+    result = { prepared, freshSnapshot, snapshotChanged: autoReplyResult.gate?.reason === 'superseded_after_quote_delivery',
+      superseded: autoReplyResult.gate?.reason === 'superseded_after_quote_delivery', autoReplyResult, closeResult };
     return result;
   } catch (error) {
     if (/superseded_by_newer_room_event/.test(String(error?.message || error || ''))) {
@@ -12398,12 +12437,13 @@ async function persistHumanAutomationState({ workOrchestratorResult, resolution,
 }
 
 export async function finalizePreparedKakaoDecision({ config, job, applied, dependencies = {} } = {}) {
-  const prepared = applied?.prepared;
+  let prepared = applied?.prepared;
   if (!prepared) throw new Error('applied Kakao decision is required');
   if (prepared.status !== 'ai_prepared') {
     return { ...prepared, workOrchestratorResult: emptyWorkOrchestratorResult(true) };
   }
   const autoReplyResult = applied.autoReplyResult || { attempted: false, sent: false, reason: 'missing_apply_result' };
+  if (verifiedPricingConfigured(config, prepared.decision)) prepared = completeVerifiedPricingWork(prepared, autoReplyResult);
   const replyExecutionOutcome = deriveCustomerReplyOutcome({ ...applied, decision: prepared.decision, autoReplyResult,
     replyExecutionIntent: prepared.replyExecutionIntent });
   if (applied.superseded === true) {
