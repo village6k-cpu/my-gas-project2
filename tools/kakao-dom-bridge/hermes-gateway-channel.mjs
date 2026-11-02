@@ -992,9 +992,10 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         .map(cloneHydrated)));
     },
 
-    async listPendingApplicationFailureNotifications() {
+    async listPendingApplicationFailureNotifications({ createdAfter = null } = {}) {
       return mutate(async () => Promise.all([...jobs.values()]
         .filter((job) => !isHeldJob(job))
+        .filter((job) => createdAfter === null || Date.parse(job.created_at) >= Date.parse(createdAfter))
         .filter((job) => job.application?.state === 'failed'
           && job.application?.failure_notification?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
@@ -1304,9 +1305,10 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     },
 
     async reapExpiredLeases() { return mutate(reapExpiredLeasesInternal); },
-    async listPendingFailureNotifications() {
+    async listPendingFailureNotifications({ createdAfter = null } = {}) {
       return mutate(async () => Promise.all([...jobs.values()]
         .filter((job) => !isHeldJob(job))
+        .filter((job) => createdAfter === null || Date.parse(job.created_at) >= Date.parse(createdAfter))
         .filter((job) => job.failure_notification?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
         .map(cloneHydrated)));
