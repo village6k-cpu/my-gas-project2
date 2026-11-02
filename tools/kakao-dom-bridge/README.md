@@ -72,6 +72,8 @@ scripts/kakao-automation status
 예약자와 다른 요청자의 수령 권한은 서버의 `AI_WORKER_STATEMENT_RECIPIENT_AUTHORIZATIONS`
 JSON 배열에 승인된 `{tradeId,roomKey,requesterName,bookingCustomerName}` 조합만 등록합니다.
 결제·증빙 상태는 변경하지 않으며 세금계산서는 이 자동 발송 권한에 포함하지 않습니다.
+기존 공식 거래명세서 서식의 12개 청구 품목 한도를 넘으면 품목을 누락하지 않고 서식 확인으로 차단합니다.
+완료된 서류 대화나 고객의 감사 답변은 추가 확인 알림을 만들지 않습니다.
 `AI_WORKER_PRICING_OWNER_SLACK_USER_ID`에 지정된 담당자에게 `SLACK_BOT_TOKEN`으로
 완료/확인 필요 알림을 보내며, Slack 장애는 `queue/pricing-owner-notices`에 저장해 재시도합니다.
 확인된 가격 안내·견적서 발송만으로 승인 업무를 만들지 않으며, 별도 예약 검토 등은 유지합니다.

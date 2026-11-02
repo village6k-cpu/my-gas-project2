@@ -8,8 +8,11 @@ export function pricingOwnerNotice(config,job,finalized){
   if(!config.verifiedPricingAutoSendEnabled || !verifiedPricingFreshJob(config,job))return null;
   const decision=finalized.decision || {},result=finalized.autoReplyResult || {};
   const pricing=verifiedPricingAudit(result);
-  const relevant=pricing || decision.statement_request || ['price','price_review','quote_send'].includes(decision.classification)
-    || (decision.follow_up_items || []).some(item=>['price_review','quote_send'].includes(item.type));
+  const openWork=(decision.follow_up_items || []).some(item=>item.requiresHumanAction===true
+    && !['completed','resolved','cancelled','dismissed'].includes(item.status)
+    && (['price_review','quote_send'].includes(item.type) || (item.type==='contract_document' && /거래명세|statement/i.test([item.title,item.summary,item.taskKey].join(' ')))));
+  const relevant=pricing || result.priceVerification || result.pricingDocumentReceipt || result.pricingDocumentFailure || openWork
+    || (decision.owner_review_required===true && ['price','price_review','quote_send'].includes(decision.classification));
   if(!relevant)return null;
   const priceSent=result.sent===true && Boolean(result.readbackReceipt);
   const document=result.pricingDocumentReceipt,documentSent=document?.deliveryConfirmed===true;
