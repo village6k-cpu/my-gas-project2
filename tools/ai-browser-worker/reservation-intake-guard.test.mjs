@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {unrecordedReservationInquiry, reservationClarificationConfigured, freshReservationJob, reservationOwnerNotice,reservationFailureOwnerNotice,INTAKE_REPAIR_INSTRUCTION} from './reservation-intake-guard.mjs';
+import {unrecordedReservationInquiry, reservationClarificationConfigured, freshReservationJob, reservationOwnerNotice,reservationFailureOwnerNotice,INTAKE_REPAIR_INSTRUCTION,RESERVATION_DATE_POLICY,RESERVATION_PRIORITY_POLICY} from './reservation-intake-guard.mjs';
 
 const decision = {should_write_to_sheet:false, inquiry_disposition:'new_inquiry', classification:'already_answered',
   reservation_inquiry:{is_reservation_inquiry:true,already_registered:false,equipment_requested:[{quantity:1}]}};
@@ -41,4 +41,19 @@ test('fresh processing failures alert the owner while historical failures remain
   assert.ok(reservationFailureOwnerNotice(config,{...job,event:{...job.event,prompt:'unrelated'},error:{type:'lease_retry_exhausted'}}));
   assert.ok(reservationFailureOwnerNotice(config,{...job,state:'completed',application:{state:'failed'}}));
   assert.equal(reservationFailureOwnerNotice(config,{...job,state:'completed'}),null);
+});
+
+
+test('native initial and repair turns share typo interpretation, direct clarification and shared-stock priority policy',async()=>{
+  const {buildHermesPrompt}=await import('./worker.mjs');
+  const prompt=buildHermesPrompt({jobId:'date-policy'},{gatewayConfirmationToolAvailable:true});
+  for(const policy of [RESERVATION_DATE_POLICY,RESERVATION_PRIORITY_POLICY]) {
+    assert.ok(prompt.includes(policy));assert.ok(INTAKE_REPAIR_INSTRUCTION.includes(policy));
+  }
+  assert.match(RESERVATION_DATE_POLICY,/one well-supported interpretation/);
+  assert.match(RESERVATION_DATE_POLICY,/ask the customer one focused question/);
+  assert.match(RESERVATION_DATE_POLICY,/SAME pending RQ/);
+  assert.doesNotMatch(INTAKE_REPAIR_INSTRUCTION,/Never guess a return date/);
+  assert.match(RESERVATION_PRIORITY_POLICY,/rentals starting earlier/);
+  assert.match(RESERVATION_PRIORITY_POLICY,/lens substitution cannot solve a shared camera-body shortage/);
 });
