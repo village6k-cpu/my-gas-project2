@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {isArchived,isCritical,parseRestore,triageItem,groupCritical} from '../lib/followups/triage.mjs';
 const id='029942b7-7bc8-4a26-91a5-dbdc9f340668';
 test('unknown or invalid amounts remain unknown',()=>{
- for(const value of [null,undefined,'',-1,'unknown',Infinity]) assert.equal(triageItem({payload:{owner_triage_balance:value}}).balance,null);
+ for(const value of [null,undefined,'','  ',false,true,[],{},-1,'unknown',Infinity]) assert.equal(triageItem({payload:{owner_triage_balance:value}}).balance,null);
  assert.equal(triageItem({payload:{owner_triage_balance:'0'}}).balance,0);
  assert.equal(triageItem({payload:{owner_triage_balance:'500000'}}).balance,500000);
 });
@@ -26,4 +26,9 @@ test('malformed evidence never invents a trade reference',()=>{
  assert.deepEqual(triageItem({payload:{owner_triage_accounts:'bad'}}).accounts,[]);
  const item=triageItem({payload:{owner_triage_accounts:JSON.stringify([{tradeId:'not-a-trade'},{tradeId:'261029-011',balance:1000,paid:2000}])}});
  assert.equal(item.accounts.length,1);assert.equal(item.accounts[0].balance,1000);
+});
+
+test('repair settlements use the verified reconciliation action over stale collection instructions',()=>{
+ const item=triageItem({payload:{owner_triage_kind:'damage_settlement',recommended_action:'입금 증거가 없으니 독촉'}});
+ assert.match(item.action,/은행 입금 원본/);assert.doesNotMatch(item.action,/독촉/);
 });
