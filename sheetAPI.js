@@ -102,6 +102,8 @@ function getVillageOperationCapabilities_() {
       { id: "contract.extras", action: "dashboardContractExtras", policy: "read_only" },
       { id: "schedule.trade_candidates", action: "tradeCandidates", policy: "read_only" },
       { id: "payment.metadata", action: "paymentMeta", policy: "read_only" },
+      { id: "invoice.workspace", action: "taxInvoiceWorkspace", policy: "read_only" },
+      { id: "invoice.workspace_issue", action: "issueTaxInvoiceWorkspace", policy: "customer_send", verification: "authoritative_server_ack" },
       { id: "confirmation_request.list", action: "list", policy: "read_only" },
       { id: "confirmation_request.scan", action: "scan", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "operation.receipt", action: "operationReceipt", policy: "read_only", verification: "authoritative_read" },
@@ -635,6 +637,12 @@ function handleRequestCore_(e) {
 
       case "terminalPaymentState":
         return jsonResponse(getTerminalPaymentState_(params.tids || postBody.tids || []));
+
+      case "taxInvoiceWorkspace":
+        return jsonResponse(getTaxInvoiceWorkspace_(postBody.tids || [], postBody.options || {}));
+
+      case "issueTaxInvoiceWorkspace":
+        return jsonResponse(issueTaxInvoiceWorkspace_(postBody));
 
       case "paymentLedgerSnapshot":
         return jsonResponse(getPaymentLedgerSnapshot_(postBody.tids == null ? null : postBody.tids));

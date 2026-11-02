@@ -8501,6 +8501,8 @@ function rememberPayAppTestPaymentRequest_(testId, info) {
 }
 
 function requestTradeProofIssue(tid, options) {
+  var invoiceGuard = typeof invoiceWorkspaceIssueGuard_ === 'function' ? invoiceWorkspaceIssueGuard_(tid, '') : null;
+  if (invoiceGuard) return invoiceGuard;
   var ready = validateTradeProofIssueReady_(tid);
   if (ready && ready.error) return ready;
   var result = callVillageOpsApi_("issueProof", tid, options || {});
@@ -8524,6 +8526,8 @@ function requestDirectTaxInvoice(tid, postBody, params) {
   });
 
   // 인증/action/거래ID는 callVillageOpsApi_가 넣고, 재무 앱이 허용한 typed field만 전달한다.
+  var invoiceGuard = typeof invoiceWorkspaceIssueGuard_ === 'function' ? invoiceWorkspaceIssueGuard_(tid, input.invoiceWorkspaceToken) : null;
+  if (invoiceGuard) return invoiceGuard;
   var payload = {};
   payload.amount = input.amount;
   payload.invoiceeCorpNum = input.invoiceeCorpNum;
