@@ -66,6 +66,7 @@ test('registered and pending-request quotes use the verified record identity and
   const currentVerification={...statementVerification,calculations:[{...statementVerification.calculations[0],...reference}]};
   const request=automaticQuoteRequest({decision:currentDecision,verification:currentVerification,job});
   assert.equal(request.action,'sendEstimateManual');
+  assert.deepEqual(request.pricingSource,{source,id});
   assert.equal(request.manualData.고객명,'테스트');assert.equal(request.manualData.연락처,'01012345678');
   assert.equal(request.manualData.대여기간,'2026-11-03 10:00 ~ 2026-11-04 10:00');
   assert.deepEqual(request.manualData.items,[{품목:'렌즈',수량:1,일수:1,단가:10000}]);
@@ -81,6 +82,7 @@ test('registered quote reaches the document API with an authoritative payload',a
   fetchImpl:async(url,request)=>{
    calls++;const body=JSON.parse(request.body);
    assert.equal(body.action,'sendEstimateManual');assert.equal(body.expectedTotal,7700);assert.equal(body.manualData.고객명,'테스트');
+   assert.deepEqual(body.pricingSource,{source:'trade',id:'261024-007'});
    return {ok:true,json:async()=>({status:'OK',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/test/view',totalVatIncluded:7700})};
   }});
  assert.equal(calls,1);assert.equal(receipt.deliveryConfirmed,true);

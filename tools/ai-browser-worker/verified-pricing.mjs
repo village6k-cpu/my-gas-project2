@@ -80,13 +80,14 @@ export function automaticQuoteRequest({ decision, verification, job }) {
     대여기간: period,
     items: calculation.pricedItems.map(item => ({품목:item.name, 수량:item.qty, 일수:days, 단가:item.price}))
   };
+  const pricingSource = {source:quote.source, ...(quote.id ? {id:quote.id} : {})};
   const operationId = createHash('sha256').update(JSON.stringify({
     event:job.sourceEventKey || job.eventHash || job.jobId || job.id,
     room:job.roomKey || job.room_key, revision:job.roomRevision || job.room_revision,
-    manualData, total:verification.totalVatIncluded
+    manualData, total:verification.totalVatIncluded, pricingSource
   })).digest('hex');
   return {action:'sendEstimateManual', automaticPricing:true, operationId,
-    expectedTotal:verification.totalVatIncluded, manualData};
+    expectedTotal:verification.totalVatIncluded, manualData, pricingSource};
 }
 
 export async function sendAutomaticPricingDocument({ config, decision, verification, job, assertFresh, fetchImpl = fetch }) {
