@@ -414,6 +414,28 @@ async function callPost(req: NextRequest) {
           confirmed = parsed as Record<string, unknown>;
         }
       } catch { /* 유효하지 않은 GAS 응답은 브라우저가 기존 규칙대로 재시도한다. */ }
+      if (confirmed?.error) {
+        // 구 GAS는 Properties 용량·서비스 일시 장애도 {error}만 반환한다. 그대로
+        // 넘기면 브라우저가 영구 거절로 오인해 내구 outbox를 삭제한다. 같은 mutationId로
+        // 재확인하고, ACK 없이는 완료 상태를 DB에 쓰지 않는다.
+        const message = String(confirmed.error);
+        const temporary = confirmed.retryable === true || confirmed.code === "BUSY" ||
+          /속성 저장용량|(?:property )?storage quota|service invoked too many times|service unavailable|일시적으로 사용할 수|잠시 후 다시|처리 중/i.test(message);
+        const unknown = confirmed.outcomeUnknown === true || confirmed.code === "OUTCOME_UNKNOWN";
+        console.error(`[${action}] upstream rejected`, {
+          tradeId: String(payload.tid ?? ""), code: confirmed.code ?? "GAS_REJECTED",
+          retryable: temporary || unknown, message,
+        });
+        if (temporary || unknown) {
+          return NextResponse.json(
+            { error: "완료 상태 저장이 지연되어 자동 재시도 중입니다", code: "REMOTE_RETRY", retryable: true },
+            { status: 503 },
+          );
+        }
+        // 명확히 거절돼 더 이상 실행 중인 요청이 없다. 다음 직원 클릭까지 120초
+        // 막지 않되, finally의 token 조건으로 다른 요청의 lease는 건드리지 않는다.
+        packingRelease = true;
+      }
       const field = action === "toggleSetup" ? "setupDone" : "returnDone";
       if (confirmed && !confirmed.error && typeof confirmed[field] === "boolean") {
         try {
