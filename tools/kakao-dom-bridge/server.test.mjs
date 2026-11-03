@@ -7599,3 +7599,24 @@ test('read catchup deduplicates a real seven-field Gateway envelope after restar
     assert.equal(classifyReadRoomCatchup({...job,reason:'read_room_catchup'},observed,{now}).action,'ignore');
   } finally { await rm(directory,{recursive:true,force:true}); }
 });
+
+test('quotation failures retain an owner notice and audit even when finalization fails',async()=>{
+ const directory=await mkdtemp(path.join(tmpdir(),'pricing-failure-notice-'));
+ try{
+  const detectedAt=new Date().toISOString(),job={jobId:'quote-failure',roomKey:'room-quote',roomRevision:1,detectedAt};
+  const durable={job_id:job.jobId,room_key:job.roomKey,room_revision:1,event:{},local_context:{job,turn_internal:{}},result:{content:'FINAL_JSON {}'},tool_receipts:[]};
+  let auditQueued=false;
+  const channel={claimApplication:async()=>({claimed:true,application_id:'application-quote',job:durable}),beginApplication:async()=>{},recordApplicationApplied:async()=>{},finalizeApplication:async()=>{},listPendingApplicationFailureNotifications:async()=>[],
+   failApplication:async()=>({...durable,application:{state:'failed',application_id:'application-quote'}}),markApplicationFailureNotified:async()=>{}};
+  const prepared={decision:{customer:{name:'견적 고객'},price_quote:{source:'trade',id:'261031-009'},follow_up_items:[{type:'quote_send',requiresHumanAction:true}]}};
+  const result={verifiedPricing:true,sent:false,priceVerification:{complete:true,totalVatIncluded:7700,unresolved:[],calculations:[{discountType:'학생',payment:{days:1},pricedItems:[{name:'렌즈',qty:1,price:10000}]}]},
+   pricingDocumentFailure:{schema:'village-auto-pricing-document-receipt/v1',documentType:'quote',status:'unconfirmed',occurredAt:detectedAt,error:'quote_delivery_not_confirmed'},gate:{reason:'quote_delivery_not_confirmed'}};
+  const coordinator=createGatewayResultApplicationCoordinator({channel,getConfig:()=>({queueDir:directory,verifiedPricingAutoSendEnabled:true,verifiedPricingEnabledAfter:'2026-11-02T00:00:00Z',pricingOwnerSlackUserId:'UOWNER'}),
+   prepare:async()=>prepared,apply:async()=>({prepared,autoReplyResult:result}),finalize:async()=>{throw Error('followup persistence unavailable')},onFailure:async()=>{},
+   auditCoordinator:{queueFromEvidence:async()=>{auditQueued=true;},projectPending:async()=>{}}});
+  await coordinator.enqueue(durable);await coordinator.idle();
+  const files=await readdir(path.join(directory,'pricing-owner-notices'));assert.equal(files.length,1);
+  const notice=JSON.parse(await readFile(path.join(directory,'pricing-owner-notices',files[0]),'utf8'));
+  assert.match(notice.text,/견적 고객/);assert.match(notice.text,/quote_delivery_not_confirmed/);assert.equal(auditQueued,true);
+ }finally{await rm(directory,{recursive:true,force:true});}
+});
