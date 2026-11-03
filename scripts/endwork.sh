@@ -46,11 +46,13 @@ fi
 
 # 3. HEAD 기준 GAS가 바뀌었는지 확인. 바뀌었으면 push 중단.
 # Native Windows git cannot read MSYS /tmp paths reliably in this runtime.
-# Keep snapshots under .git and pass repo-relative paths to git diff.
-TMP_GAS="$(mktemp -d "$ROOT/.git/gas-endwork-remote.XXXXXX")"
-TMP_HEAD="$(mktemp -d "$ROOT/.git/gas-endwork-head.XXXXXX")"
-TMP_GAS_REL="${TMP_GAS#$ROOT/}"
-TMP_HEAD_REL="${TMP_HEAD#$ROOT/}"
+# Keep snapshots under the shared git directory. In a linked worktree `$ROOT/.git`
+# is a file, so resolving the common directory is required before mktemp.
+GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir)"
+TMP_GAS="$(mktemp -d "$GIT_COMMON_DIR/gas-endwork-remote.XXXXXX")"
+TMP_HEAD="$(mktemp -d "$GIT_COMMON_DIR/gas-endwork-head.XXXXXX")"
+TMP_GAS_REL="$TMP_GAS"
+TMP_HEAD_REL="$TMP_HEAD"
 cleanup() { rm -rf "$TMP_GAS" "$TMP_HEAD"; }
 trap cleanup EXIT
 

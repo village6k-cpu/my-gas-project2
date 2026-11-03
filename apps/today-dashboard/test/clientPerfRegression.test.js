@@ -97,3 +97,17 @@ test("렌더 안정화: ScheduleCard·VillageTimeline은 memo, 타임라인 행�
   assert.match(tl, /const headerCells = useMemo\(/, "날짜 헤더 셀은 useMemo여야 한다");
   assert.match(tl, /const dayStripes = useMemo\(/, "주말·오늘 배경 셀은 useMemo여야 한다");
 });
+
+test("타임라인 상세 탭: 활성 포인터만 드래그를 종료하고 지연 정리를 누적하지 않는다", () => {
+  const tl = read("components/VillageTimeline.tsx");
+  assert.match(tl, /el: HTMLElement; pointerId: number;/, "활성 드래그가 소유 포인터 ID를 저장해야 한다");
+  assert.match(tl, /pointerId !== active\.pointerId/, "다른 포인터의 취소·캡처 유실은 무시해야 한다");
+  assert.match(tl, /const pointerId = e\.pointerId;[\s\S]*drag\.current = \{ el, pointerId,/, "포인터 ID를 이벤트에서 분리해 활성 드래그에 저장해야 한다");
+  assert.equal((tl.match(/d\.pointerId !== e\.pointerId/g) || []).length, 2, "이동·해제는 활성 포인터만 처리해야 한다");
+  assert.match(tl, /drag\.current = null;[\s\S]*releasePointerCapture\(active\.pointerId\)/, "캡처 해제의 재진입 전에 활성 드래그를 분리해야 한다");
+  assert.match(tl, /onPointerCancel=\{\(ev\) => cancelActiveDrag\(ev\.pointerId\)\}/, "포인터 취소 시 해당 포인터만 정리해야 한다");
+  assert.match(tl, /onLostPointerCapture=\{\(ev\) => cancelActiveDrag\(ev\.pointerId\)\}/, "캡처 유실 시 해당 포인터만 정리해야 한다");
+  assert.match(tl, /const delayedReset = useRef</, "150ms 스타일 정리 타이머를 추적해야 한다");
+  assert.match(tl, /const onDown =[\s\S]*finishDelayedReset\(\);[\s\S]*cancelActiveDrag\(\);/, "새 드래그 전에 이전 지연 정리를 끝내야 한다");
+  assert.match(tl, /cancelActiveDrag\(\);\s*finishDelayedReset\(\);/, "화면 이탈 시 드래그와 지연 정리를 모두 끝내야 한다");
+});

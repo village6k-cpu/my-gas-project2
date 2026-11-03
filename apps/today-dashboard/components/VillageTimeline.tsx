@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { Trade } from "@/lib/domain/types";
@@ -17,6 +17,13 @@ const BAR_H = 28;
 const HEAD_H = 52;
 const REV_H = 50;
 const WEEKDAY = ["일", "월", "화", "수", "목", "금", "토"];
+
+function resetDragElement(el: HTMLElement) {
+  el.style.transition = "";
+  el.style.transform = "";
+  el.style.zIndex = "";
+  el.style.cursor = "";
+}
 
 // React.memo: 스토어 emit 중 trades 참조가 안 바뀌는 갱신(저장 토스트 등)에는
 // 수백 개 막대 트리를 다시 조정하지 않는다. props는 전부 참조 안정(ScheduleView useMemo/상태).
@@ -110,13 +117,37 @@ export const VillageTimeline = memo(function VillageTimeline({
     setMenu({ item, x, y, mobile: typeof window !== "undefined" && window.innerWidth < 640 });
 
   // ── 이동 드래그 (관성) ──────────────────────────────────────────
-  const drag = useRef<{ el: HTMLElement; sx: number; sy: number; tx: number; ty: number; cx: number; cy: number; raf: number; moved: boolean; lp: number; lpFired: boolean } | null>(null);
-  const resetEl = (el: HTMLElement) => {
-    el.style.transition = "";
-    el.style.transform = "";
-    el.style.zIndex = "";
-    el.style.cursor = "";
-  };
+  const drag = useRef<{ el: HTMLElement; pointerId: number; sx: number; sy: number; tx: number; ty: number; cx: number; cy: number; raf: number; moved: boolean; lp: number; lpFired: boolean } | null>(null);
+  const delayedReset = useRef<{ timer: number; finish: () => void } | null>(null);
+  const finishDelayedReset = useCallback((timer?: number) => {
+    const pending = delayedReset.current;
+    if (!pending || (timer !== undefined && timer !== pending.timer)) return;
+    delayedReset.current = null;
+    clearTimeout(pending.timer);
+    pending.finish();
+  }, []);
+  const cancelActiveDrag = useCallback((pointerId?: number) => {
+    const active = drag.current;
+    if (!active || (pointerId !== undefined && pointerId !== active.pointerId)) return;
+    // releasePointerCapture can synchronously dispatch lostpointercapture. Detach first so
+    // that callback cannot cancel a newer drag or re-enter cleanup for this one.
+    drag.current = null;
+    clearTimeout(active.lp);
+    cancelAnimationFrame(active.raf);
+    try {
+      if (active.el.hasPointerCapture(active.pointerId)) active.el.releasePointerCapture(active.pointerId);
+    } catch {
+      // Capture may already have been released by the browser.
+    }
+    resetDragElement(active.el);
+  }, []);
+  useEffect(
+    () => () => {
+      cancelActiveDrag();
+      finishDelayedReset();
+    },
+    [cancelActiveDrag, finishDelayedReset],
+  );
   const loop = () => {
     const d = drag.current;
     if (!d) return;
@@ -126,8 +157,12 @@ export const VillageTimeline = memo(function VillageTimeline({
     d.raf = requestAnimationFrame(loop);
   };
   const onDown = (e: React.PointerEvent, it: TLItem) => {
+    // 이전 완료 타이머/드래그가 새 포인터의 스타일이나 상태를 건드리지 못하게 먼저 끝낸다.
+    finishDelayedReset();
+    cancelActiveDrag();
     const el = e.currentTarget as HTMLElement;
-    el.setPointerCapture(e.pointerId);
+    const pointerId = e.pointerId;
+    el.setPointerCapture(pointerId);
     el.style.transition = "none";
     el.style.zIndex = "40";
     el.style.cursor = "grabbing";
@@ -135,17 +170,17 @@ export const VillageTimeline = memo(function VillageTimeline({
     const sy = e.clientY;
     const lp = window.setTimeout(() => {
       const d = drag.current;
-      if (!d || d.moved) return;
+      if (!d || d.pointerId !== pointerId || d.moved) return;
       d.lpFired = true;
       cancelAnimationFrame(d.raf);
-      resetEl(d.el);
+      resetDragElement(d.el);
       openMenu(it, sx, sy);
     }, 500);
-    drag.current = { el, sx, sy, tx: 0, ty: 0, cx: 0, cy: 0, raf: requestAnimationFrame(loop), moved: false, lp, lpFired: false };
+    drag.current = { el, pointerId, sx, sy, tx: 0, ty: 0, cx: 0, cy: 0, raf: requestAnimationFrame(loop), moved: false, lp, lpFired: false };
   };
   const onMove = (e: React.PointerEvent) => {
     const d = drag.current;
-    if (!d || d.lpFired) return;
+    if (!d || d.pointerId !== e.pointerId || d.lpFired) return;
     d.tx = e.clientX - d.sx;
     d.ty = e.clientY - d.sy;
     if (Math.abs(d.tx) > 4 || Math.abs(d.ty) > 4) {
@@ -153,19 +188,18 @@ export const VillageTimeline = memo(function VillageTimeline({
       clearTimeout(d.lp);
     }
   };
-  const onUp = (it: TLItem) => {
+  const onUp = (e: React.PointerEvent, it: TLItem) => {
     const d = drag.current;
-    if (!d) return;
+    if (!d || d.pointerId !== e.pointerId) return;
     clearTimeout(d.lp);
     if (d.lpFired) {
-      drag.current = null;
+      cancelActiveDrag(e.pointerId);
       return;
     }
     cancelAnimationFrame(d.raf);
     const el = d.el;
     if (!d.moved) {
-      resetEl(el);
-      drag.current = null;
+      cancelActiveDrag(e.pointerId);
       setSel(it);
       return;
     }
@@ -173,20 +207,18 @@ export const VillageTimeline = memo(function VillageTimeline({
     el.style.transition = "transform 0.14s ease-out";
     el.style.transform = `translate3d(${dayShift * colW}px,0,0)`;
     drag.current = null;
-    window.setTimeout(() => {
-      resetEl(el);
-      if (dayShift) shiftEquipmentDates(it.tradeId, it.scheduleId, dayShift);
-    }, 150);
+    const timer = window.setTimeout(() => finishDelayedReset(timer), 150);
+    delayedReset.current = {
+      timer,
+      finish: () => {
+        resetDragElement(el);
+        if (dayShift) shiftEquipmentDates(it.tradeId, it.scheduleId, dayShift);
+      },
+    };
   };
   const onCtx = (e: React.MouseEvent, it: TLItem) => {
     e.preventDefault();
-    const d = drag.current;
-    if (d) {
-      clearTimeout(d.lp);
-      cancelAnimationFrame(d.raf);
-      resetEl(d.el);
-      drag.current = null;
-    }
+    cancelActiveDrag();
     openMenu(it, e.clientX, e.clientY);
   };
 
@@ -275,7 +307,9 @@ export const VillageTimeline = memo(function VillageTimeline({
             <button
               onPointerDown={(ev) => onDown(ev, it)}
               onPointerMove={onMove}
-              onPointerUp={() => onUp(it)}
+              onPointerUp={(ev) => onUp(ev, it)}
+              onPointerCancel={(ev) => cancelActiveDrag(ev.pointerId)}
+              onLostPointerCapture={(ev) => cancelActiveDrag(ev.pointerId)}
               onContextMenu={(ev) => onCtx(ev, it)}
               className={`tl-bar group absolute flex items-center gap-1 overflow-hidden rounded-[5px] px-2 text-[11px] font-semibold shadow-sm ${sc.bar} ${sc.strike ? "line-through" : ""} ${conf ? "conflict" : ""}`}
               style={{ left: s * colW + 2, width: span * colW - 4, top: 6, height: BAR_H, touchAction: "none", cursor: "grab" }}
