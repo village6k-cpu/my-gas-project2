@@ -31,6 +31,7 @@ class ToolSwitchTests(unittest.TestCase):
             self.write(self.root / home / 'gateway_state.json', '{"active_agents":0}')
             self.write(self.root / code / 'tools/browser_tool.py',
                        '    # Auto-start recording if configured and this is first navigation\n'
+                       '        session_info = _get_session_info(task_id)\n'
                        '        else:\n            try:\n                _run_browser_command(task_id, "close", [], timeout=10)')
             manifest['services'][name] = {'env_file': str(envpath), 'env_sha256': switch.sha(envpath.read_bytes()),
                                          'runtime_file_sha256': {str(cfgpath): switch.sha(cfgpath.read_bytes())}}
@@ -56,9 +57,11 @@ class ToolSwitchTests(unittest.TestCase):
         cfg = yaml.safe_load((self.root/'hermes-root/config.yaml').read_text())
         for key in ['model', 'finance', 'approvals']:
             self.assertEqual(cfg[key], self.cfg[key])
-        self.assertEqual(cfg['agent']['disabled_toolsets'], ['video'])
+        self.assertEqual(cfg['agent']['disabled_toolsets'], ['video', 'browser'])
         self.assertEqual(cfg['browser']['inactivity_timeout'], 123)
         self.assertIn('village', cfg['platform_toolsets']['kakao_village'])
+        self.assertIn('mcp-village_browser', cfg['platform_toolsets']['kakao_village'])
+        self.assertEqual(cfg['mcp_servers']['village_browser']['tools']['include'], ['browser'])
         env = json.loads((self.root/'control/root.env.json').read_text())
         self.assertEqual(env['AUTH_SENTINEL'], self.env['AUTH_SENTINEL'])
         self.assertEqual(env['HOME'], self.env['HOME'])
