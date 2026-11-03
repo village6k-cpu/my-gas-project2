@@ -665,7 +665,9 @@ async function scanChannel(config, visionBudget) {
 
 async function scanCommand(config, args) {
   config={...config,scanDeadlineMs:Date.now()+155000};
-  const maintenanceDeadline=Date.now()+55000,maintenanceSignal=()=>AbortSignal.timeout(Math.max(0,Math.min(8000,maintenanceDeadline-Date.now())));
+  // Reserve at least 70s of the 155s scan for booking channels. Stock intake
+  // needs two independent GAS reads when an owner has actually replied.
+  const maintenanceDeadline=Date.now()+85000,maintenanceSignal=()=>AbortSignal.timeout(Math.max(0,Math.min(8000,maintenanceDeadline-Date.now())));
   const result = {pending: [], scanned: 0, channelErrors: []};
   const visionBudget = {remaining: MAX_VISION_IMAGES_PER_SCAN};
   // The installed runner caps the whole scan at 180s. All channels share this
@@ -678,7 +680,7 @@ async function scanCommand(config, args) {
     catch { process.stderr.write('slack-heybilli-sync: 장비마스터 비고 반영 실패, 다음 실행에서 재시도합니다\n'); }
   }
   try {
-    const stock=await scanStockWithLocalCollector((body,options)=>stockSyncApi(config,body,options),(method,args,options)=>slackApi(config,method,args,options),{timeoutMs:Math.max(1,Math.min(25000,maintenanceDeadline-Date.now()))});
+    const stock=await scanStockWithLocalCollector((body,options)=>stockSyncApi(config,body,options),(method,args,options)=>slackApi(config,method,args,options),{timeoutMs:35000,totalTimeoutMs:Math.max(1,Math.min(75000,maintenanceDeadline-Date.now()))});
     result.stockQuestions=stock.questions || [];result.stockInvestigations=stock.investigations || [];result.stockCatalog=stock.catalog;result.stockCatalogHash=stock.catalogHash;result.stockSourceIssues=stock.sourceIssues;result.stockMirrors=stock.mirrors || [];result.stockErrors=stock.errors || [];
     if(result.stockErrors.length)process.stderr.write('slack-heybilli-sync: 일부 재고 답변 조회를 다음 실행에서 재시도합니다\n');
   }catch(error){process.stderr.write('slack-heybilli-sync: 재고 답변 처리 경로 확인 필요: '+String(error.message || error).slice(0,250)+'\n');}
