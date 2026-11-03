@@ -2738,6 +2738,16 @@ export function createGatewayResultApplicationCoordinator({
     durableJob.application = persistedAppliedJob?.application
       ? cloneForAudit(persistedAppliedJob.application)
       : { ...(durableJob.application || {}), state: 'applied', applied_audit: appliedAudit };
+    if (applied?.autoReplyResult?.pricingDocumentFailure) {
+      // A document failure can make finalization reject the turn. Preserve its
+      // audit and owner notice before that rejection, independently of task saves.
+      triggerAuditProjection({ durableJob, prepared, applied });
+      if (config.verifiedPricingAutoSendEnabled && config.pricingOwnerSlackUserId) {
+        try { await queuePricingOwnerNotice(path.join(config.queueDir || CONFIG.queueDir,'pricing-owner-notices'),
+          pricingOwnerNotice(config,job,{decision:prepared.decision,autoReplyResult:applied.autoReplyResult})); }
+        catch { console.error('pricing_owner_notice_storage_failed', String(job.jobId || job.id || '')); }
+      }
+    }
     if (applied?.snapshotChanged === true && applied?.superseded !== true) {
       throw new Error('gateway_snapshot_unverified: current conversation could not be reconciled before send');
     }
