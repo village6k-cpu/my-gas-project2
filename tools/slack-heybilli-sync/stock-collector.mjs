@@ -15,8 +15,8 @@ async function boundedRead(action,signal,label='재고 댓글 조회'){
  const aborted=new Promise((_,reject)=>{onAbort=()=>reject(timedOut());signal.addEventListener('abort',onAbort,{once:true});});
  try{return await Promise.race([action(),aborted]);}finally{signal.removeEventListener('abort',onAbort);}
 }
-export async function scanStockWithLocalCollector(api,slack,{timeoutMs=35000,totalTimeoutMs=85000}={}){
- // Each cloud phase can legitimately spend up to 30s reading GAS. A single
+export async function scanStockWithLocalCollector(api,slack,{timeoutMs=50000,totalTimeoutMs=115000}={}){
+ // Each cloud phase can spend up to 45s reading GAS plus context enrichment. A single
  // 25s timer used to expire before Slack was read, or during revalidation.
  const total=AbortSignal.timeout(totalTimeoutMs),stage=()=>AbortSignal.any([total,AbortSignal.timeout(timeoutMs)]);
  const readApi=(body,signal,label)=>boundedRead(()=>api(body,{signal}),signal,label);

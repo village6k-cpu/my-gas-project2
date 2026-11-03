@@ -25,7 +25,28 @@ import {
   selectPendingVisionRecords,
   slackImageFiles,
   sourceHashFor,
+  scanCommand,
 } from '../tools/slack-heybilli-sync/slack-heybilli-sync.mjs';
+
+test('booking channels are collected before slow inventory maintenance starts', async () => {
+  const previous = globalThis.fetch, calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'slack.com') {
+      const method = parsed.pathname.split('/').at(-1); calls.push(method);
+      return Response.json({ok: true, user_id: 'UBOT', messages: []});
+    }
+    const body = JSON.parse(options.body); calls.push(body.mode);
+    assert.equal(body.mode, 'stock_reports');
+    return Response.json({ok: true, reports: [], investigations: []});
+  };
+  try {
+    await scanCommand({token:'xoxb-test', apiToken:'private-test', inventoryApiToken:'private-test',
+      apiUrl:'https://stock.test/api', channelIds:['C123'], channelStartTs:{},
+      writeEnabled:false, lookbackHours:72, maxMessages:50}, new Set());
+    assert.ok(calls.indexOf('conversations.history') < calls.indexOf('stock_reports'));
+  } finally { globalThis.fetch = previous; }
+});
 
 function hermesEnvelopeFixture(overrides = {}) {
   return {
