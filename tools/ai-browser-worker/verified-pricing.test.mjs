@@ -120,3 +120,10 @@ test('first AI response sends a verified quotation and price with general automa
  const stale=await maybeAutoSendReply({config:{...config,verifiedPricingEnabledAfter:new Date(now.getTime()+60000).toISOString()},decision:currentDecision,job:currentJob});assert.equal(stale.sent,false);assert.equal(stale.gate.reason,'pricing_before_activation_cutoff');
  }finally{await fs.rm(dir,{recursive:true,force:true})}
 });
+
+test('accepted quotation polls the same persisted operation until provider delivery is confirmed',async()=>{
+ const operations=[];
+ const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid/exec',documentApiKey:'test'},decision,verification,job,waitImpl:async()=>{},
+  fetchImpl:async(_url,request)=>{const body=JSON.parse(request.body);operations.push(body.operationId);return{ok:true,json:async()=>({status:operations.length<3?'QUEUED':'OK',operationId:body.operationId,deliveryConfirmed:operations.length>=3,totalVatIncluded:7700,pdfUrl:'https://drive.google.com/file/d/test/view'})}}});
+ assert.equal(receipt.deliveryConfirmed,true);assert.equal(operations.length,3);assert.equal(new Set(operations).size,1);
+});
