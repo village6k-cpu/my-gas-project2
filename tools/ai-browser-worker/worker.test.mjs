@@ -6360,17 +6360,18 @@ test('buildHermesPrompt requires one write call for pending RQ additions instead
   assert.match(prompt, /unchanged.*existing RQ.*should_write_to_sheet=false/is);
 });
 
-test('buildHermesPrompt requires native document execution before any quote-delivery promise', () => {
+test('buildHermesPrompt requests verified host delivery without a pre-existing receipt', () => {
   const prompt = buildHermesPrompt(
     { id: 'job-native-quote', preview_text: '260822-001 공급가 기준 견적서 보내주세요' },
     { gatewayConfirmationToolAvailable: true }
   );
 
   assert.match(prompt, /village_document_send/);
-  assert.match(prompt, /registered.*quote.*exact trade_id/is);
-  assert.match(prompt, /supply_only.*VAT-exclusive/is);
-  assert.match(prompt, /successful.*receipt.*only.*delivery/is);
-  assert.match(prompt, /do not promise.*without.*receipt/is);
+  assert.match(prompt, /source="trade" or "request" with the exact live ID/);
+  assert.match(prompt, /delivery receipt is not required to REQUEST this host execution/);
+  assert.match(prompt, /do not downgrade a fully verified pending quote to draft_only/);
+  assert.match(prompt, /VAT-exclusive registered-trade document.*exact trade_id.*supply_only/is);
+  assert.match(prompt, /Never claim delivery before either the tool or host has confirmed it/);
 });
 
 test('buildHermesPrompt treats read catch-up rows as possible missed reservations', () => {
