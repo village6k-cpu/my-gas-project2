@@ -663,27 +663,15 @@ async function scanChannel(config, visionBudget) {
   return result;
 }
 
-async function scanCommand(config, args) {
+export async function scanCommand(config, args) {
   config={...config,scanDeadlineMs:Date.now()+155000};
-  const maintenanceDeadline=Date.now()+55000,maintenanceSignal=()=>AbortSignal.timeout(Math.max(0,Math.min(8000,maintenanceDeadline-Date.now())));
+  // Booking collection has priority; stock uses only the remaining scan time.
+  const maintenanceDeadline=config.scanDeadlineMs,maintenanceSignal=()=>AbortSignal.timeout(Math.max(0,Math.min(8000,maintenanceDeadline-Date.now())));
   const result = {pending: [], scanned: 0, channelErrors: []};
   const visionBudget = {remaining: MAX_VISION_IMAGES_PER_SCAN};
   // The installed runner caps the whole scan at 180s. All channels share this
   // earlier vision deadline so slow images leave time for ready text events.
   const visionDeadlineMs = Date.now() + (config.writeEnabled ? 90_000 : 120_000);
-  // Durable notes are independent of event status and trade writes. Even a
-  // quiet channel retries an earlier failed sheet delivery, without an AI run.
-  if (config.writeEnabled) {
-    try { result.equipmentMirror = await syncApi(config, {mode:'equipment_sync',execute:true},{signal:maintenanceSignal()}); }
-    catch { process.stderr.write('slack-heybilli-sync: 장비마스터 비고 반영 실패, 다음 실행에서 재시도합니다\n'); }
-  }
-  try {
-    const stock=await scanStockWithLocalCollector((body,options)=>stockSyncApi(config,body,options),(method,args,options)=>slackApi(config,method,args,options),{timeoutMs:Math.max(1,Math.min(25000,maintenanceDeadline-Date.now()))});
-    result.stockQuestions=stock.questions || [];result.stockInvestigations=stock.investigations || [];result.stockCatalog=stock.catalog;result.stockCatalogHash=stock.catalogHash;result.stockSourceIssues=stock.sourceIssues;result.stockMirrors=stock.mirrors || [];result.stockErrors=stock.errors || [];
-    if(result.stockErrors.length)process.stderr.write('slack-heybilli-sync: 일부 재고 답변 조회를 다음 실행에서 재시도합니다\n');
-  }catch(error){process.stderr.write('slack-heybilli-sync: 재고 답변 처리 경로 확인 필요: '+String(error.message || error).slice(0,250)+'\n');}
-  if(config.writeEnabled){try{result.stockMirrors=(await stockSyncApi(config,{mode:'stock_sync',execute:true},{signal:maintenanceSignal()})).mirrors;}catch{process.stderr.write('slack-heybilli-sync: 확정 재고의 시트 반영은 다음 실행에서 재시도합니다\n');}}
-  if(config.writeEnabled&&maintenanceDeadline>Date.now()+1000){try{result.stockQuestionDelivery=await deliverStock(config,undefined,Math.max(1,maintenanceDeadline-Date.now()));}catch(error){result.stockDeliveryError=String(error.message||error);process.stderr.write('slack-heybilli-sync: 재고 질문 발송 영수증은 다음 실행에서 확인합니다\n');}}
   let succeeded = 0;
   for (const channelId of config.channelIds) {
     try {
@@ -697,6 +685,19 @@ async function scanCommand(config, args) {
       process.stderr.write(`slack-heybilli-sync: ${channelId} 수집 실패, 다음 실행에서 재시도: ${reason}\n`);
     }
   }
+  // Durable notes are independent of event status and trade writes. Even a
+  // quiet channel retries an earlier failed sheet delivery, without an AI run.
+  if (config.writeEnabled) {
+    try { result.equipmentMirror = await syncApi(config, {mode:'equipment_sync',execute:true},{signal:maintenanceSignal()}); }
+    catch { process.stderr.write('slack-heybilli-sync: 장비마스터 비고 반영 실패, 다음 실행에서 재시도합니다\n'); }
+  }
+  try {
+    const stock=await scanStockWithLocalCollector((body,options)=>stockSyncApi(config,body,options),(method,args,options)=>slackApi(config,method,args,options),{timeoutMs:50000,totalTimeoutMs:Math.max(1,Math.min(115000,maintenanceDeadline-Date.now()-15000))});
+    result.stockQuestions=stock.questions || [];result.stockInvestigations=stock.investigations || [];result.stockCatalog=stock.catalog;result.stockCatalogHash=stock.catalogHash;result.stockSourceIssues=stock.sourceIssues;result.stockMirrors=stock.mirrors || [];result.stockErrors=stock.errors || [];
+    if(result.stockErrors.length)process.stderr.write('slack-heybilli-sync: 일부 재고 답변 조회를 다음 실행에서 재시도합니다\n');
+  }catch(error){result.stockErrors=[{error:String(error.message || error).slice(0,250)}];process.stderr.write('slack-heybilli-sync: 재고 답변 처리 경로 확인 필요: '+result.stockErrors[0].error+'\n');}
+  if(config.writeEnabled){try{result.stockMirrors=(await stockSyncApi(config,{mode:'stock_sync',execute:true},{signal:maintenanceSignal()})).mirrors;}catch{process.stderr.write('slack-heybilli-sync: 확정 재고의 시트 반영은 다음 실행에서 재시도합니다\n');}}
+  if(config.writeEnabled&&maintenanceDeadline>Date.now()+1000){try{result.stockQuestionDelivery=await deliverStock(config,undefined,Math.max(1,maintenanceDeadline-Date.now()));}catch(error){result.stockDeliveryError=String(error.message||error);process.stderr.write('slack-heybilli-sync: 재고 질문 발송 영수증은 다음 실행에서 확인합니다\n');}}
   if (!succeeded && !result.stockInvestigations?.length && !result.stockQuestions?.length) throw new Error('모든 Slack 채널 수집 실패');
   if (args.has('--hermes-envelope')) return hermesScanEnvelope(result, config);
   return args.has('--hermes') ? hermesPrompt(result, config) : result;

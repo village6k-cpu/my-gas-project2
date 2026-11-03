@@ -11,7 +11,7 @@ async function gas(action:string,body:Obj={},timeoutMs=30000) {
  const response=await fetch(request.url,{...request.options,signal:AbortSignal.timeout(timeoutMs)});
  const data=await response.json();if(!response.ok || data.success===false || data.error)throw Error('재고 원장 연결 확인 필요');return data;
 }
-async function context(){const data=await gas('run',{func:'getInventoryStockQuestions',args:[{refresh:true}]});if(!data.result?.reports)throw Error('재고 보고 조회 실패');return enrichInventoryReviewContext(data.result);}
+async function context(){const data=await gas('run',{func:'getInventoryStockQuestions',args:[{refresh:true}]},45000);if(!data.result?.reports)throw Error('재고 보고 조회 실패');return enrichInventoryReviewContext(data.result);}
 export async function processInventoryQuestionDelivery(body:Obj){return inventoryQuestionDelivery(body,context);}
 export async function reviewStock(input:unknown,execute:boolean){const c=await context();
  if((input as Obj)?.action==='classify_component'){

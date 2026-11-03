@@ -9,19 +9,25 @@ export async function collectStockThread(report,slack,signal){
  const root=messages[0];if(root?.ts!==report.ts||!root.bot_id||!['preregistration_stock_alert','inventory_risk_alert'].includes(root.metadata?.event_type)||root.metadata?.event_payload?.id!==report.id)throw Error('재고 보고 영수증 불일치');
  return {reportId:report.id,channel:report.channel,ts:report.ts,complete:true,messages};
 }
-async function boundedRead(action,signal){
- signal.throwIfAborted();let onAbort;
- const aborted=new Promise((_,reject)=>{onAbort=()=>reject(Error('재고 댓글 조회 시간 초과; 다음 실행에서 재시도'));signal.addEventListener('abort',onAbort,{once:true});});
+async function boundedRead(action,signal,label='재고 댓글 조회'){
+ const timedOut=()=>Error(label+' 시간 초과; 다음 실행에서 재시도');
+ if(signal.aborted)throw timedOut();let onAbort;
+ const aborted=new Promise((_,reject)=>{onAbort=()=>reject(timedOut());signal.addEventListener('abort',onAbort,{once:true});});
  try{return await Promise.race([action(),aborted]);}finally{signal.removeEventListener('abort',onAbort);}
 }
-export async function scanStockWithLocalCollector(api,slack,{timeoutMs=25000}={}){
- const signal=AbortSignal.timeout(timeoutMs),rawApi=api,rawSlack=slack;
- api=body=>boundedRead(()=>rawApi(body,{signal}),signal);
- slack=(method,args)=>boundedRead(()=>rawSlack(method,args,{signal}),signal);
- const initial=await api({mode:'stock_reports'}),reports=initial.reports;if(!Array.isArray(reports)||reports.length>8)throw Error('재고 보고 조회 범위 오류');
- const collected=await Promise.all(reports.map(async report=>{try{return {thread:await collectStockThread(report,slack)};}catch(error){return {error:{reportId:report.id,error:error.message}};}}));
+export async function scanStockWithLocalCollector(api,slack,{timeoutMs=50000,totalTimeoutMs=115000}={}){
+ // Each cloud phase can spend up to 45s reading GAS plus context enrichment. A single
+ // 25s timer used to expire before Slack was read, or during revalidation.
+ const total=AbortSignal.timeout(totalTimeoutMs),stage=()=>AbortSignal.any([total,AbortSignal.timeout(timeoutMs)]);
+ const readApi=(body,signal,label)=>boundedRead(()=>api(body,{signal}),signal,label);
+ const initial=await readApi({mode:'stock_reports'},stage(),'재고 보고서 조회'),reports=initial.reports;if(!Array.isArray(reports)||reports.length>8)throw Error('재고 보고 조회 범위 오류');
+ const replySignal=stage(),readSlack=(method,args)=>boundedRead(()=>slack(method,args,{signal:replySignal}),replySignal,'Slack 재고 댓글 조회');
+ const collected=await Promise.all(reports.map(async report=>{try{return {thread:await collectStockThread(report,readSlack)};}catch(error){return {error:{reportId:report.id,error:error.message}};}}));
  let result={ok:true,questions:[],errors:[]};const threads=collected.filter(r=>r.thread).map(r=>r.thread);
- if(threads.length)try{result=await api({mode:'stock_scan',threads});}catch(error){result.errors.push({error:error.message});}
+ // No human reply means there is no owner decision to validate. Preserve the
+ // initial catalog/investigations without rebuilding the full inventory again.
+ const hasHumanReply=threads.some(t=>t.messages.slice(1).some(m=>!m.bot_id&&m.user));
+ if(hasHumanReply)try{result=await readApi({mode:'stock_scan',threads},stage(),'재고 답변 검증');}catch(error){result.errors.push({error:error.message});}
  return {...initial,...result,errors:[...(result.errors||[]),...collected.filter(r=>r.error).map(r=>r.error)]};
 }
 export async function confirmStockWithLocalCollector(body,execute,api,slack){
