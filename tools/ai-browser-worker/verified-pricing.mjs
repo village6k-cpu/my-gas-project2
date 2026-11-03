@@ -56,15 +56,28 @@ export function automaticQuoteRequest({ decision, verification, job }) {
   const quote = decision.price_quote;
   const issue = verifiedPricingIssue(verification, quote);
   if (issue) throw new Error(issue);
-  if (quote.source !== 'catalog') throw new Error('quote_document_context_required');
-  const phone = String(quote.phone || '').replace(/[^0-9]/g, '');
-  if (!/^01[016789]\d{7,8}$/.test(phone)) throw new Error('quote_recipient_required');
-  if (!quote.customer_name || quote.customer_name.trim() !== decision.customer?.name?.trim()) throw new Error('quote_customer_mismatch');
   const calculation = verification.calculations[0], days = calculation.payment.days;
+  let customerName, recipientPhone, period;
+  if (quote.source === 'catalog') {
+    customerName = quote.customer_name;
+    recipientPhone = quote.phone;
+    period = `${quote.start_date} ${quote.start_time} ~ ${quote.end_date} ${quote.end_time}`;
+  } else if (quote.source === 'trade' || quote.source === 'request') {
+    const pattern = quote.source === 'trade' ? /^\d{6}-\d{3}$/ : /^RQ-\d{6}-\d{3}$/;
+    const verifiedId = quote.source === 'trade' ? calculation.tradeId : calculation.reqID;
+    if (!pattern.test(quote.id || '') || verifiedId !== quote.id) throw new Error('quote_reference_mismatch');
+    customerName = calculation.customer;
+    recipientPhone = calculation.phone;
+    period = calculation.period;
+  } else throw new Error('quote_document_context_required');
+  const phone = String(recipientPhone || '').replace(/[^0-9]/g, '');
+  if (!/^01[016789]\d{7,8}$/.test(phone)) throw new Error('quote_recipient_required');
+  if (!customerName || customerName.trim() !== decision.customer?.name?.trim()) throw new Error('quote_customer_mismatch');
+  if (!/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d ~ \d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d$/.test(period || '')) throw new Error('quote_period_invalid');
   if (!Number.isFinite(days) || days <= 0 || days > 366) throw new Error('quote_days_invalid');
   const manualData = {
-    고객명: quote.customer_name, 연락처: phone, 할인유형: calculation.discountType,
-    대여기간: `${quote.start_date} ${quote.start_time} ~ ${quote.end_date} ${quote.end_time}`,
+    고객명: customerName.trim(), 연락처: phone, 할인유형: calculation.discountType,
+    대여기간: period,
     items: calculation.pricedItems.map(item => ({품목:item.name, 수량:item.qty, 일수:days, 단가:item.price}))
   };
   const operationId = createHash('sha256').update(JSON.stringify({

@@ -60,6 +60,31 @@ test('manual quote uses authoritative complete lines and stable operation identi
  assert.equal(request.operationId,automaticQuoteRequest({decision,verification,job}).operationId);
  assert.notEqual(request.operationId,automaticQuoteRequest({decision,verification,job:{...job,roomRevision:3}}).operationId);
 });
+test('registered and pending-request quotes use the verified record identity and period',()=>{
+ for(const [source,id,reference] of [['trade','261024-007',{tradeId:'261024-007'}],['request','RQ-261024-007',{reqID:'RQ-261024-007'}]]){
+  const currentDecision={...decision,price_quote:{source,id}};
+  const currentVerification={...statementVerification,calculations:[{...statementVerification.calculations[0],...reference}]};
+  const request=automaticQuoteRequest({decision:currentDecision,verification:currentVerification,job});
+  assert.equal(request.action,'sendEstimateManual');
+  assert.equal(request.manualData.고객명,'테스트');assert.equal(request.manualData.연락처,'01012345678');
+  assert.equal(request.manualData.대여기간,'2026-11-03 10:00 ~ 2026-11-04 10:00');
+  assert.deepEqual(request.manualData.items,[{품목:'렌즈',수량:1,일수:1,단가:10000}]);
+  assert.throws(()=>automaticQuoteRequest({decision:{...currentDecision,price_quote:{source,id:id.replace('007','008')}},verification:currentVerification,job}),/reference_mismatch/);
+  assert.throws(()=>automaticQuoteRequest({decision:{...currentDecision,customer:{name:'다른 고객'}},verification:currentVerification,job}),/customer_mismatch/);
+  assert.throws(()=>automaticQuoteRequest({decision:currentDecision,verification:{...currentVerification,calculations:[{...currentVerification.calculations[0],period:''}]},job}),/period_invalid/);
+ }
+});
+test('registered quote reaches the document API with an authoritative payload',async()=>{
+ let calls=0;
+ const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid/exec',documentApiKey:'test'},
+  decision:{...decision,price_quote:{source:'trade',id:'261024-007'}},verification:statementVerification,job,
+  fetchImpl:async(url,request)=>{
+   calls++;const body=JSON.parse(request.body);
+   assert.equal(body.action,'sendEstimateManual');assert.equal(body.expectedTotal,7700);assert.equal(body.manualData.고객명,'테스트');
+   return {ok:true,json:async()=>({status:'OK',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/test/view',totalVatIncluded:7700})};
+  }});
+ assert.equal(calls,1);assert.equal(receipt.deliveryConfirmed,true);
+});
 test('transport acceptance, a PDF alone and wrong totals never prove quotation delivery',async()=>{
  for(const payload of [{status:'OK',pdfUrl:'https://drive.google.com/file/d/test/view'},{status:'OK',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/test/view',totalVatIncluded:1},{status:'QUEUED'}])await assert.rejects(sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid',documentApiKey:'test'},decision,verification,job,fetchImpl:async()=>({ok:true,json:async()=>payload})}),/not_confirmed/);
  let checked=false;const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid',documentApiKey:'test'},decision,verification,job,assertFresh:async()=>{checked=true},fetchImpl:async(_url,request)=>{assert.equal(checked,true);assert.equal(JSON.parse(request.body).automaticPricing,true);return{ok:true,json:async()=>({status:'OK',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/test/view',totalVatIncluded:7700})}}});assert.equal(receipt.deliveryConfirmed,true);
