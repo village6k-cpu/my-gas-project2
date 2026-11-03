@@ -90,14 +90,22 @@ export function automaticQuoteRequest({ decision, verification, job }) {
     expectedTotal:verification.totalVatIncluded, manualData, pricingSource};
 }
 
-export async function sendAutomaticPricingDocument({ config, decision, verification, job, assertFresh, fetchImpl = fetch }) {
+export async function sendAutomaticPricingDocument({ config, decision, verification, job, assertFresh, fetchImpl = fetch,
+  waitImpl = ms => new Promise(resolve => setTimeout(resolve,ms)) }) {
   const statement=Boolean(decision.statement_request);
   const body = statement ? automaticStatementRequest({config,decision,verification,job}) : automaticQuoteRequest({ decision, verification, job });
   if (!config.documentApiBaseUrl || !config.documentApiKey) throw new Error('quote_delivery_not_configured');
   await assertFresh?.();
-  const response = await fetchImpl(config.documentApiBaseUrl, {method:'POST',headers:{'content-type':'application/json'},
+  const request = () => fetchImpl(config.documentApiBaseUrl, {method:'POST',headers:{'content-type':'application/json'},
     body:JSON.stringify({...body,key:config.documentApiKey}),signal:AbortSignal.timeout(240000)});
-  const result = await response.json();
+  let response = await request(), result = await response.json();
+  // The server persists an accepted operation before returning QUEUED. Reusing
+  // that exact operation only reads its provider outcome and cannot resend it.
+  for (let attempt=0; !statement && response.ok && result.status==='QUEUED'
+    && result.operationId===body.operationId && result.totalVatIncluded===verification.totalVatIncluded && attempt<3; attempt++) {
+    await waitImpl(1000 * 2**attempt);
+    response=await request();result=await response.json();
+  }
   if (!response.ok || (statement ? result.status!=='PREPARED' || result.documentType!=='statement' || result.tradeID!==body.id
       : result.status !== 'OK' || result.deliveryConfirmed !== true)
     || result.totalVatIncluded !== verification.totalVatIncluded || (statement
