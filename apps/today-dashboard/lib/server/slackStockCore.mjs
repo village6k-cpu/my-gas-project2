@@ -1,5 +1,11 @@
 import {createHash} from 'node:crypto';
 export const stockNameKey=value=>String(value || '').normalize('NFKC').toLowerCase().replace(/[^0-9a-z가-힣]/g,'');
+// Slack escapes these three control characters in returned message text. Keep
+// the actual receipt untouched and allow only that documented presentation change.
+export function stockQuestionTextMatches(actual,expected){
+ if(typeof actual!=='string'||typeof expected!=='string')return false;
+ return actual===expected||actual.replace(/&(amp|lt|gt);/g,(_,name)=>({amp:'&',lt:'<',gt:'>'})[name])===expected;
+}
 export function stockThreadHash(messages){return createHash('sha256').update(JSON.stringify(messages.map(m=>({ts:m.ts,user:m.user || '',bot:m.bot_id || '',text:m.text || ''})))).digest('hex');}
 export function validateStockConfirmation(plan,{report,ownerIds,messages,catalog,equipment}) {
  if(!plan || !report || !Array.isArray(ownerIds) || !ownerIds.length)throw Error('소유자 재고 확인 설정이 없습니다');

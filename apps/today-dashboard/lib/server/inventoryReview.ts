@@ -2,7 +2,7 @@ import 'server-only';
 import {randomUUID} from 'node:crypto';
 import {getInventoryAuditServiceClient} from './inventoryAuditDb';
 import {prepareInventoryInvestigations,reviewCatalogHash,validateInventoryReview} from './inventoryReviewCore.mjs';
-import {stockNameKey,stockQuestionBatch} from './slackStockCore.mjs';
+import {stockNameKey,stockQuestionBatch,stockQuestionTextMatches} from './slackStockCore.mjs';
 type Obj=Record<string,any>;
 export async function enrichInventoryReviewContext(c:Obj):Promise<Obj>{
  const db=getInventoryAuditServiceClient();
@@ -64,7 +64,7 @@ export async function inventoryQuestionDelivery(body:Obj,loadCurrent:()=>Promise
  if(body.operation!=='receipt')throw Error('재고 질문 처리 형식 오류');
  const {data:row,error}=await db.from('inventory_identity_reviews').select('*').eq('id',id).single();
  const receipt=body.receipt,root=receipt?.messages?.[0];
- if(error||!row||row.action!=='ask_owner'||receipt?.complete!==true||receipt.channel!==row.question_channel||receipt.reportId!==id||root?.ts!==receipt.ts||!root?.bot_id||root.text!==row.question_text||root.metadata?.event_type!=='inventory_risk_alert'||root.metadata?.event_payload?.id!==id)throw Error('재고 질문의 실제 Slack 원문 확인 필요');
+ if(error||!row||row.action!=='ask_owner'||receipt?.complete!==true||receipt.channel!==row.question_channel||receipt.reportId!==id||root?.ts!==receipt.ts||!root?.bot_id||!stockQuestionTextMatches(root.text,row.question_text)||root.metadata?.event_type!=='inventory_risk_alert'||root.metadata?.event_payload?.id!==id)throw Error('재고 질문의 실제 Slack 원문 확인 필요');
  const {data:done,error:saveError}=await db.rpc('complete_inventory_identity_question',{p_id:id,p_owner:owner,p_ts:root.ts});
  if(saveError||done!==true)throw Error('재고 질문 전송 영수증 저장 재시도 필요');return {ok:true,posted:true,id,ts:root.ts};
 }

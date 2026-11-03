@@ -14,3 +14,11 @@ test('accepted but timed out question is reconciled without another message',asy
 test('no lease, recent uncertain send, denied attempt and incomplete history never post',async()=>{for(const options of [{claim:false},{attemptedAt:'2026-09-14T00:04:50Z'},{allow:false},{incomplete:true}]){const f=fixture(options);await f.run().catch(()=>{});assert.equal(f.writes.length,0);assert.equal(f.calls.some(c=>c.operation==='receipt'),false);}});
 test('question receipts on later history pages are found before posting',async()=>{let pages=0,posts=0;const api=async b=>b.operation==='claim'?{question}:b.operation==='receipt'?{ok:true,posted:true}:assert.fail('must not post');const slack=async(method,args)=>method==='conversations.replies'?{ok:true,messages:[root]}:++pages===1?{ok:true,messages:[],has_more:true,response_metadata:{next_cursor:'page2'}}:{ok:true,messages:[root]};const r=await deliverInventoryQuestion(api,slack,async()=>{posts++;});assert.equal(r.posted,true);assert.equal(pages,2);assert.equal(posts,0);});
 test('edited question text cannot be acknowledged as the original question',async()=>{const f=fixture({history:[root],changed:true});await assert.rejects(f.run(),/원문/);assert.equal(f.writes.length,0);assert.equal(f.calls.some(c=>c.operation==='receipt'),false);});
+
+test('Slack entity escaping reconciles a sent question without reposting or rewriting evidence',async()=>{
+ const q={...question,question_text:'H&Y 58mm > 82mm 업링의 실보유 수량을 알려주세요.'};
+ const wire={...root,text:'H&amp;Y 58mm &gt; 82mm 업링의 실보유 수량을 알려주세요.'};let receipts=0;
+ const api=async b=>{if(b.operation==='claim')return {question:q};assert.equal(b.operation,'receipt');assert.equal(b.receipt.messages[0].text,wire.text);receipts++;return {ok:true,posted:true};};
+ const result=await deliverInventoryQuestion(api,async()=>({ok:true,messages:[wire]}),async()=>assert.fail('existing message must not be posted again'));
+ assert.equal(result.posted,true);assert.equal(receipts,1);
+});
