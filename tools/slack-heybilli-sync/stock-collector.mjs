@@ -1,3 +1,4 @@
+import {stockQuestionTextMatches} from '../../apps/today-dashboard/lib/server/slackStockCore.mjs';
 /** Collect Slack only on the existing authenticated local runtime. Never accept AI transcripts. */
 export async function collectStockThread(report,slack,signal){
  if(!report || typeof report.id!=='string' || !/^[CG][A-Z0-9]+$/.test(report.channel||'') || !/^\d+\.\d+$/.test(report.ts||''))throw Error('잘못된 재고 보고 참조');
@@ -46,7 +47,7 @@ export async function deliverInventoryQuestion(api,slack,post,{id,now=Date.now,t
  do {
   const history=await slack('conversations.history',{channel:q.question_channel,oldest:String((Date.parse(q.created_at)-60000)/1000),limit:100,include_all_metadata:true,cursor});
   if(history.ok===false||!Array.isArray(history.messages))throw Error('재고 질문 영수증 전체 조회 실패');
-  for(const message of history.messages){if(message.bot_id&&message.metadata?.event_type==='inventory_risk_alert'&&message.metadata?.event_payload?.id===q.id){if(receipt&&receipt.ts!==message.ts)throw Error('재고 질문 중복 영수증 대조 필요');if(message.text!==q.question_text)throw Error('재고 질문 원문이 변경됐습니다');receipt=message;}}
+  for(const message of history.messages){if(message.bot_id&&message.metadata?.event_type==='inventory_risk_alert'&&message.metadata?.event_payload?.id===q.id){if(receipt&&receipt.ts!==message.ts)throw Error('재고 질문 중복 영수증 대조 필요');if(!stockQuestionTextMatches(message.text,q.question_text))throw Error('재고 질문 원문이 변경됐습니다');receipt=message;}}
   cursor=String(history.response_metadata?.next_cursor||'');pages++;
   if(history.has_more&&!cursor||cursor&&(cursors.has(cursor)||pages>=20))throw Error('재고 질문 영수증 전체 조회 실패');if(cursor)cursors.add(cursor);
  }while(cursor);
@@ -57,6 +58,6 @@ export async function deliverInventoryQuestion(api,slack,post,{id,now=Date.now,t
   if(sent.ok===false||!/^\d+\.\d+$/.test(sent.ts||''))throw Error('재고 질문 전송 영수증 확인 재시도 필요');receipt={ts:sent.ts};
  }
  const evidence=await collectStockThread({id:q.id,channel:q.question_channel,ts:receipt.ts},slack);
- if(evidence.messages[0].text!==q.question_text)throw Error('전송한 재고 질문 원문 대조 필요');
+ if(!stockQuestionTextMatches(evidence.messages[0].text,q.question_text))throw Error('전송한 재고 질문 원문 대조 필요');
  return api({...lease,operation:'receipt',receipt:evidence});
 }

@@ -73,3 +73,13 @@ test('a model-choice question stays visible in the AI queue until the booking is
  source.name='17인치 모니터';source.kinds=['model_selection'];await reviewStock(decision(await getStockReports(),'ask_owner'),true);
  const next=await getStockReports();assert.equal(next.investigations.length,1);assert.equal(next.investigations[0].status,'waiting_model_choice');assert.match(next.investigations[0].question.text,/수량/);
 });
+
+test('cloud acknowledges Slack-escaped receipt text while rejecting a changed model',async()=>{
+ const d=decision(await getStockReports(),'ask_owner');d.question='H&Y 58mm > 82mm 업링의 실보유 수량을 알려주세요.';
+ await reviewStock(d,true);const claim=await inventoryQuestionDelivery({operation:'claim'});
+ const root={ts:'1789344060.001',bot_id:'B1',text:'H&amp;Y 58mm &gt; 82mm 업링의 실보유 수량을 알려주세요.',metadata:{event_type:'inventory_risk_alert',event_payload:{id:questionId}}};
+ const receipt={reportId:questionId,channel:'C123',ts:root.ts,complete:true,messages:[root]};
+ const args={operation:'receipt',id:questionId,owner:claim.question.owner,receipt};
+ assert.equal((await inventoryQuestionDelivery(args)).posted,true);
+ await assert.rejects(inventoryQuestionDelivery({...args,receipt:{...receipt,messages:[{...root,text:root.text.replace('82mm','72mm')}]}}),/실제 Slack 원문/);
+});
