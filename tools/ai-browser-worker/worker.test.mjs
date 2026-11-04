@@ -14314,3 +14314,16 @@ test('native external allocation requires exact full row readback and retains in
  const decision=registeredDecisionFixture({staff_confirmed_mutation:m,existing_confirm_request_ids:[],follow_up_items:[follow,{...follow,route:'document',taskKey:'quote-price-review',actionFamily:'document_approval',title:'미확정 단가 확인',summary:'별도 단가 미확정',recommended_action:'단가 근거 확인'}]});
  for(const altered of [false,true]){const r=structuredClone(receipt);if(altered)r.authoritative_result.after.sources[0].results[0].data[4]=3;const result=await workerModule.prepareKakaoGatewayDecision({config:{},job,turn,finalText:'FINAL_JSON\n'+JSON.stringify(decision),trustedToolReceipts:[r]});assert.equal(result.decision.reply_decision.replyMode,altered?'draft_only':'no_reply');if(!altered){assert.deepEqual(result.gatewaySafetyFailures,[]);assert.equal(result.decision.follow_up_items.some(i=>i.taskKey==='external-return'),true);assert.equal(result.decision.follow_up_items.some(i=>i.taskKey==='quote-price-review'),true)}}
 });
+
+test('verified host quotation intent survives preparation before any native delivery receipt exists',async()=>{
+ const {job,turn}=gatewayTurnFixture();
+ const decision=documentDecisionFixture({classification:'price',owner_review_required:false,
+  price_quote:{source:'trade',id:'261031-009'},
+  reply_decision:{replyMode:'auto_send',text:'요청하신 견적서 금액은 부가세 포함 157,080원입니다.',confidence:'high',
+   safetyClass:'sensitive_commitment',grounding:'authoritative_sheet',requiresRag:false,shouldCreateTask:false}});
+ for(const enabled of [true,false]){
+  const prepared=await workerModule.prepareKakaoGatewayDecision({config:{verifiedPricingAutoSendEnabled:enabled},job,turn,finalText:JSON.stringify(decision),trustedToolReceipts:[]});
+  assert.equal(prepared.decision.reply_decision.replyMode,enabled?'auto_send':'draft_only');
+  assert.equal(prepared.gatewaySafetyFailures.includes('document_execution_without_trusted_receipt'),!enabled);
+ }
+});

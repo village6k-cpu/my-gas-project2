@@ -10849,10 +10849,16 @@ function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
     || reservationAuthorityClaim;
 }
 
-function gatewayDecisionHasStructuredDocumentClaim(decision = {}) {
+function gatewayDecisionHasStructuredDocumentClaim(decision = {}, config = {}) {
   // A pending document task is not proof that a separate answer claims delivery.
   // Independent answers still pass their own fresh price/policy/RAG send checks.
   const reply = decision.reply_decision || {};
+  // This is a request for the host to send, not evidence of an earlier send.
+  // The host must verify the current price and actual provider delivery before
+  // emitting this answer, including when its text mentions the quotation.
+  if (verifiedPricingConfigured(config,decision) && reply.replyMode === 'auto_send'
+    && reply.alreadyDelivered !== true && !(reply.attachmentKeys || []).length
+    && (decision.follow_up_items || []).some(item=>item.type==='quote_send')) return false;
   const independentAnswer = ['sensitive_commitment', 'current_policy_answer', 'rag_grounded_answer'].includes(replySafetyClass(decision))
     && (replySafetyClass(decision) !== 'sensitive_commitment' || isTypedPriceReply(decision))
     && reply.alreadyDelivered !== true && !(reply.attachmentKeys || []).length
@@ -11657,7 +11663,7 @@ export async function prepareKakaoGatewayDecision({
   const structuredCustomerRevision = Boolean(decision?.customer_requested_pending_revision);
   const hasConfirmationBatchReceipt = trustedConfirmationReceipt?.authoritative_sheet_result?.batch === true;
   const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
-  const structuredDocumentClaim = decision ? gatewayDecisionHasStructuredDocumentClaim(decision) : false;
+  const structuredDocumentClaim = decision ? gatewayDecisionHasStructuredDocumentClaim(decision, config) : false;
   const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
 
   let sheetResult = null;
