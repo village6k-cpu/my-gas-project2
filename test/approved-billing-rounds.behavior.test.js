@@ -124,7 +124,7 @@ test('regeneration and same-period approval guards use displayed F/H rather than
   h.ctx.trashContractFilesForTrade_ = () => h.events.push('trash');
   h.ctx.deleteAndRegenerateContract(h.ss, '261101-001', '');
   assert.equal(h.cells.get('15:5'), 2.5);
-  assert.deepEqual(h.events, ['trash', 'copy', 'ledger']);
+  assert.deepEqual(h.events, ['copy', 'ledger', 'trash']);
   const range = h.ss.getSheetByName('계약마스터').getRange(2, 1, 1, 12);
   assert.equal(h.ctx.assertApprovedBillingDateChange_(range.getValues()[0], period, range.getDisplayValues()[0]), 2.5);
 });

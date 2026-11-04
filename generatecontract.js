@@ -1062,7 +1062,7 @@ function inspectContractTemplateDiscounts() {
  * 재생성(deleteAndRegenerateContract)과 취소(cancelContract) 양쪽에서 공용.
  * 반환: 휴지통으로 옮긴 파일 수.
  */
-function trashContractFilesForTrade_(거래ID) {
+function trashContractFilesForTrade_(거래ID, keepFileId) {
   const props = PropertiesService.getScriptProperties();
   const folderId = props.getProperty("CONTRACT_FOLDER_ID");
   const fileName = `계약서_${거래ID}_`;
@@ -1073,7 +1073,7 @@ function trashContractFilesForTrade_(거래ID) {
       const iter = folder.getFiles();
       while (iter.hasNext()) {
         const f = iter.next();
-        if (f.getName().indexOf(fileName) === 0) {
+        if (f.getName().indexOf(fileName) === 0 && (!keepFileId || f.getId() !== keepFileId)) {
           f.setTrashed(true);
           trashed++;
           Logger.log("기존 계약서 삭제: " + f.getName());
@@ -1084,7 +1084,7 @@ function trashContractFilesForTrade_(거래ID) {
       const searchIter = DriveApp.searchFiles(`title contains '${fileName}'`);
       while (searchIter.hasNext()) {
         const f = searchIter.next();
-        if (f.getName().indexOf(fileName) === 0) {
+        if (f.getName().indexOf(fileName) === 0 && (!keepFileId || f.getId() !== keepFileId)) {
           f.setTrashed(true);
           trashed++;
           Logger.log("기존 계약서 삭제: " + f.getName());
@@ -1130,29 +1130,14 @@ function deleteAndRegenerateContract(ss, 거래ID, 추가요청, options) {
       }
     });
   }
-  // 기존 파일 휴지통으로 이동
-  trashContractFilesForTrade_(거래ID);
-
-  // 개고생2.0 M열 링크 초기화
-  try {
-    const 개고생URL = props.getProperty("개고생2_URL");
-    if (개고생URL) {
-      const 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
-      if (거래시트) {
-        // 2026-04-23 컬럼 재배치: 거래ID D→E(5), 계약서링크 M→C(3)
-        const ids = 거래시트.getRange(2, 5, Math.max(1, 거래시트.getLastRow() - 1), 1).getValues();
-        for (let i = 0; i < ids.length; i++) {
-          if (ids[i][0] === 거래ID) {
-            거래시트.getRange(i + 2, 3).clearContent();
-            break;
-          }
-        }
-      }
-    }
-  } catch (err) { Logger.log("M열 초기화 실패: " + err.message); }
-
+  // 새 파일 생성·원장 링크 기록이 성공할 때까지 기존 계약서와 링크를 보존한다.
+  // 단가 미확정, Drive 오류, 링크 기록 실패가 기존 문서를 지우면 안 된다.
   var extraText = 추가요청 !== undefined ? 추가요청 : getAdditionalRequestTextByTradeId_(ss, 거래ID);
-  return generateContractFile(ss, 거래ID, extraText, options);
+  var generated = generateContractFile(ss, 거래ID, extraText, options);
+  if (generated && generated.fileId && generated.url && generated.linkUpdate && generated.linkUpdate.success === true) {
+    trashContractFilesForTrade_(거래ID, generated.fileId);
+  }
+  return generated;
   } finally {
     if (props.getProperty(exclusionKey) === exclusion) props.deleteProperty(exclusionKey);
   }
