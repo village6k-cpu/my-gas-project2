@@ -2,7 +2,7 @@
 
 import { useMemo, useState, type ClipboardEvent, type DragEvent, type ReactNode } from "react";
 import { authFetch } from "@/lib/data/authFetch";
-import { retryEquipmentCatalog, searchEquipmentCatalog, useEquipmentCatalog } from "@/lib/data/equipmentCatalog";
+import { exactEquipmentCatalogItem, retryEquipmentCatalog, searchEquipmentCatalog, useEquipmentCatalog } from "@/lib/data/equipmentCatalog";
 import { Camera, Check, Plus, Send } from "@/components/icons";
 
 type EquipmentDraft = {
@@ -157,13 +157,11 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
 
   const appendLog = (message: string) => setLog((prev) => [...prev, message]);
 
-  const catalogExactKey = (value: string) => value.trim().toLowerCase().replace(/\s+/g, "");
 
   const bestCatalogName = (name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return { name: "", warn: true };
-    const exactKey = catalogExactKey(trimmed);
-    const exact = catalog.items.find((item) => catalogExactKey(item.name) === exactKey);
+    const exact = exactEquipmentCatalogItem(catalog.items, trimmed);
     if (exact) return { name: exact.name, warn: false };
     return { name: trimmed, warn: true };
   };

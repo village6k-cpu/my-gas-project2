@@ -8909,7 +8909,11 @@ function getDashboardEquipmentCatalog_(ss) {
     components: setLookup.components || {},
     prices: setLookup.prices || {},
     items: setLookup.items || {},
-    stocks: stocks
+    stocks: stocks,
+    // 검색·선택·등록이 같은 검증된 판매상품 별칭을 공유한다.
+    aliases: getSetMasterProductAliases_().filter(function(entry) {
+      return resolveSetMasterProduct_(entry.alias, setLookup).canonicalName === entry.canonicalName;
+    })
   };
 }
 
@@ -8971,6 +8975,10 @@ function setMasterProductKey_(name) {
 
 function getSetMasterProductAliases_() {
   var aliases = [
+    { alias: 'DZO CATTA ACE 렌즈세트', canonicalName: 'DZOFILM 3 Lens 세트' },
+    { alias: 'DZOFILM CATTA ACE 3Lens Set', canonicalName: 'DZOFILM 3 Lens 세트' },
+    { alias: 'DZO CATTA ACE', canonicalName: 'DZOFILM 3 Lens 세트' },
+    { alias: '디조 줌렌즈', canonicalName: 'DZOFILM 3 Lens 세트' },
     { alias: '헤이저', canonicalName: '헤이져 머신' },
     { alias: '헤이저 머신', canonicalName: '헤이져 머신' },
     { alias: '릴선 - 1ea', canonicalName: '릴선' },

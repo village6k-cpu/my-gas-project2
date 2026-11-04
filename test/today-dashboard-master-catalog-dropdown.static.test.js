@@ -35,7 +35,7 @@ assert(
 );
 assert(
   !/searchEquipmentCatalog\(catalog\.items, trimmed, 1\)\[0\]/.test(kakaoInput) &&
-    /catalogExactKey\(trimmed\)/.test(kakaoInput) &&
+    /exactEquipmentCatalogItem\(catalog.items, trimmed\)/.test(kakaoInput) &&
     /return \{ name: trimmed, warn: true \}/.test(kakaoInput),
   'Kakao reservation equipment parsing must not auto-replace short free input like SDI with the first catalog suggestion'
 );
