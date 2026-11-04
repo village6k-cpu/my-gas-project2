@@ -55,7 +55,7 @@ assert(
 
 // #36 — cancelContract는 계약서 Drive 파일 정리를 재시도 가능한 외부 워커에 맡겨야 한다.
 assert(
-  /function trashContractFilesForTrade_\(거래ID\)/.test(contract),
+  /function trashContractFilesForTrade_\(거래ID(?:, keepFileId)?\)/.test(contract),
   '#36 shared trashContractFilesForTrade_ helper must exist in generatecontract.js'
 );
 assert(
