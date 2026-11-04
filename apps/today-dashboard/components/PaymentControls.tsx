@@ -179,7 +179,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
             ))
           )}
         </span>
-        {trade.amount != null && <span className="shrink-0 text-[14px] font-extrabold tabular-nums text-ink">{won(trade.amount)}</span>}
+        <span className="shrink-0 text-[14px] font-extrabold tabular-nums text-ink">{trade.amount != null ? won(trade.amount) : "금액 미확정"}</span>
         <ChevronRight className={`h-4 w-4 shrink-0 text-ink-faint transition-transform ${open ? "-rotate-90" : "rotate-90"}`} />
       </button>
 

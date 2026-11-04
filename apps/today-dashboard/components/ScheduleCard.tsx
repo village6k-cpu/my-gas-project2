@@ -298,7 +298,7 @@ export const ScheduleCard = memo(function ScheduleCard({
       {/* 사진은 완료 카드가 접혀도 항상 접근할 수 있어야 한다. */}
       <div className="px-4 pb-4 pl-5">
         <PhotoStrip tradeId={trade.tradeId} photos={trade.photos} showThumbnails={open} />
-        {open && <PaymentControls trade={trade} />}
+        <PaymentControls trade={trade} />
       </div>
 
       {customerOpen && <CustomerSheet name={trade.customerName} phone={trade.customerPhone} onClose={() => setCustomerOpen(false)} />}

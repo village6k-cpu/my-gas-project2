@@ -37,6 +37,7 @@ const { ScheduleCard } = component('ScheduleCard.tsx', {
   '@/lib/data/store': { ensureTradePhotos() {}, setKakaoConversationChecked() {}, toggleReturn() {}, toggleSetup() {} },
   './TradeNotes': { TradeNotes },
   ...Object.fromEntries(['HandoverChecklist', 'RiskPanel', 'PhotoStrip', 'PaymentControls', 'MyReservationLinkButton', 'CustomerSheet', 'TradeActions'].map(name => [`./${name}`, { [name]: Empty }])),
+  './PaymentControls': { PaymentControls: () => React.createElement('div', {'data-testid':'payment-controls'}, '계약서 열기') },
   './icons': { Check: Empty, ChevronRight: Empty, Phone: Empty },
 });
 const trade = {
@@ -97,3 +98,17 @@ for (const tab of ['checkout', 'checkin']) {
     }
   });
 }
+
+test('completed and collapsed cards keep contract and payment access when the total is pending', () => {
+  const html=render(ScheduleCard,{trade:{...trade,setupDone:true,returnDone:true,amount:undefined},date:'2026-10-16',tab:'checkout',defaultOpen:false});
+  assert(html.includes('data-testid="payment-controls"'));
+});
+const {PaymentControls}=component('PaymentControls.tsx',{
+  '@/lib/data/store':{}, '@/lib/data/writeback':{gasRead:async()=>({})}, '@/lib/domain/status':{won:v=>String(v)+'원'},
+  './MyReservationLinkButton':{MyReservationLinkButton:Empty}, './icons':{ChevronRight:Empty,Doc:Empty,Refresh:Empty,Send:Empty},
+});
+test('unknown payment total is labeled pending, never silently omitted or shown as zero',()=>{
+  const html=render(PaymentControls,{trade:{...trade,amount:undefined}});
+  assert(html.includes('금액 미확정'));assert(!html.includes('0원'));
+  assert(render(PaymentControls,{trade:{...trade,amount:0}}).includes('0원'));
+});
