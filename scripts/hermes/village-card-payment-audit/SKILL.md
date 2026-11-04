@@ -1,6 +1,6 @@
 ---
 name: village-card-payment-audit
-description: Read actual Village card approvals, cancellations and duplicate charges (카드 결제 두 번, 중복 결제, 승인번호, 취소 확인).
+description: Read actual Village card approvals, cancellations and duplicate charges (카드 결제 두 번, 중복 결제, 승인번호, 취소 가능 여부, 무카드 취소).
 platforms: [macos, windows, linux]
 metadata:
   hermes:
@@ -50,3 +50,38 @@ direct PostgreSQL connection is required.
   Sheet search: the reservation API has no `거래내역` or `발행처DB` sheets.
 - Never cancel/refund or send a customer/Slack message as part of this audit.
   A separate explicit instruction is required for those actions.
+
+## Cancellation requests (취소 / 무카드 취소)
+
+Run the audit first and inspect each approval's `cancellation` result. NICE and
+NICEPAY are different VANs: **NICEPAY is explicitly unsupported** by the Front
+cardless API, even if a key is present. Never infer support from “나이스” alone.
+Official reference: https://docs.tossplace.com/reference/plugin-sdk/front/payment.html
+Official scope clarification: https://forum.tossplace.com/topic/61
+
+- `unsupported_van`: explain that this approval requires the original card to
+  be read again. Do not promise software can make an unsupported VAN cardless.
+- `terminal_verification_required`: NICE alone is insufficient. The original
+  terminal must confirm CARD plus the actual top-level SDK `vanTransactionKey`.
+  The app preserves this from new approvals and attempts old-cache recovery.
+- `van_unverified`: report missing evidence. Do not assume NICE or no payment.
+- `already_cancelled`: report it; do not request another refund.
+- This command is **read-only**, and `remoteExecutionAvailable` is false. It
+  cannot remotely press the physical terminal or execute a cancellation. Do
+  not POST `/api/lookup/cancel` or the Toss Open API cancel-record endpoint as
+  a substitute: those only record status and do NOT reverse the card approval.
+- Identify the exact customer/trade, approval number, time, and full amount.
+  Do not choose one of two duplicate approvals arbitrarily. “Build cancellation”
+  and “check eligibility” are not instructions to refund a live customer.
+- Actual cancellation is in the original Front's staff settings > 최근 결제 취소.
+  The updated plugin offers **무카드 전액 취소** only for eligible NICE CARD
+  approvals with the original key, otherwise card-present cancellation. Do not
+  claim the new UI is installed without verified terminal/portal version.
+- A timeout or lost response is uncertain. The plugin saves a durable attempt
+  before the SDK call; reopening only checks `getPaymentCancel` and never
+  repeats the cancellation. That API is a local success cache, not a live VAN
+  inquiry. Missing cache requires Toss/merchant support verification.
+- After staff confirms cancellation, rerun this audit. Separate actual SDK
+  cancellation success, local persistence, canonical receipt cancellation,
+  and billing projection. State any pending sync; do not blindly mark an
+  entire reservation refunded when cancelling only one of two approvals.

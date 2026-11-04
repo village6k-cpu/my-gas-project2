@@ -29,6 +29,22 @@ function kst(value) {
   return Number.isFinite(time) ? new Date(time + 9 * 3600000).toISOString().replace('Z', '+09:00') : null;
 }
 
+function cancellationCapability(receipt, sources, events) {
+  const vans = [...new Set(events.filter(e => e.receipt_id === receipt.id)
+    .flatMap(e => [e.providerVan, e.providerCardVan]).filter(Boolean))];
+  const front = sources.filter(a => a.source === 'front');
+  const van = vans.length === 1 ? vans[0] : null;
+  const status = receipt.status === 'cancelled' ? 'already_cancelled'
+    : van && van !== 'NICE' ? 'unsupported_van'
+    : van === 'NICE' ? 'terminal_verification_required' : 'van_unverified';
+  return { van, status, cardlessReady: false, remoteExecutionAvailable: false,
+    paymentKey: front.length === 1 ? front[0].source_id : null,
+    reason: status === 'already_cancelled' ? '이미 취소된 승인입니다.'
+      : status === 'unsupported_van' ? `${van}는 토스 프론트 무카드 취소 지원 대상이 아닙니다. 원결제 카드 재인식 취소가 필요합니다.`
+      : '원결제 단말에서 NICE·CARD와 실제 vanTransactionKey를 확인해야 합니다. 서버 조회만으로 무카드 취소 가능 판정을 내리지 않습니다.',
+    execution: '원결제 프론트 직원 설정 > 최근 결제 취소에서 승인번호·금액·시각을 대조한 뒤 한 건만 선택합니다.' };
+}
+
 function summarize(account, current, allocations, receipts, aliases, events) {
   const associated = new Set([
     ...allocations.filter(a => a.trade_id === account.trade_id).map(a => a.receipt_id),
@@ -49,6 +65,7 @@ function summarize(account, current, allocations, receipts, aliases, events) {
       providerVerified: matchingToss.length === 1,
       providerReferences: matchingToss.map(a => a.source_id),
       reviewReason: r.review_reason,
+      cancellation: cancellationCapability(r, sources, events),
       updatedAt: r.updated_at,
       eventTypes: [...new Set(events.filter(e => e.receipt_id === r.id).map(e => e.event_type))]
     };
@@ -123,7 +140,7 @@ async function audit({ config, tradeId, customer, checkoutDate, fetchImpl = glob
   const [receipts, aliases, events] = ids.length ? await Promise.all([
     read('payment_receipts', { id: receiptFilter, select: 'id,source,amount,occurred_at,approval_number,status,review_reason,updated_at' }),
     read('payment_receipt_aliases', { receipt_id: receiptFilter }),
-    read('payment_events', { receipt_id: receiptFilter, select: 'id,event_type,receipt_id,created_at', order: 'id.asc' })
+    read('payment_events', { receipt_id: receiptFilter, select: 'id,event_type,receipt_id,created_at,providerVan:request_payload->receipt->raw->payment->>van,providerCardVan:request_payload->receipt->raw->payment->cardDetails->>van', order: 'id.asc' })
   ]) : [[], [], []];
   return {
     ok: true, readOnly: true, retrievedAt: new Date().toISOString(),
@@ -154,4 +171,4 @@ if (require.main === module) main(process.argv.slice(2)).then(result => console.
   console.error(JSON.stringify({ ok: false, readOnly: true, error: error.message }));
   process.exitCode = 1;
 });
-module.exports = { audit, summarize, parseConfig, validateSelector };
+module.exports = { audit, summarize, parseConfig, validateSelector, cancellationCapability };

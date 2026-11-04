@@ -102,3 +102,22 @@ test('invalid IDs, ambiguous selectors and impossible dates fail before a reques
   assert.throws(() => validateSelector({ tradeId: account.trade_id, customer: '시험고객' }));
   assert.throws(() => validateSelector({ customer: '시험고객', checkoutDate: '2026-02-30' }));
 });
+
+
+test('NICEPAY is explicitly blocked even with a terminal alias; NICE requires terminal evidence', () => {
+  for (const van of ['NICEPAY', 'NICE', 'KSNET', null]) {
+    const events = [{ receipt_id: receipts[0].id, providerVan: van, providerCardVan: van }];
+    const result = summarize(account, current, allocations, receipts, aliases, events).approvals[0].cancellation;
+    assert.equal(result.van, van);
+    assert.equal(result.cardlessReady, false);
+    assert.equal(result.remoteExecutionAvailable, false);
+    assert.equal(result.status, !van ? 'van_unverified' : van === 'NICE' ? 'terminal_verification_required' : 'unsupported_van');
+    assert.equal(result.paymentKey, 'frontreceipt1');
+  }
+});
+test('conflicting VAN evidence is not converted into support; cancelled receipts stay cancelled', () => {
+  const events = [{ receipt_id: receipts[0].id, providerVan: 'NICEPAY', providerCardVan: 'NICE' }];
+  assert.equal(summarize(account, current, allocations, receipts, aliases, events).approvals[0].cancellation.status, 'van_unverified');
+  const result = summarize(account, current, allocations, [{ ...receipts[0], status: 'cancelled' }], aliases, events);
+  assert.equal(result.approvals[0].cancellation.status, 'already_cancelled');
+});

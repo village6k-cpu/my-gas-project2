@@ -39,6 +39,8 @@ function createHarness(options = {}) {
   let receiptValue = Object.prototype.hasOwnProperty.call(options, 'receiptRawValue')
     ? options.receiptRawValue
     : JSON.stringify(records);
+  let receiptWrites = 0;
+  const cardlessCalls = [];
   let failedWritesRemaining = options.failReceiptWrites || 0;
   const lookupCalls = [];
   const requestCalls = [];
@@ -85,6 +87,11 @@ function createHarness(options = {}) {
         events.push({ type: 'tossLookup', payload });
         return options.getPaymentCancel(payload, lookupCalls.length);
       },
+      async requestCardlessPaymentCancel(payload) {
+        cardlessCalls.push(payload);
+        events.push({ type: 'cardlessCancel', payload });
+        return options.requestCardlessPaymentCancel(payload);
+      },
       async requestPaymentCancel(payload) {
         requestCalls.push(payload);
         events.push({ type: 'tossCancel', payload });
@@ -118,6 +125,8 @@ function createHarness(options = {}) {
           events.push({ type: 'storageWrite', key, value });
           return;
         }
+        receiptWrites += 1;
+        if (options.failReceiptWriteAt === receiptWrites) throw new Error('storage write failed');
         if (failedWritesRemaining > 0) {
           failedWritesRemaining -= 1;
           throw new Error('storage write failed');
@@ -190,6 +199,7 @@ function createHarness(options = {}) {
   return {
     context: sandbox,
     lookupCalls,
+    cardlessCalls,
     requestCalls,
     paymentCalls,
     printCalls,
@@ -722,6 +732,7 @@ async function testRawPaymentNormalizationForCardCashAndBarcode() {
     approvalNumber: 'RAW-CARD-1',
     installment: 3,
     extraData: { source: 'card' },
+    van: null, tid: null, vanTransactionKey: null, taxExemptValue: 0,
     isSelfIssuance: false
   });
 
@@ -800,7 +811,8 @@ async function testLegacyIncompleteRecordHydratesBeforeBuildingCancelPayload() {
     tax: 1000,
     supplyValue: 10000,
     tip: 0,
-    timestamp: '2026-07-15T09:00:00.000Z',
+    timestamp: Date.parse('2026-07-15T09:00:00.000Z'),
+    taxExemptValue: 0,
     approvalNumber: 'LEGACY-APPROVAL-1',
     installment: 2,
     timeoutMs: 60000,
@@ -1208,7 +1220,7 @@ async function testOtherLookupErrorFailsClosed() {
 
 async function testConfirmedCancelWarnsThenReconcilesAfterLocalFailure() {
   const harness = createHarness({
-    failReceiptWrites: 1,
+    failReceiptWriteAt: 2,
     getPaymentCancel: async (_payload, callNumber) => {
       if (callNumber === 1) throw paymentNotFound('errorCode');
       return {
@@ -1297,7 +1309,7 @@ async function testInFlightStaysLockedUntilLocalPersistenceFinishes() {
     'cancel must remain locked until confirmed external success is persisted locally'
   );
   await harness.context.executeFullPaymentCancel(paymentRecord());
-  assert.strictEqual(harness.requestCalls.length, 1);
+  assert.strictEqual(harness.requestCalls.length, 0, 'SDK call waits for durable intent');
   assert.strictEqual(harness.toasts.at(-1).message, '취소 요청을 처리하고 있어요.');
 
   releaseWrite();
@@ -1365,7 +1377,123 @@ async function testManualPendingRecoveryRetainsManualReceiptClassification() {
   assert.strictEqual(harness.paymentCalls.length, 0, 'recovery must never charge again');
 }
 
+
+function niceRecord(overrides = {}) {
+  return paymentRecord({ van: 'NICE', vanTransactionKey: 'original-van-key', tid: 'original-tid', taxExemptValue: 0, ...overrides });
+}
+const cancelSuccess = () => ({ type: 'SUCCESS', response: { paymentMethod: 'CARD', card: { approvalNumber: 'CANCEL', timestamp: Date.now() } } });
+
+async function testCardlessSafety() {
+  // A NICEPAY approval must remain card-present even if it happens to contain a key.
+  for (const fields of [{ van: 'NICEPAY' }, { van: 'KSNET' }, { paymentMethod: 'BARCODE' }, { vanTransactionKey: '' }]) {
+    const r = niceRecord(fields);
+    const h = createHarness({ records: [r], getPaymentCancel: async () => null });
+    await h.initPromise;
+    await h.context.executeFullPaymentCancel(r, 'cardless');
+    assert.equal(h.cardlessCalls.length + h.requestCalls.length, 0);
+    assert.equal(h.records()[0].cancelAttempt, undefined);
+    await h.context.showCancelRecord(r);
+    assert.ok(!h.lastResult().buttons.some(b => b.label === '무카드 전액 취소'));
+  }
+  const r = niceRecord({ tax: 500, supplyValue: 10500, taxExemptValue: 5000, installment: 3 });
+  const h = createHarness({ records: [r], getPaymentCancel: async () => null, requestCardlessPaymentCancel: async () => cancelSuccess() });
+  await h.initPromise;
+  await h.context.showCancelRecord(r);
+  const methods = h.pages.at(-1).page;
+  assert.equal(methods.title, '취소 방법 선택');
+  await methods.options.find(b => b.title === '무카드 전액 취소').onClick();
+  assert.ok(h.lastResult().buttons.some(b => b.label === '무카드 전액 취소'));
+  assert.equal(h.lastResult().buttons.length, 2, 'Toss result template supports at most 2 buttons');
+  await h.context.executeFullPaymentCancel(r, 'cardless');
+  assert.equal(h.cardlessCalls.length, 1);
+  assert.equal(h.requestCalls.length, 0);
+  const sent = h.cardlessCalls[0];
+  assert.equal(sent.paymentKey, r.paymentKey);
+  assert.equal(sent.approvalNumber, r.approvalNumber);
+  assert.equal(sent.timestamp, Date.parse(r.timestamp));
+  for (const key of ['tax', 'supplyValue', 'taxExemptValue', 'tid', 'vanTransactionKey', 'installment']) assert.equal(sent[key], r[key]);
+  assert.ok(h.events.findIndex(e => e.type === 'receiptWrite') < h.events.findIndex(e => e.type === 'cardlessCancel'));
+  assert.ok(h.records()[0].cancelledAt);
+  assert.equal(h.records()[0].cancelSyncPending, false);
+}
+
+async function testOriginalCardlessMetadataRecovery() {
+  const r = paymentRecord();
+  const original = { paymentMethod: 'CARD', tid: 'cat', vanTransactionKey: 'native-key', card: { van: 'NICE', approvalNumber: r.approvalNumber, timestamp: Date.parse(r.timestamp) } };
+  const h = createHarness({ records: [r], getPayment: async () => ({ type: 'SUCCESS', response: original }), getPaymentCancel: async () => null, requestCardlessPaymentCancel: async () => cancelSuccess() });
+  await h.initPromise;
+  await h.context.executeFullPaymentCancel(r, 'cardless');
+  assert.equal(h.cardlessCalls.length, 1);
+  assert.equal(h.cardlessCalls[0].vanTransactionKey, 'native-key');
+  assert.equal(h.records()[0].van, 'NICE');
+  const mismatch = createHarness({ records: [r], getPayment: async () => ({ type: 'SUCCESS', response: { ...original, card: { ...original.card, approvalNumber: 'OTHER' } } }) });
+  await mismatch.initPromise;
+  await mismatch.context.executeFullPaymentCancel(r, 'cardless');
+  assert.equal(mismatch.cardlessCalls.length + mismatch.requestCalls.length, 0);
+  assert.match(mismatch.lastResult().description, /원거래와 다릅니다/);
+  const payment = h.context.normalizePaymentResponse(original, r.amount);
+  await h.context.rememberReceiptRecord({ tradeId: 'TEST' }, { ...payment, paymentKey: 'new' });
+  assert.equal(h.records()[0].vanTransactionKey, 'native-key');
+  assert.equal(h.records()[0].tid, 'cat');
+}
+
+async function testUncertainCancelSurvivesReboot() {
+  for (const result of [null, { type: 'TIMEOUT' }, new Error('network lost')]) {
+    const r = niceRecord();
+    const h = createHarness({ records: [r], getPaymentCancel: async () => null, requestCardlessPaymentCancel: async () => { if (result instanceof Error) throw result; return result; } });
+    await h.initPromise;
+    await h.context.executeFullPaymentCancel(r, 'cardless');
+    await h.context.executeFullPaymentCancel(r, 'cardless');
+    assert.equal(h.cardlessCalls.length, 1);
+    assert.ok(h.records()[0].cancelAttempt);
+    assert.equal(h.fetchCalls.length, 0, 'uncertain result cannot update ledger');
+    const reboot = createHarness({ records: h.records(), getPaymentCancel: async () => null });
+    await reboot.initPromise;
+    await reboot.context.executeFullPaymentCancel(r, 'cardless');
+    await reboot.context.executeFullPaymentCancel(r);
+    assert.equal(reboot.cardlessCalls.length + reboot.requestCalls.length, 0, 'neither mode may resend after restart');
+    const recovered = createHarness({ records: h.records(), getPaymentCancel: async () => cancelSuccess() });
+    await recovered.initPromise;
+    await recovered.context.executeFullPaymentCancel(r, 'cardless');
+    assert.equal(recovered.cardlessCalls.length + recovered.requestCalls.length, 0);
+    assert.ok(recovered.records()[0].cancelledAt);
+  }
+}
+
+async function testCancelIntentAndLedgerFailures() {
+  const paramsHarness = createHarness({ pageMode: 'customer' });
+  await paramsHarness.initPromise;
+  assert.equal(paramsHarness.context.fullCancelParameters(paymentRecord({ amount: 5, tax: 0, supplyValue: 5 })).taxExemptValue, 5);
+  const malformed = createHarness({ records: [niceRecord()], getPaymentCancel: async () => null, requestCardlessPaymentCancel: async () => ({ type: 'SUCCESS', response: {} }) });
+  await malformed.initPromise;
+  await malformed.context.executeFullPaymentCancel(niceRecord(), 'cardless');
+  assert.equal(malformed.records()[0].cancelledAt, undefined);
+  assert.equal(malformed.fetchCalls.length, 0);
+  assert.ok(malformed.records()[0].cancelAttempt);
+  const r = niceRecord();
+  const blocked = createHarness({ records: [r], failReceiptWrites: 1, getPaymentCancel: async () => null });
+  await blocked.initPromise;
+  await blocked.context.executeFullPaymentCancel(r, 'cardless');
+  assert.equal(blocked.cardlessCalls.length + blocked.requestCalls.length, 0, 'cannot refund without durable intent');
+  const wrongAmount = createHarness({ records: [niceRecord({ supplyValue: 1 })], getPaymentCancel: async () => null });
+  await wrongAmount.initPromise;
+  await wrongAmount.context.executeFullPaymentCancel(r, 'cardless');
+  assert.equal(wrongAmount.cardlessCalls.length, 0, 'caller cannot override stored original amounts');
+  for (const body of [{ ok: false }, { ok: true, pendingReview: true }, { ok: true, syncWarnings: ['GAS unavailable'] }]) {
+    const h = createHarness({ records: [r], getPaymentCancel: async () => null, requestCardlessPaymentCancel: async () => cancelSuccess(), fetch: async () => jsonResponse(body) });
+    await h.initPromise;
+    await h.context.executeFullPaymentCancel(r, 'cardless');
+    assert.ok(h.records()[0].cancelledAt);
+    assert.equal(h.records()[0].cancelSyncPending, true);
+    assert.match(h.lastResult().description, /반영.*대기/);
+  }
+}
+
 (async function run() {
+  await testCardlessSafety();
+  await testOriginalCardlessMetadataRecovery();
+  await testUncertainCancelSurvivesReboot();
+  await testCancelIntentAndLedgerFailures();
   await testManualPendingRecoveryRetainsManualReceiptClassification();
   await testSameReservationRetainsEachApprovalKey();
   await testManualReceiptSyncKeepsIdentityAndPendingOnFailure();
