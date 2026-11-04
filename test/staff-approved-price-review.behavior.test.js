@@ -35,7 +35,7 @@ test('the actual registration price stage preserves confirmed unknown equipment 
   assert.throws(() => context.stage(false), /세트마스터/);
 });
 
-test('unresolved prices cannot produce a customer contract or copy a Drive template', () => {
+test('unresolved prices reach contract generation instead of blocking Drive template access', () => {
   const source = fs.readFileSync(path.join(__dirname, '../generatecontract.js'), 'utf8');
   const start = source.indexOf('function generateContractFile(');
   const end = source.indexOf('\nfunction ', start + 1);
@@ -49,6 +49,6 @@ test('unresolved prices cannot produce a customer contract or copy a Drive templ
   vm.createContext(context);
   vm.runInContext(fn('hasPendingSchedulePrice_') + '\n' + source.slice(start, end), context);
   const ss = {getSheetByName: name => sheet(name === '계약마스터' ? contract : schedule)};
-  assert.throws(() => context.generateContractFile(ss, '261013-099'), /단가확인필요/);
-  assert.equal(driveCopies, 0);
+  assert.throws(() => context.generateContractFile(ss, '261013-099'), /unexpected Drive template access/);
+  assert.equal(driveCopies, 1);
 });
