@@ -213,6 +213,10 @@ function normalizePaymentResponse(response, amount) {
     approvalNumber: detail.approvalNumber || null,
     installment: detail.installment || 0,
     extraData: r.extraData || null,
+    van: detail.van || null,
+    tid: r.tid || null,
+    vanTransactionKey: r.vanTransactionKey || null,
+    taxExemptValue: tax === 0 ? paidAmount : 0,
     isSelfIssuance: Boolean(detail.isSelfIssuance)
   };
 }
@@ -257,6 +261,10 @@ async function requestCardPayment(price, pendingTradeId) {
       approvalNumber: normalized.approvalNumber,
       installment: normalized.installment,
       extraData: normalized.extraData,
+      van: normalized.van,
+      tid: normalized.tid,
+      vanTransactionKey: normalized.vanTransactionKey,
+      taxExemptValue: normalized.taxExemptValue,
       isSelfIssuance: normalized.isSelfIssuance,
       raw: r,
     };
@@ -403,7 +411,11 @@ async function syncCancelledReservation(record) {
     })
   });
   if (!res.ok) throw new Error(await errMsg(res, '환불 장부 반영 실패'));
-  return res.json();
+  var result = await res.json();
+  if (!result || result.ok !== true || result.pendingReview || (result.syncWarnings && result.syncWarnings.length)) {
+    throw new Error('취소는 완료됐지만 장부 반영에 확인이 필요합니다.');
+  }
+  return result;
 }
 
 async function retryPendingCancelSyncs() {
@@ -439,43 +451,98 @@ async function retryPendingCancelSyncs() {
   return summary;
 }
 
-async function hydrateCancelRecord(record) {
-  if (hasCancelDetails(record)) return record;
-  if (!record || !record.paymentKey) {
-    throw new Error('취소할 결제키가 없습니다.');
+// NICEPAY is a separate VAN and is explicitly NOT supported by cardless cancellation.
+function cardlessCancelBlockReason(record) {
+  if (!record || record.paymentMethod !== 'CARD') return '무카드 취소는 카드 결제만 지원합니다.';
+  if (record.van !== 'NICE') return '무카드 취소는 NICE만 지원합니다. ' + (record.van || 'VAN 확인 필요') + ' 거래는 카드 재인식 취소를 이용해주세요.';
+  if (typeof record.vanTransactionKey !== 'string' || !record.vanTransactionKey.trim()) return '원거래 무카드 취소키가 없습니다. 카드 재인식 취소를 이용해주세요.';
+  if (!sdk.payment || typeof sdk.payment.requestCardlessPaymentCancel !== 'function') return '이 단말 버전에서 무카드 취소를 지원하지 않습니다.';
+  return null;
+}
+
+function approvalTime(value) {
+  return typeof value === 'number' ? value : Date.parse(value);
+}
+
+async function hydrateCancelRecord(record, recoverCardless) {
+  if (!record || !record.paymentKey) throw new Error('취소할 결제키가 없습니다.');
+  var complete = hasCancelDetails(record);
+  var needKey = recoverCardless && (!record.van || (record.van === 'NICE' && !record.vanTransactionKey));
+  if (complete && !needKey) return record;
+  var result;
+  try {
+    if (!sdk.payment || typeof sdk.payment.getPayment !== 'function') throw new Error('승인 조회 기능이 없습니다.');
+    result = await sdk.payment.getPayment({ paymentKey: record.paymentKey });
+    if (!result || result.type !== 'SUCCESS') throw new Error('최근 승인정보를 찾지 못했습니다.');
+  } catch (e) {
+    // Older complete records can still use card-present cancellation. A missing cache
+    // is not evidence of a failed approval and never supplies a made-up VAN key.
+    if (complete) return record;
+    throw e;
   }
-  if (!sdk.payment || typeof sdk.payment.getPayment !== 'function') {
-    throw new Error('이 결제의 승인정보를 복구할 수 없습니다.');
+  var normalized = normalizePaymentResponse(result.response, record.amount);
+  if ((record.approvalNumber && record.approvalNumber !== normalized.approvalNumber) ||
+      (record.timestamp && approvalTime(record.timestamp) !== approvalTime(normalized.timestamp)) ||
+      (record.paymentMethod && record.paymentMethod !== normalized.paymentMethod) ||
+      (record.van && record.van !== normalized.van)) {
+    throw new Error('단말 승인정보가 저장된 원거래와 다릅니다. 취소를 중단했습니다.');
   }
-  var result = await sdk.payment.getPayment({ paymentKey: record.paymentKey });
-  if (!result || result.type !== 'SUCCESS') {
-    throw new Error('최근 승인정보를 찾지 못했습니다.');
-  }
-  var hydrated = Object.assign({}, record, normalizePaymentResponse(result.response, record.amount));
-  if (!hasCancelDetails(hydrated)) {
-    throw new Error('취소에 필요한 승인정보가 부족합니다.');
-  }
+  var hydrated = Object.assign({}, record, normalized);
+  // Preserve the exact original tax split; only legacy records use this plugin's
+  // historical VAT-inclusive request formula.
+  ['tax', 'supplyValue', 'taxExemptValue', 'tip'].forEach(function (key) {
+    if (record[key] != null) hydrated[key] = record[key];
+  });
+  if (!hasCancelDetails(hydrated)) throw new Error('취소에 필요한 승인정보가 부족합니다.');
   return hydrated;
 }
 
-async function requestFullPaymentCancel(record) {
-  if (!sdk.payment || typeof sdk.payment.requestPaymentCancel !== 'function') {
-    throw new Error('토스 전액 취소 기능을 사용할 수 없습니다.');
+function fullCancelParameters(record) {
+  if (!hasCancelDetails(record)) throw new Error('원승인 정보가 부족합니다.');
+  var timestamp = approvalTime(record.timestamp);
+  var tax = Number(record.tax), supplyValue = Number(record.supplyValue), tip = Number(record.tip || 0);
+  var exempt = Number(record.taxExemptValue == null ? (tax === 0 ? supplyValue : 0) : record.taxExemptValue);
+  if (!Number.isFinite(timestamp) || timestamp <= 0 ||
+      [tax, supplyValue, tip, exempt].some(function (v) { return !Number.isSafeInteger(v) || v < 0; }) ||
+      exempt > supplyValue || tax + supplyValue + tip !== Number(record.amount)) {
+    throw new Error('원거래 금액·세금·승인시각이 일치하지 않습니다.');
   }
-  return sdk.payment.requestPaymentCancel({
-    paymentKey: record.paymentKey,
-    paymentMethod: record.paymentMethod,
-    tax: record.tax,
-    supplyValue: record.supplyValue,
-    tip: record.tip || 0,
-    timestamp: record.timestamp,
-    approvalNumber: record.approvalNumber,
-    installment: record.installment || 0,
-    timeoutMs: 60000,
-    extraData: record.extraData || undefined,
-    isSelfIssuance: record.isSelfIssuance || false,
-    localeCode: 'ko'
+  return {
+    paymentKey: record.paymentKey, paymentMethod: record.paymentMethod,
+    tax: tax, supplyValue: supplyValue, taxExemptValue: exempt, tip: tip,
+    timestamp: timestamp, approvalNumber: record.approvalNumber,
+    installment: record.installment || 0, tid: record.tid || undefined,
+    timeoutMs: 60000, localeCode: 'ko'
+  };
+}
+
+async function requestFullPaymentCancel(record, mode) {
+  var params = fullCancelParameters(record);
+  if (mode === 'cardless') {
+    var reason = cardlessCancelBlockReason(record);
+    if (reason) throw new Error(reason);
+    params.vanTransactionKey = record.vanTransactionKey;
+    return sdk.payment.requestCardlessPaymentCancel(params);
+  }
+  if (!sdk.payment || typeof sdk.payment.requestPaymentCancel !== 'function') throw new Error('토스 전액 취소 기능을 사용할 수 없습니다.');
+  params.extraData = record.extraData || undefined;
+  params.isSelfIssuance = record.isSelfIssuance || false;
+  return sdk.payment.requestPaymentCancel(params);
+}
+
+async function rememberCancelAttempt(record, mode) {
+  var records = await loadReceiptRecords();
+  var found = false;
+  var attempted = Object.assign({}, record, { cancelAttempt: { at: new Date().toISOString(), mode: mode } });
+  var updated = records.map(function (r) {
+    if (!r || r.paymentKey !== record.paymentKey) return r;
+    if (r.cancelAttempt || r.cancelledAt) throw new Error('이미 취소 요청이 기록되어 있습니다. 결과를 먼저 확인해주세요.');
+    found = true;
+    return attempted;
   });
+  if (!found) throw new Error('로컬 결제 기록을 찾지 못했습니다.');
+  await saveReceiptRecords(updated); // readback must succeed BEFORE a financial SDK call
+  return attempted;
 }
 
 function isPaymentCancelNotFoundError(error) {
@@ -561,6 +628,10 @@ async function rememberReceiptRecord(trade, payment) {
     timestamp: payment.timestamp || null,
     installment: payment.installment || 0,
     extraData: payment.extraData || null,
+    van: payment.van || null,
+    tid: payment.tid || null,
+    vanTransactionKey: payment.vanTransactionKey || null,
+    taxExemptValue: payment.taxExemptValue == null ? (Number(payment.tax) === 0 ? payment.supplyValue : 0) : payment.taxExemptValue,
     tax: payment.tax,
     supplyValue: payment.supplyValue,
     tip: payment.tip || 0,
@@ -806,10 +877,10 @@ async function showCancelablePayments() {
   });
 }
 
-async function showCancelRecord(record) {
+async function showCancelRecord(record, mode) {
   var hydrated;
   try {
-    hydrated = await hydrateCancelRecord(record);
+    hydrated = await hydrateCancelRecord(record, true);
   } catch (e) {
     return showStaffMessage(
       'error',
@@ -819,27 +890,45 @@ async function showCancelRecord(record) {
     );
   }
 
+  if (!hydrated.cancelAttempt && !mode && !cardlessCancelBlockReason(hydrated)) {
+    return sdk.template.renderSelectPage({
+      title: '취소 방법 선택',
+      subtitle: (hydrated.customerName || '현장 직접 결제') + ' · ' + won(hydrated.amount),
+      options: [
+        { title: '무카드 전액 취소', subtitle: '카드 없이 원승인을 취소합니다', onClick: function () { return showCancelRecord(hydrated, 'cardless'); } },
+        { title: '카드 재인식 전액 취소', subtitle: '원결제 카드를 다시 읽습니다', onClick: function () { return showCancelRecord(hydrated, 'card-present'); } }
+      ],
+      onBack: function () { return showCancelablePayments(); }
+    });
+  }
+  mode = mode || 'card-present';
   return sdk.template.renderResultPage({
     type: 'image',
     status: 'error',
-    title: '전액 취소할까요',
+    title: hydrated.cancelAttempt ? '취소 결과를 확인할까요' : (mode === 'cardless' ? '카드 없이 전액 취소할까요' : '전액 취소할까요'),
     description: [
       hydrated.customerName || '현장 직접 결제',
       hydrated.tradeId || '직접 결제',
       won(hydrated.amount),
       receiptDateTime(hydrated.paidAt || hydrated.timestamp),
-      '승인번호 ' + asciiReceiptText(hydrated.approvalNumber, '-')
+      '승인번호 ' + asciiReceiptText(hydrated.approvalNumber, '-'),
+      hydrated.cancelAttempt ? '이전 취소 요청의 결과만 확인합니다.' : (cardlessCancelBlockReason(hydrated) || '카드 없이 전액 취소할 수 있습니다.')
     ].join(' · '),
     timerMs: 0,
     buttons: [
-      { label: '전액 취소', onClick: function () { executeFullPaymentCancel(hydrated); } },
-      { label: '목록으로', onClick: function () { showCancelablePayments(); } }
+      { label: hydrated.cancelAttempt ? '취소 결과 확인' : (mode === 'cardless' ? '무카드 전액 취소' : (hydrated.paymentMethod === 'CARD' ? '카드 재인식 전액 취소' : '전액 취소')),
+        onClick: function () { return executeFullPaymentCancel(hydrated, mode); } },
+      { label: '목록으로', onClick: function () { return showCancelablePayments(); } }
     ]
   });
 }
 
 async function recordConfirmedPaymentCancel(record, result, title, description) {
   var cancelDetail = extractPaymentCancelDetail(result, record.paymentMethod);
+  if (!result.response || result.response.paymentMethod !== record.paymentMethod ||
+      !cancelDetail.approvalNumber || !Number.isFinite(approvalTime(cancelDetail.timestamp))) {
+    return showStaffMessage('error', '취소 결과 확인이 필요해요', '취소 성공 응답의 승인정보가 부족하거나 원거래 수단과 다릅니다. 토스 결제내역에서 확인해주세요.', true);
+  }
   var cancelledRecord;
   try {
     cancelledRecord = await markPaymentCancelled(record, cancelDetail);
@@ -878,7 +967,8 @@ async function recordConfirmedPaymentCancel(record, result, title, description) 
   return showStaffMessage('success', title, description, false);
 }
 
-async function executeFullPaymentCancel(record) {
+async function executeFullPaymentCancel(record, mode) {
+  mode = mode || 'card-present';
   if (cancelInFlight) {
     try { if (sdk.template.openToast) sdk.template.openToast({ message: '취소 요청을 처리하고 있어요.' }); } catch (e) {}
     return;
@@ -899,7 +989,7 @@ async function executeFullPaymentCancel(record) {
       return showStaffMessage('success', '이미 취소된 결제예요', receiptDateTime(stored.cancelledAt) + ' 취소 완료', false);
     }
 
-    var cancelRecord = await hydrateCancelRecord(Object.assign({}, stored, record));
+    var cancelRecord = await hydrateCancelRecord(stored, true);
     var previous;
     try {
       previous = await getCachedPaymentCancel(cancelRecord.paymentKey);
@@ -920,17 +1010,24 @@ async function executeFullPaymentCancel(record) {
       );
     }
 
+    if (stored.cancelAttempt) {
+      return showStaffMessage('error', '취소 결과 확인이 필요해요', '이전 요청의 결과를 단말에서 찾지 못했습니다. 자동 재취소하지 않습니다. 토스 결제내역 또는 고객센터에서 확인해주세요.', true);
+    }
+    fullCancelParameters(cancelRecord);
+    if (mode !== 'cardless' && (!sdk.payment || typeof sdk.payment.requestPaymentCancel !== 'function')) throw new Error('토스 전액 취소 기능을 사용할 수 없습니다.');
+    if (mode === 'cardless' && cardlessCancelBlockReason(cancelRecord)) throw new Error(cardlessCancelBlockReason(cancelRecord));
+    cancelRecord = await rememberCancelAttempt(cancelRecord, mode);
     var result;
     try {
-      result = await requestFullPaymentCancel(cancelRecord);
+      result = await requestFullPaymentCancel(cancelRecord, mode);
     } catch (e) {
-      return showStaffMessage('error', '전액 취소에 실패했어요', e.message || '토스 취소 상태를 확인해주세요.', true);
+      return showStaffMessage('error', '취소 결과 확인이 필요해요', '취소 응답을 확인하지 못했습니다. 결과 확인만 다시 시도하며 취소 요청은 반복하지 않습니다.', true);
     }
     if (!result || result.type !== 'SUCCESS') {
       return showStaffMessage(
         'error',
-        '전액 취소가 완료되지 않았어요',
-        '토스 응답: ' + ((result && result.type) || 'UNKNOWN'),
+        '취소 결과 확인이 필요해요',
+        '토스 응답: ' + ((result && result.type) || 'UNKNOWN') + ' · 취소 요청은 반복하지 않습니다. 토스 결제내역에서 확인해주세요.',
         true
       );
     }

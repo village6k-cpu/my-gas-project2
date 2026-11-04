@@ -12,13 +12,13 @@ assert(/extraData:\s*normalized\.extraData/.test(app));
 assert(/tax:\s*normalized\.tax/.test(app));
 assert(/supplyValue:\s*normalized\.supplyValue/.test(app));
 
-assert(app.includes('async function hydrateCancelRecord(record)'));
-assert(app.includes('async function requestFullPaymentCancel(record)'));
+assert(app.includes('async function hydrateCancelRecord(record, recoverCardless)'));
+assert(app.includes('async function requestFullPaymentCancel(record, mode)'));
 assert(app.includes('async function markPaymentCancelled(record, cancelDetail)'));
 assert(app.includes('async function syncCancelledReservation(record)'));
 assert(app.includes('async function retryPendingCancelSyncs()'));
 assert(app.includes('async function showCancelablePayments()'));
-assert(/sdk\.payment\.requestPaymentCancel\(\{/.test(app));
+assert(app.includes('sdk.payment.requestPaymentCancel(params)'));
 assert(/sdk\.payment\.getPaymentCancel\(\{\s*paymentKey:/.test(app));
 assert(/paymentMethod:\s*record\.paymentMethod/.test(app));
 assert(/timestamp:\s*record\.timestamp/.test(app));
