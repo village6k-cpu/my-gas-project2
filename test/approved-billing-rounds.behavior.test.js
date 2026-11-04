@@ -101,10 +101,18 @@ test('stale period, mismatched I, duplicate or damaged approval fail before docu
     assert.deepEqual(h.events, []);
   }
 });
-test('approved half rounds do not bypass pending unit-price document hold', () => {
-  const h = generator({ pendingPrice: true });
-  assert.throws(h.run, /단가확인필요/);
-  assert.deepEqual(h.events, []);
+test('pending unit prices publish a usable contract without a fabricated final amount', () => {
+  const h = generator({ pendingPrice: true }); let ledgerAmount = 'not-written';
+  h.ctx.updateContractLink = (_id, _url, amount) => { ledgerAmount = amount; return {success:true}; };
+  const result = h.run();
+  assert.equal(result.pricingPending, true);
+  assert.equal(result.finalAmount, null);
+  assert.equal(ledgerAmount, null);
+  assert.equal(h.cells.get('15:6'), '미확정');
+  assert.equal(h.formulas.get('15:7'), '="미확정"');
+  assert.equal(h.cells.get('47:8'), '단가 미확정');
+  assert.equal(h.cells.get('44:7'), '단가 미확정');
+  assert.equal(result.fileId, 'generated');
 });
 test('stale approval cannot trash the previous document or clear its ledger link during regeneration', () => {
   const h = generator({ endTime: '03:00' });

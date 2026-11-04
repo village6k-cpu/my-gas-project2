@@ -149,18 +149,19 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
     // A:스케줄ID, B:거래ID, C:세트명, D:장비명, E:수량, ..., L:단가(col12)
     schedData.forEach(row => {
       if (row[1] === 거래ID) {
-        if (hasPendingSchedulePrice_(row)) {
-          throw new Error('단가확인필요: 예약은 등록되어 있으나 가격 확정 전 계약서 생성은 보류합니다 — ' + row[3]);
-        }
         items.push({
           세트명: row[2] || "",
           장비명: row[3] || "",
           수량: row[4] || 1,
-          단가: row[11] || 0
+          단가: row[11] || 0,
+          단가미확정: hasPendingSchedulePrice_(row)
         });
       }
     });
   }
+
+  const pendingPriceItems = items.filter(function(item) { return item.단가미확정; }).map(function(item) { return item.장비명; });
+  const pricingPending = pendingPriceItems.length > 0;
 
   // ── 템플릿 복사 ──
   const templateFile = DriveApp.getFileById(templateId);
@@ -274,10 +275,10 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
       return;
     }
     nameArr.push([item.장비명 || ""]);
-    numArr.push([item.수량 || "", item.수량 ? 일수 : "", item.단가 || ""]);
+    numArr.push([item.수량 || "", item.수량 ? 일수 : "", item.단가미확정 ? "미확정" : (item.단가 || "")]);
     // 금액 수식 — 좌측이면 D*E*F, 우측이면 J*K*L
     const qA = _colLetter(qCol) + rowIdx, dA = _colLetter(dCol) + rowIdx, pA = _colLetter(pCol) + rowIdx;
-    fmlArr.push(["=" + qA + "*" + dA + "*" + pA]);  // 원본과 동일하게 항상 수식 세팅
+    fmlArr.push([item.단가미확정 ? '="미확정"' : "=" + qA + "*" + dA + "*" + pA]);  // 원본과 동일하게 항상 수식 세팅
     const isSetHeader = item.세트명 && item.장비명 === item.세트명;
     const isPriced = !item.세트명 && item.단가 > 0;
     if (isSetHeader || isPriced) {
@@ -388,9 +389,15 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
       .setValue("임차인:       " + contract.예약자명 + "  (서명 또는 인)");
   }
 
+  // 단가 미확정도 장비·기간·수량 계약서는 제공한다. 부분 합계를 확정 총액으로 보이지 않는다.
+  if (pricingPending) {
+    [paymentRefs.totalBeforeDiscountCell, paymentRefs.discountedAmountCell, paymentRefs.finalAmountCell].forEach(function(cell) {
+      ws.getRange(cell).setValue("단가 미확정");
+    });
+  }
   // 저장
   SpreadsheetApp.flush();
-  const finalAmount = readContractAmount_(ws, paymentRefs.finalAmountCell);
+  const finalAmount = pricingPending ? null : readContractAmount_(ws, paymentRefs.finalAmountCell);
 
   // ── 링크가 있는 사람은 누구나 열람 가능 (직원 PC 열람용) ──
   try {
@@ -409,6 +416,8 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
     url: newUrl,
     fileId: newFileId,
     finalAmount: finalAmount,
+    pricingPending: pricingPending,
+    pendingPriceItems: pendingPriceItems,
     linkUpdate: linkUpdate
   };
 }
@@ -1167,6 +1176,8 @@ function regenerateContractById(거래ID, 추가요청, options) {
     finalAmount: result && result.finalAmount ? result.finalAmount : null,
     amount: result && result.finalAmount ? result.finalAmount : null,
     linkUpdate: result && result.linkUpdate ? result.linkUpdate : null,
+    pricingPending: !!(result && result.pricingPending),
+    pendingPriceItems: result && result.pendingPriceItems ? result.pendingPriceItems : [],
     extraRequestFound: !!extraText,
     summary: summary
   };
