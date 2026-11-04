@@ -150,7 +150,15 @@ export function completeVerifiedPricingWork(prepared, result) {
   if (result.pricingDocumentReceipt?.deliveryConfirmed === true && result.pricingDocumentReceipt.documentType!=='statement') completed.add('quote_send');
   const statementDone=result.pricingDocumentReceipt?.deliveryConfirmed===true && result.pricingDocumentReceipt.documentType==='statement';
   if (!completed.size && !statementDone) return prepared;
-  const fulfilled=item=>completed.has(item.type) || (statementDone && item.type==='contract_document'
+  const reference=prepared.decision.price_quote?.id;
+  const sameQuote=item=>{
+    const keys=[item.businessKey,item.business_key,item.taskKey,item.task_key].filter(Boolean);
+    // Older single-quote intents have no keys. Keyed work must name the exact
+    // verified reference; a combined/mismatched case is still outstanding.
+    return !reference || !keys.length || keys.some(key=>String(key).split(':').includes(reference));
+  };
+  const fulfilled=item=>(completed.has(item.type)
+    && (!['quote_send','price_review'].includes(item.type) || sameQuote(item))) || (statementDone && item.type==='contract_document'
     && /거래명세|statement/i.test([item.title,item.summary,item.taskKey,item.task_key,item.payload?.task_key].join(' ')));
   const remaining=(prepared.decision.follow_up_items || []).filter(item=>!fulfilled(item));
   return {...prepared,decision:{...prepared.decision,follow_up_items:remaining,

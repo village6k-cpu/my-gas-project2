@@ -4,6 +4,19 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {maybeAutoSendReply, autoReplyTextHash} from './worker.mjs';
+import {completeVerifiedPricingWork} from './verified-pricing.mjs';
+
+test('one sent quotation cannot resolve another rental or a combined unpriced case',()=>{
+  const matching={type:'quote_send',taskKey:'quote-send:RQ-261104-001',requiresHumanAction:true};
+  const other={type:'quote_send',businessKey:'261029-006',requiresHumanAction:true};
+  const combined={type:'quote_send',businessKey:'quote:customer:20261031:20261102',requiresHumanAction:true};
+  const unknownPrice={type:'price_review',taskKey:'price-review:261029-006',requiresHumanAction:true};
+  const items=[matching,other,combined,unknownPrice];
+  const prepared={decision:{price_quote:{source:'request',id:'RQ-261104-001'},follow_up_items:items},availabilityAwareRows:items};
+  const result=completeVerifiedPricingWork(prepared,{verifiedPricing:true,sent:true,readbackReceipt:{},pricingDocumentReceipt:{deliveryConfirmed:true}});
+  assert.deepEqual(result.decision.follow_up_items,[other,combined,unknownPrice]);
+  assert.deepEqual(result.availabilityAwareRows,[other,combined,unknownPrice]);
+});
 
 test('a recovered explicit document request is delivered after current-room and price revalidation', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'quote-recovery-'));
