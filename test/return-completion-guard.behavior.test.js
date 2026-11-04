@@ -76,6 +76,20 @@ function trade(returnCounts, equipments) {
 const body = { scheduleId: 'BODY', name: '소니 FX9 바디', qty: 1, takenQty: 1, checkoutState: 'taken' };
 const sdi = { scheduleId: 'SDI', name: 'SDI 롱라인', qty: 6, takenQty: 6, checkoutState: 'taken' };
 
+test('직원 완료는 초안·구성품 개별 기록 생략 때문에 미완료로 부활하지 않는다', () => {
+  const completed = {
+    ...trade({}, [body, sdi]), returnDone: true, riskWarnings: [],
+    checkoutAt: '2026-11-01T09:00:00+09:00', returnAt: '2026-11-04T09:00:00+09:00',
+    packing: { phase: 'draft', sources: [], entries: [{ id: 'c', name: '케이블', partId: 'cable', qty: 2, checked: false }], counts: {} },
+  };
+  assert.deepEqual(status.returnCompletionBlockers(completed), []);
+  assert.equal(status.cardDone(completed, '2026-11-04', 'checkin'), true);
+  assert.equal(status.attentionReason(completed, '2026-11-04'), null);
+  const withLoss = { ...completed, returnCounts: { BODY: { good: 0, damaged: 0, lost: 1 } } };
+  assert.equal(status.attentionReason(withLoss, '2026-11-04'), 'damage', '기록된 실제 분실은 계속 확인필요');
+  assert.equal(status.cardDone(withLoss, '2026-11-04', 'checkin'), true, '사고 기록이 완료 자체를 취소하지 않는다');
+});
+
 test('불변 반출 기준선 도입 전의 닫힌 카드는 소급해서 확인필요로 되살리지 않는다', () => {
   const legacy = {
     tradeId: '260101-001',

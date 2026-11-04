@@ -2476,7 +2476,7 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
   const on = !current.returnDone;
   const force = !!opts?.force;
   const packingPending = packingBlockers(current.packing);
-  if (on && (packingPending.length || current.packing?.phase === "draft")) return { ok: false, blockers: packingPending, error: "구성품 수량을 확인한 뒤 반납을 완료해주세요" };
+  if (on && !force && (packingPending.length || current.packing?.phase === "draft")) return { ok: false, blockers: packingPending, error: "구성품 수량을 확인한 뒤 반납을 완료해주세요" };
   const blockers = on && !force ? returnCompletionBlockers(current) : [];
   if (blockers.length > 0) {
     // 강제 차단하지 않는다 — 호출부(카드)가 미확인 내역을 보여주고 작업자 확인 후

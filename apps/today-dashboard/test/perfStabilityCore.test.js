@@ -558,8 +558,8 @@ test("반납완료 미확인은 강제 차단이 아니라 작업자 확인 후 
   assert.match(replay, /flushReturnCountsPersist\(latest\.tradeId\)/, "미확인 내역 기록은 유지돼야 한다");
 
   const card = read("components/ScheduleCard.tsx");
-  assert.match(card, /window\.confirm/, "작업자 확인 다이얼로그를 거쳐야 한다");
-  assert.match(card, /toggleReturn\(trade\.tradeId, \{ force: true \}\)/, "확인 후에만 force 재호출한다");
+  assert.doesNotMatch(card, /window\.confirm/, "명시적 완료 버튼에 추가 확인을 강제하지 않는다");
+  assert.match(card, /toggleReturn\(trade\.tradeId, \{ force: true \}\)/, "완료 버튼 자체가 작업자 확인이다");
 
   const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
   const gasRet = section(gas, "function toggleReturnDone", "function listDashboardCheckoutItemCheckSids_");
