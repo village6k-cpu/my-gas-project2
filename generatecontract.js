@@ -397,7 +397,7 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   }
   // 저장
   SpreadsheetApp.flush();
-  const finalAmount = pricingPending ? null : readContractAmount_(ws, paymentRefs.finalAmountCell);
+  const finalAmount = readContractAmount_(ws, paymentRefs.finalAmountCell);
 
   // ── 링크가 있는 사람은 누구나 열람 가능 (직원 PC 열람용) ──
   try {
