@@ -95,22 +95,16 @@ export const ScheduleCard = memo(function ScheduleCard({
       } finally { setCompleting(false); }
       return;
     }
-    if (returnBlockers.length > 0) setOpen(true);
-    const result = await toggleReturn(trade.tradeId);
-    if (result.ok) return;
-    setOpen(true);
-    if (trade.packing?.phase === "draft" || result.blockers.some(b => b.scheduleId.startsWith("packing:"))) return;
-    // 미확인/초과는 강제 차단하지 않는다 — 작업자가 내용을 보고 결정한다(소프트 가드).
-    // 카드는 완료 전까지 계속 살아있고, 미확인 내역은 returnCounts 기록으로 남는다.
-    if (result.blockers.length > 0) {
-      const missing = result.blockers.reduce((sum, b) => sum + b.missing, 0);
-      const over = result.blockers.reduce((sum, b) => sum + b.over, 0);
-      const detail = [missing > 0 ? `미확인 ${missing}개` : "", over > 0 ? `초과 ${over}개` : ""].filter(Boolean).join(", ");
-      const confirmed = window.confirm(`${detail} 상태입니다.\n품목 확인 없이 반납완료 처리할까요?\n(미확인 내역은 기록으로 남습니다)`);
-      if (!confirmed) return;
-      const forced = await toggleReturn(trade.tradeId, { force: true });
-      if (!forced.ok) setOpen(true);
-    }
+    // 완료 버튼 자체가 직원의 명시적 판단이다. 개별 수량 입력을 추가로 강제하지 않는다.
+    // 입력하지 않은 상세 기록은 채우지 않고, 완료 의도만 내구 outbox에 남긴다.
+    if (completing) return;
+    setCompleting(true); setCompletionError("");
+    try {
+      const result = await toggleReturn(trade.tradeId, { force: true });
+      if (!result.ok) { setCompletionError(result.error); setOpen(true); }
+    } catch (error) {
+      setCompletionError(error instanceof Error ? error.message : "반납 완료 처리 실패"); setOpen(true);
+    } finally { setCompleting(false); }
   }
 
   // 완료되면 상세 자동 접힘 (처리됨 느낌)
@@ -256,8 +250,7 @@ export const ScheduleCard = memo(function ScheduleCard({
           </span>
           {isCheckout
             ? completing ? "구성 확인 중…" : done ? "반출 완료됨" : "반출 완료"
-            : done ? "반납 완료됨"
-            : returnBlockers.length ? "수량 확인 후 반납완료" : "반납 완료"}
+            : done ? "반납 완료됨" : "반납 완료"}
         </button>
         <button
           type="button"
@@ -278,7 +271,7 @@ export const ScheduleCard = memo(function ScheduleCard({
           className="tap mx-4 ml-5 mt-2.5 block w-[calc(100%-2.25rem)] rounded-xl bg-attention-bg px-3 py-2.5 text-left ring-1 ring-attention-ring"
         >
           <span className="block text-[12px] font-extrabold text-attention-fg">
-            🚨 반납 수량 확인 필요
+            개별 반납 기록 안내 · 직원 판단으로 완료 가능
           </span>
           <span className="mt-1 block text-[12px] font-semibold leading-relaxed text-attention-fg">
             {returnBlockers.slice(0, 3).map((b) => (

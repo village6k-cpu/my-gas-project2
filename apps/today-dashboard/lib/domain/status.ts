@@ -271,14 +271,14 @@ export interface ReturnCompletionBlocker {
 }
 
 /**
- * 거래 전체를 반납완료로 닫기 전에 반드시 해소해야 하는 수량 불일치.
- * 정상/파손/분실 중 어느 상태든 합계가 실제 반출 수량과 정확히 같아야 한다.
+ * 개별 반납 기록에서 안내할 수량 차이. 직원의 명시적 완료를 막는 조건이 아니다.
  */
 export function returnCompletionBlockers(t: Trade): ReturnCompletionBlocker[] {
+  // 직원이 완료한 거래를 상세 기록 생략/준비 초안 때문에 다시 미완료로 되살리지 않는다.
+  // 실제 기록된 파손·분실은 별도 incident 집계로 계속 표시한다.
+  if (t.returnDone) return [];
   const packingPending = packingBlockers(t.packing);
   if (t.packing?.phase === "draft") packingPending.push({ scheduleId: "packing:draft", name: "구성품 준비 미확정", expected: 1, accounted: 0, missing: 1, over: 0 });
-  // 완료가 확정된 카드는 과거 상세 수량을 다시 해석해 '잘못 닫힌 카드'로 부활시키지 않는다.
-  if (t.returnDone) return packingPending;
   // taken_qty 도입 전 완료된 레거시 거래에는 불변 반출 기준선이 없다. 예약 qty를
   // 사후 기준선처럼 소급 적용하면 과거 완료 카드 수백 건이 확인필요로 부활한다.
   // 기준선이 한 행이라도 시작된 거래(김동민 사고 건 및 향후 반출)만 새 차단을 적용한다.

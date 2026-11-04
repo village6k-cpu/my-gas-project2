@@ -85,7 +85,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   return <PackingContext.Provider value={context}><section aria-label="구성품 검수" className="mb-3">
     <div className="flex flex-wrap items-center justify-between gap-2 bg-brand-50 px-3 py-3">
       <div><h3 className="text-sm font-extrabold text-brand-700">구성품 검수</h3>
-        <p className="mt-1 text-xs text-ink-mute">{p ? `${p.phase === "sealed" ? "확정된 반출" : "반출 준비"} · ${total}개${unresolvedQty ? ` · 종류 미선택 ${unresolvedQty}개` : ""}${phase === "checkin" ? ` · 미반납 ${missing}개` : ""}` : "실제 챙기는 종류와 개수를 장비별로 기록합니다."}</p></div>
+        <p className="mt-1 text-xs text-ink-mute">{p ? `${p.phase === "sealed" ? "확정된 반출" : "반출 준비"} · ${total}개${unresolvedQty ? ` · 종류 미선택 ${unresolvedQty}개` : ""}${phase === "checkin" ? ` · 개별 미확인 ${missing}개` : ""}` : "실제 챙기는 종류와 개수를 장비별로 기록합니다."}</p></div>
     </div>
     <div aria-live="polite">{error && <p role="alert" className="m-3 rounded-lg bg-attention-bg p-2 text-sm font-bold text-attention-fg">{error}</p>}</div>
     {!p && children}
@@ -111,8 +111,8 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
             {!packingStarted(trade) && <button className={button} onClick={() => run({ action: "revise" })}>구성 다시 준비</button>}</>}
         </div>
       </> : <div className="p-3">
-        {p.phase !== "sealed" ? <p className="text-sm font-bold text-attention-fg">반출 탭에서 실제 구성품을 먼저 확정해주세요.</p> : <>
-          <p className="mb-3 text-xs text-ink-mute">같은 실물은 한 번만 셉니다. 일부만 받았으면 받은 수량만 저장하세요.</p>
+        {p.phase !== "sealed" ? <p className="text-sm text-ink-mute">반출 구성품이 미확정된 기록입니다. 현장에서 확인했다면 개별 입력 없이 반납완료할 수 있습니다.</p> : <>
+          <p className="mb-3 text-xs text-ink-mute">같은 실물은 한 번만 셉니다. 일부만 받았으면 받은 수량만 저장하세요. 개별 입력이 어려우면 직원 판단으로 반납완료할 수 있습니다.</p>
           {groups.map(g => <PackingReturnRow key={g.id} version={p.version} group={g} locked={trade.returnDone} onSave={(count, version) => run({ action: "receive", partId: g.id, count }, version)} />)}
           {p.note && <p className="mt-2 whitespace-pre-wrap rounded-lg bg-warn-bg p-2 text-sm">반출 메모: {p.note}</p>}
         </>}

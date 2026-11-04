@@ -33,12 +33,13 @@ begin
  select packing_manifest into actual from village.trades where trade_id='991231-997';
  assert actual->'counts'->'CBL-003'->>'good'='2', 'partial return readback';
  assert not village.packing_return_complete(actual), '2 of 3 must remain incomplete';
- caught:=false;
- begin perform village.lock_packing_completion('991231-997','return',true,'return-request'); exception when others then caught:=true; end;
- assert caught, 'incomplete return cannot reach GAS';
- caught:=false;
- begin update village.trades set return_done=true,contract_status='반납완료' where trade_id='991231-997'; exception when others then caught:=true; end;
- assert caught, 'direct completion must also fail';
+ perform village.lock_packing_completion('991231-997','return',true,'return-request');
+ perform village.apply_trade_completion('991231-997','return',true,now(),'반납완료',1);
+ assert (select return_done and packing_manifest=actual from village.trades where trade_id='991231-997'), 'staff may complete without changing partial counts';
+ perform village.apply_trade_completion('991231-997','return',false,null,'반출',1);
+ assert (select return_done from village.trades where trade_id='991231-997'), 'stale completion revision must still be ignored';
+ perform village.apply_trade_completion('991231-997','return',false,null,'반출',2);
+ update village.trades set packing_completion_token=null,packing_completion_until=null where trade_id='991231-997';
  p:=p||'{"version":4,"counts":{"CBL-003":{"good":3,"damaged":0,"lost":0}}}';
  perform village.save_packing_manifest('991231-997',3,p,actor,'receive');
  perform village.lock_packing_completion('991231-997','return',true,'return-request');
@@ -71,12 +72,10 @@ begin
  update village.trades set setup_done=true where trade_id='991231-996';
  select packing_dispatched_at into dispatched from village.trades where trade_id='991231-996';
  update village.schedule_items set name='아마란 F21C',set_name='아마란 F21C' where schedule_id='991231-996-1';
- caught:=false;
- begin perform village.lock_packing_completion('991231-996','return',true,'replacement-return'); exception when others then caught:=sqlerrm like '%교체 장비%'; end;
- assert caught,'replacement must block return before the GAS mutation starts';
- caught:=false;
- begin update village.trades set return_done=true where trade_id='991231-996'; exception when others then caught:=sqlerrm like '%교체 장비%'; end;
- assert caught,'stale replacement must not close return against old baseline';
+ perform village.lock_packing_completion('991231-996','return',true,'replacement-return');
+ update village.trades set return_done=true where trade_id='991231-996';
+ assert (select return_done and packing_manifest=p from village.trades where trade_id='991231-996'), 'staff return must preserve unreconciled replacement evidence';
+ update village.trades set return_done=false,packing_completion_token=null,packing_completion_until=null where trade_id='991231-996';
  n := jsonb_set(p,'{sources,0,name}','"아마란 F21C"') || jsonb_build_object('version',4,'entries',jsonb_set(jsonb_set(p->'entries','{1,qty}','0'),'{1,checked}','false')||'[{"id":"new-clamp","ownerId":"991231-996-1","device":"아마란 F21C","name":"아마란 F21C용 ㄱ자 클램프","partId":"clamp","qty":1,"checked":true}]'::jsonb);
  caught:=false;
  begin perform village.save_packing_manifest('991231-996',3,n,actor,'reconcile'); exception when others then caught:=true; end;
@@ -93,4 +92,22 @@ begin
  assert (select count(*)=4 from village.packing_audit where trade_id='991231-996'),'old snapshots must survive';
 end $$;
 select 'replacement transaction checks passed; rolled back' as result;
+rollback;
+
+-- Missing preparation and missing detail counts are not missing physical equipment.
+begin;
+insert into village.trades(trade_id,customer_name,checkout_at,return_at,contract_status,packing_manifest)
+values('991231-995','직원 직접 반납 검증',now(),now()+interval '1 day','예약',
+ '{"schemaVersion":2,"version":1,"phase":"draft","sources":[],"entries":[{"id":"line","partId":"cable","qty":2,"checked":false}],"counts":{}}');
+do $$
+declare before_manifest jsonb; before_counts jsonb;
+begin
+ select packing_manifest,return_counts into before_manifest,before_counts from village.trades where trade_id='991231-995';
+ perform village.lock_packing_completion('991231-995','return',true,'staff-return');
+ perform village.apply_trade_completion('991231-995','return',true,now(),'반납완료',1);
+ assert (select return_done and contract_status='반납완료' and packing_manifest=before_manifest and return_counts=before_counts from village.trades where trade_id='991231-995'), 'draft return accepted without fabricated records';
+ assert not has_function_privilege('authenticated','village.apply_trade_completion(text,text,boolean,timestamp with time zone,text,bigint)','execute'), 'completion RPC remains server-only';
+ assert not has_function_privilege('anon','village.lock_packing_completion(text,text,boolean,text)','execute'), 'lease remains server-only';
+end $$;
+select 'staff return checks passed; rolled back' as result;
 rollback;

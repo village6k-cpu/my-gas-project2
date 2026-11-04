@@ -29,13 +29,13 @@ function extractFunction(source, name) {
   throw new Error(`${name} incomplete`);
 }
 
-// ── B1 클라이언트: 기준선 전용 확인/autoForce 제거 + 품목 확인 다이얼로그 유지 ──
+// ── B1 클라이언트: 완료 버튼 자체가 직원의 확인 — 추가 다이얼로그 불필요 ──
 assert(!/const force = !!opts\?\.force \|\| \(on && !hasCheckoutBaseline\);/.test(store),
   '기준선 없음을 근거로 확인 없이 force를 자동 전송하면 안 된다');
 assert(!/needsBaselineConfirm|autoForce:\s*1/.test(store),
   '기준선 전용 확인 상태와 autoForce를 완료 경로에 되살리면 안 된다');
-assert(!/needsBaselineConfirm/.test(card) && /window\.confirm/.test(card),
-  '카드는 기준선 팝업 없이 미확인 품목에 대해서만 작업자 확인을 받아야 한다');
+assert(!/needsBaselineConfirm|window\.confirm/.test(card) && /toggleReturn\(trade.tradeId, \{ force: true \}\)/.test(card),
+  '명시적인 완료 버튼은 추가 확인 팝업 없이 직원 완료 의도를 전송해야 한다');
 
 // ── B1 서버: 완료 버튼에서 Supabase 기준선 HTTP 재검증 금지 ──
 const toggleReturnFn = extractFunction(backend, 'toggleReturnDone');
