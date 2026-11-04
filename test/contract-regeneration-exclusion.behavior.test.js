@@ -11,7 +11,7 @@ function fixture(){
 }
 test('direct and queued regeneration publish exclusion before any document/ledger mutation without holding global lock',()=>{
  const f=fixture();f.ctx.deleteAndRegenerateContract({getSheetByName:()=>null},f.tid,'');
- assert.deepEqual(f.events.map(e=>e.claim),[true,true]);assert.deepEqual(f.events.map(e=>e.held),[false,false]);assert.equal(f.props.has('contractDirectRegen_v1_'+f.tid),false);
+ assert.deepEqual(f.events.map(e=>e.claim),[true]);assert.deepEqual(f.events.map(e=>e.held),[false]);assert.equal(f.props.has('contractDirectRegen_v1_'+f.tid),false);
 });
 test('concurrent direct regeneration is rejected before trashing any document',()=>{
  const f=fixture();f.props.set('contractDirectRegen_v1_'+f.tid,JSON.stringify({at:Date.now(),token:'other'}));
@@ -20,4 +20,18 @@ test('concurrent direct regeneration is rejected before trashing any document',(
 test('generation error releases only its own exclusion marker',()=>{
  const f=fixture();f.ctx.throwDuringGenerate=true;
  assert.throws(()=>f.ctx.deleteAndRegenerateContract({getSheetByName:()=>null},f.tid,''),/generation failure/);assert.equal(f.props.has('contractDirectRegen_v1_'+f.tid),false);
+});
+test('failed regeneration preserves the previously published document and ledger link',()=>{
+ const f=fixture();f.ctx.throwDuringGenerate=true;
+ assert.throws(()=>f.ctx.deleteAndRegenerateContract({getSheetByName:()=>null},f.tid,''),/generation failure/);
+ assert.deepEqual(f.events.map(e=>e.stage),['generate']);
+});
+test('only verified replacement publication permits retiring old files, preserving replacement ID',()=>{
+ const f=fixture();let kept='';f.ctx.generateContractFile=()=>({fileId:'new-file',url:'new-url',linkUpdate:{success:true}});
+ f.ctx.trashContractFilesForTrade_=(id,keep)=>{kept=keep};
+ f.ctx.deleteAndRegenerateContract({getSheetByName:()=>null},f.tid,'');assert.equal(kept,'new-file');
+});
+test('failed ledger publication never retires old documents',()=>{
+ const f=fixture();f.ctx.generateContractFile=()=>({fileId:'new-file',url:'new-url',linkUpdate:{success:false}});
+ f.ctx.deleteAndRegenerateContract({getSheetByName:()=>null},f.tid,'');assert.equal(f.events.length,0);
 });
