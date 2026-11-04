@@ -2379,7 +2379,9 @@ const packingCheckQueue = createPackingCheckQueue({
 });
 
 export function savePackingCheck(tradeId: string, entryId: string, checked: boolean): Promise<void> {
-  if (!packingCheckQueue.pending(tradeId) && hasTradePending(tradeId)) return Promise.reject(new Error("이 거래의 저장을 마친 뒤 다시 시도해주세요"));
+  // 본체 체크와 구성품 체크는 서로 다른 정본 행이다. 본체 저장 대기 때문에 클릭을 버리지 않는다.
+  // 구성 변경/제외 중에는 기존 원본을 사용한 체크만 잠깐 제한한다.
+  if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) return Promise.reject(new Error("구성 변경을 저장 중입니다. 잠시 후 다시 시도해주세요"));
   return packingCheckQueue.check(tradeId, entryId, checked);
 }
 
