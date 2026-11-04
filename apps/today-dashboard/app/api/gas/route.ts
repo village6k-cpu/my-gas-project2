@@ -16,6 +16,31 @@ function completionDoneValue(value: unknown): boolean {
   return value === true || value === 1 || value === "1" || value === "true";
 }
 
+/** 본체 체크 정본은 DB에 있다. GAS Properties 캐시 용량과 독립적으로 CAS 저장한다. */
+async function callCheckoutItems_(payload: Record<string, unknown>) {
+  let items: unknown;
+  try { items = typeof payload.items === "string" ? JSON.parse(payload.items) : payload.items; }
+  catch { return NextResponse.json({ error: "품목 목록을 확인해주세요" }, { status: 400 }); }
+  const tradeId = String(payload.tid ?? "");
+  const versionPattern = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+  if (!/^\d{6}-\d{3}$/.test(tradeId) || !Array.isArray(items) || !items.length || items.length > 100 || items.some(item =>
+    !item || typeof item !== "object" || typeof item.scheduleId !== "string" || !item.scheduleId.startsWith(`${tradeId}-`) ||
+    typeof item.done !== "boolean" || typeof item.expectedUpdatedAt !== "string" || !versionPattern.test(item.expectedUpdatedAt)
+  )) return NextResponse.json({ error: "거래·품목·반출 기준 정보를 확인하고 다시 선택해주세요", code: "CHECKOUT_REFRESH_REQUIRED" }, { status: 400 });
+  try {
+    const { data, error } = await getInventoryAuditServiceClient().rpc("apply_checkout_item_checks", {
+      p_trade_id: tradeId, p_items: items,
+    });
+    if (error || !data || typeof data !== "object" || Array.isArray(data)) throw error ?? new Error("품목 체크 정본 응답 없음");
+    if (data.error) return NextResponse.json(data, { status: data.retryable ? 503 : 409 });
+    if (!Array.isArray(data.results)) throw new Error("품목 체크 결과 없음");
+    invalidateCacheForWrite("toggleItems");
+    return NextResponse.json(data, { headers: { "cache-control": "no-store", "x-cache": "DB-WRITE" } });
+  } catch {
+    return NextResponse.json({ error: "품목 체크 저장이 지연되어 자동 재시도 중입니다", code: "REMOTE_RETRY", retryable: true }, { status: 503 });
+  }
+}
+
 /**
  * 완료 버튼의 원격 정본 저장. 직원 클릭을 반출 수량 기준선 생성과 묶지 않는다.
  * 로그인된 앱 서버가 거래 완료 상태만 한 번 저장하고, GAS는 시트/속성만 갱신한다.
@@ -285,7 +310,7 @@ async function callGet(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const action = sp.get("action") ?? "";
   // 레거시 GET도 같은 완료 검수/lease 경로를 사용한다.
-  if (action === "toggleSetup" || action === "toggleReturn") {
+  if (action === "toggleSetup" || action === "toggleReturn" || action === "toggleItems") {
     return callPost(new NextRequest(req.url, { method: "POST", headers: req.headers, body: JSON.stringify(Object.fromEntries(sp)) }));
   }
   const func = sp.get("func") ?? "";
@@ -381,7 +406,9 @@ async function callPost(req: NextRequest) {
   const completionAction = action === "toggleSetup" || action === "toggleReturn";
   const photoWrite = isPhotoWriteAction(action);
   // 완료 상태 순서는 GAS mutation 원장이 먼저 결정하고, Supabase 저장은 그 응답을 따른다.
-  Object.assign(payload, body, { action, key: getVillageGasInternalKey() });
+  Object.assign(payload, body, { action });
+  if (action === "toggleItems") return callCheckoutItems_(payload);
+  payload.key = getVillageGasInternalKey();
 
   let packingLease = false;
   let packingRelease = false;
