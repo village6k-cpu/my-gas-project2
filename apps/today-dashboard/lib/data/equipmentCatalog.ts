@@ -12,6 +12,7 @@ export interface EquipmentCatalogComponent {
 
 export interface EquipmentCatalogItem extends CatalogItem {
   components?: EquipmentCatalogComponent[];
+  aliases?: string[];
   unitPrice?: number;
   source: "sheet-master";
 }
@@ -33,6 +34,7 @@ interface RawCatalog {
   items?: unknown;
   stocks?: unknown;
   prices?: unknown;
+  aliases?: unknown;
 }
 
 const EMPTY_STATE: EquipmentCatalogState = {
@@ -156,6 +158,12 @@ function buildItems(raw: RawCatalog): EquipmentCatalogState {
     });
   }
 
+  if (Array.isArray(raw.aliases)) for (const row of raw.aliases) {
+    if (!row || typeof row !== "object") continue;
+    const alias = normalizeName(row.alias);
+    const item = byName.get(normalizeName(row.canonicalName));
+    if (alias && item) item.aliases = [...(item.aliases ?? []), alias];
+  }
   const items = Array.from(byName.values());
   const stocks: Record<string, number> = {};
   if (raw.stocks && typeof raw.stocks === "object") {
@@ -186,6 +194,7 @@ function readCatalogPayload(payload: unknown): RawCatalog {
     items: catalog.items,
     stocks: catalog.stocks,
     prices: catalog.prices,
+    aliases: catalog.aliases,
   };
 }
 
@@ -264,7 +273,7 @@ export function useEquipmentCatalog(): EquipmentCatalogState {
 export function searchEquipmentCatalog(items: EquipmentCatalogItem[], q: string, limit = 7): EquipmentCatalogItem[] {
   const key = searchKey(q);
   if (!key) return items.slice(0, limit);
-  return items.filter((item) => searchKey(item.name).includes(key)).slice(0, limit);
+  return items.filter((item) => [item.name, ...(item.aliases ?? [])].some(name => searchKey(name).includes(key))).slice(0, limit);
 }
 
 /** 장비마스터 실재고 조회 (카탈로그 로드 전이면 undefined → 호출부가 추정값 폴백) */
@@ -272,4 +281,14 @@ export function catalogStockOf(name: string): number | undefined {
   const clean = normalizeName(name);
   if (!clean) return undefined;
   return state.stocks[clean];
+}
+
+/** 유일한 정식명·검증된 별칭만 자동 연결한다. 브랜드만 입력한 경우는 선택을 받는다. */
+export function exactEquipmentCatalogItem(items: EquipmentCatalogItem[], query: string): EquipmentCatalogItem | undefined {
+  const key = searchKey(query);
+  if (!key) return undefined;
+  const exact = items.find(item => searchKey(item.name) === key);
+  if (exact) return exact;
+  const matches = items.filter(item => item.aliases?.some(name => searchKey(name) === key));
+  return matches.length === 1 ? matches[0] : undefined;
 }

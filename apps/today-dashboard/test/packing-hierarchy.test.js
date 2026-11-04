@@ -33,3 +33,36 @@ test('AX700 legacy memory battery cap bundle becomes four source parts with no d
 test('refresh absorbs old defaults into newly recognized source bundle preserving checks and manual quantity',()=>{const t=axFixture();t.packing=step(t,{action:'start'},now);t.packing.entries=t.packing.entries.map((e,i)=>({...e,id:`default:ax:${i}`,sourceId:undefined,modelDefault:true,checked:true,qty:e.name.includes('배터리')?3:e.qty}));t.packing.sources=t.equipments.map(e=>({id:e.scheduleId,name:e.name,qty:e.qty,device:true}));t.packing=step(t,{action:'refresh'},now);assert.equal(t.packing.entries.length,4);assert(t.packing.entries.every(e=>e.sourceId==='ax-parts'&&e.checked));assert.equal(t.packing.entries.find(e=>e.name.includes('배터리')).qty,3);t.packing=step(t,{action:'refresh'},now);assert.equal(t.packing.entries.length,4);assert.equal(groups(t.packing).reduce((n,g)=>n+g.expected,0),6);});
 test('registered bare charger is folded into owner instead of also adding template charger',()=>{const t=axFixture();t.equipments=[{...t.equipments[0],name:'아마란 PT4C 2KIT',setName:'아마란 PT4C 2KIT'},{...t.equipments[1],name:'충전기*2',setName:'아마란 PT4C 2KIT'}];t.packing=step(t,{action:'start'},now);assert.equal(t.packing.entries.filter(e=>e.name.includes('충전기')).length,1);assert.equal(t.packing.entries.find(e=>e.name.includes('충전기')).sourceId,'ax-parts');assert.equal(t.packing.entries.find(e=>e.name.includes('충전기')).qty,2);});
 test('refresh keeps checks and replacements on unchanged actual-device defaults',()=>{const t=axFixture();t.equipments.push({scheduleId:'tv',name:'티비로직 F-7HS',qty:1,setName:'티비로직 F-7HS',isSetHeader:true,checkoutState:'taken'});t.packing=step(t,{action:'start'},now);const power=t.packing.entries.find(e=>e.ownerId==='tv'&&e.name.includes('D탭'));power.checked=true;power.qty=2;t.packing=step(t,{action:'refresh'},now);const saved=t.packing.entries.find(e=>e.id===power.id);assert.equal(saved.qty,2);assert.equal(saved.checked,true);});
+
+function lensAudioFixture(){return {tradeId:'lens-audio',contractStatus:'예약',setupDone:false,returnDone:false,equipments:[
+ {scheduleId:'cooke',name:'CooKe SP3(25/32/50/75/100)',qty:1,setName:'CooKe SP3(25/32/50/75/100)',isSetHeader:true,checkoutState:'taken'},
+ {scheduleId:'rings',name:'58 업링 (3) 77 업링 (1)',qty:1,setName:'CooKe SP3(25/32/50/75/100)',isComponent:true,checkoutState:'pending'},
+ {scheduleId:'uwp',name:'소니 UWP-D21',qty:3,setName:'소니 UWP-D21',isSetHeader:true,checkoutState:'pending'},
+ {scheduleId:'uwp-parts',name:'핀마이크(솜, 클립) / 3.5 라인*1 / XLR 라인*1',qty:3,setName:'소니 UWP-D21',isComponent:true,checkoutState:'pending'}]};}
+test('Cooke explicit ring quantities and UWP parenthesized description produce exactly five registered rows',()=>{
+ const t=lensAudioFixture();t.packing=step(t,{action:'start'},now);
+ assert.equal(t.packing.entries.length,5);assert(t.packing.entries.every(e=>!e.unresolved));
+ assert.deepEqual(Array.from(t.packing.entries.filter(e=>e.ownerId==='cooke'),e=>e.qty),[3,1]);
+ assert.equal(t.packing.entries.filter(e=>e.ownerId==='uwp').length,3);
+ assert(t.packing.entries.filter(e=>e.ownerId==='uwp').every(e=>e.qty===3));
+ assert(load('packing').packingSourceIds(t.packing).has('rings'));
+});
+test('refresh repairs stored split UWP fragments and absorbs checked Cooke defaults without losing checks',()=>{
+ const t=lensAudioFixture();t.packing=step(t,{action:'start'},now);
+ const entries=t.packing.entries;
+ const cooke=entries.filter(e=>e.ownerId==='cooke').map((e,i)=>({...e,id:`default:cooke:${i}`,sourceId:undefined,modelDefault:true,checked:true}));
+ const audio=entries.filter(e=>e.ownerId==='uwp');
+ const mic=audio.find(e=>e.name.includes('핀마이크'));
+ t.packing.entries=[...cooke,
+  {...mic,id:'uwp-parts:0',name:'핀마이크(솜',partId:'unresolved:uwp-parts:0',unresolved:true},
+  {...mic,id:'uwp-parts:1',name:'클립)',partId:'unresolved:uwp-parts:1',unresolved:true},
+  ...audio.filter(e=>!e.name.includes('핀마이크')).map((e,i)=>({...e,id:`uwp-parts:${i+2}`,checked:true})),
+  {...mic,id:'default:uwp:0',sourceId:undefined,modelDefault:true}];
+ t.packing.sources=t.packing.sources.map(e=>e.id==='rings'?{...e,device:true}:e);
+ t.packing=step(t,{action:'refresh'},now);
+ const active=t.packing.entries.filter(e=>e.qty>0);
+ assert.equal(active.length,5);assert(active.every(e=>!e.unresolved));
+ assert(active.filter(e=>e.ownerId==='cooke').every(e=>e.checked));
+ assert(active.filter(e=>/ライン/.test(e.name)).every(e=>e.checked));
+ const saved=JSON.stringify(t.packing.entries);t.packing=step(t,{action:'refresh'},now);assert.equal(JSON.stringify(t.packing.entries),saved);
+});

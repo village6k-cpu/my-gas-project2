@@ -106,3 +106,39 @@ test('registration stage applies accessory context only from its own request and
   assert.equal(c.stage().notes[0], '[정식상품]릴선');
   assert.equal(c.allData[0][5], '릴선 - 1ea'); assert.equal(c.allData[0][6], 2);
 });
+
+test('DZO CATTA ACE sales aliases resolve only to the registered lens set and current canonical price',()=>{
+ const {c,lookup}=harness();lookup.items['DZOFILM 3 Lens 세트']=true;lookup.prices['DZOFILM 3 Lens 세트']=100000;
+ for(const name of ['DZO CATTA ACE 렌즈세트','DZOFILM CATTA ACE 3Lens Set','디조 줌렌즈']) {
+  assert.equal(c.resolveSetMasterProduct_(name,lookup).canonicalName,'DZOFILM 3 Lens 세트');
+  assert.equal(c.requireSetMasterPrice_(name,lookup),100000);
+ }
+ assert.equal(c.resolveSetMasterProduct_('DZO Vespid',lookup).canonicalName,'');
+});
+function clientCatalog() {
+ const ts=require('../apps/today-dashboard/node_modules/typescript');
+ const m={exports:{}};
+ const code=ts.transpileModule(fs.readFileSync(require('node:path').join(__dirname,'../apps/today-dashboard/lib/data/equipmentCatalog.ts'),'utf8')+'\nexport {buildItems};',{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+ vm.runInNewContext(code,{module:m,exports:m.exports,require:name=>name==='react'?{useSyncExternalStore(){}}:name.includes('catalog')?{categoryOf(){}}:{gasFetch(){}},Map,Set,setInterval,clearInterval});
+ return m.exports;
+}
+test('client catalog shares verified aliases for search and unique exact resolution without adding alias products',()=>{
+ const c=clientCatalog();const state=c.buildItems({names:['DZOFILM 3 Lens 세트'],aliases:[{alias:'DZO CATTA ACE 렌즈세트',canonicalName:'DZOFILM 3 Lens 세트'}],prices:{'DZOFILM 3 Lens 세트':100000}});
+ assert.equal(state.items.length,1);assert.equal(c.searchEquipmentCatalog(state.items,'CATTA')[0].name,'DZOFILM 3 Lens 세트');
+ assert.equal(c.exactEquipmentCatalogItem(state.items,'DZO CATTA ACE 렌즈세트').unitPrice,100000);
+ assert.equal(c.exactEquipmentCatalogItem(state.items,'DZO'),undefined);
+ assert.equal(c.exactEquipmentCatalogItem([...state.items,{name:'다른 모델',aliases:['DZO CATTA ACE 렌즈세트']}],'DZO CATTA ACE 렌즈세트'),undefined);
+});
+test('touch catalog options prevent input blur before click; name editor commits canonical alias',()=>{
+ const ts=require('../apps/today-dashboard/node_modules/typescript');
+ const ui=fs.readFileSync(require('node:path').join(__dirname,'../apps/today-dashboard/components/HandoverChecklist.tsx'),'utf8');
+ const menu=ui.slice(ui.indexOf('function FloatingCatalogMenu('),ui.indexOf('function EquipmentNameCombobox('));
+ const m={exports:{}}, element=(type,props)=>({type,props});
+ const code=ts.transpileModule(menu+'\nexport {FloatingCatalogMenu};',{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText;
+ vm.runInNewContext(code,{module:m,exports:m.exports,require:()=>({jsx:element,jsxs:element}),useState:()=>[{left:0,top:0,width:300,maxHeight:200},()=>{}],useLayoutEffect(){},document:{body:{}},createPortal:e=>e,Plus:'plus',coarseGroup:()=>'',});
+ let saved,prevented=false;const item={name:'DZOFILM 3 Lens 세트',category:'세트'};
+ const tree=m.exports.FloatingCatalogMenu({open:true,anchorRef:{current:null},items:[item],exact:false,query:'DZO',onSelect:i=>{saved=i.name;},onFreeInput(){},freeLabel:'저장'});
+ const option=tree.props.children[0][0];assert.equal(typeof option.props.onPointerDown,'function');
+ option.props.onPointerDown({pointerType:'touch',preventDefault(){prevented=true;}});assert(prevented);option.props.onClick();assert.equal(saved,item.name);
+ assert.match(ui,/saveValue\(exactMatch\?\.name \?\? q, !exactMatch\)/);
+});

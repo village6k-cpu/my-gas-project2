@@ -83,17 +83,35 @@ export function optimisticPackingCheck(t: Trade, version: number, command: Packi
 }
 
 function componentTokens(name: string) {
-  return name.replace(/SDI\s*\/\s*HDMI/gi, "SDI or HDMI").split(/\s*,\s*|\s+\/\s+/);
+  // 괄호 안 쉼표는 구성품 설명이다. 괄호 밖 구분자만 분리한다.
+  const text = name.replace(/SDI\s*\/\s*HDMI/gi, "SDI or HDMI");
+  const tokens: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < text.length; i++) {
+    if ("(（[".includes(text[i])) depth++;
+    else if (")）]".includes(text[i])) depth = Math.max(0, depth - 1);
+    else if (!depth && (text[i] === "," || (text[i] === "/" && /\s/.test(text[i-1] ?? "") && /\s/.test(text[i+1] ?? "")))) {
+      tokens.push(text.slice(start, i).trim()); start = i + 1;
+    }
+  }
+  tokens.push(text.slice(start).trim());
+  // 과거 예약의 "58 업링 (3) 77 업링 (1)"도 명시된 수량만 해석한다.
+  return tokens.flatMap(token => {
+    const rings = [...token.matchAll(/(\d+\s*(?:mm\s*)?업링)\s*\((\d+)\)/gi)];
+    return rings.length && !token.replace(/\d+\s*(?:mm\s*)?업링\s*\(\d+\)/gi, "").trim()
+      ? rings.map(m => `${m[1]}*${m[2]}`) : [token];
+  }).filter(Boolean);
 }
 function componentMatches(setName: string, label: string) {
   const template = templateFor(setName);
   const choices = /^(SDI|HDMI)$/i.test(label) ? template.map(r => ({...r, name: r.name.replace(/SDI\s*(?:or|\/)\s*HDMI/i, label.toUpperCase())})) : template;
-  return choices.filter(r => partKey(r.name) === partKey(label) || partKey(r.name).endsWith("용" + partKey(label)));
+  const key = (s: string) => partKey(s).replace(/(\d+)mm(?=업링)/g, "$1");
+  return choices.filter(r => key(r.name) === key(label) || key(r.name).endsWith("용" + key(label)));
 }
 export function packingCandidates(t: Trade): EquipmentItem[] {
   return t.equipments.filter(e => e.isComponent && !e.isSetHeader && e.checkoutState !== "excluded" && !e.synthetic &&
     (ACCESSORY.test(e.name) || e.name.includes("용 ") || componentTokens(e.name).some(token =>
-      componentMatches(e.setName ?? "", token.replace(/\s*[*×]\s*\d+\s*$/, "").trim()).some(r => ACCESSORY.test(r.name) || r.name.includes("용 ")))));
+      componentMatches(e.setName ?? "", token.replace(/\s*[*×]\s*\d+\s*$/, "").trim()).some(r => !!registeredPart(r.name)))));
 }
 export function packingDevices(t: Trade) {
   const managed = new Set(packingCandidates(t).map(e => e.scheduleId));
@@ -225,6 +243,14 @@ export function packingPreparationTrade(t: Trade, phase: "checkout" | "checkin" 
   return {...t, packing: initialManifest(t, 0)};
 }
 
+function candidatesForRepair(t: Trade, previous: PackingManifest, fresh: PackingManifest): string[] {
+  return packingCandidates(t).filter(source => {
+    const old = previous.entries.filter(e=>e.sourceId===source.scheduleId);
+    const current = fresh.entries.filter(e=>e.sourceId===source.scheduleId);
+    return old.length > 0 && old.length !== current.length;
+  }).map(e=>e.scheduleId);
+}
+
 export function packingNeedsUpgrade(p?: PackingManifest) { return !!p && p.phase === "draft" && p.schemaVersion !== 2; }
 function validText(value: unknown, label: string, max = 160): string {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new Error(`${label}을 확인해주세요`);
@@ -293,8 +319,14 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     }
     fresh.deviceModels = { ...prev.deviceModels };
     const absorbedDefaults = new Set<string>();
+    const reparsedSources = new Set(candidatesForRepair(t, prev, fresh));
+    const reusedEntries = new Set<string>();
     fresh.entries = fresh.entries.map(e => {
-      const old=prev.entries.find(x=>x.id===e.id);
+      const reparsed = !!e.sourceId && reparsedSources.has(e.sourceId);
+      const old = reparsed
+        ? prev.entries.find(x=>x.sourceId===e.sourceId && x.partId===e.partId && x.ownerId===e.ownerId && !reusedEntries.has(x.id))
+        : prev.entries.find(x=>x.id===e.id);
+      if (old && reparsed) { reusedEntries.add(old.id); return {...old,id:e.id}; }
       const before=prev.sources.find(x=>x.id===e.sourceId), after=fresh.sources.find(x=>x.id===e.sourceId);
       if (old?.modelDefault && old.ownerId===e.ownerId) {
         const priorOwner=prev.sources.find(s=>s.device && s.id===old.ownerId);
@@ -303,7 +335,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       }
       // 기존 묶음을 새로 인식하면 자동 생성했던 동일 구성품을 원본 행에 연결한다.
       // 직원의 확인/교체/수량 변경은 옮겨 담고, 자동 행을 다시 더하지 않는다.
-      if (!old && before?.device && after && before.name===after.name && before.qty===after.qty) {
+      if (!old && (before?.device || reparsed) && before && after && before.name===after.name && before.qty===after.qty) {
         const owner=packingDevices(t).find(d=>d.scheduleId===e.ownerId);
         const defaults=templateFor(prev.deviceModels?.[e.ownerId ?? ""] ?? owner?.name ?? "").filter(r=>ACCESSORY.test(r.name)||r.name.includes("용 "));
         const matching=defaults.flatMap((r,i)=>canonicalPart(r.name).id===e.partId ? [i] : []);
@@ -318,7 +350,16 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       return old && before && after && before.name===after.name &&
         !legacyOvercount && (before.qty===after.qty || (old.partId===e.partId && old.qty===e.qty && old.ownerId===e.ownerId)) ? old : e;
     });
-    for (const e of prev.entries) if (!absorbedDefaults.has(e.id) && !fresh.entries.some(x=>x.id===e.id)) {
+    for (const e of prev.entries) {
+      if (absorbedDefaults.has(e.id) || reusedEntries.has(e.id)) continue;
+      if (e.sourceId && reparsedSources.has(e.sourceId)) {
+        // 잘못 분리된 미확인 설명 조각만 제거한다. 선택·체크한 실물은 보존한다.
+        if (e.unresolved && !e.checked && !e.custom) continue;
+        if (fresh.entries.some(x=>x.id===e.id && x.partId===e.partId)) continue;
+        fresh.entries.push({...e,id:fresh.entries.some(x=>x.id===e.id) ? `retained:${e.id}` : e.id});
+        continue;
+      }
+      if (fresh.entries.some(x=>x.id===e.id)) continue;
       if (!e.sourceId && (!e.ownerId || packingDevices(t).some(d=>d.scheduleId===e.ownerId))) fresh.entries.push(e);
       else if (e.sourceId) fresh.entries.push({...e,qty:0,checked:false});
     }

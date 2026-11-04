@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
 import { groupBySet, handoverSummary, isCheckoutBaselineLocked, realDeviceHeaders, singleControllableSetItem } from "@/lib/domain/status";
 import { categoryOf, coarseGroup } from "@/lib/domain/catalog";
-import { searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem } from "@/lib/data/equipmentCatalog";
+import { exactEquipmentCatalogItem, searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem } from "@/lib/data/equipmentCatalog";
 import { SetBox, LooseList } from "./SetBox";
 import {
   addOnsiteItems,
@@ -28,10 +28,6 @@ import { packingSourceIds, packingPreparationTrade, type PackingCommand } from "
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
-
-function catalogExactKey(value: string) {
-  return value.trim().toLowerCase().replace(/\s+/g, "");
-}
 
 function SetSingleList({ children }: { children: ReactNode }) {
   return <ul className="divide-y divide-line/60 overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-line">{children}</ul>;
@@ -474,6 +470,7 @@ function FloatingCatalogMenu({
       {items.map((m) => (
         <button
           key={m.name}
+          onPointerDown={(event) => event.preventDefault()}
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => onSelect(m)}
           className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]"
@@ -484,6 +481,7 @@ function FloatingCatalogMenu({
       ))}
       {!exact && (
         <button
+          onPointerDown={(event) => event.preventDefault()}
           onMouseDown={(event) => event.preventDefault()}
           onClick={onFreeInput}
           className="tap flex w-full items-center gap-2 border-t border-line/60 bg-paper/70 px-2.5 py-1.5 text-left"
@@ -521,7 +519,7 @@ function EquipmentNameCombobox({
   }, [dirty, value]);
 
   const matches = searchEquipmentCatalog(catalog.items, q);
-  const exactMatch = catalog.items.find((m) => catalogExactKey(m.name) === catalogExactKey(q));
+  const exactMatch = exactEquipmentCatalogItem(catalog.items, q);
   const exact = !!exactMatch;
   const showList = focused && q.trim().length > 0 && !selected;
 
@@ -539,7 +537,7 @@ function EquipmentNameCombobox({
   };
 
   const save = () => {
-    if (dirty) saveValue(q, !exactMatch);
+    if (dirty) saveValue(exactMatch?.name ?? q, !exactMatch);
   };
 
   return (
