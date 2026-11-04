@@ -8821,9 +8821,33 @@ export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWind
   return { eligible: false, reason: 'preview_not_live_time_format' };
 }
 
+function canResumeVerifiedDocument({config,decision,job,dependencies,liveGate}) {
+  // A restart must not discard an outstanding, explicitly requested quotation.
+  // The broad historical-reply hold stays in place. Only the host's fresh,
+  // unchanged room readback can authorize this narrow document path; AI output
+  // cannot supply it. Price, recipient, policy, dedupe and delivery checks below
+  // still run normally.
+  if (!['startup_catchup_never_auto_sends','supabase_recovery_never_auto_sends',
+    'top_row_time_outside_live_window'].includes(liveGate.reason)
+    || !verifiedPricingConfigured(config,decision) || !verifiedPricingFreshJob(config,job)
+    || !pricingDocumentRequested(decision) || decision.reply_decision?.replyMode !== 'auto_send'
+    || decision.reply_decision.alreadyDelivered===true || decision.reply_decision.attachmentKeys?.length
+    || typeof dependencies.assertFreshBeforeSend !== 'function') return false;
+  const snapshot=dependencies.revalidatedSnapshot;
+  const age=Date.now()-Date.parse(snapshot?.capturedAt || '');
+  const evidence=snapshot?.navigation?.conversation_evidence;
+  return snapshot?.schema==='kakao-room-snapshot/v1'
+    && snapshot.jobId===(job.jobId || job.id)
+    && snapshot.roomKey===(job.roomKey || job.room_key)
+    && snapshot.roomRevision===Number(job.roomRevision || job.room_revision)
+    && Number.isFinite(age) && age>=-1000 && age<=60000
+    && evidence?.hint_matched===true && evidence?.capture_integrity?.ok===true
+    && evidence.messages?.at(-1)?.role==='customer';
+}
+
 export async function maybeAutoSendReply({ config, decision, job, navigationContext, dependencies = {} }) {
   const liveGate = isAutoSendEligibleLiveJob(job);
-  if (!liveGate.eligible) {
+  if (!liveGate.eligible && !canResumeVerifiedDocument({config,decision,job,dependencies,liveGate})) {
     const result = { attempted: false, sent: false, gate: { allowed: false, reason: liveGate.reason } };
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', preview: job.preview_text || job.previewText || '' });
     return result;
@@ -12274,6 +12298,7 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
     const replyDependencies = {
+      revalidatedSnapshot: freshSnapshot,
       assertFreshBeforeSend: async () => {
         await freshnessGuard.checkNow();
         freshnessGuard.throwIfSuperseded();
