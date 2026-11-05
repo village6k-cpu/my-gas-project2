@@ -11,7 +11,7 @@ def evaluate(report,health):
     elif report.get('authenticated') is not True:issues.append('collector_probe_unavailable')
     elif report.get('watcher_ready') is not True:issues.append('collector_not_reading_full_list')
     if report.get('bridge_responding') is not True:issues.append('bridge_unresponsive')
-    elif not g.get('consumer',{}).get('fresh'):issues.append('reservation_worker_disconnected')
+    elif not g.get('consumer',{}).get('fresh') and not report.get('maintenance'):issues.append('reservation_worker_disconnected')
     if g.get('registered_reservation_change',{}).get('oldest_reserved_age_ms',0) and g['registered_reservation_change']['oldest_reserved_age_ms']>600000:issues.append('reservation_write_needs_readback')
     if g.get('unnotified_application_failures',0):issues.append('undelivered_failure_notices')
     if g.get('failure_notification_counts',{}).get('pending',0):issues.append('pending_failure_notices')
@@ -53,6 +53,8 @@ def atomic(path,data):
     tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(data,ensure_ascii=False));tmp.chmod(0o600);tmp.replace(path)
 
 def maintain_health(root,report,health):
+    control=load(root/'control/reservation-recovery-control.json');drain=load(root/'hermes-root/profiles/kakaoworker/.drain_request.json')
+    report['maintenance']=bool(control.get('maintenanceOwner') and drain.get('principal')=='codex-reservation-recovery:'+control['maintenanceOwner'])
     path=root/'state/reservation-recovery.json';now=time.time();report['durable_intake']=load(root/'production-runtime/tools/kakao-dom-bridge/queue/durable-intake-status.json');previous=load(path);raw=evaluate(report,health);stable,conditions=stabilize(previous,raw);state=transition(previous,stable,now);state.update(condition_state=conditions,observed_issues=raw)
     worker=load(root/'hermes-root/profiles/kakaoworker/gateway_state.json')
     from supervisor import gateway_owned

@@ -8,7 +8,7 @@
 - 수신 전용 카카오 `전체 상담` 목록을 유지한다. 검색/서류 발송 화면과 분리한다.
 - 웹훅 성공 응답 전에 원문을 파일·디렉터리 fsync까지 보관한다. 외부 DB 지연은 수신 ACK를 막지 않는다.
 - 재시작 후 같은 원문·작업을 이어받고, 이미 존재하는 정확한 Gateway 작업은 재실행하지 않는다.
-- 원문 조회 동시 실행은 1개, Native AI 작업 동시 실행은 2개로 제한한다.
+- 수신 복구 경로의 원문 조회 동시 실행은 1개, Native AI 작업 동시 실행은 2개로 제한한다.
 - 새 상담을 우선하고 과거 대조는 제한된 속도로 진행한다. 실패 작업이 원문 대기열을 영구 독점하지 않는다.
 - 과거 목록을 스크롤하는 동안 일반 새 메시지 감지를 잠시 억제한다. 복귀 후 실제 새 메시지를 다시 감지한다.
 - 카카오의 삭제 메시지 안내를 실제 대화 문장으로 오인하지 않는다. 실제 예약 문장은 원문 일치를 계속 요구한다.
@@ -34,7 +34,7 @@ python3 tools/reservation-recovery/install.py --root /absolute/isolated/runtime
 
 설치 전 현재 환경·런타임·활성화 매니페스트 해시를 확인하고, 변경할 파일과 매니페스트를
 `control/automatic-recovery-YYYYmmdd-HHMMSS/`에 백업한다. 설치 오류는 기존 파일과 매니페스트로
-복원한다. 기존 활성화 gates와 역사적 hold 파일은 유지한다. 공유 파일의 모든 서비스 핀을 갱신한다.
+복원한다. Native adapter 패치는 forward 방식으로 한 번만 적용하며 반복 설치가 이를 되돌릴 수 없다. 기존 활성화 gates와 역사적 hold 파일은 유지한다. 공유 파일의 모든 서비스 핀을 갱신한다.
 
 설치기는 서비스를 강제로 재시작하지 않는다.
 
@@ -42,7 +42,7 @@ python3 tools/reservation-recovery/install.py --root /absolute/isolated/runtime
 /isolated/runtime/venv-root/bin/python tools/reservation-recovery/release.py --root /absolute/isolated/runtime
 ```
 
-배포 도구는 과거 복구 유입을 잠시 보류하고 해당 Native 업무와 적용 작업이 유휴 상태가 되기를 기다린다. 독립적인 Slack 업무는 계속 진행한다. 실행 중인 AI에 종료 신호를 보내서 끝내지 않는다. Native worker의 정상 종료와 활성 업무 종료를 확인한 뒤
+배포 도구는 Hermes의 기존 외부 drain 기능으로 새 턴 수락을 잠시 보류하고 해당 Native 업무와 적용 작업이 유휴 상태가 되기를 기다린다. 독립적인 Slack 업무는 계속 진행한다. 실행 중인 AI에 종료 신호를 보내서 끝내지 않는다. Native worker의 정상 종료와 활성 업무 종료를 확인한 뒤
 bridge를 재시작하고 worker의 launchd 자동 실행을 다시 활성화한다. watcher는 독립적으로 재시작 가능하다.
 feature 브랜치에서 GAS 배포 스크립트를 실행하지 않는다. 이 패키지는 격리된 런타임만 갱신한다.
 

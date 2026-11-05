@@ -4,6 +4,23 @@ from pathlib import Path
 HERE=Path(__file__).parent
 
 def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+def native_adapter_bytes(original,patch_bytes):
+    import subprocess,tempfile
+    marker=b'def _claim_capacity_available'
+    value=original
+    if marker not in value:
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory);target=base/'hermes-root/profiles/kakaoworker/plugins/kakao_village/adapter.py';target.parent.mkdir(parents=True);target.write_bytes(original)
+            result=subprocess.run(['/usr/bin/patch','-N','-p1','--batch'],cwd=base,input=patch_bytes,capture_output=True)
+            if result.returncode or marker not in target.read_bytes():raise ValueError('Native adapter forward patch failed')
+            value=target.read_bytes()
+    if b'getattr(owner, "_external_drain_active", False)' not in value:
+        newline=b'\r\n' if b'\r\n' in value else b'\n'
+        anchor=b'        owner = getattr(getattr(self, "_message_handler", None), "__self__", None)'+newline
+        if value.count(anchor)!=1:raise ValueError('Native adapter capacity owner anchor mismatch')
+        value=value.replace(anchor,anchor+b'        if getattr(owner, "_draining", False) or getattr(owner, "_external_drain_active", False):'+newline+b'            return False'+newline)
+    return value
+
 def install(root,watchdog_only=False):
     manifest=root/'control/runtime.json';activation=root/'ACTIVATION.json'
     m=json.loads(manifest.read_text());a=json.loads(activation.read_text());assert a['manifest_sha256']==sha(manifest)
@@ -53,11 +70,7 @@ def install(root,watchdog_only=False):
         if not watchdog_only:
             import subprocess,tempfile
             adapter=root/'hermes-root/profiles/kakaoworker/plugins/kakao_village/adapter.py'
-            relative=Path('hermes-root/profiles/kakaoworker/plugins/kakao_village/adapter.py')
-            staged=backup/relative;staged.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(adapter,staged)
-            result=subprocess.run(['/usr/bin/patch','-p1','--batch'],cwd=backup,input=(HERE/'native-adapter-concurrency.patch').read_bytes(),capture_output=True)
-            assert result.returncode==0 or b'def _claim_capacity_available' in adapter.read_bytes(),result.stdout.decode(errors='replace')
-            copy(staged,adapter,'worker')
+            staged=backup/'adapter.next.py';staged.write_bytes(native_adapter_bytes(adapter.read_bytes(),(HERE/'native-adapter-concurrency.patch').read_bytes()));copy(staged,adapter,'worker')
             config=root/'hermes-root/profiles/kakaoworker/config.yaml'
             import re
             cfg=config.read_text()

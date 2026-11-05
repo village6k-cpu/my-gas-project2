@@ -2,7 +2,7 @@
 
 ## 자동 검증
 
-`run-tests.sh <installed-runtime-root>`: 신규 93개 통과.
+`run-tests.sh <installed-runtime-root>`: 신규 97개 통과.
 
 - 원문 journal 19개: fsync, 크래시, 손상, 디스크 여유, 정확한 전달 영수증
 - intake coordinator 13개: 재기동, 중복, 소스 증거, 불명확 결과 보존, 대기열 공정성, 동시 실행 제한
@@ -11,7 +11,8 @@
 - 적용 전 무효 AI 응답의 무실행 증거와 재시도 제한 4개
 - 알림 분리 1개, 재시도 작업 ID와 작업 버전 2개
 - 정확한 소유 탭 로딩 3개, 삭제 메시지 안내 문구 3개
-- native adapter lifecycle 9개, collector 소유권 6개, 장애·알림 정책 9개
+- native adapter lifecycle 9개, collector 소유권 6개, 장애·알림 정책 10개
+- 반복 설치 3개: 패치가 되돌아가지 않음, native drain 연동, 실패한 패치 거부
 - 유휴 배포 조건 3개: 실행 중 업무 보호, 실제 consumer 상태, 오래된 상태 파일 구분
 - 실제 로컬 TCP 포트 3개: 실행 중 포트 보호, 정상 종료 후 TIME_WAIT, 설치된 launcher 확인
 

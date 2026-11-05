@@ -24,4 +24,13 @@ class FloodTests(unittest.TestCase):
   self.assertFalse(transition(previous,['x','y'],130)['notification_due'])
   self.assertTrue(transition(previous,['x','y'],1000)['notification_due'])
 
+
+
+class MaintenanceTests(unittest.TestCase):
+ def test_intentional_owned_drain_is_not_reported_as_worker_crash(self):
+  report={'authenticated':True,'watcher_ready':True,'bridge_responding':True,'maintenance':True,'coverage':{'complete':True}}
+  self.assertNotIn('reservation_worker_disconnected',evaluate(report,{'gateway':{'consumer':{'fresh':False}}}))
+  report['maintenance']=False
+  self.assertIn('reservation_worker_disconnected',evaluate(report,{'gateway':{'consumer':{'fresh':False}}}))
+
 if __name__=='__main__':unittest.main()

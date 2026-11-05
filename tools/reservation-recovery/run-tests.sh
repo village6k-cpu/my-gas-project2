@@ -11,3 +11,4 @@ python3 tools/reservation-recovery/test_collector.py
 python3 tools/reservation-recovery/test_recovery_policy.py
 python3 tools/reservation-recovery/test_launcher_ports.py
 python3 tools/reservation-recovery/test_release.py
+python3 tools/reservation-recovery/test_installer.py

@@ -12,15 +12,21 @@ def read(path):
 def atomic(path,data):
     tmp=path.with_suffix('.release.tmp');tmp.write_text(json.dumps(data));tmp.chmod(0o600);tmp.replace(path)
 
-def idle_for_release(worker,health,owned):
+def idle_for_release(worker,health,owned,drain_requested=False):
     applications=health.get('execution_application_counts')or health.get('application_counts')or{}
-    return owned and worker.get('active_agents')==0 and health.get('consumer',{}).get('fresh') is True and all(applications.get(s)==0 for s in ['pending','claimed','applying','applied']) and health.get('queue',{}).get('ready')==0
+    return owned and worker.get('active_agents')==0 and (health.get('consumer',{}).get('fresh') is True or (drain_requested and worker.get('gateway_state')=='draining')) and all(applications.get(s)==0 for s in ['pending','claimed','applying','applied']) and (drain_requested or health.get('queue',{}).get('ready')==0)
 
 def release(root):
     control=root/'control/reservation-recovery-control.json';original=read(control);token=str(uuid.uuid4())
-    atomic(control,{**original,'pauseBackfill':True,'maintenanceOwner':token})
+    profile=root/'hermes-root/profiles/kakaoworker';drain=profile/'.drain_request.json';principal='codex-reservation-recovery:'+token
+    if drain.exists():raise RuntimeError('An existing native maintenance drain must be preserved')
+    import sys
+    sys.path.insert(0,str(root/'hermes-worker-code'))
+    from gateway.drain_control import write_drain_request
     label=f'gui/{os.getuid()}/com.village.migrated.worker';disabled=False;stable=0;last_report=0
     try:
+        write_drain_request(home=profile,principal=principal,suppress_notification=True)
+        atomic(control,{**original,'pauseBackfill':True,'maintenanceOwner':token})
         while True:
             worker=read(root/'hermes-root/profiles/kakaoworker/gateway_state.json');main=read(root/'hermes-root/gateway_state.json')
             owned=gateway_owned(worker,root/'hermes-root/profiles/kakaoworker',root/'hermes-worker-code')
@@ -29,7 +35,7 @@ def release(root):
                 request=Request('http://127.0.0.1:8787/hermes/v1/status',headers={'Authorization':'Bearer '+env['KAKAO_HERMES_BRIDGE_TOKEN']})
                 with urlopen(request,timeout=10) as response:health=json.load(response)
             except (OSError,ValueError,KeyError):health={}
-            idle=idle_for_release(worker,health,owned)
+            idle=idle_for_release(worker,health,owned,drain_requested=True)
             stable=stable+1 if idle else 0
             if time.time()-last_report>30:
                 print(json.dumps({'waiting_for_idle':True,'worker_active':worker.get('active_agents'),'slack_active':main.get('active_agents'),'idle_samples':stable}),flush=True);last_report=time.time()
@@ -45,6 +51,7 @@ def release(root):
         subprocess.run(['launchctl','kickstart','-k',f'gui/{os.getuid()}/com.village.migrated.bridge'],check=True)
         print(json.dumps({'bridge_restarted_after_verified_idle':True}),flush=True)
     finally:
+        if read(drain).get('principal')==principal:drain.unlink(missing_ok=True)
         if disabled:
             subprocess.run(['launchctl','enable',label],check=True);subprocess.run(['launchctl','kickstart',label],check=True)
         current=read(control)
