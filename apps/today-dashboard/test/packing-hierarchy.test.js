@@ -66,3 +66,59 @@ test('refresh repairs stored split UWP fragments and absorbs checked Cooke defau
  assert(active.filter(e=>/ライン/.test(e.name)).every(e=>e.checked));
  const saved=JSON.stringify(t.packing.entries);t.packing=step(t,{action:'refresh'},now);assert.equal(JSON.stringify(t.packing.entries),saved);
 });
+
+function fx3M1Fixture(){return {tradeId:'demo',contractStatus:'예약',setupDone:false,returnDone:false,equipments:[
+  {scheduleId:'kit',name:'소니 FX3 풀세트',qty:1,setName:'소니 FX3 풀세트',isSetHeader:true,checkoutState:'pending'},
+  {scheduleId:'m1',name:'마스 M1',qty:1,setName:'소니 FX3 풀세트',isComponent:true,checkoutState:'taken'},
+  {scheduleId:'arm',name:'매직암',qty:1,setName:'소니 FX3 풀세트',isComponent:true,checkoutState:'taken'},
+  {scheduleId:'video',name:'소니 FX3 풀세트용 HDMI 라인',qty:1,setName:'소니 FX3 풀세트',isComponent:true,checkoutState:'pending'},
+  {scheduleId:'power',name:'소니 FX3 풀세트용 970더미',qty:1,setName:'소니 FX3 풀세트',isComponent:true,checkoutState:'pending'}]};}
+test('a monitor inside an FX3 kit consumes the existing kit power, video and arm exactly once',()=>{
+  const t=fx3M1Fixture();t.packing=step(t,{action:'start'},now);
+  assert.equal(t.packing.entries.length,2);assert(t.packing.entries.every(e=>e.sourceId&&e.ownerId==='m1'));
+  assert.equal(groups(t.packing).reduce((n,g)=>n+g.expected,0),2);
+  assert(!load('packing').packingSourceIds(t.packing).has('arm'),'the existing magic arm remains its original physical row');
+});
+test('standalone M1, another kit, and extra accessories are not merged by similar names',()=>{
+  const t=fx3M1Fixture();t.equipments.push({scheduleId:'extra',name:'마스 M1',qty:1,setName:'마스 M1',isSetHeader:true,checkoutState:'taken'});
+  t.packing=step(t,{action:'start'},now);
+  assert.equal(t.packing.entries.filter(e=>e.ownerId==='extra').length,3);
+  assert.equal(t.packing.entries.filter(e=>e.ownerId==='m1').length,2);
+});
+test('excluded parent accessories do not come back as M1 defaults',()=>{
+  const t=fx3M1Fixture();t.equipments.filter(e=>['arm','power','video'].includes(e.scheduleId)).forEach(e=>e.checkoutState='excluded');
+  t.packing=step(t,{action:'start'},now);assert.equal(t.packing.entries.length,0);
+});
+function legacyM1(t){
+ t.packing=step(t,{action:'start'},now);
+ const {registeredPart}=load('packingCatalog');
+ for(const [index,name] of ['마스 M1용 970더미','마스 M1용 HDMI','마스 M1용 숏암'].entries()){
+  const part=registeredPart(name);t.packing.entries.push({id:`old:${index}`,ownerId:'m1',device:'마스 M1',name,partId:part.id,qty:1,checked:true,modelDefault:true});
+ }
+ return t;
+}
+test('legacy draft repair retires only generated duplicates and is idempotent',()=>{
+ const t=legacyM1(fx3M1Fixture());t.packing.entries.forEach(e=>e.checked=true);t.packing.note='인계 보존';
+ assert.equal(load('packing').packingPreparationCommand(t).action,'refresh');
+ t.packing=step(t,{action:'refresh'},now);assert.equal(t.packing.entries.filter(e=>e.qty>0).length,2);
+ assert(t.packing.entries.filter(e=>e.sourceId).every(e=>e.checked));assert.equal(t.packing.note,'인계 보존');
+ assert.equal(load('packing').packingPreparationCommand(t),undefined);
+ const rows=JSON.stringify(t.packing.entries);t.packing=step(t,{action:'refresh'},now);assert.equal(JSON.stringify(t.packing.entries),rows);
+});
+test('repair preserves manually increased, replaced, extra, and already returned accessory facts',()=>{
+ const t=legacyM1(fx3M1Fixture());t.packing.entries.find(e=>e.id==='old:0').qty=2;
+ const hdmi=t.packing.entries.find(e=>e.id==='old:1');t.packing.counts[hdmi.partId]={good:1,damaged:0,lost:0};
+ const arm=t.packing.entries.find(e=>e.id==='old:2');arm.custom=true;
+ assert.equal(load('packing').packingDuplicateDefaults(t).length,0);
+ t.setupDone=true;assert.equal(load('packing').packingPreparationCommand(t),undefined);
+});
+test('M1 replacement inside the camera kit does not add the same accessories again',()=>{
+ const t=fx3M1Fixture();t.equipments[1].name='5인치 모니터';t.packing=step(t,{action:'start'},now);
+ t.equipments[1].name='마스 M1';t.packing=step(t,{action:'reconcile',ownerId:'m1',name:'마스 M1'},now);
+ assert.equal(t.packing.entries.filter(e=>e.modelDefault&&e.qty>0).length,0);
+ assert.equal(t.packing.entries.filter(e=>e.sourceId&&e.qty>0).length,2);
+});
+test('two monitors retain only the uncovered additional accessories, not a second full allowance',()=>{
+ const t=fx3M1Fixture();t.equipments[1].qty=2;t.packing=step(t,{action:'start'},now);
+ for(const name of ['마스 M1용 970더미','마스 M1용 숏암','마스 M1용 SDI or HDMI']) assert.equal(t.packing.entries.find(e=>e.name===name).qty,1);
+});
