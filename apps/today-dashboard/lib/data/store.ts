@@ -155,6 +155,7 @@ type ContractMutationPayload = {
   /** removeEquips 배치의 품목별 결과 — 일부만 이미 빠진 경우를 구분한다. */
   results?: unknown;
   allAlreadyRemoved?: boolean;
+  packing?: Trade["packing"];
 };
 
 function markLocalMutation(tradeId?: string) {
@@ -1792,6 +1793,7 @@ function applyContractMutationResult(tradeId: string, raw: unknown, fallbackRemo
   mutateTrade(tradeId, (t) => ({
     ...t,
     equipments: removedSet.size ? t.equipments.filter((e) => !removedSet.has(e.scheduleId)) : t.equipments,
+    ...(result.packing ? { packing: result.packing } : {}),
     amount: amount ?? t.amount,
     contractUrl: url || t.contractUrl || null,
     contractRegenPending: !!result.contractRegenPending && !url,
@@ -1929,6 +1931,7 @@ const REMOVE_EQUIPMENT_BATCH_DEBOUNCE_MS = 3_000;
 const removeEquipmentBatchTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
 const removeEquipmentBatchInFlight: Record<string, Promise<void> | undefined> = {};
 const removeEquipmentOriginals = new Map<string, EquipmentItem>();
+const removeEquipmentFailures = new Map<string, string>();
 
 function armRemoveEquipmentBatch(tradeId: string, delay = REMOVE_EQUIPMENT_BATCH_DEBOUNCE_MS): void {
   if (removeEquipmentBatchTimers[tradeId]) clearTimeout(removeEquipmentBatchTimers[tradeId]);
@@ -2008,6 +2011,7 @@ async function commitRemoveEquipmentBatch_(tradeId: string): Promise<void> {
   if (!entries.length) return;
 
   const task = (async () => {
+    removeEquipmentFailures.delete(tradeId);
     const keys = entries.map((entry) => removeEquipmentOutboxKey_(entry.tradeId, entry.scheduleId));
     keys.forEach((key) => removeEquipmentReplayInFlight.add(key));
     const saveId = beginTradeSave(tradeId);
@@ -2052,6 +2056,7 @@ async function commitRemoveEquipmentBatch_(tradeId: string): Promise<void> {
         armRemoveEquipmentBatch(tradeId, Math.min(2_000 * 2 ** Math.min(maxAttempts, 4), 30_000));
         return;
       }
+      removeEquipmentFailures.set(tradeId, message);
       // 되돌릴 수 없는 실패 — 화면에서 지웠던 품목을 되살려 사실과 맞춘다.
       for (const entry of entries) {
         const key = removeEquipmentOutboxKey_(entry.tradeId, entry.scheduleId);
@@ -2067,7 +2072,7 @@ async function commitRemoveEquipmentBatch_(tradeId: string): Promise<void> {
       keys.forEach((key) => removeEquipmentReplayInFlight.delete(key));
       delete removeEquipmentBatchInFlight[tradeId];
       // 배치가 도는 동안 새로 눌린 제외가 있으면 이어서 처리한다.
-      if (pendingRemoveEquipmentEntries_(tradeId).length) armRemoveEquipmentBatch(tradeId);
+      if (pendingRemoveEquipmentEntries_(tradeId).length && !removeEquipmentBatchTimers[tradeId]) armRemoveEquipmentBatch(tradeId);
     }
   })();
   removeEquipmentBatchInFlight[tradeId] = task;
@@ -2386,6 +2391,15 @@ export function savePackingCheck(tradeId: string, entryId: string, checked: bool
 }
 
 export async function savePacking(tradeId: string, version: number, command: PackingCommand): Promise<void> {
+  if (command.action === "refresh" && !activeTradeTransitions.has(tradeId)) {
+    await packingCheckQueue.flush(tradeId);
+    if (pendingRemoveEquipmentTrades.has(tradeId)) {
+      flushRemoveEquipmentBatch_(tradeId);
+      await commitRemoveEquipmentBatch_(tradeId);
+      if (removeEquipmentFailures.has(tradeId)) throw new Error(removeEquipmentFailures.get(tradeId));
+    }
+    version = state.trades.find(t => t.tradeId === tradeId)?.packing?.version ?? version;
+  }
   if (hasTradePending(tradeId)) throw new Error("이 거래의 저장을 마친 뒤 다시 시도해주세요");
   const before=state.trades.find(t=>t.tradeId===tradeId);
   const preview=before ? optimisticPackingCheck(before,version,command) : undefined;
@@ -2409,6 +2423,20 @@ export async function savePacking(tradeId: string, version: number, command: Pac
 }
 
 export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
+  // 완료 클릭을 버리지 않는다. 마지막 체크와 제외를 확정한 뒤 최신 버전으로 준비를 확정한다.
+  if (!activeTradeTransitions.has(tradeId)) {
+    try {
+      await packingCheckQueue.flush(tradeId);
+      await flushItemCheckWritesForTrade(tradeId);
+      if (pendingRemoveEquipmentTrades.has(tradeId)) {
+        flushRemoveEquipmentBatch_(tradeId);
+        await commitRemoveEquipmentBatch_(tradeId);
+        if (removeEquipmentFailures.has(tradeId)) throw new Error(removeEquipmentFailures.get(tradeId));
+      }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "앞선 준비 내용을 저장하지 못했습니다" };
+    }
+  }
   if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
     const error = pendingRemoveEquipmentTrades.has(tradeId)
       ? "장비 제외를 원장에 확정 중입니다. 완료 후 반출처리해주세요"

@@ -302,7 +302,7 @@ test("재시작 시 보존된 저장 작업은 한꺼번에 0ms 재생하지 않
 
 test("반출완료는 품목 체크와 수량 debounce의 최신 목표를 모두 drain한 뒤 실행한다", () => {
   const store = read("lib/data/store.ts");
-  // 장벽은 이제 백그라운드 확정 엔진(replay)에 있다 — 클릭 경로는 아무것도 기다리지 않는다
+  // 원장 완료는 백그라운드에서 확정한다. 준비 확정은 앞선 체크/제외 저장을 기다린다.
   const replay = section(store, "async function replayCompletionMutationEntry_", "\nfunction replayCompletionMutationOutboxes_");
   const itemBarrierAt = replay.indexOf("flushItemCheckWritesForTrade(latest.tradeId)");
   const qtyBarrierAt = replay.indexOf("flushQueuedItemQtyForTrade(latest.tradeId)");
@@ -310,7 +310,8 @@ test("반출완료는 품목 체크와 수량 debounce의 최신 목표를 모�
   assert.ok(itemBarrierAt >= 0 && qtyBarrierAt >= 0, "품목 체크와 수량 저장 장벽이 모두 있어야 한다");
   assert.ok(setupGasAt > itemBarrierAt && setupGasAt > qtyBarrierAt, "기준선 고정은 두 장벽 뒤에만 실행해야 한다");
   const setup = section(store, "export async function toggleSetup", "export type ToggleReturnResult");
-  assert.doesNotMatch(setup, /await gasMutation|await flush/, "클릭 경로는 서버 왕복·flush를 기다리지 않는다 (즉시 확정 UX)");
+  assert.doesNotMatch(setup, /await gasMutation/, "원장 완료 왕복은 백그라운드에서 처리한다");
+  assert.match(setup, /await packingCheckQueue\.flush/, "마지막 구성품 체크를 저장한 뒤 준비를 확정한다");
   assert.match(store, /itemCheckTerminalErrors/, "품목 원장 저장 실패를 완료 장벽이 삼키면 안 된다");
   assert.match(store, /qtyCommitFailures/, "수량 원장 저장 실패를 완료 장벽이 삼키면 안 된다");
 });

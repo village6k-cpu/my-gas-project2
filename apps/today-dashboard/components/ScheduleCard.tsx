@@ -70,6 +70,7 @@ export const ScheduleCard = memo(function ScheduleCard({
 
   useEffect(() => { setAcknowledgedNotes(null); }, [notesKey, completionRecorded]);
   useEffect(() => { setEditingNotes(false); setCompletionError(""); }, [trade.tradeId, phase]);
+  useEffect(() => { setCompletionError(""); }, [trade.packing?.version, trade.equipments]);
 
   function handleNoteEditingChange(editing: boolean) {
     setEditingNotes(editing);

@@ -2,7 +2,7 @@ import type { Trade } from "../domain/types";
 import { optimisticPackingCheck, type PackingCommand, type PackingManifest } from "../domain/packing";
 
 type Intent = { id: string; checked: boolean; resolve: () => void; reject: (error: unknown) => void };
-type Queue = { confirmed: PackingManifest; pending: Intent[]; failing: boolean };
+type Queue = { confirmed: PackingManifest; pending: Intent[]; failing: boolean; done?: Promise<void> };
 
 /** 항목 클릭은 즉시 표시하고, 서버에는 확정 버전 기준으로 순서대로 보낸다. */
 export function createPackingCheckQueue(io: {
@@ -40,9 +40,11 @@ export function createPackingCheckQueue(io: {
       queues.delete(id);
       finish(failure);
     }
+    if (failure) throw failure;
   }
   return {
     pending: (id: string) => queues.has(id),
+    flush: (id: string): Promise<void> => queues.get(id)?.done ?? Promise.resolve(),
     check(id: string, entryId: string, checked: boolean): Promise<void> {
       const trade = io.read(id);
       if (!trade?.packing) return Promise.reject(new Error("구성품을 먼저 불러와주세요"));
@@ -50,13 +52,14 @@ export function createPackingCheckQueue(io: {
       if (q?.failing) return Promise.reject(new Error("저장 상태를 확인 중입니다"));
       const entries = trade.packing.entries.map(e => e.id === entryId ? { ...e, checked } : e);
       if (!entries.some(e => e.id === entryId) || !optimisticPackingCheck(trade, trade.packing.version, { action: "save", entries, note: trade.packing.note })) return Promise.reject(new Error("현재 구성품은 체크할 수 없습니다"));
-      const queue = q ?? { confirmed: trade.packing, pending: [], failing: false };
+      const queue: Queue = q ?? { confirmed: trade.packing, pending: [], failing: false };
       const promise = new Promise<void>((resolve, reject) => queue.pending.push({ id: entryId, checked, resolve, reject }));
       if (!q) queues.set(id, queue);
       io.show(id, overlay(queue));
       if (!q) {
         const finish = io.start(id);
-        void drain(id, queue, finish);
+        queue.done = drain(id, queue, finish);
+        void queue.done.catch(() => {}); // 개별 체크/flush 호출자가 오류를 표시한다.
       }
       return promise;
     },
