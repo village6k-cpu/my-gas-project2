@@ -45,9 +45,6 @@ export function createIntakeCoordinator({journal,gateway,dispatch,schedule,now=D
   const owned=new Set(pending.filter(r=>r.event.kind==='job').flatMap(r=>r.event.sourceIds||[]));
   // A failing capture must not starve events accepted during an outage.
   const events=pending.filter(r=>r.event.kind==='event'&&!owned.has(r.id));
-  for(const row of events.slice(0,Math.max(1,Math.ceil(limit/2)))){
-   if(!journal.read(row.id).handedOff){schedule({...row.event.event,intakeIds:[row.id]});replayed++;}
-  }
   // Previously held intake may be closed only by passive exact gateway proof.
   // Its failed business result remains owned by that gateway job.
   const reviews=pending.filter(r=>r.event.kind==='review_required');
@@ -69,9 +66,15 @@ export function createIntakeCoordinator({journal,gateway,dispatch,schedule,now=D
     const receipt=await submit({...row.event.job,intakeIds:row.event.sourceIds||[]},{allowDispatch:false});
     if(!receipt.deferred){reconciled++;continue;}
     if(dispatched>=limit)continue;
-    attempted.set(row.id,++sequence);
-    await submit({...row.event.job,intakeIds:row.event.sourceIds||[]},{dispatchContext:{origin:'durable_intake_replay'}});dispatched++;replayed++;
+    const result=await submit({...row.event.job,intakeIds:row.event.sourceIds||[]},{dispatchContext:{origin:'durable_intake_replay'}});
+    if(result?.deferred)continue;
+    attempted.set(row.id,++sequence);dispatched++;replayed++;
    }catch{attempted.set(row.id,++sequence);next.set(row.id,now()+60000);dispatched++;replayed++;}
+  }
+  // Starting a new raw backfill capture before pending jobs can occupy the sole
+  // slot on every sweep. Drain admitted jobs first, then reserve raw-event slots.
+  for(const row of events.slice(0,Math.max(1,Math.ceil(limit/2)))){
+   if(!journal.read(row.id).handedOff){schedule({...row.event.event,intakeIds:[row.id]});replayed++;}
   }
   return {replayed,reconciled,...status()};
  }

@@ -2,10 +2,10 @@
 
 ## 자동 검증
 
-`run-tests.sh <installed-runtime-root>`: 신규 99개 통과.
+`run-tests.sh <installed-runtime-root>`: 신규 101개 통과.
 
 - 원문 journal 19개: fsync, 크래시, 손상, 디스크 여유, 정확한 전달 영수증
-- intake coordinator 14개: 재기동, 중복, 소스 증거, 불명확 결과 보존, 대기열 공정성, 동시 실행 제한
+- intake coordinator 16개: 재기동, 중복, 소스 증거, 불명확 결과 보존, 대기열 공정성, 동시 실행 제한, raw 재수신보다 대기 고객 우선, 보류의 시도 예산 제외
 - watcher 9개: ACK, 불완전 대조, 과거 목록 스크롤과 실제 새 메시지 구분
 - bridge 통합 3개, 실시간 우선순위 2개, 안전한 재시도 분류 5개
 - 적용 전 무효 AI 응답의 무실행 증거와 재시도 제한 4개
