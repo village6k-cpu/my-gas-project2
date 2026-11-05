@@ -23,10 +23,12 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const p = trade.packing;
   const replacements = useMemo(() => packingDeviceReplacements(trade), [p, trade.equipments, trade.setupDone, trade.returnDone, trade.contractStatus]);
   const replacementKey = JSON.stringify(replacements.map(e => [e.scheduleId, e.name, e.qty]));
+  const reservationChanges = packingReservationChanges(trade);
+  const reservationChangeKey = JSON.stringify(reservationChanges);
   const syncAttempted = useRef("");
   useEffect(() => {
-    if (!p || phase !== "checkout" || onCommand || packingStarted(trade) || !replacements.length) return;
-    const key = `${trade.tradeId}:${p.version}:${replacementKey}`;
+    if (!p || phase !== "checkout" || onCommand || packingStarted(trade) || (!replacements.length && !reservationChanges.length)) return;
+    const key = `${trade.tradeId}:${p.version}:${replacementKey}:${reservationChangeKey}`;
     if (syncAttempted.current === key) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -35,12 +37,12 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
       if (hasTradePending(trade.tradeId)) { timer = setTimeout(sync, 400); return; }
       syncAttempted.current = key;
       const owner = replacements[0];
-      try { await savePacking(trade.tradeId, p.version, { action: "reconcile", ownerId: owner.scheduleId, name: owner.name }); }
+      try { await savePacking(trade.tradeId, p.version, owner ? { action: "reconcile", ownerId: owner.scheduleId, name: owner.name } : { action: "refresh" }); if (!cancelled) setError(""); }
       catch (e) { if (!cancelled) setError(e instanceof Error ? e.message : "교체 구성품 반영 실패. 다시 확인해주세요"); }
     };
     timer = setTimeout(sync, 100);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [trade.tradeId, p?.version, replacementKey, phase, onCommand, trade.setupDone, trade.packingDispatchedAt, trade.contractStatus]);
+  }, [trade.tradeId, p?.version, replacementKey, reservationChangeKey, phase, onCommand, trade.setupDone, trade.packingDispatchedAt, trade.contractStatus]);
   const devices = useMemo(() => packingDevices(trade), [trade.equipments]);
   const entriesByOwner = useMemo(() => {
     const rows = new Map<string | undefined, PackingEntry[]>();
@@ -65,7 +67,6 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const unresolvedQty = p?.entries.filter(e=>e.unresolved).reduce((n,e)=>n+e.qty,0) ?? 0;
   const total = groups.reduce((n, g) => n + g.expected, 0);
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
-  const reservationChanges = packingReservationChanges(trade);
   const requiredIssues = p?.phase === "draft" ? packingRequiredIssues(trade) : [];
   const unfinished = p?.entries.filter(packingEntryNeedsPreparation) ?? [];
   const sealReason = checking > 0 ? "체크 내용을 저장 중입니다." : p && packingNeedsUpgrade(p) ? "구성품 목록을 먼저 업데이트해주세요."

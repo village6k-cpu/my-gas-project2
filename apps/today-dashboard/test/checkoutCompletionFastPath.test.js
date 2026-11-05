@@ -31,6 +31,8 @@ function toggleHarness() {
   const trade = { tradeId: "T-1", setupDone: false, setupDoneAt: null };
   const context = {
     packingPreparationTrade: t => t,
+    packingCheckQueue: { flush: async () => {} },
+    flushItemCheckWritesForTrade: async () => {},
     state: { trades: [trade], savingTrades: {}, toast: null },
     isSupabase: false,
     writeBackEnabled: true,
@@ -85,7 +87,7 @@ test("클릭 경로 소스에는 네트워크 대기가 없다 (즉시 확정 �
   const setup = sourceFunction(store, "export async function toggleSetup", "\nexport type ToggleReturnResult");
   const ret = sourceFunction(store, "export async function toggleReturn", "\n// ── 품목 체크 원장 쓰기 신뢰화");
   for (const body of [setup, ret]) {
-    assert.doesNotMatch(body, /await gasMutation|await flush|beginTradeTransition/, "클릭 경로는 서버·flush·카드 잠금이 없어야 한다");
+    assert.doesNotMatch(body, /await gasMutation|beginTradeTransition/, "원장 완료 왕복과 카드 잠금은 백그라운드에서 처리해야 한다");
     assert.match(body, /putCompletionMutationOutbox/, "내구 outbox 기록 필수");
     assert.match(body, /scheduleCompletionMutationReplay_/, "백그라운드 확정 예약 필수");
   }

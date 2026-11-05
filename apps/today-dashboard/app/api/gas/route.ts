@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { revalidateTag, unstable_cache } from "next/cache";
 import { createHash, randomUUID } from "node:crypto";
-import { isAuthedRequest as isAuthed } from "@/lib/server/authCache";
+import { isAuthedRequest as isAuthed, getAuthedUser } from "@/lib/server/authCache";
 import { getInventoryAuditServiceClient } from "@/lib/server/inventoryAuditDb";
 import { getVillageGasInternalKey } from "@/lib/server/gasInternalKey.mjs";
+
+import { projectConfirmedEquipmentRemoval } from "@/lib/server/removedEquipmentProjection";
 
 export const maxDuration = 60;
 
@@ -310,7 +312,7 @@ async function callGet(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const action = sp.get("action") ?? "";
   // 레거시 GET도 같은 완료 검수/lease 경로를 사용한다.
-  if (action === "toggleSetup" || action === "toggleReturn" || action === "toggleItems") {
+  if (action === "toggleSetup" || action === "toggleReturn" || action === "toggleItems" || action === "removeEquips") {
     return callPost(new NextRequest(req.url, { method: "POST", headers: req.headers, body: JSON.stringify(Object.fromEntries(sp)) }));
   }
   const func = sp.get("func") ?? "";
@@ -433,6 +435,20 @@ async function callPost(req: NextRequest) {
       signal: AbortSignal.timeout(60_000),
     });
     let responseBody = await r.text();
+    if (action === "removeEquips" && r.ok) {
+      const confirmed = JSON.parse(responseBody);
+      if (confirmed?.success === true && !confirmed.error) {
+        try {
+          const user = await getAuthedUser(req);
+          if (!user) throw new Error("직원 로그인 필요");
+          const packing = await projectConfirmedEquipmentRemoval(getInventoryAuditServiceClient(), String(payload.tid ?? ""), confirmed, user.id);
+          responseBody = JSON.stringify({ ...confirmed, ...(packing ? { packing } : {}) });
+        } catch {
+          // 시트는 이미 저장됐을 수 있다. ACK/롤백하지 않고 같은 제외 요청으로 투영까지 재시도한다.
+          return NextResponse.json({ error: "제외한 장비의 검수 목록을 동기화 중입니다", retryable: true, outcomeUnknown: true }, { status: 503 });
+        }
+      }
+    }
     if (completionAction && r.ok) {
       let confirmed: Record<string, unknown> | null = null;
       try {
