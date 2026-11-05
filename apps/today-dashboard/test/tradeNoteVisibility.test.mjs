@@ -58,7 +58,7 @@ for (const tab of ['checkout', 'checkin']) {
       const noteEnd = html.indexOf('파우치 함께 회수');
       const completionLabel = tab === 'checkout' ? '반출 완료' : '반납 완료';
       assert(noteEnd < html.indexOf(completionLabel), '메모를 읽기 전에 완료로 넘어가면 안 된다');
-      assert.equal(html.split('aria-label="반출 전체 메모"').length - 1, 1, '전문이 중복 표시되면 안 된다');
+      assert.equal(html.split('aria-label="반출 메모"').length - 1, 1, '전문이 중복 표시되면 안 된다');
     });
   }
 }
@@ -71,7 +71,7 @@ test('빈 메모는 강조 영역을 만들지 않고 펼친 카드에서 작성
   const blank = { ...trade, noteCheckout: '  ', noteCheckin: '' };
   assert.equal(render(TradeNotes, { trade: blank, phase: 'checkout', showAdd: false }), '');
   const html = render(TradeNotes, { trade: blank, phase: 'checkout', showAdd: true });
-  assert(html.includes('+ 반출 전체 메모'));
+  assert(html.includes('+ 반출 메모'));
   assert(!html.includes('<section'));
 });
 test('메모는 HTML이 아닌 원문 텍스트로 렌더링된다', () => {
@@ -84,7 +84,7 @@ for (const tab of ['checkout', 'checkin']) {
   const completionButton = (html) => html.match(/<button\b[^>]*>(?:(?!<\/button>)[\s\S])*<\/button>/g).find(button => button.includes('반출 완료') || button.includes('반납 완료') || button.includes('수량 확인 후 반납완료'));
   test(`${tab}: 전체메모를 확인하기 전에는 완료할 수 없다`, () => {
     const html = render(ScheduleCard, { trade, date: '2026-10-16', tab });
-    assert(html.includes('전체메모를 확인했습니다'), '메모 확인 체크가 필요하다');
+    assert(html.includes('위 메모를 확인했습니다'), '메모 확인 체크가 필요하다');
     assert.match(completionButton(html), /disabled=""/, '미확인 메모가 있으면 완료를 막아야 한다');
   });
   test(`${tab}: 빈 메모와 완료 취소에는 확인 체크를 요구하지 않는다`, () => {
@@ -94,7 +94,7 @@ for (const tab of ['checkout', 'checkin']) {
     ]) {
       const html = render(ScheduleCard, { trade: data, date: '2026-10-16', tab });
       assert.doesNotMatch(completionButton(html), /disabled=""/);
-      assert(!html.includes('전체메모를 확인했습니다'));
+      assert(!html.includes('위 메모를 확인했습니다'));
     }
   });
 }
@@ -111,4 +111,18 @@ test('unknown payment total is labeled pending, never silently omitted or shown 
   const html=render(PaymentControls,{trade:{...trade,amount:undefined}});
   assert(html.includes('금액 미확정'));assert(!html.includes('0원'));
   assert(render(PaymentControls,{trade:{...trade,amount:0}}).includes('0원'));
+});
+
+for (const phase of ['checkout', 'checkin']) {
+  test(`${phase}: 이전 인계 메모를 접힌 카드의 한 메모 영역에서 보존한다`, () => {
+    const data = {...trade, noteCheckout: '', noteCheckin: '', packing: {note: '기존 인계 내용'}};
+    const html = render(ScheduleCard, {trade: data, date: '2026-10-16', tab: phase});
+    assert.equal(html.split('기존 인계 내용').length - 1, 1);
+    assert(html.includes('위 메모를 확인했습니다'));
+    assert(!html.includes('인계 메모 ('));
+  });
+}
+test('같은 공통 메모와 이전 인계 기록은 중복하지 않는다', () => {
+  const html = render(TradeNotes, {trade: {...trade, packing: {note: trade.noteCheckout}}, phase:'checkout', showAdd:true});
+  assert.equal(html.split(trade.noteCheckout).length - 1, 1);
 });

@@ -62,8 +62,8 @@ export const ScheduleCard = memo(function ScheduleCard({
   const [acknowledgedNotes, setAcknowledgedNotes] = useState<string | null>(null);
   const [editingNotes, setEditingNotes] = useState(false);
   const memoHelpId = useId();
-  const hasNotes = !!(trade.noteCheckout?.trim() || trade.noteCheckin?.trim());
-  const notesKey = JSON.stringify([trade.tradeId, phase, trade.noteCheckout ?? "", trade.noteCheckin ?? ""]);
+  const hasNotes = !!(trade.noteCheckout?.trim() || trade.noteCheckin?.trim() || trade.packing?.note?.trim());
+  const notesKey = JSON.stringify([trade.tradeId, phase, trade.noteCheckout ?? "", trade.noteCheckin ?? "", trade.packing?.note ?? ""]);
   const notesChecked = acknowledgedNotes === notesKey;
   const completionRecorded = isCheckout ? trade.setupDone : trade.returnDone;
   const memoBlocked = !completionRecorded && (editingNotes || (hasNotes && !notesChecked));
@@ -202,7 +202,7 @@ export const ScheduleCard = memo(function ScheduleCard({
                 aria-describedby={memoHelpId}
                 className="h-6 w-6 shrink-0 accent-brand-600"
               />
-              <span>위 전체메모를 확인했습니다</span>
+              <span>위 메모를 확인했습니다</span>
             </label>
           )}
           <p id={memoHelpId} className="mt-1.5 text-[13px] font-semibold text-ink-soft">

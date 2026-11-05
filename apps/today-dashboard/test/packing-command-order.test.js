@@ -24,7 +24,7 @@ function harness() {
   const mod={exports:{}};
   const queue = load('lib/data/packingCheckQueue.ts').createPackingCheckQueue({read:()=>state.trades[0],show:(_,packing)=>{state.trades[0]={...state.trades[0],packing}},persist:async()=>{throw new Error('unexpected check')},start:()=>()=>{},recover:async()=>{}});
   const ctx={module:mod,exports:mod.exports,state,packingCheckQueue:queue,activeTradeTransitions:new Set(),pendingRemoveEquipmentTrades:new Set(),hasTradePending:()=>true,
-    settlePackingDependencies_:async()=>{},rebasePackingCommand:load("lib/data/packingCommand.ts").rebasePackingCommand,packingPreparationTrade:domain.packingPreparationTrade,optimisticPackingCheck:domain.optimisticPackingCheck,
+    settlePackingDependencies_:async()=>{},rebasePackingCommand:load("lib/data/packingCommand.ts").rebasePackingCommand,packingPreparationTrade:domain.packingPreparationTrade,packingPreparationCommand:domain.packingPreparationCommand,transitionPacking:domain.transitionPacking,optimisticPackingCheck:domain.optimisticPackingCheck,
     beginTradeTransition:()=>1,finishTradeSave:()=>{},AbortSignal,Date,structuredClone,
     mutateTrade:(_,fn)=>{state.trades[0]=fn(state.trades[0])},fetchTradesByIds:async()=>[],mergeTradeChanges:(_,fresh)=>fresh,set:patch=>Object.assign(state,patch),
     authFetch:async(url,options)=>{const body=JSON.parse(options.body);requests.push(body);return {ok:true,json:async()=>({packing:domain.transitionPacking(state.trades[0],body.command,new Date().toISOString())})}}
@@ -108,4 +108,40 @@ test('automatic refresh and manual apply can overlap without rejecting or using 
   const a=h.save('261105-999',p.version,{action:'refresh'}),b=h.save('261105-999',p.version,{action:'refresh'});
   await tick();assert.equal(h.requests.length,0);gate.resolve();await Promise.all([a,b]);
   assert.deepEqual(h.requests.map(r=>r.version),[p.version,p.version+1]);
+});
+
+test('completion seals after applying an exclusion, retaining the other checked quantities and original note',async()=>{
+  const h=harness(),t=h.state.trades[0];
+  t.equipments.push({...t.equipments[0],scheduleId:'keep',name:'스몰HD용 D탭',qty:2});
+  t.packing=domain.transitionPacking({...t,packing:undefined},{action:'start'},new Date().toISOString());
+  t.packing.entries.forEach(e=>e.checked=true);t.packing.note='기존 전달사항';
+  const version=t.packing.version;t.equipments=t.equipments.filter(e=>e.scheduleId!=='line');
+  await h.save(t.tradeId,version,{action:'seal'});
+  assert.deepEqual(h.requests.map(r=>r.command.action),['refresh','seal']);
+  assert.equal(h.state.trades[0].packing.phase,'sealed');
+  assert.equal(h.state.trades[0].packing.entries.find(e=>e.id==='keep').qty,2);
+  assert.equal(h.state.trades[0].packing.note,'기존 전달사항');
+  assert.equal(h.state.trades[0].packing.entries.find(e=>e.id==='line').qty,0);
+});
+test('new reservation items are synchronized but never checked or sealed automatically',async()=>{
+  const h=harness(),t=h.state.trades[0];t.packing.entries.forEach(e=>e.checked=true);
+  t.equipments.push({...t.equipments[0],scheduleId:'added',name:'스몰HD용 D탭',qty:1});
+  await assert.rejects(h.save(t.tradeId,t.packing.version,{action:'seal'}),/실제 종류·수량/);
+  assert.deepEqual(h.requests.map(r=>r.command.action),['refresh']);
+  assert.equal(h.state.trades[0].packing.phase,'draft');
+  assert.equal(h.state.trades[0].packing.entries.find(e=>e.id==='added').checked,false);
+});
+test('an unchecked unchanged draft never sends a seal request',async()=>{
+  const h=harness(),t=h.state.trades[0];
+  await assert.rejects(h.save(t.tradeId,t.packing.version,{action:'seal'}),/실제 종류·수량/);
+  assert.equal(h.requests.length,0);
+});
+test('background synchronization and completion share one queue without duplicate refreshes',async()=>{
+  const h=harness(),t=h.state.trades[0];t.packing.entries.forEach(e=>e.checked=true);
+  t.equipments=[];
+  const sync=h.ctx.module.exports.syncPackingPreparation(t.tradeId);
+  const completion=h.save(t.tradeId,t.packing.version,{action:'seal'});
+  await Promise.all([sync,completion]);
+  assert.deepEqual(h.requests.map(r=>r.command.action),['refresh','seal']);
+  assert.equal(h.state.trades[0].packing.phase,'sealed');
 });

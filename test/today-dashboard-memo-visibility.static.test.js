@@ -86,7 +86,7 @@ assert.match(card, /<TradeNotes\b[^>]*trade=\{trade\} phase=\{phase\} showAdd=\{
 assert.ok(card.indexOf('<TradeNotes') < card.indexOf('onClick={handleDoneToggle}'),
   'full notes must appear before completion controls');
 assert.doesNotMatch(notes, /line-clamp-|truncate/, 'full notes must never be clipped');
-assert.match(notes, /checkout: "반출 전체 메모"[\s\S]*checkin: "반납 전체 메모"/);
+assert.match(notes, /checkout: "반출 메모"[\s\S]*checkin: "반납 메모"/);
 
 // ── 출처 보존: 저장은 자기 phase 필드에만, 병합 시 교차 복사 금지 ─────
 

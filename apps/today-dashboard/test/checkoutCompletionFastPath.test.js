@@ -361,7 +361,7 @@ test('실제 사고 구성: 체크가 하나라도 빠지면 구성 확정과 �
   const domain=actualPackingDomain(),h=toggleHarness(),t=readyWirelessFixture(domain);
   t.packing.entries.find(e=>e.id==='arm').checked=false;
   h.state.trades=[t];h.packingPreparationTrade=domain.packingPreparationTrade;h.transitionPacking=domain.transitionPacking;
-  h.savePacking=async()=>assert.fail('미확인 구성은 저장 전에 차단되어야 한다');
+  h.savePacking=async(id, version, command)=>domain.transitionPacking(h.state.trades[0],command,new Date().toISOString());
   const result=await h.toggleSetup('T-1');assert.equal(result.ok,false);assert.match(result.error,/실제 종류·수량/);assert.equal(h.outboxPuts.length,0);
 });
 test('완료 거절 이유는 카드 오류로 표시하며 처리 중 잠금은 반드시 해제한다',async()=>{

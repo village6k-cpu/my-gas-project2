@@ -68,11 +68,11 @@ function checklistHarness(checking) {
   trade.packing = packing.transitionPacking(trade, { action: 'start' }, '2026-10-31T01:00:00Z');
   return require('react-dom/server').renderToStaticMarkup(React.createElement(module.exports.PackingChecklist, { trade, phase: 'checkout' }));
 }
-test('저장 대기 전후에도 상태 표시와 확정 안내 영역 높이를 유지', () => {
+test('저장 대기 높이는 유지하고 중복 확정 버튼과 빈 안내 영역은 없앤다', () => {
   const idle = checklistHarness(0), pending = checklistHarness(1);
   for (const html of [idle, pending]) {
     assert.match(html, /class="h-6 px-3[^\"]*" role="status"/);
-    assert.match(html, /id="packing-seal-reason-test" class="h-12 overflow-y-auto/);
+    assert.doesNotMatch(html, /packing-seal-reason|이 구성으로 반출 준비 확정|예약 장비가 변경됐나요|인계 메모 \(/);
   }
   assert.match(pending, /저장 중…/);
   assert.doesNotMatch(idle, /저장 중…/);
