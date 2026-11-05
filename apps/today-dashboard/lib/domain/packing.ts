@@ -1,6 +1,6 @@
 import type { EquipmentItem, ReturnCount, Trade } from "./types";
 
-import { PACKING_PARTS, ACCESSORY, CHOICE, MONITOR_MODELS, canonicalPart, registeredPart, partKey, templateFor } from "./packingCatalog";
+import { PACKING_PARTS, PACKING_BUNDLE_COVERAGE, ACCESSORY, CHOICE, MONITOR_MODELS, canonicalPart, registeredPart, partKey, templateFor } from "./packingCatalog";
 export { PACKING_PARTS, MONITOR_MODELS } from "./packingCatalog";
 
 export interface PackingEntry {
@@ -62,7 +62,7 @@ export function packingPreparationCommand(t: Trade): PackingCommand | undefined 
   if (!t.packing || packingStarted(t)) return;
   const replacement = packingDeviceReplacements(t)[0];
   if (replacement) return { action: "reconcile", ownerId: replacement.scheduleId, name: replacement.name };
-  if (packingNeedsUpgrade(t.packing) || packingReservationChanges(t).length) return { action: "refresh" };
+  if (packingNeedsUpgrade(t.packing) || packingReservationChanges(t).length || (t.packing.phase === "draft" && packingDuplicateDefaults(t).length)) return { action: "refresh" };
 }
 
 /** 체크만 바꾼 요청은 화면에 먼저 반영한다. 구성 변경·확정은 서버 응답을 기다린다. */
@@ -131,7 +131,7 @@ export function packingReplacementEntries(t: Trade, ownerId: string): PackingEnt
     const existing = old.find(e => e.partId === part?.id && !e.custom);
     return { id: existing?.id ?? `replacement:${ownerId}:${part?.id ?? partKey(row.name)}`, ownerId, device: owner.name,
       name: part?.name ?? row.name, partId: part?.id ?? `unresolved:${ownerId}:${partKey(row.name)}`,
-      ...(existing?.sourceId ? { sourceId: existing.sourceId } : {}), qty: row.qty * owner.qty,
+      ...(existing?.sourceId ? { sourceId: existing.sourceId } : {}), qty: bundledDefaultQty(t, owner, row.name, row.qty * owner.qty),
       checked: false, unresolved: !part || CHOICE.test(row.name), modelDefault: true };
   });
   return [...old.filter(e => !desired.some(d => d.id === e.id)).map(e => ({ ...e, device: owner.name,
@@ -160,8 +160,45 @@ export function packingBlockers(p?: PackingManifest | null) {
     return accounted === g.expected ? [] : [{ scheduleId: `packing:${g.id}`, name: g.name, expected: g.expected, accounted, missing: Math.max(0, g.expected - accounted), over: Math.max(0, accounted - g.expected) }];
   });
 }
+/** 명시된 부모-하위 장비 관계만 연결한다. 이름이 비슷한 다른 세트는 건드리지 않는다. */
+function bundledSource(t: Trade, owner: EquipmentItem, defaultName: string): EquipmentItem | undefined {
+  const rule = PACKING_BUNDLE_COVERAGE.find(r => partKey(r.setName) === partKey(owner.setName ?? "") &&
+    partKey(r.device) === partKey(owner.name) && r.defaults.some(name => partKey(name) === partKey(defaultName)));
+  if (!rule || owner.onsite) return;
+  const owners = packingDevices(t).filter(e => e.setName === owner.setName && partKey(e.name) === partKey(rule.device));
+  const headers = t.equipments.filter(e => e.isSetHeader && e.setName === owner.setName && partKey(e.name) === partKey(rule.setName));
+  const sources = t.equipments.filter(e => !e.onsite && e.isComponent && e.setName === owner.setName && partKey(e.name) === partKey(rule.source));
+  if (owners.length === 1 && headers.length === 1 && sources.length === 1) return sources[0];
+}
+function bundledDefaultQty(t: Trade, owner: EquipmentItem, name: string, expected: number): number {
+  const source = bundledSource(t, owner, name);
+  if (!source) return expected;
+  // 명시적으로 제외한 부모 구성품을 자식 기본품으로 되살리지 않는다.
+  if (source.checkoutState === "excluded" || source.qty === 0) return 0;
+  return Math.max(0, expected - source.qty);
+}
+/** 자동 생성됐고 수량·종류가 원래 기본값인 중복만 제안한다. 직원 수정과 반납 기록은 보존한다. */
+export function packingDuplicateDefaults(t: Trade): { entryId: string; qty: number }[] {
+  if (!t.packing) return [];
+  return t.packing.entries.flatMap(e => {
+    if (!e.modelDefault || e.sourceId || e.custom || e.qty === 0) return [];
+    const owner = packingDevices(t).find(d => d.scheduleId === e.ownerId);
+    if (!owner || !bundledSource(t, owner, e.name)) return [];
+    const row = templateFor(owner.name).find(r => r.name === e.name ||
+      (r.name === "마스 M1용 SDI or HDMI" && e.name === "마스 M1용 HDMI"));
+    if (!row || e.qty !== row.qty * owner.qty) return [];
+    const count = t.packing!.counts[e.partId];
+    if (count && (count.good || count.damaged || count.lost || count.memo)) return [];
+    const qty = bundledDefaultQty(t, owner, e.name, e.qty);
+    return qty < e.qty ? [{ entryId: e.id, qty }] : [];
+  });
+}
+
 function defaultOwner(t: Trade, source: EquipmentItem, name: string): EquipmentItem | undefined {
   const devices = packingDevices(t).filter(e => e.setName === source.setName);
+  const inherited = devices.filter(owner => PACKING_BUNDLE_COVERAGE.some(rule =>
+    rule.defaults.some(defaultName => bundledSource(t, owner, defaultName)?.scheduleId === source.scheduleId)));
+  if (inherited.length === 1) return inherited[0];
   const monitors = devices.filter(e => needsDeviceModel(e) || /스몰HD|포트키|(?:티비로직|TVLogic).*?(?:F-?7|074|7인치)/i.test(e.name));
   if ((name === "노가암" || /스몰HD용/.test(name)) && monitors.length === 1) return monitors[0];
   // 운영자 확인: 카메라 풀세트는 일반 SDI→7인치, 롱라인→LVM의 공통 구성.
@@ -211,15 +248,17 @@ function addDeviceDefaults(t: Trade, p: PackingManifest, owner: EquipmentItem, m
   const rows = templateFor(model).filter(r => ACCESSORY.test(r.name) || r.name.includes("용 "));
   rows.forEach((row,index) => {
     if (p.entries.some(e=>e.id===`default:${owner.scheduleId}:${index}`)) return;
+    const qty = bundledDefaultQty(t, owner, row.name, row.qty * owner.qty);
+    if (qty === 0) return;
     const part = registeredPart(row.name);
     if (t.equipments.some(e=>e.setName===owner.setName && e.checkoutState==="excluded" && (partKey(e.name)===partKey(row.name) || (part && registeredPart(e.name)?.id===part.id)))) return;
     // 기존에 이미 배분된 선·암을 다시 만들지 않는다. 미결 SDI/HDMI도 기존 영상선이 있으면 대체한다.
     const existing = p.entries.filter(e => e.ownerId === owner.scheduleId && e.qty > 0);
-    const hasVideo = /SDI|HDMI/i.test(row.name) && (existing.some(e => /SDI|HDMI/i.test(e.name)) || unassignedVideo(t,p,owner.scheduleId).length>0);
+    const hasVideo = !bundledSource(t, owner, row.name) && /SDI|HDMI/i.test(row.name) && (existing.some(e => /SDI|HDMI/i.test(e.name)) || unassignedVideo(t,p,owner.scheduleId).length>0);
     if (hasVideo || existing.some(e => e.partId === part?.id || e.name === row.name)) return;
     p.entries.push({ id: `default:${owner.scheduleId}:${index}`, ownerId: owner.scheduleId, device: model,
       name: part?.name ?? row.name, partId: part?.id ?? `unresolved:${owner.scheduleId}:${index}`,
-      qty: row.qty * owner.qty, checked: false, unresolved: !part || CHOICE.test(row.name), modelDefault: true });
+      qty, checked: false, unresolved: !part || CHOICE.test(row.name), modelDefault: true });
   });
 }
 function initialManifest(t: Trade, version: number, note = ""): PackingManifest {
@@ -343,7 +382,9 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       return old && before && after && before.name===after.name &&
         !legacyOvercount && (before.qty===after.qty || (old.partId===e.partId && old.qty===e.qty && old.ownerId===e.ownerId)) ? old : e;
     });
+    const duplicateDefaults = new Map(packingDuplicateDefaults(t).map(e => [e.entryId, e.qty]));
     for (const e of prev.entries) {
+      if (duplicateDefaults.has(e.id)) { fresh.entries = fresh.entries.filter(row => row.id !== e.id); fresh.entries.push({...e, qty: duplicateDefaults.get(e.id)!, checked: false}); continue; }
       if (absorbedDefaults.has(e.id) || reusedEntries.has(e.id)) continue;
       if (e.sourceId && reparsedSources.has(e.sourceId)) {
         // 잘못 분리된 미확인 설명 조각만 제거한다. 선택·체크한 실물은 보존한다.

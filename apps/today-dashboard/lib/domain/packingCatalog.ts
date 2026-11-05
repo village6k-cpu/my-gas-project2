@@ -120,6 +120,14 @@ export const PACKING_TEMPLATES: Record<string, {name: string; qty: number}[]> = 
   "타스캠 레코더": [{"name":"마이크로SD 32기가","qty":1}],
 };
 
+// 풀세트에 포함된 실물이 하위 장비의 동봉품도 충족한다. 전역 품목 별칭으로 합치지 않는다.
+// 같은 세트 안의 단일 대상만 연결하므로 별도 대여한 모니터·여분 선은 각각 센다.
+export const PACKING_BUNDLE_COVERAGE = [
+  { setName: "소니 FX3 풀세트", device: "마스 M1", source: "소니 FX3 풀세트용 970더미", defaults: ["마스 M1용 970더미"] },
+  { setName: "소니 FX3 풀세트", device: "마스 M1", source: "소니 FX3 풀세트용 HDMI 라인", defaults: ["마스 M1용 SDI or HDMI", "마스 M1용 HDMI"] },
+  { setName: "소니 FX3 풀세트", device: "마스 M1", source: "매직암", defaults: ["마스 M1용 숏암"] },
+] as const;
+
 // 같은 표준 품목명이 반복되는 검수 경로에서 유니코드/공백 정규화를 재실행하지 않는다.
 const normalizedPartNames = new Map<string, string>();
 export const partKey = (s: string): string => {
