@@ -1,0 +1,88 @@
+--- a/hermes-root-code/gateway/status.py
++++ b/hermes-root-code/gateway/status.py
+@@ -315,7 +315,14 @@
+     # of the same process compare equal without float-precision fragility.
+     try:
+         import psutil  # type: ignore
+-        return int(round(psutil.Process(pid).create_time() * 100))
++        if sys.platform == 'darwin':
++            # Avoid psutil's wall-clock adjustment: cached boot-time offsets can
++            # otherwise give two processes different identities for the same PID.
++            from psutil import _psosx
++            birth = _psosx.Process(pid).create_time(monotonic=True)
++        else:
++            birth = psutil.Process(pid).create_time()
++        return int(round(birth * 100))
+     except Exception:
+         return None
+ 
+--- a/hermes-worker-code/gateway/status.py
++++ b/hermes-worker-code/gateway/status.py
+@@ -315,7 +315,14 @@
+     # of the same process compare equal without float-precision fragility.
+     try:
+         import psutil  # type: ignore
+-        return int(round(psutil.Process(pid).create_time() * 100))
++        if sys.platform == 'darwin':
++            # Avoid psutil's wall-clock adjustment: cached boot-time offsets can
++            # otherwise give two processes different identities for the same PID.
++            from psutil import _psosx
++            birth = _psosx.Process(pid).create_time(monotonic=True)
++        else:
++            birth = psutil.Process(pid).create_time()
++        return int(round(birth * 100))
+     except Exception:
+         return None
+ 
+--- a/control/village-supervisor.py
++++ b/control/village-supervisor.py
+@@ -18,6 +18,16 @@
+     if probe.get('authenticated') is not True:return 'user_auth_required'
+     return 'observe' if probe.get('watcherReady') is True else 'inject'
+ 
++def stable_process_birth(process):
++    # psutil's default macOS timestamp is adjusted when the wall clock changes.
++    # The unadjusted kernel birth time remains stable across interpreter lifetimes.
++    if sys.platform == 'darwin':
++        from psutil import _psosx
++        value = _psosx.Process(process.pid).create_time(monotonic=True)
++    else:
++        value = process.create_time()
++    return int(round(value * 100))
++
+ def gateway_owned(state,home,code):
+     """Reject stale status, reused PIDs, and a different profile's gateway."""
+     import psutil
+@@ -28,7 +38,7 @@
+         process=psutil.Process(state['pid'])
+         argv=process.cmdline();env=process.environ()
+         return (process.is_running() and process.status()!=psutil.STATUS_ZOMBIE
+-            and int(round(process.create_time()*100))==state.get('start_time')
++            and stable_process_birth(process)==state.get('start_time')
+             and argv[1:]==['-m','hermes_cli.main','gateway','run']
+             and env.get('HERMES_HOME')==str(home)
+             and env.get('PYTHONPATH')==str(code))
+--- a/hermes-root/skills/productivity/village-official-quote-delivery/references/shared-browser-exact-room-document-delivery.md
++++ b/hermes-root/skills/productivity/village-official-quote-delivery/references/shared-browser-exact-room-document-delivery.md
+@@ -4,8 +4,10 @@
+ 
+ ## Validated recovery
+ 
+-1. Read CDP `http://127.0.0.1:19223/json/list` and require the authenticated Kakao `/chats` list tab. Never navigate or close that list tab.
+-2. Inspect the list DOM for the exact customer name and current request preview.
++1. Read CDP `http://127.0.0.1:19223/json/list` and identify the authenticated Kakao `/chats` collection tab. This tab drives incoming reservation detection. Never search, change consultation filters, navigate, reload, or close it for quote delivery.
++   - If an exact room id is already established by current authoritative evidence, open a temporary room directly and verify its identity.
++   - Otherwise create a separate temporary `/chats` lookup target. Perform all name searches and consultation-filter changes in that owned lookup target only. Keep its id distinct from the original collection tab and the delivery room. The original tab remaining open is insufficient: a search left active there silently hides every other customer's new request.
++2. Inspect only the temporary lookup-list DOM for the exact customer name and current request preview.
+    - Check the active 상담상태 filter before concluding the room is absent. The list can default to `진행 중 상담`, which hides an existing room after it has moved outside that state.
+    - If exact-name search is empty under `진행 중 상담`, open the existing status selector once, choose `전체 상담`, then rerun the same exact-name search. Require the matched row itself to contain the exact customer title and relevant preview; do not broaden to fuzzy names.
+    - Treat an empty first search as a filter-scoped negative, not proof that no writable Kakao room exists. Ask the user for an alias only after the exact search also fails under `전체 상담` and customer-domain alias lookup has no safe result.
+@@ -19,7 +21,7 @@
+ 5. After load, require both exact customer title and `/chats/{chatId}` URL before reading or sending.
+ 6. Read the relevant conversation, then deliver file first with `attachKakaoFilesViaDevtools`; verify filename stem plus PDF/size/`용량`/`저장하기` DOM evidence.
+ 7. Send the short customer text separately with empty `attachmentPaths`; require full-string or marker readback.
+-8. Re-read the tail for an immediate customer reply. Close only the temporary target and verify the original list tab remains present.
++8. Re-read the tail for an immediate customer reply. Close only the owned temporary room and owned temporary lookup-list targets after confirming neither has an unsent draft. Verify the original collection tab remains on the unfiltered list. Never call quote delivery a schedule update: if a staff-confirmed equipment change is missing from the live schedule, perform the registered-change workflow or explicitly surface a pending unresolved operation; do not silently treat the quote as completion of that change.
+ 
+ ## Historical-document identity reconciliation
+ 
