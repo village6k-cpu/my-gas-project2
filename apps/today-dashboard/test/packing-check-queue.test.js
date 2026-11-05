@@ -16,3 +16,19 @@ test('conflict cancels pending work and loads authoritative state without overwr
 
 test('flush waits through checks queued during the first save',async()=>{const h=harness();const a=h.q.check('t',h.trade.packing.entries[0].id,true);let settled=false;const drain=h.q.flush('t').then(()=>{settled=true;});const b=h.q.check('t','second',true);h.confirm(0);await a;await tick();assert.equal(settled,false);h.confirm(1);await Promise.all([b,drain]);assert.equal(h.q.pending('t'),false);assert.equal(h.finished.length,1);});
 test('flush propagates failed persistence after authoritative recovery',async()=>{const h=harness();const a=h.q.check('t',h.trade.packing.entries[0].id,true);const rejected=assert.rejects(a,/offline/);const drain=assert.rejects(h.q.flush('t'),/offline/);h.requests[0].reject(new Error('offline'));await Promise.all([rejected,drain]);assert.equal(h.q.pending('t'),false);assert.equal(h.finished.length,1);});
+test('a command drains checks then later checks use the command version and note',async()=>{
+  const h=harness(),id=h.trade.packing.entries[0].id;
+  const first=h.q.check('t',id,true);
+  let commandRan=false;
+  const command=h.q.command('t',async()=>{commandRan=true;h.trade.packing.version++;h.trade.packing.note='새 메모';});
+  const later=h.q.check('t','second',true);
+  await tick();assert.equal(commandRan,false);assert.equal(h.requests.length,1);
+  h.confirm(0);await Promise.all([first,command]);await tick();
+  assert.equal(h.requests.length,2);assert.equal(h.requests[1].version,h.requests[0].version+2);assert.equal(h.requests[1].command.note,'새 메모');
+  h.confirm(1);await later;await h.q.flush('t');assert.equal(h.q.pending('t'),false);
+});
+test('a command failure cancels later queued check and releases the queue for recovery',async()=>{
+  const h=harness();const a=h.q.command('t',async()=>{throw new Error('offline')});const b=h.q.check('t','second',true);
+  const results=await Promise.allSettled([a,b]);assert(results.every(r=>r.status==='rejected'));assert.equal(h.requests.length,0);assert.equal(h.q.pending('t'),false);
+  const c=h.q.check('t','second',true);h.confirm(0);await c;assert.equal(h.trade.packing.entries[1].checked,true);
+});

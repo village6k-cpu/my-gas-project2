@@ -1,6 +1,7 @@
 "use client";
 
 import { createPackingCheckQueue } from "./packingCheckQueue";
+import { rebasePackingCommand } from "./packingCommand";
 
 // 클라이언트 옵티미스틱 스토어 (프로토타입).
 // 변이는 즉시 반영 + "저장 중 → 저장됨" 시뮬레이션. 추후 이 레이어만 Supabase 호출로 교체.
@@ -18,7 +19,7 @@ import type {
   Trade,
 } from "../domain/types";
 import { equipmentActualTakenQty } from "../domain/equipmentActual";
-import { packingBlockers, optimisticPackingCheck, packingPreparationTrade, transitionPacking, type PackingCommand } from "../domain/packing";
+import { packingBlockers, optimisticPackingCheck, packingPreparationTrade, transitionPacking, type PackingCommand, type PackingManifest } from "../domain/packing";
 import { authFetch } from "./authFetch";
 import { buildSeed } from "./seed";
 import { isSupabase, supabase } from "../supabase/client";
@@ -2386,40 +2387,76 @@ const packingCheckQueue = createPackingCheckQueue({
 export function savePackingCheck(tradeId: string, entryId: string, checked: boolean): Promise<void> {
   // 본체 체크와 구성품 체크는 서로 다른 정본 행이다. 본체 저장 대기 때문에 클릭을 버리지 않는다.
   // 구성 변경/제외 중에는 기존 원본을 사용한 체크만 잠깐 제한한다.
-  if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) return Promise.reject(new Error("구성 변경을 저장 중입니다. 잠시 후 다시 시도해주세요"));
+  if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
+    return settlePackingDependencies_(tradeId).then(() => packingCheckQueue.check(tradeId, entryId, checked));
+  }
   return packingCheckQueue.check(tradeId, entryId, checked);
 }
 
-export async function savePacking(tradeId: string, version: number, command: PackingCommand): Promise<void> {
-  if (command.action === "refresh" && !activeTradeTransitions.has(tradeId)) {
-    await packingCheckQueue.flush(tradeId);
-    if (pendingRemoveEquipmentTrades.has(tradeId)) {
-      flushRemoveEquipmentBatch_(tradeId);
-      await commitRemoveEquipmentBatch_(tradeId);
-      if (removeEquipmentFailures.has(tradeId)) throw new Error(removeEquipmentFailures.get(tradeId));
+/** 구성품 사실에 영향을 주는 저장만 기다린다. 결제/메모 저장은 검수를 막지 않는다. */
+async function settlePackingDependencies_(tradeId: string, seal = false): Promise<void> {
+  while (activeTradeTransitions.has(tradeId)) {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { unsubscribe(); reject(new Error("이전 장비 변경의 서버 응답이 지연되고 있습니다")); }, 60_000);
+      const unsubscribe = subscribe(() => {
+        if (!activeTradeTransitions.has(tradeId)) { clearTimeout(timer); unsubscribe(); resolve(); }
+      });
+    });
+  }
+  if (seal) await flushItemCheckWritesForTrade(tradeId);
+  await flushQueuedItemQtyForTrade(tradeId);
+  const prefix = `${tradeId}|`;
+  for (;;) {
+    const keys = Object.keys(itemNameMutationIds).filter(key => key.startsWith(prefix) && itemNameMutationIds[key]);
+    if (!keys.length) break;
+    const tasks = keys.map(key => {
+      if (itemNameCommitRetryTimers[key]) { clearTimeout(itemNameCommitRetryTimers[key]); delete itemNameCommitRetryTimers[key]; }
+      return itemNameCommitInFlight[key] ?? commitQueuedItemName(tradeId, key.slice(prefix.length), key);
+    });
+    await Promise.all(tasks);
+    const failed = keys.find(key => itemNameCommitFailures[key]);
+    if (failed) throw itemNameCommitFailures[failed];
+    if (keys.some(key => itemNameCommitRetryTimers[key])) throw new Error("장비명 저장 연결을 확인 중입니다. 입력한 내용은 유지됩니다");
+  }
+  while (pendingRemoveEquipmentTrades.has(tradeId)) {
+    flushRemoveEquipmentBatch_(tradeId);
+    await commitRemoveEquipmentBatch_(tradeId);
+    if (removeEquipmentFailures.has(tradeId)) throw new Error(removeEquipmentFailures.get(tradeId));
+    if (pendingRemoveEquipmentEntries_(tradeId).some(entry => entry.attempts > 0)) throw new Error("장비 제외 저장 연결을 확인 중입니다. 입력한 내용은 유지됩니다");
+  }
+}
+
+export async function savePacking(tradeId: string, version: number, command: PackingCommand, baseSnapshot?: PackingManifest): Promise<void> {
+  const requested = state.trades.find(t => t.tradeId === tradeId);
+  const base = baseSnapshot ?? (requested ? packingPreparationTrade(requested).packing : undefined);
+  // 편집을 시작할 때의 원본이 있으면 입력 차이만 병합한다. 원본 없는 오래된 전체 목록은 덮어쓰지 않는다.
+  if ((base?.version ?? 0) !== version && !["refresh", "seal"].includes(command.action)) throw new Error("편집 중 구성품이 변경됐습니다. 최신 내역을 확인해주세요");
+  return packingCheckQueue.command(tradeId, async () => {
+    await settlePackingDependencies_(tradeId, command.action === "seal");
+    const before=state.trades.find(t=>t.tradeId===tradeId);
+    const latest = before ? packingPreparationTrade(before).packing : undefined;
+    command = rebasePackingCommand(command, base, latest);
+    version = latest?.version ?? 0;
+    const preview=before ? optimisticPackingCheck(before,version,command) : undefined;
+    const saveId = beginTradeTransition(tradeId);
+    if (preview) mutateTrade(tradeId,t=>({...t,packing:preview}),false);
+    try {
+      const response = await authFetch("/api/packing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tradeId, version, command }), signal: AbortSignal.timeout(20_000) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "구성품 저장 실패");
+      if (!result.packing || result.packing.version !== version + 1 || !Array.isArray(result.packing.entries)) throw new Error("구성품 저장 응답을 확인할 수 없습니다");
+      mutateTrade(tradeId, t => ({ ...t, packing: result.packing }), false);
+      finishTradeSave(tradeId, saveId, "saved", "구성품 저장됨");
+    } catch (error) {
+      // 조회까지 실패해도 저장되지 않은 체크를 완료처럼 남기지 않는다.
+      if (preview) mutateTrade(tradeId,t=>t.packing===preview ? {...t,packing:before!.packing} : t,false);
+      // 응답 유실/다른 직원의 수정 후에는 서버 사실을 다시 받아 중복 추가를 막는다.
+      const fresh = await fetchTradesByIds([tradeId]).catch(() => []);
+      if (fresh.length) set({ trades: mergeTradeChanges(state.trades, fresh) });
+      finishTradeSave(tradeId, saveId, "error", "구성품 저장 상태를 확인해주세요");
+      throw error;
     }
-    version = state.trades.find(t => t.tradeId === tradeId)?.packing?.version ?? version;
-  }
-  if (hasTradePending(tradeId)) throw new Error("이 거래의 저장을 마친 뒤 다시 시도해주세요");
-  const before=state.trades.find(t=>t.tradeId===tradeId);
-  const preview=before ? optimisticPackingCheck(before,version,command) : undefined;
-  const saveId = beginTradeTransition(tradeId);
-  if (preview) mutateTrade(tradeId,t=>({...t,packing:preview}),false);
-  try {
-    const response = await authFetch("/api/packing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tradeId, version, command }), signal: AbortSignal.timeout(20_000) });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "구성품 저장 실패");
-    mutateTrade(tradeId, t => ({ ...t, packing: result.packing }), false);
-    finishTradeSave(tradeId, saveId, "saved", "구성품 저장됨");
-  } catch (error) {
-    // 조회까지 실패해도 저장되지 않은 체크를 완료처럼 남기지 않는다.
-    if (preview) mutateTrade(tradeId,t=>t.packing===preview ? {...t,packing:before!.packing} : t,false);
-    // 응답 유실/다른 직원의 수정 후에는 서버 사실을 다시 받아 중복 추가를 막는다.
-    const fresh = await fetchTradesByIds([tradeId]).catch(() => []);
-    if (fresh.length) set({ trades: mergeTradeChanges(state.trades, fresh) });
-    finishTradeSave(tradeId, saveId, "error", "구성품 저장 상태를 확인해주세요");
-    throw error;
-  }
+  });
 }
 
 export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
