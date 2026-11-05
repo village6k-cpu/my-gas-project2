@@ -5,9 +5,15 @@ import type { Phase, Trade } from "@/lib/domain/types";
 import { setPhaseNote } from "@/lib/data/store";
 
 const NOTE_LABEL: Record<Phase, string> = {
-  checkout: "반출 전체 메모",
-  checkin: "반납 전체 메모",
+  checkout: "반출 메모",
+  checkin: "반납 메모",
 };
+
+// 이전 인계 메모도 같은 카드에서 읽는다. 기존 기록은 덮어쓰거나 삭제하지 않는다.
+export function legacyHandoverNote(trade: Trade): string {
+  const legacy = String(trade.packing?.note ?? "").trim();
+  return legacy && legacy !== String(trade.noteCheckout ?? "").trim() ? legacy : "";
+}
 
 // 추가 반출 내역은 반납 때도 필요하다. 카드 접힘과 관계없이 전문을 표시한다.
 export function TradeNotes({ trade, phase, showAdd, onEditingChange }: {
@@ -18,12 +24,13 @@ export function TradeNotes({ trade, phase, showAdd, onEditingChange }: {
     setEditing(next);
     onEditingChange?.(next !== null);
   }
-  const notes: { phase: Phase; text: string }[] = [
-    { phase: "checkout", text: String(trade.noteCheckout ?? "").trim() },
+  const legacy = legacyHandoverNote(trade);
+  const notes: { phase: Phase; text: string; legacy?: string }[] = [
+    { phase: "checkout", text: String(trade.noteCheckout ?? "").trim(), legacy },
     { phase: "checkin", text: String(trade.noteCheckin ?? "").trim() },
   ];
   const current = notes.find((note) => note.phase === phase);
-  if (!editing && !showAdd && !notes.some((note) => note.text)) return null;
+  if (!editing && !showAdd && !notes.some((note) => note.text || note.legacy)) return null;
 
   return (
     <div className="space-y-2 px-4 pl-5 pt-3">
@@ -31,7 +38,7 @@ export function TradeNotes({ trade, phase, showAdd, onEditingChange }: {
         if (editing === note.phase) {
           return <TradeNoteEditor key={note.phase} trade={trade} phase={note.phase} onClose={() => changeEditing(null)} />;
         }
-        if (!note.text) return null;
+        if (!note.text && !note.legacy) return null;
         const checkout = note.phase === "checkout";
         return (
           <section
@@ -49,13 +56,14 @@ export function TradeNotes({ trade, phase, showAdd, onEditingChange }: {
                 onClick={() => changeEditing(note.phase)}
                 aria-label={`${NOTE_LABEL[note.phase]} 수정`}
                 className="tap min-h-11 shrink-0 rounded-lg border border-ink/20 bg-white px-3 text-[13px] font-bold text-ink-soft focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600"
-              >수정</button>
+              >{note.text ? "수정" : "메모 추가"}</button>
             </div>
-            <p className="mt-2 whitespace-pre-wrap break-words text-[16px] font-bold leading-relaxed text-ink [overflow-wrap:anywhere]">{note.text}</p>
+            {note.text && <p className="mt-2 whitespace-pre-wrap break-words text-[16px] font-bold leading-relaxed text-ink [overflow-wrap:anywhere]">{note.text}</p>}
+            {note.legacy && <p className="mt-2 whitespace-pre-wrap break-words text-[16px] leading-relaxed text-ink"><span className="block text-xs text-ink-mute">이전 인계 기록</span>{note.legacy}</p>}
           </section>
         );
       })}
-      {!editing && showAdd && !current?.text && (
+      {!editing && showAdd && !current?.text && !current?.legacy && (
         <button
           type="button"
           onClick={() => changeEditing(phase)}
@@ -78,9 +86,10 @@ function TradeNoteEditor({ trade, phase, onClose }: { trade: Trade; phase: Phase
         value={value}
         onChange={(event) => setValue(event.target.value)}
         rows={4}
-        placeholder={phase === "checkout" ? "추가 반출 장비·수량·전달사항을 적어주세요" : "반납 확인 내역·전달사항을 적어주세요"}
+        placeholder={phase === "checkout" ? "반출 시 전달사항을 적어주세요. 장비·수량은 준비 목록에서 변경합니다" : "반납 확인 내역·전달사항을 적어주세요"}
         className="w-full resize-y rounded-lg border border-line bg-white px-3 py-2 text-[16px] leading-relaxed text-ink outline-none placeholder:text-ink-mute focus:border-brand-500"
       />
+      {phase === "checkout" && legacyHandoverNote(trade) && <p className="mt-2 whitespace-pre-wrap text-sm text-ink-soft"><span className="block text-xs">이전 인계 기록</span>{legacyHandoverNote(trade)}</p>}
       <div className="mt-2 flex justify-end gap-2">
         <button type="button" onClick={onClose} className="tap min-h-11 rounded-lg px-3 text-[14px] font-semibold text-ink-soft">취소</button>
         <button

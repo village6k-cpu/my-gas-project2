@@ -22,11 +22,13 @@ const example = (): Trade => ({
 export default function PackingDemo() {
   const [trade, setTrade] = useState(example);
   const [phase, setPhase] = useState<"checkout" | "checkin">("checkout");
+  const [error, setError] = useState("");
   const [session, setSession] = useState(0);
   const command = async (version: number, cmd: PackingCommand) => {
     if ((trade.packing?.version ?? 0) !== version) throw new Error("최신 내역을 확인해주세요");
     const packing = transitionPacking(trade, cmd, new Date().toISOString());
     setTrade({ ...trade, packing });
+    setError("");
   };
   return <main className="mx-auto max-w-2xl px-3 py-6">
     <a href="/" className="text-sm font-bold text-brand-700">← 실제 일정으로</a>
@@ -35,8 +37,15 @@ export default function PackingDemo() {
     <div className="mb-3 flex gap-2">
       <button className={`rounded-lg px-4 py-2 font-bold ${phase === "checkout" ? "bg-brand-600 text-white" : "bg-white"}`} onClick={() => setPhase("checkout")}>1. 반출 준비</button>
       <button disabled={trade.packing?.phase !== "sealed"} className={`rounded-lg px-4 py-2 font-bold disabled:opacity-40 ${phase === "checkin" ? "bg-checkin-fg text-white" : "bg-white"}`} onClick={() => { setTrade({ ...trade, setupDone: true }); setPhase("checkin"); }}>2. 반납 확인</button>
-      <button className="ml-auto text-xs font-bold text-ink-mute" onClick={() => { setTrade(example()); setPhase("checkout"); setSession(session + 1); }}>처음부터</button>
+      <button className="ml-auto text-xs font-bold text-ink-mute" onClick={() => { setTrade(example()); setPhase("checkout"); setSession(session + 1); setError(""); }}>처음부터</button>
     </div>
+    {phase === "checkout" && !trade.setupDone && <button className="my-3 w-full rounded-xl bg-checkout-fg p-3 font-bold text-white" onClick={() => {
+      try {
+        const packing = transitionPacking(trade, { action: "seal" }, new Date().toISOString());
+        setTrade({ ...trade, packing, setupDone: true }); setError("");
+      } catch (e) { setError(e instanceof Error ? e.message : "준비 목록을 확인해주세요"); }
+    }}>반출 완료</button>}
+    {error && <p role="alert" className="mb-3 text-sm text-attention-fg">{error}</p>}
     <HandoverChecklist key={session} trade={trade} phase={phase} onPackingCommand={command} preview />
   </main>;
 }

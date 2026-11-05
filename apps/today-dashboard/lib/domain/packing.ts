@@ -73,6 +73,14 @@ export function packingReservationChanges(t: Trade): string[] {
   return changes;
 }
 
+/** 예약 준비의 동기화 단계는 직원 버튼 없이 처리한다. 반출된 기준은 자동 변경하지 않는다. */
+export function packingPreparationCommand(t: Trade): PackingCommand | undefined {
+  if (!t.packing || packingStarted(t)) return;
+  const replacement = packingDeviceReplacements(t)[0];
+  if (replacement) return { action: "reconcile", ownerId: replacement.scheduleId, name: replacement.name };
+  if (packingNeedsUpgrade(t.packing) || packingReservationChanges(t).length) return { action: "refresh" };
+}
+
 /** 체크만 바꾼 요청은 화면에 먼저 반영한다. 구성 변경·확정은 서버 응답을 기다린다. */
 export function optimisticPackingCheck(t: Trade, version: number, command: PackingCommand): PackingManifest | undefined {
   const p=t.packing;

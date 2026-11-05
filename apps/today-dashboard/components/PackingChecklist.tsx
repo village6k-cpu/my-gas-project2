@@ -2,9 +2,9 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
-import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingEntryNeedsPreparation, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingManifest, type PackingEntry } from "@/lib/domain/packing";
+import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingPreparationCommand, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingManifest, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor, registeredPart } from "@/lib/domain/packingCatalog";
-import { savePacking, savePackingCheck } from "@/lib/data/store";
+import { savePacking, savePackingCheck, syncPackingPreparation } from "@/lib/data/store";
 import { packingDeviceReplacements, packingReplacementEntries } from "@/lib/domain/packing";
 
 type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
@@ -18,30 +18,29 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<PackingEntry | null>(null);
   const [editingBase, setEditingBase] = useState<PackingManifest>();
-  const [note, setNote] = useState<string | null>(null);
-  const [noteBase, setNoteBase] = useState<PackingManifest>();
   const p = trade.packing;
   const replacements = useMemo(() => packingDeviceReplacements(trade), [p, trade.equipments, trade.setupDone, trade.returnDone, trade.contractStatus]);
   const replacementKey = JSON.stringify(replacements.map(e => [e.scheduleId, e.name, e.qty]));
   const reservationChanges = packingReservationChanges(trade);
   const reservationChangeKey = JSON.stringify(reservationChanges);
   const syncAttempted = useRef("");
+  const [syncRetry, setSyncRetry] = useState(0);
+  const autoCommand = packingPreparationCommand(trade);
   useEffect(() => {
-    if (!p || phase !== "checkout" || onCommand || packingStarted(trade) || (!replacements.length && !reservationChanges.length)) return;
-    const key = `${trade.tradeId}:${p.version}:${replacementKey}:${reservationChangeKey}`;
+    if (!p || phase !== "checkout" || onCommand || packingStarted(trade) || !autoCommand) return;
+    const key = `${trade.tradeId}:${p.version}:${replacementKey}:${reservationChangeKey}:${syncRetry}`;
     if (syncAttempted.current === key) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     const sync = async () => {
       // 저장 큐가 장비 변경 확정을 기다린다. 다른 저장 때문에 자동 반영을 멈추지 않는다.
       syncAttempted.current = key;
-      const owner = replacements[0];
-      try { await savePacking(trade.tradeId, p.version, owner ? { action: "reconcile", ownerId: owner.scheduleId, name: owner.name } : { action: "refresh" }); if (!cancelled) setError(""); }
+      try { await syncPackingPreparation(trade.tradeId); if (!cancelled) setError(""); }
       catch (e) { if (!cancelled) setError(e instanceof Error ? e.message : "교체 구성품 반영 실패. 다시 확인해주세요"); }
     };
     timer = setTimeout(sync, 100);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [trade.tradeId, p?.version, replacementKey, reservationChangeKey, phase, onCommand, trade.setupDone, trade.packingDispatchedAt, trade.contractStatus]);
+  }, [trade.tradeId, p?.version, replacementKey, reservationChangeKey, phase, onCommand, trade.setupDone, trade.packingDispatchedAt, trade.contractStatus, syncRetry, !!autoCommand]);
   const devices = useMemo(() => packingDevices(trade), [trade.equipments]);
   const entriesByOwner = useMemo(() => {
     const rows = new Map<string | undefined, PackingEntry[]>();
@@ -67,13 +66,6 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const total = groups.reduce((n, g) => n + g.expected, 0);
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
   const requiredIssues = p?.phase === "draft" ? packingRequiredIssues(trade) : [];
-  const unfinished = p?.entries.filter(packingEntryNeedsPreparation) ?? [];
-  const sealReason = p && packingNeedsUpgrade(p) ? "구성품 목록을 먼저 업데이트해주세요."
-    : reservationChanges.length ? "예약 장비 변경 내용을 준비 목록에 반영해주세요."
-    : requiredIssues.length ? requiredIssues.join(" / ")
-    : unfinished.length ? `준비 확인 필요 ${unfinished.length}건: ${unfinished.slice(0, 3).map(e => e.name).join(", ")}${unfinished.length > 3 ? " 외" : ""}`
-    : devices.some(e => needsDeviceModel(e) && !p?.deviceModels?.[e.scheduleId]) ? "7인치 모니터의 실제 모델을 선택해주세요."
-    : note !== null ? "입력한 인계 메모를 저장하거나 취소해주세요." : "";
   const check = async (e: PackingEntry) => {
     if (onCommand) { await update(e, { checked: !e.checked }); return; }
     setChecking(n => n + 1); setError("");
@@ -87,40 +79,32 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
       <div><h3 className="text-sm font-extrabold text-brand-700">구성품 검수</h3>
         <p className="mt-1 text-xs text-ink-mute">{p ? `${p.phase === "sealed" ? "확정된 반출" : "반출 준비"} · ${total}개${unresolvedQty ? ` · 종류 미선택 ${unresolvedQty}개` : ""}${phase === "checkin" ? ` · 개별 미확인 ${missing}개` : ""}` : "실제 챙기는 종류와 개수를 장비별로 기록합니다."}</p></div>
     </div>
-    <div aria-live="polite">{error && <p role="alert" className="m-3 rounded-lg bg-attention-bg p-2 text-sm font-bold text-attention-fg">{error}</p>}</div>
+    <div aria-live="polite">{error && <p role="alert" className="m-3 rounded-lg bg-attention-bg p-2 text-sm font-bold text-attention-fg">{error}{autoCommand && <button className={`${button} ml-2 bg-white`} onClick={() => setSyncRetry(n => n + 1)}>다시 시도</button>}</p>}</div>
     {!p && children}
     {p && <fieldset disabled={busy} className="min-w-0 disabled:opacity-60">
       {phase === "checkout" ? <>
-        {reservationChanges.length > 0 && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm" role="status"><p className="font-bold">예약 장비가 변경되었습니다</p><p>{reservationChanges.join(" / ")}</p><button className={`${button} mt-2 bg-white`} onClick={() => run({action:"refresh"})}>예약 변경 내용 반영</button></div>}
-        {requiredIssues.length > 0 && !packingNeedsUpgrade(p) && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm"><p>{requiredIssues.join(" / ")}</p><button className={`${button} mt-2 bg-white`} onClick={() => run({action:"refresh"})}>구성품 목록 새로고침</button></div>}
-        {packingNeedsUpgrade(p) ? <div className="my-3 rounded-lg bg-warn-bg p-3 text-sm"><p>이전 묶음 목록을 장비별 표준 구성품으로 업데이트해야 합니다.</p><button className={`${button} mt-2 bg-white`} onClick={() => run({ action: "refresh" })}>구성품 목록 업데이트</button></div> : null}
+        {reservationChanges.length > 0 && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm" role="status"><p className="font-bold">예약 변경을 반영하고 있습니다…</p><p>{reservationChanges.join(" / ")}</p></div>}
+        {requiredIssues.length > 0 && !packingNeedsUpgrade(p) && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm"><p>{requiredIssues.join(" / ")}</p><button className={`${button} mt-2 bg-white`} onClick={() => run({action:"refresh"})}>누락 구성품 복구</button></div>}
+        {packingNeedsUpgrade(p) ? <div className="my-3 rounded-lg bg-warn-bg p-3 text-sm"><p>구성품 목록을 업데이트하고 있습니다…</p></div> : null}
         {children ?? devices.map(device => <div key={device.scheduleId} className="my-3 rounded-xl border border-line p-3"><h4 className="font-extrabold">{p.deviceModels?.[device.scheduleId] ?? device.name}</h4><PackingDevice ownerId={device.scheduleId} /></div>)}
         {p.entries.some(e => !e.ownerId) && !packingNeedsUpgrade(p) && <PackingDevice />}
         <details className="m-3 rounded-lg bg-paper p-3"><summary className="cursor-pointer text-sm font-bold">실물별 총수량 · {total}개{unresolvedQty > 0 ? ` + 종류 미선택 ${unresolvedQty}개` : ""}</summary>
           {groups.map(g => <div key={g.id} className="mt-2 text-sm"><strong>{g.name} ×{g.expected}</strong><div className="text-xs text-ink-mute">{g.entries.map(e => `${e.device} ${e.qty}`).join(" + ")}</div></div>)}
         </details>
-        <div className="m-3 space-y-2">
-          {p.phase === "draft" ? <><label className="block text-xs font-bold text-ink-mute">인계 메모 (수량은 위 목록으로 확인)</label>
-            <textarea value={note ?? p.note} onChange={e => { if (note === null) setNoteBase(p); setNote(e.target.value); }} maxLength={2000} className="w-full rounded-lg border border-line p-2 text-sm" placeholder="예: 고객 요청으로 D탭 라인 대신 더미 사용" />
-            {note !== null && <><button className={button} onClick={async () => { if (await run({ action: "save", entries: p.entries, note }, noteBase?.version ?? p.version, noteBase)) setNote(null); }}>메모 저장</button><button className={button} onClick={() => setNote(null)}>입력 취소</button></>}
-            <details className="text-xs text-ink-mute"><summary>예약 장비가 변경됐나요?</summary><button className={button} onClick={() => run({ action: "refresh" })}>예약 변경 내용 불러오기</button></details>
-            <p id={`packing-seal-reason-${trade.tradeId}`} className="h-12 overflow-y-auto text-xs font-bold text-attention-fg">{sealReason}</p>
-            <button className={`${button} w-full bg-brand-600 text-white`} disabled={!!sealReason} aria-describedby={sealReason ? `packing-seal-reason-${trade.tradeId}` : undefined} onClick={() => run({ action: "seal" })}>이 구성으로 반출 준비 확정</button>
-          </> : <><p className="rounded-lg bg-checkin-bg p-3 text-sm font-bold text-checkin-fg">✓ 반출 구성품 확정 · 반납 때 이 수량과 대조합니다.</p>
-            {p.note && <p className="whitespace-pre-wrap text-sm text-ink-soft">반출 메모: {p.note}</p>}
-            {!packingStarted(trade) && <button className={button} onClick={() => run({ action: "revise" })}>구성 다시 준비</button>}</>}
-        </div>
+        {p.phase === "sealed" && <div className="m-3 space-y-2">
+          <p className="text-xs text-ink-mute">반출 구성품이 확정되었습니다. 반납 때 이 수량과 대조합니다.</p>
+          {!packingStarted(trade) && <button className={button} onClick={() => run({ action: "revise" })}>구성 수정</button>}
+        </div>}
       </> : <div className="p-3">
         {p.phase !== "sealed" ? <p className="text-sm text-ink-mute">반출 구성품이 미확정된 기록입니다. 현장에서 확인했다면 개별 입력 없이 반납완료할 수 있습니다.</p> : <>
           <p className="mb-3 text-xs text-ink-mute">같은 실물은 한 번만 셉니다. 일부만 받았으면 받은 수량만 저장하세요. 개별 입력이 어려우면 직원 판단으로 반납완료할 수 있습니다.</p>
           {groups.map(g => <PackingReturnRow key={g.id} version={p.version} group={g} locked={trade.returnDone} onSave={(count, version) => run({ action: "receive", partId: g.id, count }, version)} />)}
-          {p.note && <p className="mt-2 whitespace-pre-wrap rounded-lg bg-warn-bg p-2 text-sm">반출 메모: {p.note}</p>}
         </>}
       </div>}
-      {p.sources.some(s => trade.equipments.find(e => e.scheduleId === s.id)?.memoCheckout) && <details className="m-3 rounded-lg bg-warn-bg p-2 text-xs"><summary>기존 반출 메모 확인</summary>{p.sources.map(s => {
+      {p.sources.filter(s => !s.device).some(s => trade.equipments.find(e => e.scheduleId === s.id)?.memoCheckout) && <div className="m-3 space-y-2">{p.sources.filter(s => !s.device).map(s => {
         const memo = trade.equipments.find(e => e.scheduleId === s.id)?.memoCheckout;
-        return memo ? <p key={s.id} className="mt-2 whitespace-pre-wrap">{s.name}: {memo}</p> : null;
-      })}</details>}
+        return memo ? <p key={s.id} className="rounded-lg bg-warn-bg p-2 text-sm whitespace-pre-wrap"><strong>{s.name} 메모</strong><br />{memo}</p> : null;
+      })}</div>}
     </fieldset>}
     {phase === "checkin" && children}
     {editing && p && <PackingEditor key={editing.id} entry={editing} entries={p.entries} devices={devices.map(e=>({id:e.scheduleId,name:p.deviceModels?.[e.scheduleId] ?? e.name}))} busy={busy} error={error} onClose={() => setEditing(null)} onSave={async (entry, add) => {
@@ -156,7 +140,7 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
       {replacementEntries.map(e => <div key={e.id} className={`flex justify-between gap-2 ${e.qty ? "" : "line-through text-ink-faint"}`}><span>{e.name}</span><strong>{e.qty ? `×${e.qty}` : "제외"}</strong></div>)}
       {!replacementEntries.some(e=>e.qty>0) && <p>등록된 기본 동봉품이 없습니다. 추가로 챙긴 품목은 구성품에 기록해주세요.</p>}
       <p className="text-xs text-ink-mute">{packingStarted(trade) ? "반출 완료 후 장비가 변경됐습니다. 위 구성품이 실제로 반출됐는지 확인해주세요." : "새 장비의 기본 구성품을 자동으로 반영합니다. 새로 들어온 구성품은 다시 체크해주세요."}</p>
-      <button className={`${button} text-brand-700`} disabled={busy} onClick={()=>run({action:"reconcile",ownerId:replacement.scheduleId,name:replacement.name,...(packingStarted(trade)?{confirmed:true}:{})})}>{packingStarted(trade) ? "이 구성품으로 교체 반출 확인" : "교체 구성품 반영"}</button>
+      {packingStarted(trade) && <button className={`${button} text-brand-700`} disabled={busy} onClick={()=>run({action:"reconcile",ownerId:replacement.scheduleId,name:replacement.name,confirmed:true})}>이 구성품으로 교체 반출 확인</button>}
     </div>}
     {modelNeeded && <label className="mb-2 block text-xs font-bold">실제 모니터 모델
       <select aria-label="실제 모니터 모델" disabled={busy || p.phase !== "draft" || packingStarted(trade)} value={p.deviceModels?.[ownerId!] ?? ""} onChange={e => run({action:"model",ownerId:ownerId!,model:e.target.value})} className="mt-1 w-full rounded-lg border border-line bg-white p-2 text-sm">

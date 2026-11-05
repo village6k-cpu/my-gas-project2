@@ -19,7 +19,7 @@ import type {
   Trade,
 } from "../domain/types";
 import { equipmentActualTakenQty } from "../domain/equipmentActual";
-import { packingBlockers, optimisticPackingCheck, packingPreparationTrade, transitionPacking, type PackingCommand, type PackingManifest } from "../domain/packing";
+import { packingBlockers, optimisticPackingCheck, packingPreparationCommand, packingPreparationTrade, transitionPacking, type PackingCommand, type PackingManifest } from "../domain/packing";
 import { authFetch } from "./authFetch";
 import { buildSeed } from "./seed";
 import { isSupabase, supabase } from "../supabase/client";
@@ -2433,29 +2433,57 @@ export async function savePacking(tradeId: string, version: number, command: Pac
   if ((base?.version ?? 0) !== version && !["refresh", "seal"].includes(command.action)) throw new Error("편집 중 구성품이 변경됐습니다. 최신 내역을 확인해주세요");
   return packingCheckQueue.command(tradeId, async () => {
     await settlePackingDependencies_(tradeId, command.action === "seal");
+    if (command.action === "seal") await syncPackingPreparation_(tradeId);
     const before=state.trades.find(t=>t.tradeId===tradeId);
     const latest = before ? packingPreparationTrade(before).packing : undefined;
     command = rebasePackingCommand(command, base, latest);
     version = latest?.version ?? 0;
-    const preview=before ? optimisticPackingCheck(before,version,command) : undefined;
-    const saveId = beginTradeTransition(tradeId);
-    if (preview) mutateTrade(tradeId,t=>({...t,packing:preview}),false);
-    try {
-      const response = await authFetch("/api/packing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tradeId, version, command }), signal: AbortSignal.timeout(20_000) });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "구성품 저장 실패");
-      if (!result.packing || result.packing.version !== version + 1 || !Array.isArray(result.packing.entries)) throw new Error("구성품 저장 응답을 확인할 수 없습니다");
-      mutateTrade(tradeId, t => ({ ...t, packing: result.packing }), false);
-      finishTradeSave(tradeId, saveId, "saved", "구성품 저장됨");
-    } catch (error) {
-      // 조회까지 실패해도 저장되지 않은 체크를 완료처럼 남기지 않는다.
-      if (preview) mutateTrade(tradeId,t=>t.packing===preview ? {...t,packing:before!.packing} : t,false);
-      // 응답 유실/다른 직원의 수정 후에는 서버 사실을 다시 받아 중복 추가를 막는다.
-      const fresh = await fetchTradesByIds([tradeId]).catch(() => []);
-      if (fresh.length) set({ trades: mergeTradeChanges(state.trades, fresh) });
-      finishTradeSave(tradeId, saveId, "error", "구성품 저장 상태를 확인해주세요");
-      throw error;
-    }
+    if (command.action === "seal" && before) transitionPacking(before, command, new Date().toISOString());
+    await persistPackingCommand_(tradeId, version, command);
+  });
+}
+
+async function persistPackingCommand_(tradeId: string, version: number, command: PackingCommand): Promise<void> {
+  const before = state.trades.find(t => t.tradeId === tradeId);
+  const preview=before ? optimisticPackingCheck(before,version,command) : undefined;
+  const saveId = beginTradeTransition(tradeId);
+  if (preview) mutateTrade(tradeId,t=>({...t,packing:preview}),false);
+  try {
+    const response = await authFetch("/api/packing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tradeId, version, command }), signal: AbortSignal.timeout(20_000) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "구성품 저장 실패");
+    if (!result.packing || result.packing.version !== version + 1 || !Array.isArray(result.packing.entries)) throw new Error("구성품 저장 응답을 확인할 수 없습니다");
+    mutateTrade(tradeId, t => ({ ...t, packing: result.packing }), false);
+    finishTradeSave(tradeId, saveId, "saved", "구성품 저장됨");
+  } catch (error) {
+    // 조회까지 실패해도 저장되지 않은 체크를 완료처럼 남기지 않는다.
+    if (preview) mutateTrade(tradeId,t=>t.packing===preview ? {...t,packing:before!.packing} : t,false);
+    // 응답 유실/다른 직원의 수정 후에는 서버 사실을 다시 받아 중복 추가를 막는다.
+    const fresh = await fetchTradesByIds([tradeId]).catch(() => []);
+    if (fresh.length) set({ trades: mergeTradeChanges(state.trades, fresh) });
+    finishTradeSave(tradeId, saveId, "error", "구성품 저장 상태를 확인해주세요");
+    throw error;
+  }
+}
+
+/** 같은 저장 큐에서 최신 예약을 반영한다. 새 실물의 준비 체크는 직원이 직접 한다. */
+async function syncPackingPreparation_(tradeId: string): Promise<void> {
+  const attempted = new Set<string>();
+  while (true) {
+    const trade = state.trades.find(t => t.tradeId === tradeId);
+    const command = trade && packingPreparationCommand(trade);
+    if (!trade || !command) return;
+    const key = JSON.stringify([command, trade.packing?.sources]);
+    if (attempted.has(key)) throw new Error("예약 변경을 반영하지 못했습니다. 다시 시도해주세요");
+    attempted.add(key);
+    await persistPackingCommand_(tradeId, trade.packing!.version, command);
+  }
+}
+
+export async function syncPackingPreparation(tradeId: string): Promise<void> {
+  return packingCheckQueue.command(tradeId, async () => {
+    await settlePackingDependencies_(tradeId, false);
+    await syncPackingPreparation_(tradeId);
   });
 }
 
@@ -2493,7 +2521,6 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
   // 체크가 끝난 준비 목록은 같은 클릭에서 먼저 확정한다. 서버 확정 전에는 반출 완료를 표시하지 않는다.
   if (done && current.packing?.phase === "draft") {
     try {
-      transitionPacking(current, { action: "seal" }, new Date().toISOString());
       await savePacking(tradeId, current.packing.version, { action: "seal" });
       if (state.trades.find(t => t.tradeId === tradeId)?.packing?.phase !== "sealed") throw new Error("구성품 확정 상태를 확인할 수 없습니다");
       if (state.trades.find(t => t.tradeId === tradeId)?.setupDone) return { ok: true };
