@@ -1,0 +1,2 @@
+# Stored unified diff has CRLF context and mandatory blank-line context markers.
+native-adapter-concurrency.patch -text whitespace=-blank-at-eol,cr-at-eol

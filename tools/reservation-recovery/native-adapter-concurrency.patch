@@ -1,0 +1,119 @@
+--- a/hermes-root/profiles/kakaoworker/plugins/kakao_village/adapter.py
++++ b/hermes-root/profiles/kakaoworker/plugins/kakao_village/adapter.py
+@@ -83,6 +83,9 @@
+         )
+         self._pending_claim_handoffs: Dict[str, tuple[_TurnCorrelation, asyncio.Task]] = {}
+         self._stop_requested = threading.Event()
++        # Reserve capacity before leasing, not after the gateway can reject a turn.
++        self._claim_reservations = 0
++        self._leased_claims: set[tuple[str, str, int, str]] = set()
+ 
+     @property
+     def name(self) -> str:
+@@ -155,31 +158,83 @@
+         handler_owner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+         return getattr(handler_owner, "_startup_restore_in_progress", False) is True
+ 
++    def _claim_capacity_available(self) -> bool:
++        from hermes_cli.active_sessions import resolve_max_concurrent_sessions
++        owner = getattr(getattr(self, "_message_handler", None), "__self__", None)
++        limit = resolve_max_concurrent_sessions(getattr(owner, "config", None))
++        if limit is None:
++            return True
++        occupied = len(self._leased_claims) + self._claim_reservations
++        running_count = getattr(owner, "_running_agent_count", None)
++        if callable(running_count):
++            occupied = max(occupied, running_count() + self._claim_reservations)
++        return occupied < limit
++
++    def _retain_claim_slot(self, fence: tuple[str, str, int, str], session_key: str) -> None:
++        """Keep capacity through a waiting handoff and its subsequent native turn."""
++        if fence not in self._leased_claims:
++            return
++        pending = self._pending_claim_handoffs.get(session_key)
++        task = None
++        if pending is not None:
++            correlation, pending_task = pending
++            pending_fence = (correlation.job_id, correlation.room_key,
++                             correlation.room_revision, correlation.lease_id)
++            if pending_fence == fence and not pending_task.done():
++                task = pending_task
++        if task is None and self._claim_fences.get(session_key) == fence:
++            active = self._session_tasks.get(session_key)
++            if active is not None and not active.done():
++                task = active
++        if task is None:
++            self._leased_claims.discard(fence)
++            return
++        task.add_done_callback(lambda _done: self._retain_claim_slot(fence, session_key))
++
+     async def _poll_once(self) -> bool:
+-        event = await asyncio.to_thread(self._bridge.claim, self._consumer_id, _POLL_WAIT_MS)
+-        if event is None:
++        if self._stop_requested.is_set() or not self._claim_capacity_available():
+             return False
+-        if not isinstance(event, GatewayEvent):
+-            raise BridgeClientError("bridge returned an invalid event")
+-        timestamp = parse_timestamp(event.detected_at)
+-        source = self.build_source(
+-            chat_id=event.room_key,
+-            chat_name=event.room_key,
+-            chat_type="dm",
+-            user_id="village-kakao-bridge",
+-            user_name="Village Kakao Bridge",
+-        )
+-        message = MessageEvent(
+-            text=event.prompt,
+-            message_type=MessageType.TEXT,
+-            source=source,
+-            message_id=event.job_id,
+-            raw_message=event.raw,
+-            metadata={"_kakao_bridge_lease_id": event.lease_id},
+-            timestamp=timestamp,
+-        )
+-        await self.handle_message(message)
+-        return True
++        # No await between checking and reserving: concurrent poll calls cannot
++        # both lease the same last slot. The bridge keeps excess work ready.
++        self._claim_reservations += 1
++        fence = None
++        session_key = None
++        try:
++            event = await asyncio.to_thread(self._bridge.claim, self._consumer_id, _POLL_WAIT_MS)
++            if event is None:
++                return False
++            if not isinstance(event, GatewayEvent):
++                raise BridgeClientError("bridge returned an invalid event")
++            timestamp = parse_timestamp(event.detected_at)
++            source = self.build_source(
++                chat_id=event.room_key,
++                chat_name=event.room_key,
++                chat_type="dm",
++                user_id="village-kakao-bridge",
++                user_name="Village Kakao Bridge",
++            )
++            message = MessageEvent(
++                text=event.prompt,
++                message_type=MessageType.TEXT,
++                source=source,
++                message_id=event.job_id,
++                raw_message=event.raw,
++                metadata={"_kakao_bridge_lease_id": event.lease_id},
++                timestamp=timestamp,
++            )
++            fence = self._claim_fence(message)
++            if fence is None:
++                raise BridgeClientError("bridge returned invalid claim identity")
++            if fence in self._leased_claims:
++                return True
++            session_key = self._native_session_key(message)
++            self._leased_claims.add(fence)
++            await self.handle_message(message)
++            return True
++        finally:
++            self._claim_reservations -= 1
++            if fence is not None and session_key is not None:
++                self._retain_claim_slot(fence, session_key)
+ 
+     @staticmethod
+     def _claim_fence(event: MessageEvent) -> Optional[tuple[str, str, int, str]]:

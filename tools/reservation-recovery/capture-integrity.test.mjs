@@ -1,0 +1,6 @@
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';
+const root=process.env.VILLAGE_RUNTIME_ROOT;if(!root)throw Error('VILLAGE_RUNTIME_ROOT required');const file=process.env.RECOVERY_INTEGRITY_SOURCE||root+'/production-runtime/tools/ai-browser-worker/capture-integrity.mjs';const {assessKakaoCaptureIntegrity:assess}=await import('data:text/javascript;base64,'+Buffer.from(fs.readFileSync(file)).toString('base64'));
+const evidence={visible_static_text_tail:'실제 대화 내용',messages:[{text:'기존 예약을 확인했습니다'}]};
+test('a deleted-message list label is not required to appear as a chat bubble',()=>{assert.equal(assess(evidence,{messagePreview:'메시지가 삭제되었습니다.'}).reason,'deleted_message_placeholder');});
+test('a deletion label cannot hide a disconnected conversation',()=>{assert.equal(assess({...evidence,visible_static_text_tail:'연결 끊김'},{messagePreview:'메시지가 삭제되었습니다.'}).ok,false);});
+test('real rental requests still require the triggering message in the actual conversation',()=>{assert.equal(assess(evidence,{messagePreview:'FX6를 추가해 주세요'}).ok,false);assert.equal(assess({...evidence,messages:[{text:'FX6를 추가해 주세요'}]},{messagePreview:'FX6를 추가해 주세요'}).ok,true);});
