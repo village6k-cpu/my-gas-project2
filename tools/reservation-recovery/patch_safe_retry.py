@@ -7,6 +7,14 @@ def server(source):
     if 'recoveryAttempt:Number(latest.retryAttempt' not in source:
         source=source.replace('if(latest.retrySafe===true){const bucket=',"if(latest.retrySafe===true&&(!latest.retryAfter||now.getTime()>=Date.parse(latest.retryAfter))){const bucket=")
         source=source.replace('recoveryOnly:true,recoveryOf:latest.jobId','recoveryOnly:true,recoveryOf:latest.jobId,recoveryAttempt:Number(latest.retryAttempt||0)+1')
+    source=source.replace("event.eventHash+'|zero-write-recovery|'+bucket", "event.eventHash+'|zero-write-recovery|'+latest.jobId+'|'+Number(latest.retryAttempt||0)+'|'+bucket")
+    if 'forceNewTurn = false' not in source:
+        source=source.replace("  eventHash = ''\n)","  eventHash = '',\n  { forceNewTurn = false } = {}\n)")
+        source=source.replace('  if (previous.semanticIdentity === identity) {','  if (previous.semanticIdentity === identity && !forceNewTurn) {')
+        source=source.replace('    event.eventHash\n  );','    event.eventHash,\n    { forceNewTurn: Boolean(event.recoveryOf) }\n  );')
+    old="    const latest = pending ? { event: pending } : await eventGateway.latestRoomObservation(key);"
+    new="    const durable = await eventGateway.latestRoomObservation(key);\n    const latest = pending && (!durable || semanticRoomEventIdentity(pending)!==semanticRoomEventIdentity(durable.event)) ? {event:pending} : durable;"
+    source=source.replace(old,new)
     return source
 
 def channel(source):
