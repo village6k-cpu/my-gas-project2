@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
-import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingPreparationCommand, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingManifest, type PackingEntry } from "@/lib/domain/packing";
+import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingPreparationCommand, packingReservationChanges, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingManifest, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor, registeredPart } from "@/lib/domain/packingCatalog";
 import { savePacking, savePackingCheck, syncPackingPreparation } from "@/lib/data/store";
 import { packingDeviceReplacements, packingReplacementEntries } from "@/lib/domain/packing";
@@ -65,7 +65,6 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const unresolvedQty = p?.entries.filter(e=>e.unresolved).reduce((n,e)=>n+e.qty,0) ?? 0;
   const total = groups.reduce((n, g) => n + g.expected, 0);
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
-  const requiredIssues = p?.phase === "draft" ? packingRequiredIssues(trade) : [];
   const check = async (e: PackingEntry) => {
     if (onCommand) { await update(e, { checked: !e.checked }); return; }
     setChecking(n => n + 1); setError("");
@@ -84,7 +83,6 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
     {p && <fieldset disabled={busy} className="min-w-0 disabled:opacity-60">
       {phase === "checkout" ? <>
         {reservationChanges.length > 0 && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm" role="status"><p className="font-bold">예약 변경을 반영하고 있습니다…</p><p>{reservationChanges.join(" / ")}</p></div>}
-        {requiredIssues.length > 0 && !packingNeedsUpgrade(p) && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm"><p>{requiredIssues.join(" / ")}</p><button className={`${button} mt-2 bg-white`} onClick={() => run({action:"refresh"})}>누락 구성품 복구</button></div>}
         {packingNeedsUpgrade(p) ? <div className="my-3 rounded-lg bg-warn-bg p-3 text-sm"><p>구성품 목록을 업데이트하고 있습니다…</p></div> : null}
         {children ?? devices.map(device => <div key={device.scheduleId} className="my-3 rounded-xl border border-line p-3"><h4 className="font-extrabold">{p.deviceModels?.[device.scheduleId] ?? device.name}</h4><PackingDevice ownerId={device.scheduleId} /></div>)}
         {p.entries.some(e => !e.ownerId) && !packingNeedsUpgrade(p) && <PackingDevice />}

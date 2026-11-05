@@ -153,20 +153,24 @@ test("custom names never merge by spelling; known registered names resolve to ca
   assert.throws(()=>save(t,[...t.packing.entries,{...row,id:"choice",partId:"custom:choice",name:"SDI or HDMI"}]),/한 종류/);
 });
 
-test("F21C and F22C require one angle clamp per light, including draft refresh without duplicate defaults",()=>{
+test("F21C and F22C suggest clamps but allow exclusion through refresh and sealing",()=>{
   for(const model of ["아마란 F21C","아마란 F22C"]){
     const t={...trade(),equipments:[{scheduleId:"light",name:model,qty:2,isSetHeader:true,setName:model,checkoutState:"pending"}]};
     t.packing=step(t,{action:"start"},now);
     const clamp=t.packing.entries.find(e=>e.name.includes("ㄱ자 클램프"));
     assert.equal(clamp.qty,2);
     t.packing.entries=t.packing.entries.filter(e=>e.id!==clamp.id);
-    assert.throws(()=>step(t,{action:"seal"},now),/ㄱ자 클램프.*필수/);
+    save(t,t.packing.entries.map(e=>({...e,checked:true})));
+    assert.equal(step(t,{action:"seal"},now).phase,"sealed");
     t.packing=step(t,{action:"refresh"},now);
     t.packing=step(t,{action:"refresh"},now);
     assert.equal(t.packing.entries.filter(e=>e.partId===clamp.partId).length,1);
     save(t,t.packing.entries.map(e=>({...e,checked:true})));
     const excluded=t.packing.entries.map(e=>e.partId===clamp.partId?{...e,qty:0,checked:false}:e);
-    save(t,excluded);assert.throws(()=>step(t,{action:"seal"},now),/ㄱ자 클램프.*필수/);
+    save(t,excluded);
+    t.packing=step(t,{action:"refresh"},now);
+    assert.equal(t.packing.entries.find(e=>e.partId===clamp.partId).qty,0);
+    assert.equal(step(t,{action:"seal"},now).phase,"sealed");
     save(t,t.packing.entries.map(e=>e.partId===clamp.partId?{...e,qty:2}:e));
     seal(t);assert.equal(groups(t.packing).find(g=>g.id===clamp.partId).expected,2);
   }
@@ -250,7 +254,7 @@ test('replacement rejects a stale device name and cannot rewrite returned shared
   assert.throws(()=>step(t,{action:'reconcile',ownerId:'light',name:'아마란 F21C',confirmed:true},now),/반납 기록/);
 });
 
-test('every GM zoom requires one UV filter per lens, rejects exclusion and preserves return quantities',()=>{
+test('every GM zoom suggests UV filters but permits zero or fewer filters and preserves actual return quantities',()=>{
   for(const model of ['소니 GM 16-35mm','소니 GM 16-35mm II','소니 GM 24-70mm','소니 GM 24-70mm II','소니 GM 70-200mm','소니 GM 70-200mm II','소니 GM 100-400mm']){
     const t={...trade(),equipments:[{scheduleId:'lens',name:model,qty:2,checkoutState:'pending'}]};
     t.packing=step(t,{action:'start'},now);
@@ -258,11 +262,16 @@ test('every GM zoom requires one UV filter per lens, rejects exclusion and prese
     assert.ok(uv,model); assert.equal(uv.qty,2);assert.equal(uv.checked,false);
     assert.throws(()=>step(t,{action:'seal'},now),/각 구성품/);
     t.packing.entries=[];
-    assert.throws(()=>step(t,{action:'seal'},now),/UV필터.*필수/);
+    assert.equal(step(t,{action:'seal'},now).phase,'sealed');
     t.packing=step(t,{action:'refresh'},now);t.packing=step(t,{action:'refresh'},now);
     assert.equal(t.packing.entries.length,1);
     save(t,t.packing.entries.map(e=>({...e,qty:0,checked:false})));
-    assert.throws(()=>step(t,{action:'seal'},now),/UV필터.*필수/);
+    t.packing=step(t,{action:'refresh'},now);
+    assert.equal(t.packing.entries[0].qty,0);
+    const excluded=step(t,{action:'seal'},now);
+    assert.equal(excluded.phase,'sealed');assert.equal(groups(excluded).length,0);assert.equal(blockers(excluded).length,0);
+    save(t,t.packing.entries.map(e=>({...e,qty:1})));save(t,t.packing.entries.map(e=>({...e,checked:true})));
+    assert.equal(groups(step(t,{action:'seal'},now))[0].expected,1);
     save(t,t.packing.entries.map(e=>({...e,qty:2})));seal(t);
     assert.equal(groups(t.packing)[0].expected,2);
     t.packing=step(t,{action:'receive',partId:uv.partId,count:{good:1,damaged:0,lost:0}},now);
@@ -279,4 +288,16 @@ test('GM zoom bundle checks each lens filter once and does not extend the rule t
   assert.equal(t.packing.entries.length,3);assert.equal(t.packing.entries.reduce((n,e)=>n+e.qty,0),6);
   const {templateFor}=load('packingCatalog');
   for(const name of ['소니 단렌즈 GM 135mm','소니 G 24-105mm'])assert.equal(templateFor(name).some(e=>/UV필터/.test(e.name)),false);
+});
+
+test('explicit exclusion survives reservation quantity changes and never becomes a return obligation',()=>{
+  for (const model of ['소니 GM 100-400mm','아마란 F21C']) {
+    const t={...trade(),equipments:[{scheduleId:'device',name:model,qty:1,checkoutState:'pending'}]};
+    t.packing=step(t,{action:'start'},now);
+    save(t,t.packing.entries.map(e=>({...e,qty:0,checked:false})));
+    t.equipments[0].qty=2;t.packing=step(t,{action:'refresh'},now);
+    assert(t.packing.entries.every(e=>e.qty===0),'excluded defaults must not be restored');
+    t.packing=step(t,{action:'seal'},now);
+    assert.equal(groups(t.packing).length,0);assert.equal(blockers(t.packing).length,0);
+  }
 });
