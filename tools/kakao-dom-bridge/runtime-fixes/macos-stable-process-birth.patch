@@ -62,6 +62,14 @@
              and argv[1:]==['-m','hermes_cli.main','gateway','run']
              and env.get('HERMES_HOME')==str(home)
              and env.get('PYTHONPATH')==str(code))
+@@ -86,6 +96,7 @@
+         'authenticated':probe.get('authenticated') is True,'watcher_ready':probe.get('watcherReady') is True,
+         'bridge_responding':health.get('ok') is True,'heartbeat_age_seconds':age,
+         'consumer_fresh':health.get('gateway',{}).get('consumer',{}).get('fresh') is True,
++        'collector_diagnostics':probe.get('watcher'),
+         'queue':health.get('gateway',{}).get('queue',{}),
+         'full_business_workflow_verified':False}
+     return report
 --- a/hermes-root/skills/productivity/village-official-quote-delivery/references/shared-browser-exact-room-document-delivery.md
 +++ b/hermes-root/skills/productivity/village-official-quote-delivery/references/shared-browser-exact-room-document-delivery.md
 @@ -4,8 +4,10 @@
