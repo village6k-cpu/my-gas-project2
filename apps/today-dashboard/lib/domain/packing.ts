@@ -62,7 +62,8 @@ export function packingPreparationCommand(t: Trade): PackingCommand | undefined 
   if (!t.packing || packingStarted(t)) return;
   const replacement = packingDeviceReplacements(t)[0];
   if (replacement) return { action: "reconcile", ownerId: replacement.scheduleId, name: replacement.name };
-  if (packingNeedsUpgrade(t.packing) || packingReservationChanges(t).length || (t.packing.phase === "draft" && packingDuplicateDefaults(t).length)) return { action: "refresh" };
+  const staleModel = Object.keys(t.packing.deviceModels ?? {}).some(id => !packingDevices(t).some(e => e.scheduleId === id && needsDeviceModel(e)));
+  if (packingNeedsUpgrade(t.packing) || packingReservationChanges(t).length || (t.packing.phase === "draft" && (staleModel || packingDuplicateDefaults(t).length))) return { action: "refresh" };
 }
 
 /** 체크만 바꾼 요청은 화면에 먼저 반영한다. 구성 변경·확정은 서버 응답을 기다린다. */

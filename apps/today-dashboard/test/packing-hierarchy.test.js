@@ -148,3 +148,16 @@ test('direct refresh discards stale model overrides but retains valid generic se
  assert.equal(generic.packing.deviceModels.monitor,'포트키 BM7');
  assert.equal(generic.packing.entries.find(e=>e.name==='포트키 BM7용 D탭'&&e.qty>0).qty,2);
 });
+test('already reconciled drafts with a stale model self-repair without resetting replacement checks',()=>{
+ const t=selectedMonitorFixture();t.equipments.find(e=>e.scheduleId==='monitor').name='파이로 7';
+ t.packing=step(t,{action:'reconcile',ownerId:'monitor',name:'파이로 7'},now);
+ t.packing.deviceModels.monitor='포트키 BM7';
+ const power=t.packing.entries.find(e=>e.name==='파이로 7용 D탭');power.checked=true;power.qty=2;
+ assert.equal(load('packing').packingPreparationCommand(t)?.action,'refresh');
+ t.packing=step(t,{action:'refresh'},now);
+ assert.equal(t.packing.deviceModels.monitor,undefined);
+ assert.equal(t.packing.entries.find(e=>e.id===power.id).qty,2);
+ assert.equal(t.packing.entries.find(e=>e.id===power.id).checked,true);
+ assert(!t.packing.entries.some(e=>e.qty>0&&e.ownerId==='monitor'&&e.name.includes('BM7')));
+ assert.equal(load('packing').packingPreparationCommand(t),undefined);
+});
