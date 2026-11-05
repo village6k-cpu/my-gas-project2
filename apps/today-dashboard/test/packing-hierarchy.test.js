@@ -122,3 +122,42 @@ test('two monitors retain only the uncovered additional accessories, not a secon
  const t=fx3M1Fixture();t.equipments[1].qty=2;t.packing=step(t,{action:'start'},now);
  for(const name of ['마스 M1용 970더미','마스 M1용 숏암','마스 M1용 SDI or HDMI']) assert.equal(t.packing.entries.find(e=>e.name===name).qty,1);
 });
+
+function selectedMonitorFixture(){
+ const t=fixture();t.packing=step(t,{action:'start'},now);
+ t.packing=step(t,{action:'model',ownerId:'monitor',model:'포트키 BM7'},now);
+ return t;
+}
+test('explicit replacement name overrides a previously selected generic monitor immediately',()=>{
+ const t=selectedMonitorFixture(),owner=t.equipments.find(e=>e.scheduleId==='monitor');
+ assert.equal(load('packing').packingDeviceName(t,owner),'포트키 BM7');
+ owner.name='파이로 7';assert.equal(load('packing').packingDeviceName(t,owner),'파이로 7');
+ t.packing=step(t,{action:'reconcile',ownerId:'monitor',name:'파이로 7'},now);
+ assert.equal(t.packing.deviceModels.monitor,undefined);
+ assert(t.packing.entries.some(e=>e.ownerId==='monitor'&&e.qty>0&&e.name==='파이로 7용 안테나'));
+ t.packing=step(t,{action:'refresh'},now);
+ assert(!t.packing.entries.some(e=>e.ownerId==='monitor'&&e.qty>0&&e.name.includes('BM7')));
+ assert(t.packing.entries.filter(e=>e.ownerId==='monitor'&&e.qty>0).every(e=>e.device==='파이로 7'));
+});
+test('direct refresh discards stale model overrides but retains valid generic selections',()=>{
+ const t=selectedMonitorFixture();t.equipments.find(e=>e.scheduleId==='monitor').name='파이로 7';
+ t.packing=step(t,{action:'refresh'},now);assert.equal(t.packing.deviceModels.monitor,undefined);
+ assert(!t.packing.entries.some(e=>e.ownerId==='monitor'&&e.qty>0&&e.name.includes('BM7')));
+ const generic=selectedMonitorFixture();generic.equipments.find(e=>e.scheduleId==='monitor').qty=2;
+ generic.packing=step(generic,{action:'reconcile',ownerId:'monitor',name:'7인치 모니터'},now);
+ assert.equal(generic.packing.deviceModels.monitor,'포트키 BM7');
+ assert.equal(generic.packing.entries.find(e=>e.name==='포트키 BM7용 D탭'&&e.qty>0).qty,2);
+});
+test('already reconciled drafts with a stale model self-repair without resetting replacement checks',()=>{
+ const t=selectedMonitorFixture();t.equipments.find(e=>e.scheduleId==='monitor').name='파이로 7';
+ t.packing=step(t,{action:'reconcile',ownerId:'monitor',name:'파이로 7'},now);
+ t.packing.deviceModels.monitor='포트키 BM7';
+ const power=t.packing.entries.find(e=>e.name==='파이로 7용 D탭');power.checked=true;power.qty=2;
+ assert.equal(load('packing').packingPreparationCommand(t)?.action,'refresh');
+ t.packing=step(t,{action:'refresh'},now);
+ assert.equal(t.packing.deviceModels.monitor,undefined);
+ assert.equal(t.packing.entries.find(e=>e.id===power.id).qty,2);
+ assert.equal(t.packing.entries.find(e=>e.id===power.id).checked,true);
+ assert(!t.packing.entries.some(e=>e.qty>0&&e.ownerId==='monitor'&&e.name.includes('BM7')));
+ assert.equal(load('packing').packingPreparationCommand(t),undefined);
+});

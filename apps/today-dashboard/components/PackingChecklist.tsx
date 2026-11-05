@@ -5,7 +5,7 @@ import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
 import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingPreparationCommand, packingReservationChanges, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingManifest, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor, registeredPart } from "@/lib/domain/packingCatalog";
 import { savePacking, savePackingCheck, syncPackingPreparation } from "@/lib/data/store";
-import { packingDeviceReplacements, packingReplacementEntries } from "@/lib/domain/packing";
+import { packingDeviceName, packingDeviceReplacements, packingReplacementEntries } from "@/lib/domain/packing";
 
 type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
 const PackingContext = createContext<PackingContextValue | null>(null);
@@ -84,7 +84,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
       {phase === "checkout" ? <>
         {reservationChanges.length > 0 && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm" role="status"><p className="font-bold">예약 변경을 반영하고 있습니다…</p><p>{reservationChanges.join(" / ")}</p></div>}
         {packingNeedsUpgrade(p) ? <div className="my-3 rounded-lg bg-warn-bg p-3 text-sm"><p>구성품 목록을 업데이트하고 있습니다…</p></div> : null}
-        {children ?? devices.map(device => <div key={device.scheduleId} className="my-3 rounded-xl border border-line p-3"><h4 className="font-extrabold">{p.deviceModels?.[device.scheduleId] ?? device.name}</h4><PackingDevice ownerId={device.scheduleId} /></div>)}
+        {children ?? devices.map(device => <div key={device.scheduleId} className="my-3 rounded-xl border border-line p-3"><h4 className="font-extrabold">{packingDeviceName(trade, device)}</h4><PackingDevice ownerId={device.scheduleId} /></div>)}
         {p.entries.some(e => !e.ownerId) && !packingNeedsUpgrade(p) && <PackingDevice />}
         <details className="m-3 rounded-lg bg-paper p-3"><summary className="cursor-pointer text-sm font-bold">실물별 총수량 · {total}개{unresolvedQty > 0 ? ` + 종류 미선택 ${unresolvedQty}개` : ""}</summary>
           {groups.map(g => <div key={g.id} className="mt-2 text-sm"><strong>{g.name} ×{g.expected}</strong><div className="text-xs text-ink-mute">{g.entries.map(e => `${e.device} ${e.qty}`).join(" + ")}</div></div>)}
@@ -105,7 +105,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
       })}</div>}
     </fieldset>}
     {phase === "checkin" && children}
-    {editing && p && <PackingEditor key={editing.id} entry={editing} entries={p.entries} devices={devices.map(e=>({id:e.scheduleId,name:p.deviceModels?.[e.scheduleId] ?? e.name}))} busy={busy} error={error} onClose={() => setEditing(null)} onSave={async (entry, add) => {
+    {editing && p && <PackingEditor key={editing.id} entry={editing} entries={p.entries} devices={devices.map(e=>({id:e.scheduleId,name:packingDeviceName(trade, e)}))} busy={busy} error={error} onClose={() => setEditing(null)} onSave={async (entry, add) => {
       const exists = p.entries.some(e => e.id === entry.id);
       let updated = entry;
       if (add && exists) { const id = crypto.randomUUID(); updated = { ...entry, id, partId: entry.custom ? `custom:${id}` : entry.partId, sourceId: undefined }; }
@@ -126,7 +126,7 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
   const owner=devices.find(e=>e.scheduleId===ownerId);
   const entries=entriesByOwner.get(ownerId) ?? [];
   const modelNeeded=!!owner && needsDeviceModel(owner);
-  const device=p.deviceModels?.[ownerId ?? ""] ?? owner?.name ?? "공용 구성품";
+  const device=owner ? packingDeviceName(trade, owner) : "공용 구성품";
   const existingVideo = ownerId && templateFor(device).some(r=>/SDI|HDMI/i.test(r.name)) && !entries.some(e=>/SDI|HDMI/i.test(e.name)) ? unassignedVideo(trade,p,ownerId) : [];
   const replacement = packingDeviceReplacements(trade).find(e => e.scheduleId === ownerId);
   const replacementEntries = replacement ? packingReplacementEntries(trade, replacement.scheduleId) : [];

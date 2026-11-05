@@ -62,7 +62,8 @@ export function packingPreparationCommand(t: Trade): PackingCommand | undefined 
   if (!t.packing || packingStarted(t)) return;
   const replacement = packingDeviceReplacements(t)[0];
   if (replacement) return { action: "reconcile", ownerId: replacement.scheduleId, name: replacement.name };
-  if (packingNeedsUpgrade(t.packing) || packingReservationChanges(t).length || (t.packing.phase === "draft" && packingDuplicateDefaults(t).length)) return { action: "refresh" };
+  const staleModel = Object.keys(t.packing.deviceModels ?? {}).some(id => !packingDevices(t).some(e => e.scheduleId === id && needsDeviceModel(e)));
+  if (packingNeedsUpgrade(t.packing) || packingReservationChanges(t).length || (t.packing.phase === "draft" && (staleModel || packingDuplicateDefaults(t).length))) return { action: "refresh" };
 }
 
 /** 체크만 바꾼 요청은 화면에 먼저 반영한다. 구성 변경·확정은 서버 응답을 기다린다. */
@@ -111,6 +112,11 @@ export function packingDevices(t: Trade) {
     .map(e => ({...e, name: String(e.actualName || e.name).trim()}));
 }
 export function needsDeviceModel(e: EquipmentItem) { return e.name === "7인치 모니터"; }
+/** 모델 선택값은 종류 미지정 모니터에만 적용한다. 명시적인 교체 장비명을 덮지 않는다. */
+export function packingDeviceName(t: Trade, e: EquipmentItem): string {
+  const name = String(e.actualName || e.name).trim();
+  return name === "7인치 모니터" ? t.packing?.deviceModels?.[e.scheduleId] || name : name;
+}
 export function packingAvailable(t: Trade) { return packingCandidates(t).length > 0 || packingDevices(t).some(e => needsDeviceModel(e) || templateFor(e.name).some(r => ACCESSORY.test(r.name))); }
 export function packingStarted(t: Trade): boolean {
   return !!t.packingDispatchedAt || t.setupDone || t.returnDone || t.contractStatus !== "예약" || t.equipments.some(e => (e.takenQty ?? 0) > 0);
@@ -125,16 +131,17 @@ export function packingReplacementEntries(t: Trade, ownerId: string): PackingEnt
   const owner = packingDeviceReplacements(t).find(e => e.scheduleId === ownerId);
   if (!owner || !t.packing) return [];
   const old = t.packing.entries.filter(e => e.ownerId === ownerId);
-  const rows = templateFor(owner.name).filter(r => ACCESSORY.test(r.name) || r.name.includes("용 "));
+  const device = packingDeviceName(t, owner);
+  const rows = templateFor(device).filter(r => ACCESSORY.test(r.name) || r.name.includes("용 "));
   const desired = rows.map(row => {
     const part = registeredPart(row.name);
     const existing = old.find(e => e.partId === part?.id && !e.custom);
-    return { id: existing?.id ?? `replacement:${ownerId}:${part?.id ?? partKey(row.name)}`, ownerId, device: owner.name,
+    return { id: existing?.id ?? `replacement:${ownerId}:${part?.id ?? partKey(row.name)}`, ownerId, device,
       name: part?.name ?? row.name, partId: part?.id ?? `unresolved:${ownerId}:${partKey(row.name)}`,
       ...(existing?.sourceId ? { sourceId: existing.sourceId } : {}), qty: bundledDefaultQty(t, owner, row.name, row.qty * owner.qty),
       checked: false, unresolved: !part || CHOICE.test(row.name), modelDefault: true };
   });
-  return [...old.filter(e => !desired.some(d => d.id === e.id)).map(e => ({ ...e, device: owner.name,
+  return [...old.filter(e => !desired.some(d => d.id === e.id)).map(e => ({ ...e, device,
     qty: !e.modelDefault && !e.sourceId ? e.qty : 0, checked: false })), ...desired];
 }
 export function packingSourceIds(p?: PackingManifest | null): Set<string> {
@@ -316,6 +323,8 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       next.phase = "draft";
       delete next.sealedAt;
     }
+    // Generic-model choices expire when the row becomes a concrete replacement.
+    if (!needsDeviceModel(owner) && next.deviceModels) delete next.deviceModels[owner.scheduleId];
     next.entries = [...prev.entries.filter(e => e.ownerId !== owner.scheduleId), ...entries];
     next.sources = prev.sources.map(s => s.device && s.id === owner.scheduleId ? { ...s, name: owner.name, qty: owner.qty } : s);
     return next;
@@ -348,7 +357,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       if (changed.length) throw new Error("기존 직접 변경 내역이 있습니다. 구성품 정리 전 담당자 확인이 필요합니다");
       return fresh;
     }
-    fresh.deviceModels = { ...prev.deviceModels };
+    fresh.deviceModels = Object.fromEntries(Object.entries(prev.deviceModels ?? {}).filter(([id]) => packingDevices(t).some(e => e.scheduleId === id && needsDeviceModel(e))));
     const absorbedDefaults = new Set<string>();
     const reparsedSources = new Set(candidatesForRepair(t, prev, fresh));
     const reusedEntries = new Set<string>();

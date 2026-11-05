@@ -21,10 +21,10 @@ import {
 } from "@/lib/data/store";
 import { Check, Plus } from "./icons";
 import { MemoTag, itemMemoEntries } from "./MemoTag";
-import { equipmentActualName, equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
+import { equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
 import { ReturnChecklist } from "./ReturnChecklist";
 import { PackingChecklist, PackingDevice } from "./PackingChecklist";
-import { packingSourceIds, packingPreparationTrade, type PackingCommand } from "@/lib/domain/packing";
+import { packingDeviceName, packingSourceIds, packingPreparationTrade, type PackingCommand } from "@/lib/domain/packing";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
@@ -164,7 +164,7 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
 function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false, preview = false }: { preview?: boolean; t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean; setTone?: boolean }) {
   const taken = e.checkoutState === "taken";
   const excluded = e.checkoutState === "excluded";
-  const actualName = t.packing?.deviceModels?.[e.scheduleId] ?? equipmentActualName(e);
+  const actualName = packingDeviceName(t, e);
   const actualQty = equipmentActualTakenQty(e);
   const corrected = hasEquipmentActualCorrection(e);
   const partial = actualQty !== e.qty;
