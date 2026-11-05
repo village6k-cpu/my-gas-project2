@@ -2,9 +2,9 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Phase, ReturnCount, Trade } from "@/lib/domain/types";
-import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingEntryNeedsPreparation, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingEntry } from "@/lib/domain/packing";
+import { PACKING_PARTS, MONITOR_MODELS, packingAvailable, packingPreparationTrade, packingEntryNeedsPreparation, packingReservationChanges, packingRequiredIssues, packingDevices, unassignedVideo, needsDeviceModel, packingNeedsUpgrade, packingGroups, packingStarted, type PackingCommand, type PackingManifest, type PackingEntry } from "@/lib/domain/packing";
 import { templateFor, registeredPart } from "@/lib/domain/packingCatalog";
-import { savePacking, savePackingCheck, hasTradePending } from "@/lib/data/store";
+import { savePacking, savePackingCheck } from "@/lib/data/store";
 import { packingDeviceReplacements, packingReplacementEntries } from "@/lib/domain/packing";
 
 type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
@@ -17,9 +17,9 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const [checking, setChecking] = useState(0);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<PackingEntry | null>(null);
-  const [editingVersion, setEditingVersion] = useState(0);
+  const [editingBase, setEditingBase] = useState<PackingManifest>();
   const [note, setNote] = useState<string | null>(null);
-  const [noteVersion, setNoteVersion] = useState(0);
+  const [noteBase, setNoteBase] = useState<PackingManifest>();
   const p = trade.packing;
   const replacements = useMemo(() => packingDeviceReplacements(trade), [p, trade.equipments, trade.setupDone, trade.returnDone, trade.contractStatus]);
   const replacementKey = JSON.stringify(replacements.map(e => [e.scheduleId, e.name, e.qty]));
@@ -33,8 +33,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     const sync = async () => {
-      // 본체의 낙관적 표시를 원장 저장보다 먼저 구성품 사실로 확정하지 않는다.
-      if (hasTradePending(trade.tradeId)) { timer = setTimeout(sync, 400); return; }
+      // 저장 큐가 장비 변경 확정을 기다린다. 다른 저장 때문에 자동 반영을 멈추지 않는다.
       syncAttempted.current = key;
       const owner = replacements[0];
       try { await savePacking(trade.tradeId, p.version, owner ? { action: "reconcile", ownerId: owner.scheduleId, name: owner.name } : { action: "refresh" }); if (!cancelled) setError(""); }
@@ -52,15 +51,15 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
     }
     return rows;
   }, [p?.entries]);
-  const run = async (command: PackingCommand, version = p?.version ?? 0) => {
-    if (busy || checking > 0) return false;
+  const run = async (command: PackingCommand, version = p?.version ?? 0, base?: PackingManifest) => {
+    if (busy) return false;
     setBusy(true); setError("");
-    try { if (onCommand) await onCommand(version, command); else await savePacking(trade.tradeId, version, command); return true; }
+    try { if (onCommand) await onCommand(version, command); else await savePacking(trade.tradeId, version, command, base); return true; }
     catch (e) { setError(e instanceof Error ? e.message : "저장 실패. 다시 확인해주세요"); return false; }
     finally { setBusy(false); }
   };
-  const save = (entries: PackingEntry[], version = p?.version ?? 0) => run({ action: "save", entries, note: p?.note ?? "" }, version);
-  const openEditor = (entry: PackingEntry) => { setEditing(entry); setEditingVersion(p?.version ?? 0); };
+  const save = (entries: PackingEntry[], base?: PackingManifest) => run({ action: "save", entries, note: p?.note ?? "" }, base?.version ?? p?.version ?? 0, base);
+  const openEditor = (entry: PackingEntry) => { setEditing(entry); setEditingBase(p); };
   const update = (e: PackingEntry, patch: Partial<PackingEntry>) => save(p!.entries.map(row => row.id === e.id ? { ...row, ...patch } : row));
   if (!p && (phase === "checkin" || packingStarted(trade) || !packingAvailable(trade))) return <>{children}</>;
   const groups = packingGroups(p);
@@ -69,7 +68,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
   const requiredIssues = p?.phase === "draft" ? packingRequiredIssues(trade) : [];
   const unfinished = p?.entries.filter(packingEntryNeedsPreparation) ?? [];
-  const sealReason = checking > 0 ? "체크 내용을 저장 중입니다." : p && packingNeedsUpgrade(p) ? "구성품 목록을 먼저 업데이트해주세요."
+  const sealReason = p && packingNeedsUpgrade(p) ? "구성품 목록을 먼저 업데이트해주세요."
     : reservationChanges.length ? "예약 장비 변경 내용을 준비 목록에 반영해주세요."
     : requiredIssues.length ? requiredIssues.join(" / ")
     : unfinished.length ? `준비 확인 필요 ${unfinished.length}건: ${unfinished.slice(0, 3).map(e => e.name).join(", ")}${unfinished.length > 3 ? " 외" : ""}`
@@ -82,7 +81,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
     catch (error) { setError(error instanceof Error ? error.message : "체크 저장 실패. 다시 확인해주세요"); }
     finally { setChecking(n => n - 1); }
   };
-  const context = { trade, devices, entriesByOwner, busy: busy || checking > 0, checkBusy: busy, check, update, open: openEditor, run };
+  const context = { trade, devices, entriesByOwner, busy, checkBusy: busy, check, update, open: openEditor, run };
   return <PackingContext.Provider value={context}><section aria-label="구성품 검수" className="mb-3">
     <div className="flex flex-wrap items-center justify-between gap-2 bg-brand-50 px-3 py-3">
       <div><h3 className="text-sm font-extrabold text-brand-700">구성품 검수</h3>
@@ -102,8 +101,8 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
         </details>
         <div className="m-3 space-y-2">
           {p.phase === "draft" ? <><label className="block text-xs font-bold text-ink-mute">인계 메모 (수량은 위 목록으로 확인)</label>
-            <textarea value={note ?? p.note} onChange={e => { if (note === null) setNoteVersion(p.version); setNote(e.target.value); }} maxLength={2000} className="w-full rounded-lg border border-line p-2 text-sm" placeholder="예: 고객 요청으로 D탭 라인 대신 더미 사용" />
-            {note !== null && <><button className={button} onClick={async () => { if (await run({ action: "save", entries: p.entries, note }, noteVersion)) setNote(null); }}>메모 저장</button><button className={button} onClick={() => setNote(null)}>입력 취소</button></>}
+            <textarea value={note ?? p.note} onChange={e => { if (note === null) setNoteBase(p); setNote(e.target.value); }} maxLength={2000} className="w-full rounded-lg border border-line p-2 text-sm" placeholder="예: 고객 요청으로 D탭 라인 대신 더미 사용" />
+            {note !== null && <><button className={button} onClick={async () => { if (await run({ action: "save", entries: p.entries, note }, noteBase?.version ?? p.version, noteBase)) setNote(null); }}>메모 저장</button><button className={button} onClick={() => setNote(null)}>입력 취소</button></>}
             <details className="text-xs text-ink-mute"><summary>예약 장비가 변경됐나요?</summary><button className={button} onClick={() => run({ action: "refresh" })}>예약 변경 내용 불러오기</button></details>
             <p id={`packing-seal-reason-${trade.tradeId}`} className="h-12 overflow-y-auto text-xs font-bold text-attention-fg">{sealReason}</p>
             <button className={`${button} w-full bg-brand-600 text-white`} disabled={!!sealReason} aria-describedby={sealReason ? `packing-seal-reason-${trade.tradeId}` : undefined} onClick={() => run({ action: "seal" })}>이 구성으로 반출 준비 확정</button>
@@ -129,7 +128,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
       let updated = entry;
       if (add && exists) { const id = crypto.randomUUID(); updated = { ...entry, id, partId: entry.custom ? `custom:${id}` : entry.partId, sourceId: undefined }; }
       const entries = add || !exists ? [...p.entries, updated] : p.entries.map(e => e.id === entry.id ? updated : e);
-      if (await save(entries, editingVersion)) setEditing(null);
+      if (await save(entries, editingBase)) setEditing(null);
     }} />}
     <p className="h-6 px-3 text-xs text-brand-700" role="status">{busy || checking > 0 ? "저장 중…" : ""}</p>
   </section></PackingContext.Provider>;
