@@ -7,8 +7,8 @@ import { setReturnCount, setItemMemo } from "@/lib/data/store";
 import { SetBox, LooseList } from "./SetBox";
 import { Check } from "./icons";
 import { MemoTag, itemMemoEntries } from "./MemoTag";
-import { equipmentActualName, equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
-import { packingSourceIds } from "@/lib/domain/packing";
+import { equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
+import { packingDeviceName, packingSourceIds } from "@/lib/domain/packing";
 
 function SetSingleList({ children }: { children: ReactNode }) {
   return <ul className="divide-y divide-brand-200/70 overflow-hidden rounded-xl bg-brand-50 shadow-card ring-1 ring-brand-200">{children}</ul>;
@@ -87,7 +87,7 @@ function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: E
   const [open, setOpen] = useState(false);
   const expected = e.takenQty ?? e.qty;
   const actualExpected = equipmentActualTakenQty(e);
-  const actualName = equipmentActualName(e);
+  const actualName = packingDeviceName(t, e);
   const corrected = hasEquipmentActualCorrection(e);
   const { good, damaged, lost, reportedMissing, memo } = rcOf(t, e.scheduleId);
   // 반출 때 적은 메모도 반납 카드에 그대로 보이되, 출처 태그로 구분한다
