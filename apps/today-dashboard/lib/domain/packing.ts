@@ -63,7 +63,9 @@ export function packingPreparationCommand(t: Trade): PackingCommand | undefined 
   const replacement = packingDeviceReplacements(t)[0];
   if (replacement) return { action: "reconcile", ownerId: replacement.scheduleId, name: replacement.name };
   const staleModel = Object.keys(t.packing.deviceModels ?? {}).some(id => !packingDevices(t).some(e => e.scheduleId === id && needsDeviceModel(e)));
-  if (packingNeedsUpgrade(t.packing) || packingReservationChanges(t).length || (t.packing.phase === "draft" && (staleModel || packingDuplicateDefaults(t).length))) return { action: "refresh" };
+  const owners = new Set(packingDevices(t).map(e => e.scheduleId));
+  const orphanedEntry = t.packing.entries.some(e => e.qty > 0 && e.ownerId && !owners.has(e.ownerId));
+  if (packingNeedsUpgrade(t.packing) || packingReservationChanges(t).length || (t.packing.phase === "draft" && (staleModel || orphanedEntry || packingDuplicateDefaults(t).length))) return { action: "refresh" };
 }
 
 /** 체크만 바꾼 요청은 화면에 먼저 반영한다. 구성 변경·확정은 서버 응답을 기다린다. */
@@ -136,7 +138,7 @@ export function packingReplacementEntries(t: Trade, ownerId: string): PackingEnt
   const desired = rows.map(row => {
     const part = registeredPart(row.name);
     const existing = old.find(e => e.partId === part?.id && !e.custom);
-    return { id: existing?.id ?? `replacement:${ownerId}:${part?.id ?? partKey(row.name)}`, ownerId, device,
+    return { id: existing?.id ?? `replacement:${ownerId}:${canonicalPart(row.name).id}`, ownerId, device,
       name: part?.name ?? row.name, partId: part?.id ?? `unresolved:${ownerId}:${partKey(row.name)}`,
       ...(existing?.sourceId ? { sourceId: existing.sourceId } : {}), qty: bundledDefaultQty(t, owner, row.name, row.qty * owner.qty),
       checked: false, unresolved: !part || CHOICE.test(row.name), modelDefault: true };
@@ -351,6 +353,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
   if (prev.phase !== "draft") throw new Error("구성 다시 준비를 누른 뒤 변경해주세요");
   if (command.action === "refresh") {
     const fresh = initialManifest(t,next.version,prev.note);
+    const currentOwners = new Set(packingDevices(t).map(e => e.scheduleId));
     // 첫 버전의 묶음/자유입력을 표준 목록으로 바꿀 때 변경분은 무단 폐기하지 않는다.
     if (prev.schemaVersion !== 2) {
       const changed = prev.entries.filter(e => !e.sourceId || !prev.sources.some(s => s.id === e.sourceId && s.name === e.name && s.qty === e.qty));
@@ -366,8 +369,16 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       const old = reparsed
         ? prev.entries.find(x=>x.sourceId===e.sourceId && x.partId===e.partId && x.ownerId===e.ownerId && !reusedEntries.has(x.id))
         : prev.entries.find(x=>x.id===e.id);
-      if (old && reparsed) { reusedEntries.add(old.id); return {...old,id:e.id}; }
+      if (old && reparsed) {
+        reusedEntries.add(old.id);
+        return old.ownerId && !currentOwners.has(old.ownerId)
+          ? {...old,id:e.id,ownerId:e.ownerId,device:e.device,checked:false} : {...old,id:e.id};
+      }
       const before=prev.sources.find(x=>x.id===e.sourceId), after=fresh.sources.find(x=>x.id===e.sourceId);
+      // 원본 구성품은 남아도 본체가 삭제/제외될 수 있다. 과거 owner를 되살리지 않는다.
+      if (old?.ownerId && !currentOwners.has(old.ownerId) && before && after && before.name===after.name && before.qty===after.qty) {
+        return {...old,ownerId:e.ownerId,device:e.device,checked:false};
+      }
       // 명시적으로 제외한 동봉품은 예약 본체 수량이 바뀌어도 다시 추가하지 않는다.
       if (old?.modelDefault && old.ownerId===e.ownerId) {
         const priorOwner=prev.sources.find(s=>s.device && s.id===old.ownerId);
@@ -403,7 +414,11 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
         continue;
       }
       if (fresh.entries.some(x=>x.id===e.id)) continue;
-      if (!e.sourceId && (!e.ownerId || packingDevices(t).some(d=>d.scheduleId===e.ownerId))) fresh.entries.push(e);
+      if (!e.sourceId) {
+        // 직접 추가한 실물은 본체 제거로 잃지 않는다. 자동 동봉품만 제외하고 기록을 보존한다.
+        fresh.entries.push(e.ownerId && !currentOwners.has(e.ownerId)
+          ? {...e,ownerId:undefined,device:"공용 구성품",qty:e.modelDefault ? 0 : e.qty,checked:false} : e);
+      }
       else if (e.sourceId) fresh.entries.push({...e,qty:0,checked:false});
     }
     for (const [id,model] of Object.entries(fresh.deviceModels)) {
@@ -430,7 +445,11 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     const seen = new Set<string>();
     next.entries = command.entries.map(raw => {
       const id = validText(raw.id, "구성품 ID");
-      if (!/^[\w:-]+$/.test(id) || seen.has(id)) throw new Error("구성품 ID가 중복되거나 올바르지 않습니다");
+      const old = prev.entries.find(e => e.id === id);
+      // 과거 reconcile이 만든 한글 ID는 저장된 동일 행에 한해 계속 수정 가능해야 한다.
+      // 새 ID는 ASCII 규칙을 유지하고, 중복 행은 기존/신규 모두 거부한다.
+      const legacyId = !!old && id.startsWith("replacement:") && /^[\p{L}\p{N}_:-]+$/u.test(id);
+      if ((!/^[\w:-]+$/.test(id) && !legacyId) || seen.has(id)) throw new Error("구성품 ID가 중복되거나 올바르지 않습니다");
       seen.add(id);
       if (!Number.isSafeInteger(raw.qty) || raw.qty < 0 || raw.qty > 99) throw new Error("수량은 0~99개로 입력해주세요");
       const direct = raw.custom === true;
@@ -438,7 +457,6 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       if (direct && raw.partId !== `custom:${id}`) throw new Error("직접 입력 구성품 ID를 확인해주세요");
       if (direct && CHOICE.test(directName)) throw new Error("실제로 나가는 구성품 한 종류를 입력해주세요");
       const part = direct ? registeredPart(directName) : PACKING_PARTS.find(p => p.id === raw.partId);
-      const old = prev.entries.find(e => e.id === id);
       const unchangedUnresolved = old?.unresolved && raw.partId === old.partId && raw.name === old.name;
       if (!part && !direct && !unchangedUnresolved) throw new Error("등록된 구성품을 선택해주세요. 이름 직접 입력은 합산할 수 없습니다");
       const ownerId = raw.ownerId ?? old?.ownerId;
