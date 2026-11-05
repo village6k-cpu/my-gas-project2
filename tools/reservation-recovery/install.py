@@ -65,6 +65,7 @@ def install(root,watchdog_only=False):
             text=channel.read_text();needle='.sort((left, right) => left.queue_order - right.queue_order)[0];'
             assert text.count(needle)==1 or 'const backfill=j=>' in text
             text=text.replace(needle,".sort((left,right)=>{const backfill=j=>{const e=j.local_context?.job?.events;return Array.isArray(e)&&e.length>0&&e.every(x=>x.recoveryOnly===true)?1:0;};return backfill(left)-backfill(right)||left.queue_order-right.queue_order;})[0];")
+            text=text.replace("return Array.isArray(e)&&e.length>0&&e.every(x=>x.recoveryOnly===true)?1:0;","return Array.isArray(e)&&e.length>0&&e.every(x=>x.recoveryOnly===true)?(e.some(x=>x.recoveryOf)?1:2):0;")
             staged=backup/'channel.next.mjs';staged.write_text(patch_safe_retry.channel(text));copy(staged,channel,'bridge')
             env_file=root/'control/bridge.env.json';shutil.copy2(env_file,backup/'bridge.env.json');env=json.loads(env_file.read_text());env['READ_BACKSTOP_LOOKBACK_DAYS']='14';env_file.write_text(json.dumps(env,ensure_ascii=False,indent=2)+'\n');m['services']['bridge']['env_sha256']=sha(env_file)
         if not watchdog_only:

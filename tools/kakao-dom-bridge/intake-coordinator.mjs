@@ -62,7 +62,7 @@ export function createIntakeCoordinator({journal,gateway,dispatch,schedule,now=D
   // Rotate failures behind never-attempted jobs. Reusing an existing durable
   // gateway receipt needs no browser capture and does not spend the retry budget.
   const jobs=pending.filter(r=>r.event.kind==='job'&&!running.has(r.id)&&(next.get(r.id)||0)<=now())
-   .sort((a,b)=>{const recovery=r=>r.event.job.events?.every(e=>e.recoveryOnly===true)?1:0;return recovery(a)-recovery(b)||(attempted.get(a.id)||0)-(attempted.get(b.id)||0);});
+   .sort((a,b)=>{const recovery=r=>{const e=r.event.job.events;return Array.isArray(e)&&e.length>0&&e.every(x=>x.recoveryOnly===true)?(e.some(x=>x.recoveryOf)?1:2):0;};return recovery(a)-recovery(b)||(attempted.get(a.id)||0)-(attempted.get(b.id)||0);});
   let dispatched=0;
   for(const row of jobs.slice(0,100)){
    try{
