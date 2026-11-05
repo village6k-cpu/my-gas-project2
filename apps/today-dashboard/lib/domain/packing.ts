@@ -42,22 +42,6 @@ export function packingEntryNeedsPreparation(e: PackingEntry): boolean {
   return e.qty > 0 && (!e.checked || !!e.unresolved || CHOICE.test(e.name));
 }
 
-/** 운영자 지정 필수 동봉품: 준비 중 누락·제외로 사라져도 확정 전에 검증한다. */
-export function packingRequiredIssues(t: Trade): string[] {
-  return packingDevices(t).flatMap(owner => {
-    const required = /^아마란 F2[12]C$/i.test(owner.name)
-      ? [{name: `${owner.name}용 ㄱ자 클램프`, label: "ㄱ자 클램프", qty: 1}]
-      : templateFor(owner.name).filter(row => /용 UV필터$/.test(row.name)).map(row => ({...row, label: "UV필터"}));
-    return required.flatMap(item => {
-      const part = registeredPart(item.name);
-      const rows = t.packing?.entries.filter(e => e.ownerId === owner.scheduleId && e.partId === part?.id) ?? [];
-      const quantity = rows.reduce((n, e) => n + e.qty, 0);
-      const expected = item.qty * owner.qty;
-      return quantity < expected ? [`${owner.name}: ${item.label} ${expected}개 필수 (현재 ${quantity}개)`] : [];
-    });
-  });
-}
-
 /** 준비 목록의 예약 스냅샷과 현재 유효 장비를 비교한다. 확정된 반출 기록은 재작성하지 않는다. */
 export function packingReservationChanges(t: Trade): string[] {
   const p=t.packing;
@@ -336,10 +320,11 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
         : prev.entries.find(x=>x.id===e.id);
       if (old && reparsed) { reusedEntries.add(old.id); return {...old,id:e.id}; }
       const before=prev.sources.find(x=>x.id===e.sourceId), after=fresh.sources.find(x=>x.id===e.sourceId);
+      // 명시적으로 제외한 동봉품은 예약 본체 수량이 바뀌어도 다시 추가하지 않는다.
       if (old?.modelDefault && old.ownerId===e.ownerId) {
         const priorOwner=prev.sources.find(s=>s.device && s.id===old.ownerId);
         const nextOwner=fresh.sources.find(s=>s.device && s.id===e.ownerId);
-        if (priorOwner && nextOwner && priorOwner.name===nextOwner.name && priorOwner.qty===nextOwner.qty) return old;
+        if (priorOwner && nextOwner && priorOwner.name===nextOwner.name && (priorOwner.qty===nextOwner.qty || old.qty===0)) return old;
       }
       // 기존 묶음을 새로 인식하면 자동 생성했던 동일 구성품을 원본 행에 연결한다.
       // 직원의 확인/교체/수량 변경은 옮겨 담고, 자동 행을 다시 더하지 않는다.
@@ -436,8 +421,6 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     const model=prev.deviceModels?.[owner.scheduleId] ?? owner.name;
     if (templateFor(model).some(r=>/SDI|HDMI/i.test(r.name)) && unassignedVideo(t,prev,owner.scheduleId).length>0 && !prev.entries.some(e=>e.ownerId===owner.scheduleId && /SDI|HDMI/i.test(e.name))) throw new Error("기존 영상선을 사용할 장비에 연결해주세요. 새 선을 중복 추가하지 않습니다");
   }
-  const requiredIssues = packingRequiredIssues({...t, packing: next});
-  if (requiredIssues.length) throw new Error(requiredIssues.join(" / "));
   if (next.entries.some(packingEntryNeedsPreparation)) throw new Error("각 구성품의 실제 종류·수량과 제외 여부를 확인해주세요");
   next.phase = "sealed";
   next.sealedAt = now;

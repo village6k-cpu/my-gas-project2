@@ -145,3 +145,16 @@ test('background synchronization and completion share one queue without duplicat
   assert.deepEqual(h.requests.map(r=>r.command.action),['refresh','seal']);
   assert.equal(h.state.trades[0].packing.phase,'sealed');
 });
+test('checkout completion accepts an explicitly excluded UV filter and records no phantom return quantity',async()=>{
+  const h=harness(),t=h.state.trades[0];
+  t.equipments=[{scheduleId:'lens',name:'소니 GM 100-400mm',qty:1,checkoutState:'taken'}];
+  t.packing=domain.transitionPacking({...t,packing:undefined},{action:'start'},new Date().toISOString());
+  t.packing=domain.transitionPacking(t,{action:'save',note:'필터 제외',entries:t.packing.entries.map(e=>({...e,qty:0,checked:false}))},new Date().toISOString());
+  Object.assign(h.ctx,{isSupabase:false,writeBackEnabled:true,flushItemCheckWritesForTrade:async()=>{},createLedgerMutationId:()=> 'setup:test',putCompletionMutationOutbox:entry=>h.outbox=entry,flashSave:()=>{},scheduleCompletionMutationReplay_:()=>{}});
+  const source=fs.readFileSync(path.join(root,'lib/data/store.ts'),'utf8');
+  vm.runInNewContext(compile(source.slice(source.indexOf('export async function toggleSetup('),source.indexOf('export type ToggleReturnResult'))),h.ctx);
+  const result=await h.ctx.module.exports.toggleSetup(t.tradeId);
+  assert.equal(result.ok,true);assert.equal(h.state.trades[0].setupDone,true);assert.equal(h.outbox.target,true);
+  assert.equal(h.state.trades[0].packing.phase,'sealed');assert.equal(h.state.trades[0].packing.entries[0].qty,0);
+  assert.equal(domain.packingGroups(h.state.trades[0].packing).length,0);
+});
