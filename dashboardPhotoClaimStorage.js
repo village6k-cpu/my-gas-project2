@@ -17,7 +17,7 @@ function dashboardPhotoClaimRecords_(props) {
   return records;
 }
 
-function dashboardPhotoClaimCompactCandidate_(raw, now) {
+function dashboardPhotoClaimCompactCandidate_(raw, now, newlyCompleted) {
   var claim;
   try { claim = JSON.parse(raw); } catch (error) { return { reason: 'invalid_json' }; }
   if (!claim || typeof claim !== 'object' || Array.isArray(claim)) return { reason: 'invalid_shape' };
@@ -25,7 +25,7 @@ function dashboardPhotoClaimCompactCandidate_(raw, now) {
   if (typeof claim.at !== 'number' || !isFinite(claim.at) || claim.at <= 0 || claim.at > now)
     return { reason: 'invalid_time' };
   // 804 writes the terminal receipt outside ScriptLock. Let every earlier invocation finish.
-  if (now - claim.at < DASHBOARD_PHOTO_COMPACTION_QUIET_MS_) return { reason: 'not_quiet' };
+  if (!newlyCompleted && now - claim.at < DASHBOARD_PHOTO_COMPACTION_QUIET_MS_) return { reason: 'not_quiet' };
   var result = claim.result, photo = result && result.photo;
   if (!result || typeof result !== 'object' || Array.isArray(result) || result.success !== true
       || typeof result.tid !== 'string' || !result.tid || ['checkout', 'checkin'].indexOf(result.phase) < 0
@@ -126,4 +126,10 @@ function compactDashboardPhotoUploadClaims(input) {
     if (stage === 'claim_readback') output.outcomeUnknown = true;
     return output;
   } finally { if (locked) try { lock.releaseLock(); } catch (releaseError) {} }
+}
+
+/** Construct the terminal receipt before its first write; legacy compaction still requires quiet time. */
+function compactNewDashboardPhotoUploadClaim_(claim) {
+  var candidate = dashboardPhotoClaimCompactCandidate_(JSON.stringify(claim), Date.now(), true);
+  return candidate.raw ? JSON.parse(candidate.raw) : claim;
 }

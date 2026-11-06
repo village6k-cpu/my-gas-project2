@@ -135,3 +135,16 @@ test('internal run forwards compaction arguments while public catalog credential
   h.c.jsonResponse=(body,status)=>({body,status});const denied=h.c.handleRequestCore_({parameter:{},postData:{contents:JSON.stringify({key:'village2026',action:'run',func:'compactDashboardPhotoUploadClaims',args:[{execute:true}]})}});
   assert.equal(denied.status,403);assert.equal(h.events.length,0);
 });
+
+ test('newly completed photo claims store one result immediately without changing replay or recovery facts',()=>{
+  const h=harness(),fresh=receipt({at:now}),before=JSON.stringify(fresh);
+  const saved=h.c.compactNewDashboardPhotoUploadClaim_(fresh);
+  assert.equal(JSON.stringify(fresh),before);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved)),compact(fresh));
+  assert.deepEqual(old804(saved).result,old804(fresh).result);
+  assert.equal(h.plan().eligibleCount,1);
+  const live=harness({fresh});assert.equal(live.plan().eligibleCount,0,'live compaction still waits for quiet time');
+  for(const state of ['pending','file']) {const partial=receipt({state,at:now});assert.strictEqual(h.c.compactNewDashboardPhotoUploadClaim_(partial),partial);}
+  const mismatch=receipt({at:now,fileId:'different'});assert.strictEqual(h.c.compactNewDashboardPhotoUploadClaim_(mismatch),mismatch);
+  assert.equal(h.events.length,0,'constructing a receipt performs no storage mutation');
+ });

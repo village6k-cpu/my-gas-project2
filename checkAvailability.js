@@ -7261,6 +7261,7 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, client
       claimState.at = Date.now();
       claimState.retryReady = false;
       claimState.result = result;
+      claimState = compactNewDashboardPhotoUploadClaim_(claimState);
       try { props.setProperty(claimKey, JSON.stringify(claimState)); } catch (claimDoneErr) {}
     }
     return result;
