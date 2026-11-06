@@ -846,33 +846,62 @@ function showStaffMessage(status, title, description, backToList) {
   });
 }
 
-async function showCancelablePayments() {
+var cancelListState = { page: 0, query: '' };
+var CANCEL_LIST_PAGE_SIZE = 10;
+
+function cancelSearchText(value) {
+  return String(value == null ? '' : value).toLowerCase().replace(/[\s,원./:-]/g, '');
+}
+
+function showCancelSearch() {
+  return sdk.template.renderInputPage({
+    type: 'text',
+    top: { title: '취소할 결제 찾기', subtitle: '이름 · 예약번호 · 승인번호 · 금액 · 날짜' },
+    input: { placeholder: '예: 홍길동 / 261106-001 / 11000 / 2026-11-06', maxLength: 64 },
+    button: { label: '결제 검색' },
+    disclaimer: '이 프론트에 보관된 결제 기록에서 검색합니다. 빈칸으로 조회하면 전체 목록을 표시합니다.',
+    onSubmit: function (value) { return showCancelablePayments(0, String(value || '').trim().slice(0, 64)); },
+    onBack: function () { return showCancelablePayments(); }
+  });
+}
+
+async function showCancelablePayments(page, query) {
   var records;
   try {
     records = await loadReceiptRecords();
   } catch (e) {
     return showStaffStorageWarning(e);
   }
-
-  var items = records.filter(function (record) {
+  query = typeof query === 'string' ? query : cancelListState.query;
+  page = Number.isSafeInteger(page) && page >= 0 ? page : cancelListState.page;
+  var needle = cancelSearchText(query);
+  var eligible = records.filter(function (record) {
     return record && record.paymentKey && !record.cancelledAt;
-  }).slice(0, 20);
-
-  if (!items.length) {
-    return showStaffMessage('success', '취소 가능한 최근 결제가 없어요', '이 프론트에서 완료된 미취소 결제만 표시됩니다.', false);
-  }
-
+  });
+  var items = eligible.filter(function (record) {
+    return !needle || [record.customerName, record.tradeId, record.approvalNumber, record.amount,
+      receiptDateTime(record.paidAt)].some(function (value) { return cancelSearchText(value).indexOf(needle) !== -1; });
+  });
+  var pages = Math.max(1, Math.ceil(items.length / CANCEL_LIST_PAGE_SIZE));
+  page = Math.min(page, pages - 1);
+  cancelListState = { page: page, query: query };
+  var options = [{ title: '결제 검색', subtitle: '이름 · 예약번호 · 승인번호 · 금액 · 날짜', onClick: showCancelSearch }];
+  if (query) options.push({ title: '검색 해제 · 전체 목록', onClick: function () { return showCancelablePayments(0, ''); } });
+  items.slice(page * CANCEL_LIST_PAGE_SIZE, (page + 1) * CANCEL_LIST_PAGE_SIZE).forEach(function (record) {
+    options.push({
+      title: won(record.amount),
+      subtitle: (record.customerName || '현장 직접 결제') + ' · ' + receiptDateTime(record.paidAt),
+      description: (record.tradeId || '직접 결제') + ' · 승인번호 ' + asciiReceiptText(record.approvalNumber, '복구 필요'),
+      onClick: function () { return showCancelRecord(record); }
+    });
+  });
+  if (page > 0) options.push({ title: '이전 페이지', onClick: function () { return showCancelablePayments(page - 1, query); } });
+  if (page + 1 < pages) options.push({ title: '다음 페이지', onClick: function () { return showCancelablePayments(page + 1, query); } });
   return sdk.template.renderSelectPage({
-    title: '최근 결제 취소',
-    subtitle: '취소할 결제를 선택해주세요 · 최대 20건',
-    options: items.map(function (record) {
-      return {
-        title: won(record.amount),
-        subtitle: (record.customerName || '현장 직접 결제') + ' · ' + receiptDateTime(record.paidAt),
-        description: (record.tradeId || '직접 결제') + ' · 승인번호 ' + asciiReceiptText(record.approvalNumber, '복구 필요'),
-        onClick: function () { showCancelRecord(record); }
-      };
-    }),
+    title: query ? '결제 검색 결과' : '결제 취소',
+    subtitle: items.length ? (query ? '검색 ' : '보관된 미취소 결제 ') + items.length + '건 · ' + (page + 1) + '/' + pages + '페이지' :
+      (query ? '검색 결과가 없습니다. 검색어를 바꾸거나 전체 목록을 확인해주세요.' : '이 프론트에 보관된 미취소 결제가 없습니다.'),
+    options: options,
     onBack: function () { showStaffSettings(); }
   });
 }

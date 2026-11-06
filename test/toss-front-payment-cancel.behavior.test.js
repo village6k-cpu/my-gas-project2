@@ -684,6 +684,41 @@ async function testSettingsCorruptJsonShowsNonInteractiveDegradedState() {
   assertNoInteractiveCancelMenu(harness);
 }
 
+async function testCancelPaginationAndSearchReachEveryStoredPayment() {
+  const records = Array.from({length: 80}, (_, i) => paymentRecord({
+    paymentKey: 'key-' + i, tradeId: '261106-' + String(i).padStart(3, '0'),
+    customerName: '고객' + i, approvalNumber: 'APP-' + i, amount: 10000 + i,
+    cancelledAt: i === 3 ? '2026-11-06' : undefined
+  }));
+  const h = createHarness({pageMode:'customer', records}); await h.initPromise;
+  const last = () => h.pages.at(-1).page;
+  await h.context.showCancelablePayments(0, '');
+  const seen = [];
+  while (true) {
+    const p = last(); const rows = p.options.filter(o => o.description);
+    seen.push(...rows.map(o => o.description));
+    assert(rows.length <= 10); assert(p.options.length <= 15);
+    const next = p.options.find(o => o.title === '다음 페이지');
+    if (!next) break;
+    await next.onClick();
+  }
+  assert.strictEqual(seen.length, 79); assert.strictEqual(new Set(seen).size, 79);
+  assert(seen.some(x => x.includes('APP-79'))); assert(!seen.some(x => /APP-3$/.test(x)));
+  await last().options.find(o => o.title === '이전 페이지').onClick();
+  assert.match(last().subtitle, /7\/8페이지/);
+  for (const q of ['고객79', '261106-079', 'APP-79', '10,079원']) {
+    h.context.showCancelSearch(); await last().onSubmit(q);
+    assert.strictEqual(last().options.filter(o => o.description).length, 1);
+    assert.match(last().options.find(o => o.description).description, /APP-79/);
+  }
+  await last().options.find(o => o.title === '검색 해제 · 전체 목록').onClick();
+  assert.match(last().subtitle, /1\/8페이지/);
+  await h.context.showCancelablePayments(0, '없는 고객');
+  assert.match(last().subtitle, /검색 결과가 없습니다/);
+  assert(last().options.some(o => o.title === '결제 검색'));
+  assert.strictEqual(h.requestCalls.length, 0); assert.strictEqual(h.cardlessCalls.length, 0);
+}
+
 async function testCancelableListReadFailureNeverClaimsZeroEligiblePayments() {
   const harness = createHarness({ pageMode: 'customer', receiptReadError: new Error('read unavailable') });
   await harness.initPromise;
@@ -1516,6 +1551,7 @@ async function testCancelIntentAndLedgerFailures() {
   await testRecoveryNonSuccessClearsStalePending();
   await testSettingsReadRejectionShowsNonInteractiveDegradedState();
   await testSettingsCorruptJsonShowsNonInteractiveDegradedState();
+  await testCancelPaginationAndSearchReachEveryStoredPayment();
   await testCancelableListReadFailureNeverClaimsZeroEligiblePayments();
   await testPendingLedgerRetryReadFailureRejectsInsteadOfReportingZero();
   await testRawPaymentNormalizationForCardCashAndBarcode();
