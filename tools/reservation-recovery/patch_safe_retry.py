@@ -15,6 +15,10 @@ def server(source):
     old="    const latest = pending ? { event: pending } : await eventGateway.latestRoomObservation(key);"
     new="    const durable = await eventGateway.latestRoomObservation(key);\n    const latest = pending && (!durable || semanticRoomEventIdentity(pending)!==semanticRoomEventIdentity(durable.event)) ? {event:pending} : durable;"
     source=source.replace(old,new)
+    if 'pendingDurableRoomObservation' not in source:
+        anchor="    const latest = pending && (!durable || semanticRoomEventIdentity(pending)!==semanticRoomEventIdentity(durable.event)) ? {event:pending} : durable;"
+        assert source.count(anchor)==1
+        source=source.replace(anchor,"    const queued = dependencies.pendingDurableRoomObservation?.(key) || getDurableIntakeCoordinator()?.pendingRoomObservation(key);\n    const latest = queued && (!durable || queued.roomRevision>=durable.roomRevision) ? queued : pending && (!durable || semanticRoomEventIdentity(pending)!==semanticRoomEventIdentity(durable.event)) ? {event:pending} : durable;")
     return source
 
 def channel(source):
