@@ -715,20 +715,25 @@ function groupManualReceiptRecordsByDate(records) {
 
 async function attachStoredReceiptKeys(matches) {
   var records = await loadReceiptRecords();
-  if (!records.length) return matches;
-  var byTrade = {};
-  for (var i = 0; i < records.length; i += 1) {
-    var r = records[i];
-    if (r && r.tradeId && r.paymentKey && !byTrade[r.tradeId]) byTrade[r.tradeId] = r;
-  }
-  return matches.map(function (m) {
-    var stored = byTrade[m.tradeId];
-    return stored ? Object.assign({}, m, {
-      paymentKey: stored.paymentKey,
-      approvalNumber: stored.approvalNumber || null,
-      paidAt: stored.paidAt || null
-    }) : m;
+  var result = [], seen = {};
+  matches.forEach(function (match) {
+    var approvals = records.filter(function (record) {
+      return record && record.tradeId === match.tradeId && record.paymentKey;
+    });
+    if (!approvals.length) approvals = [match];
+    approvals.forEach(function (record) {
+      if (record.paymentKey && seen[record.paymentKey]) return;
+      if (record.paymentKey) seen[record.paymentKey] = true;
+      // 예약 합계 대신 각 실제 승인 금액과 원본 키를 사용한다.
+      result.push(Object.assign({}, match, {
+        paymentKey: record.paymentKey,
+        amount: record.amount,
+        approvalNumber: record.approvalNumber || null,
+        paidAt: record.paidAt || null
+      }));
+    });
   });
+  return result;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1228,9 +1233,9 @@ var showReceiptSelect = safe(function (items) {
     options: items.map(function (m) {
       return {
         title: won(m.amount),
-        subtitle: m.customerName + (m.checkoutAt ? ' · ' + shortDate(m.checkoutAt) : ''),
-        description: (m.itemSummary || '') + ' · 토스 영수증',
-        onClick: function () { showReceiptConfirm(m); },
+        subtitle: m.customerName + ' · ' + receiptDateTime(m.paidAt),
+        description: '승인번호 ' + asciiReceiptText(m.approvalNumber, '확인 필요') + ' · ' + (m.tradeId || ''),
+        onClick: function () { showReceiptConfirm(m, items); },
       };
     }),
     onBack: function () { showReceiptMenu(); },
@@ -1288,10 +1293,11 @@ var showOrder = safe(function (m) {
   });
 });
 
-var showReceiptConfirm = safe(function (m) {
+var showReceiptConfirm = safe(function (m, receiptItems) {
   var desc = [
     m.customerName,
-    shortDate(m.checkoutAt),
+    m.paidAt ? receiptDateTime(m.paidAt) : shortDate(m.checkoutAt),
+    m.approvalNumber ? "승인번호 " + m.approvalNumber : "",
     won(m.amount),
     '공식 카드 영수증'
   ].filter(Boolean).join(' · ');
@@ -1302,19 +1308,28 @@ var showReceiptConfirm = safe(function (m) {
     description: desc,
     timerMs: 0,
     buttons: [
-      { label: '출력하기', onClick: function () { doPrintReceipt(m); } },
-      { label: '처음으로', onClick: function () { returnToIdle(); }, closeOnClick: true }
+      { label: '출력하기', onClick: function () { doPrintReceipt(m, receiptItems); } },
+      { label: receiptItems && receiptItems.length > 1 ? '다른 결제 선택' : '처음으로', onClick: function () { return receiptItems && receiptItems.length > 1 ? showReceiptSelect(receiptItems) : returnToIdle(); } }
     ],
   });
 });
 
-async function doPrintReceipt(trade) {
+async function doPrintReceipt(trade, receiptItems) {
   try {
     await printOfficialPaymentReceipt(trade && trade.paymentKey);
   } catch (e) {
     return showError('영수증 출력 실패', e.message || '프린터 연결을 확인해주세요.', { retryReceipt: true });
   }
 
+  if (receiptItems && receiptItems.length > 1) return sdk.template.renderResultPage({
+    type: 'image', status: 'success', title: '출력 요청이 완료됐어요',
+    description: '승인번호 ' + asciiReceiptText(trade.approvalNumber, '-') + ' · ' + won(trade.amount),
+    timerMs: 0,
+    buttons: [
+      { label: '다른 결제 선택', onClick: function () { return showReceiptSelect(receiptItems); } },
+      { label: '처음으로', onClick: function () { returnToIdle(); }, closeOnClick: true }
+    ]
+  });
   return showPrintResult(
     '출력 요청이 완료됐어요',
     '토스 카드 영수증을 출력했어요.'
