@@ -43,6 +43,24 @@ test('fresh processing failures alert the owner while historical failures remain
   assert.equal(reservationFailureOwnerNotice(config,{...job,state:'completed'}),null);
 });
 
+test('human-required general consultations are not lost outside pricing and reservation categories',()=>{
+ const config={reservationClarificationAutoSendEnabled:true,reservationRecoveryEnabledAfter:'2026-11-02T03:00:00Z',pricingOwnerSlackUserId:'UOWNER'};
+ const job={detectedAt:'2026-11-06T08:00:00Z',roomKey:'chat:manual-support'};
+ const final={decision:{classification:'equipment_incident',customer:{name:'테스트'},follow_up_items:[{requiresHumanAction:true,status:'open',route:'support',taskKey:'damage',title:'파손 상담',summary:'직원 확인이 필요합니다.'}]},autoReplyResult:{sent:false}};
+ const notice=reservationOwnerNotice(config,job,final);assert.equal(notice.requiresHumanAction,true);assert.match(notice.text,/자동 응대 확인 필요/);
+ assert.equal(reservationOwnerNotice(config,job,{...final,decision:{...final.decision,follow_up_items:[]}}),null);
+ const done={...final.decision,follow_up_items:final.decision.follow_up_items.map(x=>({...x,status:'resolved'}))};
+ assert.equal(reservationOwnerNotice(config,job,{decision:done,autoReplyResult:{sent:true,readbackReceipt:{id:'proof'}}}),null);
+});
+
+test('explicit owner review has a fallback, while a verified automatic success does not',()=>{
+ const config={reservationClarificationAutoSendEnabled:true,reservationRecoveryEnabledAfter:'2026-11-02T03:00:00Z',pricingOwnerSlackUserId:'UOWNER'};
+ const job={detectedAt:'2026-11-06T08:00:00Z',roomKey:'chat:owner-review'};
+ const final={decision:{classification:'faq',owner_review_required:true,reason:'정책에 없는 예외 요청',customer:{name:'테스트'}},autoReplyResult:{sent:false}};
+ assert.match(reservationOwnerNotice(config,job,final).text,/정책에 없는 예외 요청/);
+ assert.equal(reservationOwnerNotice(config,job,{...final,autoReplyResult:{sent:true,readbackReceipt:{id:'proof'}}}),null);
+});
+
 
 test('native initial and repair turns share typo interpretation, direct clarification and shared-stock priority policy',async()=>{
   const {buildHermesPrompt}=await import('./worker.mjs');

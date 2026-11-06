@@ -50,23 +50,27 @@ export function reservationClarificationConfigured(config = {}, decision = {}) {
 export function reservationOwnerNotice(config, job, finalized) {
   if (!config.reservationClarificationAutoSendEnabled || !freshReservationJob(config, job)) return null;
   const decision = finalized.decision || {}, result = finalized.autoReplyResult || {};
-  if (decision.reservation_inquiry?.is_reservation_inquiry !== true) return null;
+  const reservation=decision.reservation_inquiry?.is_reservation_inquiry===true;
   const work = (decision.follow_up_items || []).filter(item => item.requiresHumanAction === true
-    && ['schedule', 'inventory'].includes(item.route)
     && !['done', 'completed', 'resolved', 'cancelled', 'dismissed'].includes(item.status));
+  const responseConfirmed=result.sent===true && Boolean(result.readbackReceipt);
+  const delivered=responseConfirmed || result.pricingDocumentReceipt?.deliveryConfirmed===true;
+  if(!work.length && !reservation && decision.owner_review_required===true && !delivered){
+    work.push({taskKey:'owner-review',title:'직원 응대 필요',summary:decision.reason || '자동 응대로 마무리하지 못한 상담을 확인해 주세요.'});
+  }
   if (!work.length) return null;
   const clean = value => String(value || '').replace(/01[016789][ -]?\d{3,4}[ -]?\d{4}/g, '[연락처 생략]').replace(/[\r\n<>]/g, ' ').trim().slice(0,1000);
-  const caseKey = decision.owner_case?.caseKey || job.roomKey || job.room_key;
-  const outcome = result.sent === true ? 'question_sent' : 'needs_attention';
-  const key = createHash('sha256').update(`${caseKey}:reservation:${outcome}:${work.map(item=>item.taskKey).sort().join('|')}`).digest('hex');
+  const caseKey = decision.owner_case?.caseKey || job.roomKey || job.room_key || job.jobId || job.id;
+  const outcome = responseConfirmed ? 'question_sent' : 'needs_attention';
+  const key = createHash('sha256').update(`${caseKey}:${reservation?'reservation':'consultation'}:${outcome}:${work.map(item=>item.taskKey).sort().join('|')}`).digest('hex');
   const row = decision.sheet_row_candidate || {};
   return {schema:'village-pricing-owner-notice/v1', key,
     clientMsgId:`${key.slice(0,8)}-${key.slice(8,12)}-4${key.slice(13,16)}-a${key.slice(17,20)}-${key.slice(20,32)}`,
-    channel:config.pricingOwnerSlackUserId, state:'pending', createdAt:new Date().toISOString(),
-    text:['예약 자동반영 확인 필요', `고객: ${clean(decision.customer?.name || job.customerName)}`,
-      `반출: ${clean(row.start_date)} ${clean(row.pickup_time)}`,
+    channel:config.pricingOwnerSlackUserId, state:'pending',requiresHumanAction:true,createdAt:new Date().toISOString(),
+    text:[reservation?'예약 자동반영 확인 필요':'자동 응대 확인 필요', `고객: ${clean(decision.customer?.name || job.customerName)}`,
+      ...(reservation?[`반출: ${clean(row.start_date)} ${clean(row.pickup_time)}`]:[]),
       ...work.map(item=>`${clean(item.title)}: ${clean(item.summary)}`),
-      `고객 확인 질문: ${result.sent === true ? '전송 확인' : '전송되지 않음 — 직원 확인 필요'}`,
+      `${reservation?'고객 확인 질문':'자동 응대'}: ${responseConfirmed ? '전송 확인 · 남은 업무는 직원 확인 필요' : result.sent===true ? '전송 결과 미확인 — 직원 확인 필요' : '전송되지 않음 — 직원 확인 필요'}`,
       '헤이빌리 > 후속조치: https://today-dashboard-ten.vercel.app/'].join('\n')};
 }
 
