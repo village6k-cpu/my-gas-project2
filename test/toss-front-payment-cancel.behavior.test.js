@@ -684,6 +684,26 @@ async function testSettingsCorruptJsonShowsNonInteractiveDegradedState() {
   assertNoInteractiveCancelMenu(harness);
 }
 
+async function testReceiptLookupRetainsEveryApprovalAndPrintsEachOriginalKey() {
+ const records = [paymentRecord({paymentKey:'second',approvalNumber:'05211090',amount:117810,paidAt:'2026-10-30T07:08:31Z'}),
+  paymentRecord({paymentKey:'first',approvalNumber:'05189416',amount:117810,paidAt:'2026-10-30T07:00:00Z'})];
+ const match = {tradeId:records[0].tradeId,customerName:'김형민',amount:235620,checkoutAt:'2026-10-30',itemSummary:'예약'};
+ const h=createHarness({pageMode:'customer',records,fetch:async()=>jsonResponse({matches:[match]})}); await h.initPromise;
+ await h.context.runReceiptLookup({reservation:match.tradeId});
+ const selection=h.pages.at(-1).page; assert.strictEqual(selection.options.length,2);
+ assert(selection.options[0].description.includes('05211090'));assert(selection.options[1].description.includes('05189416'));
+ for (const [index,key] of ['second','first'].entries()) {
+  selection.options[index].onClick();const confirm=h.lastResult();assert(confirm.description.includes('117,810'));
+  assert(!confirm.description.includes('235,620'));
+  await confirm.buttons.find(b=>b.label==='출력하기').onClick();
+  assert.strictEqual(h.printCalls.at(-1).paymentKey,key);
+  await h.lastResult().buttons.find(b=>b.label==='다른 결제 선택').onClick();
+  assert.strictEqual(h.pages.at(-1).page.options.length,2);
+ }
+ assert.strictEqual(h.requestCalls.length,0);assert.strictEqual(h.paymentCalls.length,0);
+ const merged=await h.context.attachStoredReceiptKeys([match,match]);assert.strictEqual(merged.length,2);
+}
+
 async function testCancelPaginationAndSearchReachEveryStoredPayment() {
   const records = Array.from({length: 80}, (_, i) => paymentRecord({
     paymentKey: 'key-' + i, tradeId: '261106-' + String(i).padStart(3, '0'),
@@ -1551,6 +1571,7 @@ async function testCancelIntentAndLedgerFailures() {
   await testRecoveryNonSuccessClearsStalePending();
   await testSettingsReadRejectionShowsNonInteractiveDegradedState();
   await testSettingsCorruptJsonShowsNonInteractiveDegradedState();
+  await testReceiptLookupRetainsEveryApprovalAndPrintsEachOriginalKey();
   await testCancelPaginationAndSearchReachEveryStoredPayment();
   await testCancelableListReadFailureNeverClaimsZeroEligiblePayments();
   await testPendingLedgerRetryReadFailureRejectsInsteadOfReportingZero();
