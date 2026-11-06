@@ -5,6 +5,7 @@ import { validateConfirmationBatchDecision, executeConfirmationBatch } from './c
 import {reservationClarificationConfigured, freshReservationJob, RESERVATION_DATE_POLICY, RESERVATION_PRIORITY_POLICY} from './reservation-intake-guard.mjs';
 import { completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, sendAutomaticPricingDocument } from './verified-pricing.mjs';
 import fs from 'node:fs';
+import {liveRecoveryReplyConfig} from '../kakao-dom-bridge/recovery-hold-policy.mjs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8852,6 +8853,7 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', preview: job.preview_text || job.previewText || '' });
     return result;
   }
+  config=liveRecoveryReplyConfig(config,job,liveGate);
   if (verifiedPricingConfigured(config, decision) && !verifiedPricingFreshJob(config, job)) {
     return {attempted:false,sent:false,gate:{allowed:false,reason:'pricing_before_activation_cutoff'}};
   }

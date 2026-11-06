@@ -4743,7 +4743,7 @@ let aiJobDispatcher = null;
 
 function getKakaoWorkerRuntimeConfigForTransport() {
   kakaoWorkerRuntimeConfig ||= loadKakaoWorkerRuntimeConfig();
-  return recoveryRuntimeConfig(configForHermesTransport(kakaoWorkerRuntimeConfig, CONFIG.hermesTransport), Boolean(recoveryHold));
+  return recoveryRuntimeConfig(configForHermesTransport(kakaoWorkerRuntimeConfig, CONFIG.hermesTransport), recoveryHold);
 }
 
 async function notifyGatewayTerminalFailure({ durableJob, error }) {

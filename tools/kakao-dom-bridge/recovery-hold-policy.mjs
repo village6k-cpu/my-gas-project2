@@ -29,7 +29,21 @@ export function loadRecoveryHoldManifest(file, { directory, readFileSync = fs.re
 }
 
 export function recoveryRuntimeConfig(config, enabled) {
-  return enabled ? { ...config, autoSendEnabled: false, slackFollowUpEnabled: false } : config;
+  return enabled ? { ...config, autoSendEnabled: false, slackFollowUpEnabled: false,
+    recoveryLiveAutoSendEnabled:config.autoSendEnabled===true,
+    recoveryFreezeBefore:typeof enabled==='object' ? enabled.freezeBefore : null } : config;
+}
+
+// Restore the operator's existing send permission only after the live-event
+// gate accepted this specific job. Historical jobs and recovery scans stay held.
+export function liveRecoveryReplyConfig(config,job,liveGate) {
+  if(config.recoveryLiveAutoSendEnabled!==true || liveGate?.eligible!==true)return config;
+  const cutoff=Date.parse(config.recoveryFreezeBefore || '');
+  const detected=Date.parse(job.detectedAt || job.detected_at || '');
+  const events=job.events || job.payload?.events || [];
+  if(!Number.isFinite(cutoff) || !Number.isFinite(detected) || detected<=cutoff
+    || !Array.isArray(events) || events.some(event=>event?.recoveryOnly===true))return config;
+  return {...config,autoSendEnabled:true};
 }
 
 export function recoveryGeneralPostAllowed(pathname) {

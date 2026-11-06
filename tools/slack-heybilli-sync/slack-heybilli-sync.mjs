@@ -735,40 +735,20 @@ export function findExistingApplyAnnouncement(messages = [], tradeId = '') {
   }) || null;
 }
 
-async function applyCommand(config, args) {
-  const plan = await readStdinJson();
+export async function applyPlan(config, plan, args = new Set()) {
   config = configForEvent(config, plan);
   plan.channelId = config.channelId;
   const requestedWrite = args.has('--write');
   const execute = requestedWrite && config.writeEnabled;
   if (requestedWrite && !config.writeEnabled) throw new Error('SLACK_HEYBILLI_WRITE_ENABLED=1이 아니어서 live 쓰기를 차단했습니다');
   const result = await syncApi(config, { mode: 'apply', plan, execute });
-  if (execute && !result.duplicate && result.changed !== false) {
-    // 대화형 헤이빌리든 이 동기화든, 같은 스레드에 같은 거래의 반영 공지는 한 번이면 된다.
-    // 후속 적용은 데이터에만 반영하고 공지는 반복하지 않는다 (2026-08-09 이동교 3중 공지 재발 방지).
-    const thread = await slackApi(config, 'conversations.replies', {
-      channel: config.channelId,
-      ts: plan.messageTs,
-      limit: 100,
-    }).catch(() => null);
-    if (findExistingApplyAnnouncement(thread?.messages, plan.tradeId)) {
-      process.stderr.write('slack-heybilli-sync: 같은 스레드에 이미 이 거래의 반영 공지가 있어 재공지를 생략합니다\n');
-      return result;
-    }
-    const actionLines = (plan.actions || []).map((action) => {
-      if (action.type === 'onsite_add') return `현장추가 ${action.items.map((item) => `${item.name}×${item.qty}`).join(', ')}`;
-      if (action.type === 'item_correction') return `실반출 정정 ${action.scheduleId}`;
-      if (action.type === 'return_count') return `반납상태 정정 ${action.scheduleId}`;
-      return `품목 메모 ${action.scheduleId}`;
-    });
-    await postThread(config, plan.messageTs, [
-      `✅ 헤이빌리 자동반영 · ${plan.tradeId} · ${plan.phase === 'checkout' ? '반출' : '반납'}`,
-      plan.summary,
-      ...actionLines.map((line) => `• ${line}`),
-      '원문과 처리 이력은 내부 동기화 기록에 보존했습니다. [SLACK_HEYBILLI_SYNC]',
-    ].join('\n'));
-  }
+  // The authenticated API already persists the source and result in its ledger.
+  // Slack is reserved for the existing unresolved-context question path.
   return result;
+}
+
+async function applyCommand(config, args) {
+  return applyPlan(config, await readStdinJson(), args);
 }
 
 export function findExistingAskReply(messages = []) {

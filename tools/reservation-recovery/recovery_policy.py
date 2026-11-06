@@ -35,12 +35,16 @@ def stabilize(previous,observed):
     return sorted(active),result
 
 def transition(previous,issues,now):
-    same=previous.get('issues')==issues
-    active=bool(issues)
+    # Raw backfill/coverage progress stays on the dashboard. These conditions
+    # alone do not mean the owner has an action to perform.
+    informational={'reconciliation_scan_incomplete','unreconciled_intake_backlog'}
+    actionable=sorted(set(issues)-informational)
+    previous_notified=sorted(set(previous.get('last_notified_issues',[]))-informational)
+    active=bool(actionable)
     streak=(previous.get('streak',0)+1) if active and previous.get('issues') else 1
-    due=active and streak>=2 and previous.get('last_notified_issues')!=issues and now-previous.get('last_notified_at',-900)>=900
+    due=active and streak>=2 and previous_notified!=actionable and now-previous.get('last_notified_at',-900)>=900
     recovered=not active and bool(previous.get('notified_active'))
-    return {**previous,'issues':issues,'streak':streak,'first_seen_at':previous.get('first_seen_at',now) if active and previous.get('issues') else now,'observed_at':now,'notification_due':due or recovered,'notification_kind':'incident' if active else 'recovered','notified_active':previous.get('notified_active',False)}
+    return {**previous,'issues':issues,'notification_issues':actionable,'streak':streak,'first_seen_at':previous.get('first_seen_at',now) if active and previous.get('issues') else now,'observed_at':now,'notification_due':due,'clear_notification':recovered,'notification_kind':'incident' if active else 'silent','notified_active':previous.get('notified_active',False)}
 
 def can_restart_worker(gateway,worker):
     return gateway.get('consumer',{}).get('fresh') is False and worker.get('owner_verified') is True and worker.get('active_agents')==0 and worker.get('gateway_state')=='running'
@@ -72,17 +76,31 @@ def maintain_health(root,report,health):
             else:state['dashboard_publish_failed_at']=now
         except (OSError,ValueError,KeyError,subprocess.TimeoutExpired):state['dashboard_publish_failed_at']=now
     notification=load(root/'control/reservation-recovery-notifications.json')
-    if state['notification_due'] and notification.get('channel'):
-        env=load(root/'control/bridge.env.json');text=('🚨 헤이빌리 자동반영 복구 필요\n'+'\n'.join('- '+{'collector_probe_unavailable':'카카오 수신 상태 확인 지연','collector_not_reading_full_list':'카카오 대화 수신 중단','kakao_login_or_browser_unavailable':'카카오 로그인 또는 브라우저 확인 필요','bridge_unresponsive':'수신 프로그램 응답 지연','reservation_worker_disconnected':'예약 처리기 연결 끊김','reservation_write_needs_readback':'저장 결과 확인이 필요한 예약 기록','undelivered_failure_notices':'담당자에게 전달되지 않은 실패 확인 기록','pending_failure_notices':'전달 확인이 필요한 실패 알림','reconciliation_scan_incomplete':'최근 대화의 누락 대조 미완료','durable_storage_failure':'수신 원문 저장소 오류','unreconciled_intake_backlog':'안전하게 저장된 대화의 처리 대기'}.get(x,x) for x in state['issues'])+'\n자동 감시·재시도 중입니다. 예약 저장이 불확실한 작업은 중복 실행하지 않고 확인 대상으로 보존합니다.') if state['issues'] else '✅ 헤이빌리 자동반영 장애 감시에서 활성 장애가 해소되었습니다. 개별 예약 누락은 별도 대조 결과로 확인합니다.'
-        operational={'collector_probe_unavailable','collector_not_reading_full_list','kakao_login_or_browser_unavailable','bridge_unresponsive','reservation_worker_disconnected','durable_storage_failure'}
-        if state['issues'] and not operational.intersection(state['issues']):
-            text=text.replace('🚨 헤이빌리 자동반영 복구 필요','📋 헤이빌리 자동반영 대조 현황\n현재 카카오 수신·예약 처리기는 연결되어 있습니다. 아래는 남아 있는 대조 작업입니다.')
-        body=json.dumps({'channel':notification['channel'],'text':text+'\n확인: https://today-dashboard-ten.vercel.app/follow-ups','client_msg_id':str(__import__('uuid').uuid5(__import__('uuid').NAMESPACE_URL,str(state['first_seen_at'])+json.dumps(state['issues'])))}).encode()
+    if state.get('clear_notification') and state.get('slack_ts') and notification.get('channel'):
+        env=load(root/'control/bridge.env.json')
         try:
-            request=Request('https://slack.com/api/chat.postMessage',data=body,headers={'Authorization':'Bearer '+env['SLACK_BOT_TOKEN'],'Content-Type':'application/json'})
+            body=json.dumps({'channel':notification['channel'],'ts':state['slack_ts']}).encode()
+            request=Request('https://slack.com/api/chat.delete',data=body,headers={'Authorization':'Bearer '+env['SLACK_BOT_TOKEN'],'Content-Type':'application/json'})
+            with urlopen(request,timeout=8) as response:cleared=json.load(response)
+            if cleared.get('ok') or cleared.get('error')=='message_not_found':
+                state.update(notified_active=False,clear_notification=False,slack_ts=None)
+        except (OSError,ValueError):state['notification_failed_at']=now
+    if state['notification_due'] and notification.get('channel') and not notification.get('paused'):
+        env=load(root/'control/bridge.env.json');text=('🚨 헤이빌리 자동반영 복구 필요\n'+'\n'.join('- '+{'collector_probe_unavailable':'카카오 수신 상태 확인 지연','collector_not_reading_full_list':'카카오 대화 수신 중단','kakao_login_or_browser_unavailable':'카카오 로그인 또는 브라우저 확인 필요','bridge_unresponsive':'수신 프로그램 응답 지연','reservation_worker_disconnected':'예약 처리기 연결 끊김','reservation_write_needs_readback':'저장 결과 확인이 필요한 예약 기록','undelivered_failure_notices':'담당자에게 전달되지 않은 실패 확인 기록','pending_failure_notices':'전달 확인이 필요한 실패 알림','reconciliation_scan_incomplete':'최근 대화의 누락 대조 미완료','durable_storage_failure':'수신 원문 저장소 오류','unreconciled_intake_backlog':'안전하게 저장된 대화의 처리 대기'}.get(x,x) for x in state['notification_issues'])+'\n자동 감시·재시도 중입니다. 예약 저장이 불확실한 작업은 중복 실행하지 않고 확인 대상으로 보존합니다.') if state['issues'] else '✅ 헤이빌리 자동반영 장애 감시에서 활성 장애가 해소되었습니다. 개별 예약 누락은 별도 대조 결과로 확인합니다.'
+        operational={'collector_probe_unavailable','collector_not_reading_full_list','kakao_login_or_browser_unavailable','bridge_unresponsive','reservation_worker_disconnected','durable_storage_failure'}
+        if not operational.intersection(state['notification_issues']):
+            text=text.replace('🚨 헤이빌리 자동반영 복구 필요','⚠️ 헤이빌리 확인 필요\n자동 처리로 끝나지 않은 건만 모았습니다.')
+        payload={'channel':notification['channel'],'text':text+'\n확인: https://today-dashboard-ten.vercel.app/follow-ups'}
+        method='chat.update' if state.get('slack_ts') else 'chat.postMessage'
+        if state.get('slack_ts'):payload['ts']=state['slack_ts']
+        else:payload['client_msg_id']=str(__import__('uuid').uuid5(__import__('uuid').NAMESPACE_URL,str(state['first_seen_at'])+json.dumps(state['notification_issues'])))
+        body=json.dumps(payload).encode()
+        try:
+            request=Request('https://slack.com/api/'+method,data=body,headers={'Authorization':'Bearer '+env['SLACK_BOT_TOKEN'],'Content-Type':'application/json'})
             with urlopen(request,timeout=8) as response:sent=json.load(response)
             if sent.get('ok'):
-                state.update(last_notified_at=now,notified_active=bool(state['issues']),notification_due=False,last_notified_issues=state['issues'],slack_ts=sent.get('ts'))
+                state.update(last_notified_at=now,notified_active=True,notification_due=False,last_notified_issues=state['notification_issues'],slack_ts=sent.get('ts'))
+            elif sent.get('error')=='message_not_found':state['slack_ts']=None
         except (OSError,ValueError):state['notification_failed_at']=now
     atomic(path,state)
     return {k:v for k,v in state.items() if k not in ('slack_ts',)}
