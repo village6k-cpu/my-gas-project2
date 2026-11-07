@@ -17163,18 +17163,17 @@ function commitConfirmedReservation(args) {
           confirmedResult.inventory_review.identity_error=String(identityError.message || identityError);
         }
       }
-      // 카카오 자동등록은 기존 등록완료 알림톡을 보내지 않는다. 새 반출 안내는
-      // 실제 신규 등록과 원장 재확인이 끝난 뒤, 승인된 통합 템플릿만 사용한다.
+      // 카카오 자동등록은 원장 재확인 후 예약 확정·견적 안내를 보낸다.
       if (confirmedResult.authoritative) {
         try {
           var confirmedGroup = confirmedResult.authoritative.request;
           var confirmedPeriod = confirmedResult.authoritative.registered_trade.contract;
-          var checkoutNotice = sendConfirmedCheckoutAlimtalk_(confirmedResult.trade_id, confirmedGroup.name,
+          var confirmationNotice = sendBookingConfirmationAlimtalk_(confirmedResult.trade_id, confirmedGroup.name,
             confirmedGroup.phone, confirmedPeriod.startDate, confirmedPeriod.startTime,
             confirmedPeriod.endDate, confirmedPeriod.endTime);
-          if (checkoutNotice) confirmedResult.checkoutNotification = checkoutNotice;
+          if (confirmationNotice) confirmedResult.bookingConfirmationNotification = confirmationNotice;
         } catch (notificationError) {
-          Logger.log('확정 시 반출 안내 확인 필요: ' + confirmedResult.trade_id);
+          Logger.log('예약 확정·견적 안내 확인 필요: ' + confirmedResult.trade_id);
         }
       }
     }
@@ -17978,7 +17977,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       var _almT0 = Date.now();
       _regPerf.reqID = String(_postRegisterAlimtalk.거래ID || "");
       try {
-        var registerNotificationResult = _postRegisterAlimtalk.신규등록 && sendConfirmedCheckoutAlimtalk_(
+        var registerNotificationResult = _postRegisterAlimtalk.신규등록 && sendBookingConfirmationAlimtalk_(
           _postRegisterAlimtalk.거래ID, _postRegisterAlimtalk.예약자명, _postRegisterAlimtalk.연락처,
           _postRegisterAlimtalk.반출일, _postRegisterAlimtalk.반출시간,
           _postRegisterAlimtalk.반납일, _postRegisterAlimtalk.반납시간
@@ -19494,6 +19493,9 @@ function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출
 
   var sentFlag = 'REG_ALIM_SENT_' + 거래ID;
   if (props.getProperty(sentFlag)) return { skipped: '이미 발송됨' };
+  if (operationalPropertyStore_('receipts', props).getProperty(bookingConfirmationRecordKey_(거래ID))) {
+    return { skipped: '예약 확정·견적 안내 기록 있음' };
+  }
 
   var link = getMyPageLink(거래ID);
   if (!link.success || !link.url || link.url.indexOf('http') !== 0) {

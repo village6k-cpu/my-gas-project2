@@ -8,7 +8,7 @@ function operationalPropertyGroup_(key) {
   if (/^preRegStock_v1_(?:dirty|checked|state|registering|registered|predecessor)_RQ-\d{6}-\d{3}$/.test(key) ||
       /^inventoryStock(?:Question|Retired)_[A-Za-z0-9-]{8,80}$/.test(key)) return 'inventory';
   if (/^dashboardPhotoUpload_v2_[A-Za-z0-9_-]{1,80}$/.test(key)) return 'photos';
-  if (/^historicalDiscountRestore_v1_\d{6}-\d{3}$/.test(key)) return 'receipts';
+  if (/^(?:historicalDiscountRestore|bookingConfirmationAlimtalk)_v1_\d{6}-\d{3}$/.test(key)) return 'receipts';
   return null;
 }
 
