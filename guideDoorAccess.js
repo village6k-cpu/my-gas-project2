@@ -6,6 +6,80 @@ var GUIDE_DOOR_TEMPLATE_CODES_ = {
   checkin: '026100001009'
 };
 
+var CONFIRMED_CHECKOUT_BUTTON_ = '내 예약 확인';
+var CONFIRMED_CHECKOUT_LINK_ = 'https://today-dashboard-ten.vercel.app/my?t=';
+
+function buildConfirmedCheckoutMessage_(name, checkout, checkin, password) {
+  return '[빌리지 예약 확정 및 반출 안내]\n\n'
+    + name + ' 감독님, 예약이 확정되었습니다.\n'
+    + '· 반출 ' + checkout + '\n· 반납 ' + checkin + '\n\n'
+    + '아래 [내 예약 확인]을 누른 뒤 [견적서 보기]에서 대여 금액을 확인해주세요. '
+    + '[PDF 저장]이나 [공유]로 견적서 파일을 다른 분께 전달할 수 있어요.\n\n'
+    + '직원이 부재하면 성함과 반출 시간이 적힌 테이블에서 장비를 테스트한 뒤 가져가주세요. '
+    + '손상이나 이상은 사진과 함께 카카오톡 채널로 보내주세요.\n\n'
+    + '결제는 우리은행 1005-404-109661 최재형(빌리지)으로 이체하시거나 '
+    + '카운터의 토스 프론트에서 전화번호 또는 예약번호로 조회해 카드로 결제해주세요. '
+    + '세금계산서나 현금영수증이 필요하면 부가세 포함 금액을 이체해주세요. 이미 결제하셨다면 바로 반출하시면 됩니다.\n\n'
+    + '[매장 출입문 비밀번호: ' + password + ']\n'
+    + guideLockInstruction_() + '\n'
+    + '예약자와 실제 반출자가 다르면 실제 반출자의 성함·연락처를 카카오톡 채널로 알려주세요.\n\n'
+    + GUIDE_PARKING_NOTICE_;
+}
+
+function confirmedCheckoutTemplateCode_() {
+  var cache, key = 'confirmedCheckoutTemplate_v1';
+  try {
+    cache = CacheService.getScriptCache();
+    var cached = cache.get(key);
+    if (cached !== null) return cached === 'pending' ? '' : cached;
+  } catch (e) {}
+  var expected = buildConfirmedCheckoutMessage_('#{고객명}', '#{반출일시}', '#{반납일시}', '#{출입문비밀번호}');
+  var expectedLink = CONFIRMED_CHECKOUT_LINK_ + '#{예약토큰}';
+  var list = guidePopbillRead_('/KakaoTalk/ListATSTemplate');
+  var candidates = Array.isArray(list) ? list.filter(function(template) {
+    var button = template.btns && template.btns.length === 1 && template.btns[0];
+    return String(template.state) === '3' && /^\d{12}$/.test(String(template.templateCode))
+      && String(template.template || '').replace(/\r\n/g, '\n').trim() === expected
+      && button && button.n === CONFIRMED_CHECKOUT_BUTTON_ && button.t === 'WL'
+      && button.u1 === expectedLink && button.u2 === expectedLink;
+  }) : [];
+  var code = candidates.length === 1 ? String(candidates[0].templateCode) : '';
+  if (cache) {
+    try { cache.put(key, code || 'pending', 300); } catch (e) {}
+  }
+  return code;
+}
+
+function sendConfirmedCheckoutAlimtalk_(tid, name, phone, outDate, outTime, inDate, inTime) {
+  if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_ || !name || !phone) return null;
+  var operationAt = _parseCheckoutDateTime(outDate, outTime);
+  if (!operationAt || !(operationAt.getTime() > Date.now())) return null;
+  var code;
+  try { code = confirmedCheckoutTemplateCode_(); } catch (e) { return null; }
+  if (!code) return null;
+  var password = PropertiesService.getScriptProperties().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
+  if (!password) return null;
+  var link = getMyPageLink(tid);
+  if (!link.success || link.url !== CONFIRMED_CHECKOUT_LINK_ + encodeURIComponent(link.token)) return null;
+  var period = { checkout: fmtDT(outDate, outTime), checkin: fmtDT(inDate, inTime) };
+  var payload = {
+    channel: 'alimtalk', templateCode: code,
+    content: buildConfirmedCheckoutMessage_(name, period.checkout, period.checkin, password),
+    vars: { '#{고객명}': name, '#{반출일시}': period.checkout, '#{반납일시}': period.checkin,
+      '#{출입문비밀번호}': password, '#{예약토큰}': link.token },
+    btns: [{ n: CONFIRMED_CHECKOUT_BUTTON_, t: 'WL', u1: link.url, u2: link.url }]
+  };
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return null;
+  var claim;
+  try {
+    var prior = guideSafetyRead_(guideRecordKey_(tid, 'checkout'));
+    if (prior) return prior.confirmedCheckout ? { state: prior.state, sent: false } : null;
+    claim = sendGuideSafely_(tid, 'checkout', { name: name, tel: phone }, operationAt, payload, period);
+  } finally { lock.releaseLock(); }
+  return claim.record ? submitGuideAlimtalk_(claim.key, claim.record, payload, true) : claim;
+}
+
 function buildGuideDoorMessage_(kind, customerName, password) {
   var body = kind === 'checkin'
     ? _buildCheckinMsg(customerName, true)

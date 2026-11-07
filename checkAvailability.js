@@ -17163,6 +17163,20 @@ function commitConfirmedReservation(args) {
           confirmedResult.inventory_review.identity_error=String(identityError.message || identityError);
         }
       }
+      // 카카오 자동등록은 기존 등록완료 알림톡을 보내지 않는다. 새 반출 안내는
+      // 실제 신규 등록과 원장 재확인이 끝난 뒤, 승인된 통합 템플릿만 사용한다.
+      if (confirmedResult.authoritative) {
+        try {
+          var confirmedGroup = confirmedResult.authoritative.request;
+          var confirmedPeriod = confirmedResult.authoritative.registered_trade.contract;
+          var checkoutNotice = sendConfirmedCheckoutAlimtalk_(confirmedResult.trade_id, confirmedGroup.name,
+            confirmedGroup.phone, confirmedPeriod.startDate, confirmedPeriod.startTime,
+            confirmedPeriod.endDate, confirmedPeriod.endTime);
+          if (checkoutNotice) confirmedResult.checkoutNotification = checkoutNotice;
+        } catch (notificationError) {
+          Logger.log('확정 시 반출 안내 확인 필요: ' + confirmedResult.trade_id);
+        }
+      }
     }
     return confirmedResult;
   } catch (error) {
@@ -17936,7 +17950,8 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   if (!suppressCustomerNotification) {
     _postRegisterAlimtalk = {
       거래ID: 거래ID, 예약자명: 예약자명, 연락처: 연락처,
-      반출일: 반출일, 반출시간: 반출시간, 반납일: 반납일, 반납시간: 반납시간
+      반출일: 반출일, 반출시간: 반출시간, 반납일: 반납일, 반납시간: 반납시간,
+      신규등록: !mergeMode
     };
   }
   _registerOutcome = {
@@ -17963,7 +17978,12 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       var _almT0 = Date.now();
       _regPerf.reqID = String(_postRegisterAlimtalk.거래ID || "");
       try {
-        var registerNotificationResult = sendRegisterCompleteAlimtalk_(
+        var registerNotificationResult = _postRegisterAlimtalk.신규등록 && sendConfirmedCheckoutAlimtalk_(
+          _postRegisterAlimtalk.거래ID, _postRegisterAlimtalk.예약자명, _postRegisterAlimtalk.연락처,
+          _postRegisterAlimtalk.반출일, _postRegisterAlimtalk.반출시간,
+          _postRegisterAlimtalk.반납일, _postRegisterAlimtalk.반납시간
+        );
+        if (!registerNotificationResult) registerNotificationResult = sendRegisterCompleteAlimtalk_(
           _postRegisterAlimtalk.거래ID, _postRegisterAlimtalk.예약자명, _postRegisterAlimtalk.연락처,
           _postRegisterAlimtalk.반출일, _postRegisterAlimtalk.반출시간,
           _postRegisterAlimtalk.반납일, _postRegisterAlimtalk.반납시간

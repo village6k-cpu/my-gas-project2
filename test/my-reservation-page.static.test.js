@@ -144,9 +144,13 @@ assert(
 );
 assert(
   myPageClient.includes('/api/my/estimate') &&
-    myPageClient.includes('견적서 PDF 확인') &&
+    myPageClient.includes('견적서 보기') &&
+    myPageClient.includes('PDF 저장') &&
+    myPageClient.includes('navigator.share({ files: [file] })') &&
+    estimateRoute.includes('"Content-Type": "application/pdf"') &&
+    estimateRoute.includes('"attachment" : "inline"') &&
     !myPageClient.includes('계약서 · 견적 확인'),
-  'the my-page document button must open only the quote PDF route'
+  'the my-page must open, save, and share the verified quote PDF'
 );
 
 // ── 앱: 고객용 /my와 공개 장비 사용법만 로그인 우회, 예약 페이지는 빠른 클라이언트 조회 ──
@@ -214,8 +218,8 @@ assert(
   'register-complete alimtalk must include the my-page link, skip without a template, and dedupe per trade'
 );
 assert(
-  /try \{\s*var registerNotificationResult = sendRegisterCompleteAlimtalk_\([\s\S]{0,500}\}\s*catch/.test(registerBody) &&
-    registerBody.indexOf('regLock.releaseLock();') < registerBody.indexOf('sendRegisterCompleteAlimtalk_('),
+  /try \{\s*var registerNotificationResult = .*sendConfirmedCheckoutAlimtalk_\([\s\S]{0,1200}sendRegisterCompleteAlimtalk_\([\s\S]{0,600}\}\s*catch/.test(registerBody) &&
+    registerBody.indexOf('regLock.releaseLock();') < registerBody.indexOf('sendConfirmedCheckoutAlimtalk_('),
   'registerByReqID must call the alimtalk inside try/catch AND after releaseLock (외부 HTTP를 전역 락 밖에서) so registration never fails or blocks on send errors'
 );
 assert(

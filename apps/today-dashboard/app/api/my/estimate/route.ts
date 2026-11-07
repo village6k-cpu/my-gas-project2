@@ -9,7 +9,9 @@ export const revalidate = 0;
 const TOKEN_RE = /^[A-Za-z0-9가-힣_-]{3,40}\.[a-f0-9]{20}$/;
 const NO_STORE_HEADERS = {
   "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+  "Referrer-Policy": "no-referrer",
 };
+const MAX_PDF_BYTES = 4 * 1024 * 1024;
 
 const VILLAGE_OPS_API_URL =
   process.env.VILLAGE_OPS_API_URL ??
@@ -55,13 +57,62 @@ async function createQuotePdfUrl(tradeId: string) {
   url.searchParams.set("id", tradeId);
   url.searchParams.set("key", VILLAGE_OPS_API_KEY);
 
-  const res = await fetch(url.toString(), { cache: "no-store", redirect: "follow" });
+  const res = await fetch(url, { cache: "no-store", redirect: "follow", signal: AbortSignal.timeout(50_000) });
   const data = (await res.json()) as QuoteResult;
   if (!res.ok || data.error) throw new Error(data.error || `견적서 PDF 생성 실패 (${res.status})`);
 
   const pdfUrl = rejectNonQuotePdfUrl(String(data.pdfUrl || data.result?.pdfUrl || ""));
   if (!pdfUrl) throw new Error("견적서 PDF URL을 받지 못했습니다");
   return pdfUrl;
+}
+
+async function readQuotePdf(pdfUrl: string) {
+  const source = new URL(pdfUrl);
+  const id = /^\/file\/d\/([\w-]+)\/view\/?$/.exec(source.pathname)?.[1]
+    ?? (source.pathname === "/uc" ? source.searchParams.get("id") : null);
+  if (source.hostname !== "drive.google.com" || !id || !/^[\w-]+$/.test(id)) {
+    throw new Error("지원하지 않는 견적서 파일 주소");
+  }
+  let url = new URL("https://drive.google.com/uc");
+  url.searchParams.set("export", "download");
+  url.searchParams.set("id", id);
+  const resourceKey = source.searchParams.get("resourcekey");
+  if (resourceKey) url.searchParams.set("resourcekey", resourceKey);
+
+  const signal = AbortSignal.timeout(15_000);
+  for (let hop = 0; hop < 4; hop++) {
+    if (url.protocol !== "https:" || url.port || url.username || url.password ||
+        !["drive.google.com", "drive.usercontent.google.com"].includes(url.hostname)) break;
+    const res = await fetch(url, { cache: "no-store", redirect: "manual", signal });
+    const location = res.headers.get("location");
+    if (res.status >= 300 && res.status < 400 && location) {
+      await res.body?.cancel();
+      url = new URL(location, url);
+      continue;
+    }
+    if (!res.ok || !res.body || Number(res.headers.get("content-length")) > MAX_PDF_BYTES) {
+      await res.body?.cancel();
+      break;
+    }
+
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_PDF_BYTES) {
+        await reader.cancel();
+        throw new Error("견적서 PDF 크기 제한 초과");
+      }
+      chunks.push(value);
+    }
+    const pdf = Buffer.concat(chunks);
+    if (pdf.toString("ascii", 0, 5) === "%PDF-") return new Uint8Array(pdf);
+    break;
+  }
+  throw new Error("견적서 PDF 파일을 읽지 못했습니다");
 }
 
 export async function GET(req: NextRequest) {
@@ -101,12 +152,25 @@ export async function GET(req: NextRequest) {
     }
 
     const pdfUrl = await createQuotePdfUrl(tradeId);
+    const format = req.nextUrl.searchParams.get("format");
+    if (format === "pdf" || format === "download") {
+      const pdf = await readQuotePdf(pdfUrl);
+      const filename = "Village-quote-" + tradeId.replace(/[^a-zA-Z0-9_-]/g, "") + ".pdf";
+      return new NextResponse(pdf, {
+        headers: {
+          ...NO_STORE_HEADERS,
+          "Content-Type": "application/pdf",
+          "Content-Disposition": `${format === "download" ? "attachment" : "inline"}; filename="${filename}"`,
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
     const response = NextResponse.redirect(pdfUrl, 302);
     Object.entries(NO_STORE_HEADERS).forEach(([key, value]) => response.headers.set(key, value));
     return response;
-  } catch (e) {
+  } catch {
     return NextResponse.json(
-      { success: false, error: e instanceof Error ? e.message : "견적서 PDF 조회 실패" },
+      { success: false, error: "견적서를 열지 못했습니다. 잠시 후 다시 시도하거나 빌리지 카카오톡 채널로 문의해주세요." },
       { status: 502, headers: NO_STORE_HEADERS },
     );
   }
