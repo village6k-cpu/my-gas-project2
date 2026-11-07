@@ -52,6 +52,7 @@ test('the confirmation and scheduled checkout share one delivery record for the 
   ctx.normalizeAlimtalkReceiver_ = (phone) => phone;
   ctx.Utilities = { getUuid: () => 'test-request' };
   ctx.GUIDE_PARKING_NOTICE_ = '주차 안내';
+  ctx._buildCheckoutMsg = (name) => name + ' 반출 안내';
   props.GUIDE_DOOR_PASSWORD = 'synthetic-password';
   let lastPayload;
   ctx.sendAlimtalk = (code, phone, name, content, vars, btns) => {
