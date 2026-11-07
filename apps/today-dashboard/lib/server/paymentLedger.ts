@@ -54,10 +54,19 @@ export async function paymentBalances(tids?: string[], db = paymentDb()) {
   if (!tids.length) return [];
   return checked(await db.from("payment_account_balances").select("*").in("trade_id", tids)) ?? [];
 }
-export function projectionItem(a: Row) {
-  return { tradeId: a.trade_id, billedAmount: a.billed_amount, paidAmount: a.paid_amount,
-    balance: a.balance, credit: a.credit, status: a.status, revision: a.revision,
-    reviewRequired: a.review_required, method: a.payment_method === "카드" ? "카드결제" : null };
+export async function paymentProjectionItems(accounts: Row[], db = paymentDb()) {
+  const cardTrades = accounts.filter(a => a.payment_method === "카드").map(a => a.trade_id);
+  const evidence: Row[] = cardTrades.length
+    ? checked(await db.rpc("payment_card_proof_evidence", { p_trade_ids: cardTrades })) ?? []
+    : [];
+  const byTrade = new Map(evidence.map(row => [row.trade_id, row]));
+  return accounts.map(a => {
+    const card = byTrade.get(a.trade_id);
+    return { tradeId: a.trade_id, billedAmount: a.billed_amount, paidAmount: a.paid_amount,
+      balance: a.balance, credit: a.credit, status: a.status, revision: a.revision,
+      reviewRequired: a.review_required, method: a.payment_method === "카드" ? "카드결제" : null,
+      cardProof: card?.revision === a.revision ? card?.proof_state : undefined };
+  });
 }
 export async function acknowledgePaymentProjections(applied: Row[], rejected: Row[], db = paymentDb()) {
   for (const row of applied) {
@@ -76,7 +85,7 @@ export async function projectPaymentBalances(tids?: string[], db = paymentDb()) 
   for (let offset = 0; offset < accounts.length; offset += 50) {
     const batch = accounts.slice(offset, offset + 50);
     try {
-      const result = await gasPost({ action: "paymentLedgerProjection", items: batch.map(projectionItem) }) as Row;
+      const result = await gasPost({ action: "paymentLedgerProjection", items: await paymentProjectionItems(batch, db) }) as Row;
       if (result?.success !== true || !Array.isArray(result.applied)) throw new Error(result?.error || "장부 반영 확인 실패");
       await acknowledgePaymentProjections(result.applied, result.rejected ?? [], db);
       for (const row of result.rejected ?? []) warnings.push(`${row.tradeId}: ${row.reason}`);

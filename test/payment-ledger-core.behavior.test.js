@@ -61,6 +61,7 @@ function harness(options = {}) {
         target.remaining_amount = target.amount - target.allocated_amount;
         target.revision++;
       }
+      if (name === 'payment_card_proof_evidence') return { data: options.proofEvidence || [], error: null };
       if (name === 'payment_require_review') state.accounts.find(a => a.trade_id === args.p_trade_id).review_required = true;
       return { data: { success: true }, error: null };
     },
@@ -207,4 +208,21 @@ test('a failed authoritative phone snapshot still blocks all payment candidates'
   const h = harness({ gasError: 'upstream unavailable' });
   await assert.rejects(h.api.getPayablePaymentBalances(['261020-001']), /upstream unavailable/);
   assert.equal(h.calls.queries.length, 0);
+});
+
+test('projection only accepts card evidence for the matching ledger revision', async () => {
+  const rows = [
+    account({ payment_method: '카드', revision: 3 }),
+    account({ trade_id: '261020-002', payment_method: '카드', revision: 3 }),
+    account({ trade_id: '261020-003', payment_method: '카드', revision: 3 }),
+    account({ trade_id: '261020-004', payment_method: '계좌이체', revision: 3 }),
+  ];
+  const h = harness({ proofEvidence: [
+    { trade_id: '261020-001', revision: 3, proof_state: 'verified_card' },
+    { trade_id: '261020-002', revision: 3, proof_state: 'non_card' },
+    { trade_id: '261020-003', revision: 2, proof_state: 'verified_card' },
+  ] });
+  const projected = await h.api.paymentProjectionItems(rows);
+  assert.deepEqual(Array.from(projected, row => row.cardProof), ['verified_card', 'non_card', undefined, undefined]);
+  assert.deepEqual(h.calls.rpc[0].args.p_trade_ids, ['261020-001', '261020-002', '261020-003']);
 });

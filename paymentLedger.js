@@ -54,14 +54,14 @@ function getPaymentLedgerSnapshot_(tradeIds) {
   return { success: true, accounts: accounts, observedAt: observedAt, duplicateTradeIds: Object.keys(duplicateIds) };
 }
 
-/** 최신 청구액과 단조 revision이 모두 일치할 때만 M열을 투영한다. */
-function applyPaymentLedgerProjection_(items) {
+/** 최신 청구액과 revision이 맞는 수납 상태 및 확인된 카드 증빙을 반영한다. */
+function applyPaymentLedgerProjection_(items, fromDirtyQueue) {
   if (!Array.isArray(items) || items.length > 5000) throw new Error('수납 반영 목록 오류');
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) throw new Error('다른 변경을 반영 중입니다. 재시도해주세요.');
   try {
     var ledger = getVillageTradeSheet_(), props = PropertiesService.getScriptProperties();
-    var rows = ledger.getLastRow() < 2 ? [] : ledger.getRange(2, 1, ledger.getLastRow() - 1, 13).getValues();
+    var rows = ledger.getLastRow() < 2 ? [] : ledger.getRange(2, 1, ledger.getLastRow() - 1, 15).getValues();
     var index = {}, duplicates = {};
     rows.forEach(function(row, i) {
       var id = String(row[4] || '').trim();
@@ -69,7 +69,7 @@ function applyPaymentLedgerProjection_(items) {
       if (index[id]) duplicates[id] = true;
       index[id] = { row: i + 2, values: row };
     });
-    var applied = [], rejected = [];
+    var applied = [], rejected = [], anyChanged = false;
     items.forEach(function(item) {
       var id = String(item.tradeId || '').trim(), target = index[id];
       var revision = Number(item.revision), key = 'PAYMENT_REV_' + id;
@@ -91,17 +91,52 @@ function applyPaymentLedgerProjection_(items) {
         }
         cell.setValue(item.status);
       }
-      if (item.method === '카드결제' && item.paidAmount > 0 && !target.values[9]) {
-        ledger.getRange(target.row, 10).setValue('카드결제'); changed = true;
+      var proofError = null;
+      if (item.method === '카드결제' && item.paidAmount > 0 &&
+          (item.status === '부분입금' || item.status === '입금완료')) {
+        var method = String(target.values[9] || '').trim();
+        var proofType = String(target.values[10] || '').trim();
+        var issueStatus = String(target.values[11] || '').trim();
+        var fillProof = (!method || method === '카드결제') && !target.values[14] &&
+          (!proofType || proofType === '미발행') &&
+          ['', '미발행', '발행완료'].indexOf(issueStatus) >= 0 &&
+          (proofType !== '미발행' || issueStatus !== '발행완료');
+        if (item.cardProof === 'verified_card' && !method) {
+          ledger.getRange(target.row, 10).setValue('카드결제'); changed = true;
+        }
+        if (fillProof && item.cardProof !== 'non_card') {
+          var proofRange = ledger.getRange(target.row, 11, 1, 2);
+          if (!proofRange.getFormulas()[0].some(Boolean)) {
+            if (item.cardProof !== 'verified_card') {
+              proofError = 'card_proof_pending';
+            } else {
+              var proof = ['미발행', '발행완료'];
+              var valid = proof.every(function(value, i) {
+                var options = paymentOptionsFromRule_(ledger.getRange(target.row, 11 + i).getDataValidation());
+                return !options.length || options.indexOf(value) >= 0;
+              });
+              if (valid) {
+                proofRange.setValues([proof]); changed = true;
+              } else {
+                proofError = 'card_proof_validation';
+              }
+            }
+          }
+        }
       }
       props.setProperty(key, String(revision));
       if (changed) {
+        anyChanged = true;
         supaMarkTradeDirty_(id);
         if (typeof invalidateDashboardTradeExtraCache_ === 'function') invalidateDashboardTradeExtraCache_([id]);
       }
-      applied.push({ tradeId: id, revision: revision });
+      if (proofError) {
+        if (!changed && !fromDirtyQueue) supaMarkTradeDirty_(id);
+        rejected.push({ tradeId: id, reason: proofError });
+      }
+      else applied.push({ tradeId: id, revision: revision });
     });
-    if (applied.length && typeof invalidateDashboardCache === 'function') invalidateDashboardCache();
+    if ((applied.length || anyChanged) && typeof invalidateDashboardCache === 'function') invalidateDashboardCache();
     return { success: true, applied: applied, rejected: rejected };
   } finally { lock.releaseLock(); }
 }
@@ -125,7 +160,7 @@ function flushPaymentLedgerMirror_(tradeIds, report) {
   if (!paymentLedgerEnabled_()) return true;
   var snapshot = getPaymentLedgerSnapshot_(tradeIds);
   var result = paymentLedgerServerRequest_({ action: 'syncSnapshot', accounts: snapshot.accounts });
-  var projected = applyPaymentLedgerProjection_(result.projections || []);
+  var projected = applyPaymentLedgerProjection_(result.projections || [], true);
   paymentLedgerServerRequest_({ action: 'ackProjections', applied: projected.applied, rejected: projected.rejected });
   if (report) {
     tradeIds.forEach(function(id) { report[id] = false; });

@@ -10,7 +10,11 @@ function harness(amount = 100, status = '미입금', duplicates = false) {
   const props = {}, writes = [], dirty = [];
   const duplicateRow = ['', '중복', '', '', '260406-010', '', '', '', 50, '', '', '', '입금완료'];
   const rows = duplicates ? [row, duplicateRow, duplicateRow.slice()] : [row];
-  const ledger = { getLastRow: () => rows.length + 1, getRange: (r, c, n) => n ? { getValues: () => rows.map(value => value.slice()) } : {
+  const ledger = { getLastRow: () => rows.length + 1, getRange: (r, c, n, width) => n ? {
+    getValues: () => rows.map(value => value.slice()),
+    getFormulas: () => [Array(width).fill('')],
+    setValues: ([values]) => { values.forEach((value, i) => { row[c + i - 1] = value; writes.push([r, c + i, value]); }); },
+  } : {
     getDataValidation: () => null,
     setValue: value => { row[c - 1] = value; writes.push([r, c, value]); },
   } };
@@ -71,4 +75,30 @@ test('incomplete or impossible historical checkout dates stay unknown', () => {
   assert.equal(context.paymentLedgerDate_('2026'), null);
   assert.equal(context.paymentLedgerDate_('2026-02-30'), null);
   assert.equal(context.paymentLedgerDate_('2026-10-20T10:00:00+09:00'), '2026-10-20');
+});
+
+test('only verified card approvals complete card proof and partial payment stays partial', () => {
+  const h = harness();
+  const card = projection({ method: '카드결제', cardProof: 'verified_card' });
+  assert.equal(h.context.applyPaymentLedgerProjection_([card]).applied.length, 1);
+  assert.deepEqual(h.row.slice(9, 13), ['카드결제', '미발행', '발행완료', '부분입금']);
+  assert.equal(h.context.applyPaymentLedgerProjection_([card]).applied.length, 1);
+  assert.equal(h.writes.length, 4);
+});
+test('barcode and approval evidence still in transit never complete card proof', () => {
+  const h = harness();
+  const card = projection({ method: '카드결제', cardProof: 'pending' });
+  assert.equal(h.context.applyPaymentLedgerProjection_([card]).rejected[0].reason, 'card_proof_pending');
+  assert.deepEqual(h.row.slice(9, 13), ['', '', '', '부분입금']);
+  assert.equal(h.context.applyPaymentLedgerProjection_([{ ...card, cardProof: 'non_card' }]).applied.length, 1);
+  assert.deepEqual(h.row.slice(9, 13), ['', '', '', '부분입금']);
+});
+test('card proof preserves existing document workflow and management keys', () => {
+  const card = projection({ method: '카드결제', cardProof: 'verified_card' });
+  for (const [type, state, key] of [['세금계산서', '발행완료', ''], ['', '발행요청', ''], ['', '', 'existing-document']]) {
+    const h = harness();
+    h.row[10] = type; h.row[11] = state; h.row[14] = key;
+    assert.equal(h.context.applyPaymentLedgerProjection_([card]).applied.length, 1);
+    assert.deepEqual(h.row.slice(10, 12), [type, state]);
+  }
 });

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { acknowledgePaymentProjections, ingestPayment, paymentBalances, paymentDb, projectPaymentBalances, projectionItem, refreshPaymentAccounts, validPaymentInternalKey } from "@/lib/server/paymentLedger";
+import { acknowledgePaymentProjections, ingestPayment, paymentBalances, paymentDb, paymentProjectionItems, projectPaymentBalances, refreshPaymentAccounts, validPaymentInternalKey } from "@/lib/server/paymentLedger";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 180;
@@ -30,7 +30,8 @@ export async function POST(req: NextRequest) {
     if (body.action === "syncSnapshot") {
       const tids = await refreshPaymentAccounts(undefined, body.accounts, db);
       const balances = await paymentBalances(tids, db);
-      const projections = balances.filter(a => a.needs_projection && !a.review_required && a.billed_amount !== null && !["취소", "계약누락"].includes(a.contract_status)).map(projectionItem);
+      const pending = balances.filter(a => a.needs_projection && !a.review_required && a.billed_amount !== null && !["취소", "계약누락"].includes(a.contract_status));
+      const projections = await paymentProjectionItems(pending, db);
       // GAS가 호출한 요청에는 GAS를 다시 호출하지 않는다. 호출자가 직접 투영 후 ACK한다.
       const snapshotAcknowledgements = balances.map(a => ({
         tradeId: a.trade_id,
