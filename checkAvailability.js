@@ -6144,7 +6144,7 @@ function restoreTradeDiscountMetadata(args) {
   if (!/^\d{6}-\d{3}$/.test(tid) || !DASHBOARD_DISCOUNT_TYPES_[desired] || !mutationId || args.previousDiscountType === undefined) {
     return { success: false, error: '과거 할인 복원: 거래ID/유형/mutationId/이전값 필수', noMutationPerformed: true };
   }
-  var props = PropertiesService.getScriptProperties(), lock = LockService.getScriptLock(), held = false, wrote = false;
+  var props = operationalPropertyStore_('receipts'), lock = LockService.getScriptLock(), held = false, wrote = false;
   var receiptKey = 'historicalDiscountRestore_v1_' + tid;
   try {
     var master = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
@@ -7123,11 +7123,12 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, client
   if (!data) return { error: "사진 데이터 필요" };
 
   // CacheService 조회만으로는 동시에 시작한 재시도 2개가 모두 miss가 되어 Drive 파일과
-  // 시트 행을 중복 생성한다. ScriptProperties claim으로 pending/file/done 단계를 내구 기록한다.
+  // 시트 행을 중복 생성한다. 내구 저장소에 pending/file/done 단계를 기록한다.
   var dedupKey = clientKey ? 'dashboard_photo_upload_' + String(clientKey).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80) : '';
   var claimKey = dashboardPhotoUploadClaimKey_(clientKey);
   var claimScope = tid + '|' + phase;
-  var props = PropertiesService.getScriptProperties();
+  var legacyProps = PropertiesService.getScriptProperties();
+  var props = operationalPropertyStore_('photos', legacyProps);
   var claimState = null;
   if (claimKey) {
     var claimLock = LockService.getScriptLock();
@@ -7135,8 +7136,9 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, client
     try {
       claimLocked = claimLock.tryLock(1500);
       if (!claimLocked) return { error: '사진 업로드 접수 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
-      cleanupDashboardPhotoUploadClaims_(props);
-      try { claimState = JSON.parse(props.getProperty(claimKey) || 'null'); } catch (claimParseErr) { claimState = null; }
+      cleanupDashboardPhotoUploadClaims_(legacyProps);
+      var rawClaim = props.getProperty(claimKey);
+      try { claimState = JSON.parse(rawClaim || 'null'); } catch (claimParseErr) { claimState = null; }
       if (claimState && String(claimState.scope || '') !== claimScope) {
         return { error: '같은 사진 요청키가 다른 거래에 사용되었습니다.' };
       }

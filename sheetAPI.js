@@ -1659,6 +1659,9 @@ function runFunction(funcName, params) {
     "getInventorySemanticStorageStatus",
     "migrateInventorySemanticStorage",
     "probeScriptPropertiesCapacity",
+    "getOperationalPropertyStorageStatus",
+    "prepareOperationalPropertyStorage",
+    "migrateOperationalProperties",
     "getCheckoutMutationProtocol",
     "compactDashboardPhotoUploadClaims",
     "setInventoryIncludedComponents",
@@ -1995,6 +1998,15 @@ function runFunction(funcName, params) {
       if(!Array.isArray(semanticArgs))semanticArgs=[semanticArgs];
       var semanticFunction=funcName==='getInventorySemanticStorageStatus'?getInventorySemanticStorageStatus:migrateInventorySemanticStorage;
       return {success:true,function:funcName,result:semanticFunction.apply(null,semanticArgs),executionTime:(new Date()-startTime)+'ms'};
+    }
+    if (funcName === 'getOperationalPropertyStorageStatus' || funcName === 'prepareOperationalPropertyStorage' ||
+        funcName === 'migrateOperationalProperties') {
+      var storageArgs = typeof params.args === 'string' ? JSON.parse(params.args) : params.args;
+      if (Array.isArray(storageArgs)) storageArgs = storageArgs[0];
+      var storageResult = funcName === 'getOperationalPropertyStorageStatus' ? getOperationalPropertyStorageStatus()
+        : funcName === 'prepareOperationalPropertyStorage' ? prepareOperationalPropertyStorage()
+        : migrateOperationalProperties(storageArgs);
+      return { success: true, function: funcName, result: storageResult, executionTime: (new Date() - startTime) + 'ms' };
     }
     if (funcName === 'probeScriptPropertiesCapacity') {
       var capacityArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];

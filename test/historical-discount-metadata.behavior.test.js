@@ -25,6 +25,7 @@ function fixture(){
   SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:()=>Object.assign(table(masterRows),{getParent:()=>({getSpreadsheetTimeZone:()=>ctx.masterTimeZone||'Asia/Seoul'})})}),openById:()=>({getName:()=>ctx.documentTitle||'계약서_'+tid+'_테스트고객',getSpreadsheetTimeZone:()=>ctx.documentTimeZone||'Asia/Seoul',getSheets:()=>[{getDataRange:()=>({getValues:()=>doc,getFormulas:()=>formulas}),getName:()=> '계약서'}]})},
   Utilities:{formatDate:(v,tz)=>new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'}).format(v),DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,s)=>Array.from(crypto.createHash('sha256').update(s).digest())}};
  vm.runInNewContext(gas,ctx);
+ vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../operationalPropertyStorage.js'),'utf8'),ctx);
  ctx.openTradeLedgerContext_=()=>({sheet:Object.assign(table(ledgerRows),{getParent:()=>({getSpreadsheetTimeZone:()=>ctx.ledgerTimeZone||'Asia/Seoul'})})});
  ctx.dashboardTradeMutationLeaseError_=()=>null;
  ctx.supaMarkTradeDirty_=()=>financialWrites.push('inventory-notification');ctx.invalidateDashboardCacheForTrade_=()=>{};
