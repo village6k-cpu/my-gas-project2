@@ -41,42 +41,53 @@ test('stop persists across the next invocation and preserves SMS isolation',()=>
   assert.throws(()=>h.ctx.manageGuideAlimtalk({action:'send',tradeId:h.booking.tid,kind:'checkout'}),/중단/);
 });
 
-test('the confirmation and scheduled checkout share one delivery record for the same recipient',()=>{
+test('booking confirmation has its own delivery record and cannot suppress scheduled checkout',()=>{
   const {ctx, props, booking} = load();
-  vm.runInNewContext(fs.readFileSync('guideDoorAccess.js','utf8'),ctx);
-  ctx.GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = false;
-  ctx.confirmedCheckoutTemplateCode_ = () => '026100001099';
-  ctx.getMyPageLink = () => ({success:true,token:'synthetic',url:ctx.CONFIRMED_CHECKOUT_LINK_+'synthetic'});
-  ctx._parseCheckoutDateTime = () => booking.checkoutAt;
+  vm.runInNewContext(fs.readFileSync('guideDeliverySafety.js','utf8'),ctx);
+  vm.runInNewContext(fs.readFileSync('bookingConfirmationAlimtalk.js','utf8'),ctx);
+  const linkTemplate = ctx.BOOKING_CONFIRMATION_LINK_ + '#{예약토큰}';
+  const bodyTemplate = ctx.buildBookingConfirmationMessage_('#{고객명}', '#{반출일시}', '#{반납일시}');
+  const template = { templateCode:'026100001099', state:'2', template:bodyTemplate,
+    btns:[{n:'내 예약 확인', t:'WL', u1:linkTemplate, u2:linkTemplate}] };
+  const cache = new Map();
+  ctx.CacheService = {getScriptCache:()=>({get:key=>cache.get(key) ?? null,put:(key,value)=>cache.set(key,value)})};
+  ctx.popbillKakaoRead_ = () => [template];
+  ctx.getMyPageLink = () => ({success:true,token:'synthetic',url:ctx.BOOKING_CONFIRMATION_LINK_+'synthetic'});
   ctx.fmtDT = (date, time) => date + ' ' + time;
   ctx.normalizeAlimtalkReceiver_ = (phone) => phone;
   ctx.Utilities = { getUuid: () => 'test-request' };
-  ctx.GUIDE_PARKING_NOTICE_ = '주차 안내';
-  ctx._buildCheckoutMsg = (name) => name + ' 반출 안내';
-  props.GUIDE_DOOR_PASSWORD = 'synthetic-password';
+  ctx.operationalPropertyStore_ = (_group, base) => base;
+  ctx._alimtalkAccepted_ = (result) => !!result.receiptNum;
   let lastPayload;
   ctx.sendAlimtalk = (code, phone, name, content, vars, btns) => {
     lastPayload = {code, phone, name, content, vars, btns};
     return { receiptNum: '026101599999900001' };
   };
-  vm.runInNewContext(fs.readFileSync('guideDeliverySafety.js','utf8'),ctx);
-  ctx.GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = false;
-  const send = () => ctx.sendConfirmedCheckoutAlimtalk_(booking.tid, booking.cust.name, booking.cust.tel,
+  const send = () => ctx.sendBookingConfirmationAlimtalk_(booking.tid, booking.cust.name, booking.cust.tel,
     '2026-11-07', '17:00', '2026-11-08', '17:00');
+  assert.equal(send(), null);
+  template.state = '3';
+  template.btns[0].u2 += 'wrong';
+  cache.clear();
+  assert.equal(send(), null);
+  template.btns[0].u2 = linkTemplate;
+  cache.clear();
   assert.equal(send().state, 'pending');
   const confirmation = lastPayload;
-  assert.equal(confirmation.btns[0].u1, ctx.CONFIRMED_CHECKOUT_LINK_ + 'synthetic');
+  assert.equal(confirmation.btns[0].u1, ctx.BOOKING_CONFIRMATION_LINK_ + 'synthetic');
+  assert.match(confirmation.content, /견적서 보기/);
+  assert.doesNotMatch(confirmation.content, /비밀번호|주차/);
   const key = ctx.guideRecordKey_(booking.tid, 'checkout');
-  assert(!props[key].includes('synthetic-password') && !props[key].includes('synthetic'));
-  ctx.guidePopbillRead_ = () => ({ templateCode: confirmation.code, msgs: [
-    { state: 3, result: 100, content: confirmation.content, receiveNum: booking.cust.tel }
-  ] });
-  assert.equal(send().sent, false);
-  assert.equal(ctx.sendGuideSafely_(booking.tid, 'checkout', booking.cust, booking.checkoutAt).state, 'delivered');
+  assert.equal(props[key], undefined);
+  assert.equal(send().state, 'duplicate');
   assert.equal(lastPayload, confirmation);
+  ctx.GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = false;
   ctx.getGuideAlimtalkPayload_ = () => ({ channel: 'alimtalk', templateCode: '026100001008', content: '반출 안내' });
-  const delegate = { name: '실제 반출자', tel: '01012345679' };
-  assert.equal(ctx.sendGuideSafely_(booking.tid, 'checkout', delegate, booking.checkoutAt).sent, true);
-  assert.equal(lastPayload.phone, delegate.tel);
+  // 통합 안내가 이미 접수됐던 예약도 기존 반출 안내를 받는다.
+  props[key] = JSON.stringify({confirmedCheckout:{},state:'delivered',
+    binding:booking.cust.tel+'|'+booking.cust.name+'|'+booking.checkoutAt.getTime()});
+  assert.equal(ctx.sendGuideSafely_(booking.tid, 'checkout', booking.cust, booking.checkoutAt).sent, true);
+  assert.equal(lastPayload.code, '026100001008');
+  assert.equal(lastPayload.phone, booking.cust.tel);
   assert.equal(lastPayload.btns, null);
 });

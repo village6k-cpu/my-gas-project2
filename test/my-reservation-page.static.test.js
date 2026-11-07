@@ -218,8 +218,8 @@ assert(
   'register-complete alimtalk must include the my-page link, skip without a template, and dedupe per trade'
 );
 assert(
-  /try \{\s*var registerNotificationResult = .*sendConfirmedCheckoutAlimtalk_\([\s\S]{0,1200}sendRegisterCompleteAlimtalk_\([\s\S]{0,600}\}\s*catch/.test(registerBody) &&
-    registerBody.indexOf('regLock.releaseLock();') < registerBody.indexOf('sendConfirmedCheckoutAlimtalk_('),
+  /try \{\s*var registerNotificationResult = .*sendBookingConfirmationAlimtalk_\([\s\S]{0,1200}sendRegisterCompleteAlimtalk_\([\s\S]{0,600}\}\s*catch/.test(registerBody) &&
+    registerBody.indexOf('regLock.releaseLock();') < registerBody.indexOf('sendBookingConfirmationAlimtalk_('),
   'registerByReqID must call the alimtalk inside try/catch AND after releaseLock (외부 HTTP를 전역 락 밖에서) so registration never fails or blocks on send errors'
 );
 assert(

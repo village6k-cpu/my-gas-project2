@@ -83,25 +83,6 @@ reset();
 assert.equal(ctx.getGuideAlimtalkPayload_('checkout','테스트').templateCode,newCode,'only an approved exactly matching new template may automatically activate');
 assert.equal(props.GUIDE_SAFE_TEMPLATE_checkout,newCode);
 assert(!JSON.stringify(ctx.getGuideDoorAccessStatus()).includes(password), 'status must never disclose the password');
-
-const combinedBody = ctx.buildConfirmedCheckoutMessage_('#{고객명}', '#{반출일시}', '#{반납일시}', '#{출입문비밀번호}');
-const combinedLink = ctx.CONFIRMED_CHECKOUT_LINK_ + '#{예약토큰}';
-const combined = { templateCode: '026100001099', state: '2', template: combinedBody,
-  btns: [{ n: '내 예약 확인', t: 'WL', u1: combinedLink, u2: combinedLink }] };
-ctx.guidePopbillRead_ = () => [combined];
-reset();
-assert.equal(ctx.confirmedCheckoutTemplateCode_(), '');
-combined.state = '3';
-combined.btns[0].u2 = combinedLink + 'wrong';
-reset();
-assert.equal(ctx.confirmedCheckoutTemplateCode_(), '');
-combined.btns[0].u2 = combinedLink;
-reset();
-assert.equal(ctx.confirmedCheckoutTemplateCode_(), combined.templateCode);
-assert(combinedBody.includes('[견적서 보기]') && combinedBody.includes('[PDF 저장]'));
-assert(combinedBody.endsWith(ctx.buildGuideDoorMessage_('checkout', '#{고객명}', '#{출입문비밀번호}')), 'the approved checkout instructions must be kept verbatim');
-assert(combinedBody.length <= 1300);
-
 ctx.GUIDE_DELIVERY_INCIDENT_SUSPENDED_=true;
 assert.equal(ctx.getGuideDoorAccessStatus().checkout.active,false,'template approval cannot override an incident stop');
 assert.equal(ctx.getGuideDoorAccessStatus().checkout.channel,'suspended');
