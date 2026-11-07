@@ -128,6 +128,68 @@ function MyPageError({ error }: { error?: string }) {
   );
 }
 
+function ReservationQuote({ url, tradeId }: { url: string; tradeId: string }) {
+  const [preparing, setPreparing] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [message, setMessage] = useState("");
+  const buttonClass = "tap rounded-[8px] border border-line px-2 py-3 text-center text-[13px] font-bold text-ink transition hover:border-brand-300 disabled:opacity-60";
+
+  async function shareQuote() {
+    setMessage("");
+    if (file) {
+      try {
+        await navigator.share({ files: [file] });
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setMessage("공유 앱을 열 수 없습니다. PDF 저장 후 파일을 첨부해주세요.");
+        }
+      } finally {
+        setFile(null);
+      }
+      return;
+    }
+    if (!navigator.share || !navigator.canShare) {
+      setMessage("이 브라우저에서는 PDF 저장 후 카카오톡이나 이메일에 파일을 첨부해주세요.");
+      return;
+    }
+    setPreparing(true);
+    try {
+      const response = await fetch(url + "&format=pdf", { cache: "no-store" });
+      if (!response.ok || response.headers.get("content-type") !== "application/pdf") {
+        throw new Error("PDF unavailable");
+      }
+      const prepared = new File([await response.blob()], `빌리지-견적서-${tradeId}.pdf`, { type: "application/pdf" });
+      if (navigator.canShare({ files: [prepared] })) setFile(prepared);
+      else setMessage("이 브라우저에서는 PDF 저장 후 카카오톡이나 이메일에 파일을 첨부해주세요.");
+    } catch {
+      setMessage("견적서 PDF를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.");
+    } finally {
+      setPreparing(false);
+    }
+  }
+
+  return (
+    <section aria-label="견적서" className="mt-4 rounded-[10px] border border-line/80 bg-white/85 p-4 shadow-card">
+      <h2 className="text-[15px] font-black text-ink">견적서</h2>
+      <p className="mt-1 text-[13px] font-medium text-ink-mute">대여 금액을 확인하고 PDF로 저장하거나 공유할 수 있어요.</p>
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        <a href={url + "&format=pdf"} target="_blank" rel="noopener noreferrer" className={buttonClass + " bg-brand-50 text-brand-700"}>
+          견적서 보기
+        </a>
+        <a href={url + "&format=download"} className={buttonClass}>PDF 저장</a>
+        <button type="button" onClick={shareQuote} disabled={preparing} className={buttonClass}>
+          {preparing ? "준비 중…" : file ? "공유 앱 열기" : "공유"}
+        </button>
+      </div>
+      {(message || file) && (
+        <p role="status" className="mt-2 text-[13px] text-ink-mute">
+          {message || "PDF가 준비됐어요. 공유 앱 열기를 눌러 받을 사람을 선택해주세요."}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function MyPageContent({ data, token, refreshing }: { data: MyPageData; token: string; refreshing?: boolean }) {
   if (!data.success) return <MyPageError error={data.error} />;
 
@@ -176,6 +238,8 @@ function MyPageContent({ data, token, refreshing }: { data: MyPageData; token: s
         )}
       </section>
 
+      {trade && estimateUrl && <ReservationQuote key={estimateUrl} url={estimateUrl} tradeId={trade.tradeId} />}
+
       {/* ── 품목 ── */}
       {(trade?.items.length || request?.items.length) ? (
         <section className="mt-4 rounded-[10px] border border-line/80 bg-white/85 p-4 shadow-card">
@@ -212,18 +276,6 @@ function MyPageContent({ data, token, refreshing }: { data: MyPageData; token: s
       ) : null}
 
       <GuideVideoLibrary mode="reservation" equipmentNames={guideEquipmentNames} />
-
-      {/* ── 견적서 PDF ── */}
-      {trade && estimateUrl && (
-        <a
-          href={estimateUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="tap mt-4 block w-full rounded-[8px] border border-line bg-white py-3.5 text-center text-[15px] font-black text-ink shadow-sm transition hover:border-brand-300 hover:text-brand-600"
-        >
-          📄 견적서 PDF 확인
-        </a>
-      )}
 
       {/* ── 변경/연장/취소 안내 — 카카오톡 채널로 ── */}
       <section className="mt-4 rounded-[10px] border border-line/80 bg-white/85 p-4 text-center shadow-card">

@@ -140,7 +140,9 @@ function verifyGuideRecord_(record) {
     var finalSuccess = record.channel === 'sms' ? Number(msg.state) === 3 && result === 100
       : (Number(msg.state) === 3 && result === 100) || Number(msg.altResult) === 100;
     if (finalSuccess) {
-      var expected=via==='sms' ? buildGuideAccessSms_(record.kind,record.name,password) : buildGuideDoorMessage_(record.kind,record.name,password);
+      var expected=record.confirmedCheckout
+        ? buildConfirmedCheckoutMessage_(record.name, record.confirmedCheckout.checkout, record.confirmedCheckout.checkin, password)
+        : via==='sms' ? buildGuideAccessSms_(record.kind,record.name,password) : buildGuideDoorMessage_(record.kind,record.name,password);
       if (!password || body.trim()!==expected.trim()) { record.state = 'failed'; record.reason = '비밀번호/출입 안내 본문 불일치'; }
       else { record.state = 'delivered'; record.deliveredVia = via; record.verifiedAt = Date.now(); }
     } else if (Number(msg.state) === 3 && result !== 100) {
@@ -155,7 +157,7 @@ function verifyGuideRecord_(record) {
 
 // 기존 GUIDE_SENT_V2는 API 접수 기록이다. 새 버전은 자체 도착 기록만으로 중복을 막는다.
 // 이미 예전 안내를 받은 가까운 예약에는 새 조건문과 주차 안내를 1회 보완 발송한다.
-function sendGuideSafely_(tid, kind, cust, operationAt) {
+function sendGuideSafely_(tid, kind, cust, operationAt, approvedPayload, confirmedCheckout) {
   if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return {state:'suspended',sent:false};
   var phone = normalizeAlimtalkReceiver_(cust.tel);
   var key = guideRecordKey_(tid, kind);
@@ -165,12 +167,16 @@ function sendGuideSafely_(tid, kind, cust, operationAt) {
   // 동일 알림톡 거절/응답 불명/접수번호 있는 건은 자동 재시도하지 않는다.
   var blockedLegacySms = record && record.binding === binding && record.channel === 'sms'
     && record.state === 'rejected' && Number(record.rejectionCode) === -10010039 && !record.receiptNum;
+  var failedConfirmation = false;
   if (record && record.binding === binding && !blockedLegacySms) {
     record = verifyGuideRecord_(record); guideSafetyWrite_(key, record);
-    // 보안/IP 제한으로 거절된 요청도 운영자 확인 없이 자동 재접수하지 않는다.
-    return { state: record.state, receiptNum: record.receiptNum || '', sent: false };
+    failedConfirmation = !confirmedCheckout && record.confirmedCheckout &&
+      ((record.state === 'rejected' && record.rejectionCode < 0 && !record.receiptNum) ||
+        (record.state === 'failed' && /^전송 실패 /.test(record.reason || '')));
+    // 확정 안내가 명확히 실패한 경우에만 기존 반출 안내 템플릿을 한 번 사용한다.
+    if (!failedConfirmation) return { state: record.state, receiptNum: record.receiptNum || '', sent: false };
   }
-  var payload = getGuideAlimtalkPayload_(kind, cust.name);
+  var payload = approvedPayload || getGuideAlimtalkPayload_(kind, cust.name);
   if (payload.channel !== 'alimtalk') return {state:'approval_pending',sent:false};
   var replacedRequest = blockedLegacySms ? record.requestNum : '';
   if (blockedLegacySms) guideSafetyWrite_('GUIDE_REJECTED_SMS_V1_' + record.requestNum, record);
@@ -178,10 +184,16 @@ function sendGuideSafely_(tid, kind, cust, operationAt) {
     kind: kind, name: cust.name, templateCode: payload.templateCode || '', channel: payload.channel, smsFallback: false,
     state: 'unknown', requestNum: Utilities.getUuid(), createdAt: Date.now() };
   if (replacedRequest) record.replacesRejectedSmsRequest = replacedRequest;
+  if (confirmedCheckout) record.confirmedCheckout = confirmedCheckout;
   // 외부 호출 전에 원장에 남겨 하드킬/timeout에서도 같은 건을 다시 접수하지 않는다.
   guideSafetyWrite_(key, record);
+  if (confirmedCheckout) return { key: key, record: record };
+  return submitGuideAlimtalk_(key, record, payload, false);
+}
+
+function submitGuideAlimtalk_(key, record, payload, claimOutsideLock) {
   try {
-    var result = sendAlimtalk(payload.templateCode, phone, cust.name, payload.content, payload.vars, null,
+    var result = sendAlimtalk(payload.templateCode, record.phone, record.name, payload.content, payload.vars, payload.btns || null,
       { altSendType: '', requestNum: record.requestNum });
     if (!result || !result.receiptNum) {
       record.state = 'rejected'; record.reason = '발송 접수 거절';
@@ -190,7 +202,19 @@ function sendGuideSafely_(tid, kind, cust, operationAt) {
       record.state = 'pending'; record.receiptNum = String(result.receiptNum);
     }
   } catch (e) { record.state = 'unknown'; record.reason = '발송 응답 확인 불가'; }
-  guideSafetyWrite_(key, record);
+  if (!claimOutsideLock) guideSafetyWrite_(key, record);
+  else {
+    var lock = LockService.getScriptLock();
+    if (lock.tryLock(3000)) {
+      try {
+        var current = guideSafetyRead_(key);
+        // 조회 워커가 먼저 도착을 확인했거나 다른 반출자로 교체한 기록을 덮지 않는다.
+        if (current && current.requestNum === record.requestNum && current.state === 'unknown' && !current.receiptNum) {
+          guideSafetyWrite_(key, record);
+        }
+      } finally { lock.releaseLock(); }
+    }
+  }
   return { state: record.state, receiptNum: record.receiptNum || '', sent: record.state === 'pending' };
 }
 
