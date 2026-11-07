@@ -99,7 +99,8 @@ combined.btns[0].u2 = combinedLink;
 reset();
 assert.equal(ctx.confirmedCheckoutTemplateCode_(), combined.templateCode);
 assert(combinedBody.includes('[견적서 보기]') && combinedBody.includes('[PDF 저장]'));
-assert(combinedBody.length < 1000);
+assert(combinedBody.endsWith(ctx.buildGuideDoorMessage_('checkout', '#{고객명}', '#{출입문비밀번호}')), 'the approved checkout instructions must be kept verbatim');
+assert(combinedBody.length <= 1300);
 
 ctx.GUIDE_DELIVERY_INCIDENT_SUSPENDED_=true;
 assert.equal(ctx.getGuideDoorAccessStatus().checkout.active,false,'template approval cannot override an incident stop');
