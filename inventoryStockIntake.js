@@ -3,13 +3,13 @@ function rememberInventoryStockQuestion_(receipt,signature) {
   if(!receipt?.id || !signature)return;
   var names=(signature.uncertain || []).filter(function(a){return inventoryRiskNeedsIdentityReview_(a[0]);}).map(function(a){return a[1];});
   if(!names.length)return;
-  var p=PropertiesService.getScriptProperties(),key='inventoryStockQuestion_'+receipt.id,prior=JSON.parse(p.getProperty(key) || '{}');
+  var p=operationalPropertyStore_('inventory'),key='inventoryStockQuestion_'+receipt.id,prior=JSON.parse(p.getProperty(key) || '{}');
   names=Array.from(new Set((prior.names || []).concat(names)));
   p.setProperty(key,JSON.stringify({id:receipt.id,channel:receipt.channel,ts:receipt.ts,names:names}));
 }
 function getInventoryStockQuestions(options) {
   if(options?.refresh===true){var cache=CacheService.getScriptCache();cache.remove('inventory_identity_links_v1');cache.remove('inventory_risk_ledger_aliases_v2');}
-  var props=PropertiesService.getScriptProperties().getProperties(),reports={},snapshot=readInventoryRiskSnapshot_();
+  var props=operationalPropertyStore_('inventory').getProperties(),reports={},snapshot=readInventoryRiskSnapshot_();
   var pending=inventoryReviewPendingRows_(),context={equipment:snapshot.equipment,sets:snapshot.sets.slice()};
   var report=buildInventoryRiskReport_(Object.assign({},snapshot,{schedules:snapshot.schedules.concat(pending)})),byName={};
   report.alerts.filter(function(a){return inventoryRiskNeedsIdentityReview_(a.kind);}).forEach(function(a){
@@ -76,7 +76,7 @@ function inventoryReviewPendingRows_(){
 /** Retire only exact, externally verified deleted Slack receipts; preserve booking history. */
 function retireInventoryStockReports(input){
  if(!input||Object.keys(input).some(function(k){return k!=='reports';})||!Array.isArray(input.reports)||input.reports.length>200)throw new Error('삭제한 재고 알림 영수증 필요');
- var p=PropertiesService.getScriptProperties(),allowed=[p.getProperty(PREREG_STOCK_PREFIX_+'channel'),p.getProperty(INVENTORY_RISK_PREFIX_+'channel')];
+ var p=operationalPropertyStore_('inventory'),allowed=[p.getProperty(PREREG_STOCK_PREFIX_+'channel'),p.getProperty(INVENTORY_RISK_PREFIX_+'channel')];
  input.reports.forEach(function(r){if(!r||Object.keys(r).some(function(k){return ['id','channel','ts'].indexOf(k)<0;})||typeof r.id!=='string'||!/^[a-zA-Z0-9-]{8,80}$/.test(r.id)||allowed.indexOf(r.channel)<0||!/^\d+\.\d+$/.test(r.ts))throw new Error('재고 알림 삭제 범위 오류');});
  var lock=LockService.getScriptLock();if(!lock.tryLock(5000))throw new Error('재고 알림 정리 중');
  try{input.reports.forEach(function(r){p.setProperty('inventoryStockRetired_'+r.id,JSON.stringify(r));});

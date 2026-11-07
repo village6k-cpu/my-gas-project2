@@ -111,7 +111,7 @@ function preRegistrationStockText_(result,previous) {
 function linkPreRegistrationStockReplacement_(previousId,requestId) {
   if(!/^RQ-\d{6}-\d{3}$/.test(previousId) || !/^RQ-\d{6}-\d{3}$/.test(requestId) || previousId===requestId)
     throw new Error('재고 알림 예약 교체 연결 확인 필요');
-  var props=PropertiesService.getScriptProperties(),key=PREREG_STOCK_PREFIX_+'predecessor_'+requestId;
+  var props=operationalPropertyStore_('inventory'),key=PREREG_STOCK_PREFIX_+'predecessor_'+requestId;
   var existing=props.getProperty(key);
   if(existing && existing!==previousId)throw new Error('재고 알림 예약 교체 연결 충돌');
   if(existing!==previousId)props.setProperty(key,previousId);
@@ -119,7 +119,7 @@ function linkPreRegistrationStockReplacement_(previousId,requestId) {
 }
 
 function preRegistrationStockInherit_(requestId,state) {
-  var p=PropertiesService.getScriptProperties(),seen={},id=requestId;
+  var p=operationalPropertyStore_('inventory'),seen={},id=requestId;
   for(var i=0;i<32;i++) {
     id=p.getProperty(PREREG_STOCK_PREFIX_+'predecessor_'+id);
     if(!id)return {pending:false};
@@ -172,7 +172,7 @@ function preRegistrationStockReceipt_(pending) {
 }
 
 function preRegistrationStockDeliver_(evaluation) {
-  var p=PropertiesService.getScriptProperties(),key=PREREG_STOCK_PREFIX_+'state_'+evaluation.requestId;
+  var p=operationalPropertyStore_('inventory'),key=PREREG_STOCK_PREFIX_+'state_'+evaluation.requestId;
   var state=JSON.parse(p.getProperty(key) || '{}'),reconciled=false,posting=false;
   var signature={customer:evaluation.customer,start:evaluation.start,end:evaluation.end,
     shortages:evaluation.shortages.map(function(s){return [s.equipment,s.start,s.end,s.requested,s.available];}).sort(),
@@ -244,7 +244,7 @@ function preRegistrationStockDeliver_(evaluation) {
 
 function queuePreRegistrationStockCheck_(requestId,options) {
   options=options || {};
-  var p=PropertiesService.getScriptProperties();
+  var p=operationalPropertyStore_('inventory');
   if((p.getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true' && !options.forceQueue) || !/^RQ-\d{6}-\d{3}$/.test(String(requestId)))return;
   // Writers own dirty; the consumer only writes checked. A newer generation can
   // never be erased by an older check completing between a comparison and delete.
@@ -260,7 +260,7 @@ function queuePreRegistrationStockCheck_(requestId,options) {
 }
 
 function cancelPreRegistrationStockResume_(requestId) {
-  PropertiesService.getScriptProperties().deleteProperty(PREREG_STOCK_PREFIX_+'registering_'+requestId);
+  operationalPropertyStore_('inventory').deleteProperty(PREREG_STOCK_PREFIX_+'registering_'+requestId);
   queuePreRegistrationStockCheck_(requestId);
 }
 
@@ -269,7 +269,7 @@ function preRegistrationStockPrune_(scriptLockHeld) {
   if(!scriptLockHeld && !lock.tryLock(1000))return;
   try {
     if(!inputLock.hasLock()) {if(!inputLock.tryLock(100))return;ownsInputLock=true;}
-    var p=PropertiesService.getScriptProperties(),all=p.getProperties(),prefix=PREREG_STOCK_PREFIX_+'dirty_',cutoff=Date.now()-7*86400000;
+    var p=operationalPropertyStore_('inventory'),all=p.getProperties(),prefix=PREREG_STOCK_PREFIX_+'dirty_',cutoff=Date.now()-7*86400000;
     var inherited=Object.keys(all).filter(function(k){return k.indexOf(PREREG_STOCK_PREFIX_+'predecessor_')===0;}).map(function(k){return all[k];});
     Object.keys(all).filter(function(k){return k.indexOf(prefix)===0;}).forEach(function(k){
       var id=k.slice(prefix.length),state=JSON.parse(all[PREREG_STOCK_PREFIX_+'state_'+id] || '{}');
@@ -313,7 +313,7 @@ function preRegistrationStockRequest_(requestId,includeRegistered,forRegistratio
 }
 
 function preRegistrationStockFlush_(requestId,scriptLockHeld,includeRegistered,preparedEvaluation) {
-  var p=PropertiesService.getScriptProperties();
+  var p=operationalPropertyStore_('inventory');
   if(p.getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true')return {status:'disabled'};
   var lock=LockService.getScriptLock(),owner=Utilities.getUuid(),claimed=false;
   if(!scriptLockHeld && !lock.tryLock(1000))return {status:'busy'};
@@ -368,7 +368,7 @@ function preRegistrationStockFlush_(requestId,scriptLockHeld,includeRegistered,p
 
 function flushPreRegistrationStockAlerts(){return preRegistrationStockFlush_(null,false,false);}
 function checkPreRegistrationStockBeforeRegister_(requestId){
-  if(PropertiesService.getScriptProperties().getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true')return {ready:true,status:'disabled'};
+  if(operationalPropertyStore_('inventory').getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true')return {ready:true,status:'disabled'};
   try {
     var request=preRegistrationStockRequest_(requestId,false,true);
     if(!request)return {ready:true,status:'skipped'};
@@ -378,7 +378,7 @@ function checkPreRegistrationStockBeforeRegister_(requestId){
     // the durable request/schedule for native AI; it is never declared available.
     if(!evaluation.shortages.length && !preRegistrationStockNotifiableUncertainty_(evaluation).length)
       return {ready:true,status:'identity_review_queued',inventoryVerified:false};
-    PropertiesService.getScriptProperties().setProperty(PREREG_STOCK_PREFIX_+'registering_'+requestId,'true');
+    operationalPropertyStore_('inventory').setProperty(PREREG_STOCK_PREFIX_+'registering_'+requestId,'true');
     queuePreRegistrationStockCheck_(requestId);
     var result=preRegistrationStockFlush_(requestId,true,false,evaluation);
     return {ready:result.status==='ok' && result.results.length===1 && ['sent','already_sent'].indexOf(result.results[0].status)>=0,result:result};
@@ -389,7 +389,7 @@ function checkPreRegistrationStockAlert(options) {
   options=options || {};var id=String(options.requestId || '');
   if(!/^RQ-\d{6}-\d{3}$/.test(id))throw new Error('확인요청 ID 확인 필요');
   if(options.notify===true){
-    if(options.includeRegistered===true)PropertiesService.getScriptProperties().setProperty(PREREG_STOCK_PREFIX_+'registered_'+id,'true');
+    if(options.includeRegistered===true)operationalPropertyStore_('inventory').setProperty(PREREG_STOCK_PREFIX_+'registered_'+id,'true');
     queuePreRegistrationStockCheck_(id);return preRegistrationStockFlush_(id,false,options.includeRegistered===true);
   }
   var request=preRegistrationStockRequest_(id,options.includeRegistered===true);
@@ -397,7 +397,7 @@ function checkPreRegistrationStockAlert(options) {
 }
 
 function getPreRegistrationStockAlertStatus(options) {
-  var p=PropertiesService.getScriptProperties(),all=p.getProperties(),lease=JSON.parse(all[PREREG_STOCK_PREFIX_+'lease'] || '{}');
+  var p=operationalPropertyStore_('inventory'),all=p.getProperties(),lease=JSON.parse(all[PREREG_STOCK_PREFIX_+'lease'] || '{}');
   var result={policyVersion:2,enabled:p.getProperty(PREREG_STOCK_PREFIX_+'enabled')==='true',channel:p.getProperty(PREREG_STOCK_PREFIX_+'channel'),
     externalRelay:p.getProperty(PREREG_STOCK_PREFIX_+'externalRelay')==='true',
     processingUntil:lease.until>Date.now()?new Date(lease.until).toISOString():null,
@@ -415,7 +415,7 @@ function getPreRegistrationStockAlertStatus(options) {
 }
 
 function setupPreRegistrationStockAlerts(options) {
-  options=options || {};var p=PropertiesService.getScriptProperties(),channel=options.channel || p.getProperty(PREREG_STOCK_PREFIX_+'channel');
+  options=options || {};var p=operationalPropertyStore_('inventory'),channel=options.channel || p.getProperty(PREREG_STOCK_PREFIX_+'channel');
   if(!/^[CG][A-Z0-9]{8,}$/.test(channel || ''))throw new Error('Slack 채널 ID 확인 필요');
   // The authenticated local relay verifies its own Slack connection before setup.
   // This keeps activation possible when this Google account has no UrlFetch quota.
@@ -428,7 +428,7 @@ function setupPreRegistrationStockAlerts(options) {
 }
 
 function claimPreRegistrationStockAlertRelay() {
-  var p=PropertiesService.getScriptProperties();
+  var p=operationalPropertyStore_('inventory');
   if(p.getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true' || p.getProperty(PREREG_STOCK_PREFIX_+'externalRelay')!=='true')return {status:'disabled'};
   // Refresh the exact candidate, including pending receipts outside the normal
   // four-request batch. A locked/failed read cannot authorize an old notice.
@@ -460,7 +460,7 @@ function claimPreRegistrationStockAlertRelay() {
 function authorizePreRegistrationStockAlertRelay(args) {
   args=args || {};
   if(!/^RQ-\d{6}-\d{3}$/.test(args.requestId || ''))throw new Error('재고 경보 요청ID 확인 필요');
-  var p=PropertiesService.getScriptProperties(),lock=LockService.getScriptLock(),inputLock=LockService.getUserLock(),inputHeld=false;
+  var p=operationalPropertyStore_('inventory'),lock=LockService.getScriptLock(),inputLock=LockService.getUserLock(),inputHeld=false;
   if(!lock.tryLock(1000))return {status:'busy'};
   try {
     if(p.getProperty(PREREG_STOCK_PREFIX_+'enabled')!=='true' || p.getProperty(PREREG_STOCK_PREFIX_+'externalRelay')!=='true')return {status:'disabled'};
@@ -481,7 +481,7 @@ function authorizePreRegistrationStockAlertRelay(args) {
 function acknowledgePreRegistrationStockAlertRelay(args) {
   args=args || {};
   if(!/^RQ-\d{6}-\d{3}$/.test(args.requestId || ''))throw new Error('재고 경보 요청ID 확인 필요');
-  var p=PropertiesService.getScriptProperties(),lock=LockService.getScriptLock();if(!lock.tryLock(1000))return {status:'busy'};
+  var p=operationalPropertyStore_('inventory'),lock=LockService.getScriptLock();if(!lock.tryLock(1000))return {status:'busy'};
   try {
     var lease=JSON.parse(p.getProperty(PREREG_STOCK_PREFIX_+'lease') || '{}');if(lease.until>Date.now())return {status:'busy'};
     var key=PREREG_STOCK_PREFIX_+'state_'+args.requestId,state=JSON.parse(p.getProperty(key) || '{}'),pending=state.pending;
