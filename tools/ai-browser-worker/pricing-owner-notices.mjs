@@ -4,6 +4,28 @@ import {createHash} from 'node:crypto';
 import {verifiedPricingFreshJob,verifiedPricingAudit,pricingDocumentUrl} from './verified-pricing.mjs';
 
 const clean=value=>String(value || '').replace(/[\r\n<>]/g,' ').trim();
+export function liveReplyFailureNotice(config, durableJob, now = Date.now()) {
+  const job = durableJob.local_context?.job;
+  const application = durableJob.application;
+  const detected = Date.parse(durableJob.event?.detected_at || '');
+  const cutoff = Date.parse(config.recoveryFreezeBefore || '');
+  const reason = /^gateway_reply_execution_unresolved: ([a-z0-9_]+)$/.exec(application?.error?.message || '')?.[1];
+  if (config.recoveryLiveAutoSendEnabled !== true || !/^U[A-Z0-9]+$/.test(config.pricingOwnerSlackUserId || '')
+    || !durableJob.job_id || !application?.application_id || application.state !== 'failed'
+    || application.failure_notification?.state !== 'pending' || !reason
+    || !Number.isFinite(detected) || !Number.isFinite(cutoff) || detected <= cutoff || detected > now
+    || now - detected > 2 * 60 * 60 * 1000 || job?.replayedFromSupabase === true
+    || job?.events?.some(event => event.recoveryOnly === true || event.reason === 'startup_catchup')
+    || !job?.events?.some(event => ['top_row_changed', 'top_rows_backstop'].includes(event.reason))) return null;
+
+  const key = createHash('sha256').update(durableJob.job_id + ':live-reply-failure').digest('hex');
+  const clientMsgId = `${key.slice(0,8)}-${key.slice(8,12)}-4${key.slice(13,16)}-a${key.slice(17,20)}-${key.slice(20,32)}`;
+  const customer = clean(job.customerName).replace(/01[016789][ -]?\d{3,4}[ -]?\d{4}/g, '[연락처 생략]').slice(0,80) || '상담방 확인';
+  return { schema:'village-pricing-owner-notice/v1', key, clientMsgId, channel:config.pricingOwnerSlackUserId,
+    requiresHumanAction:true, createdAt:new Date(now).toISOString(), state:'pending',
+    text:`카톡 자동 답변 확인 필요\n고객: ${customer}\n사유: ${reason}\n카카오톡 채팅방에서 답변이 이미 나갔는지 확인해주세요.` };
+}
+
 export function pricingOwnerNotice(config,job,finalized){
   if(!config.verifiedPricingAutoSendEnabled || !verifiedPricingFreshJob(config,job))return null;
   const decision=finalized.decision || {},result=finalized.autoReplyResult || {};

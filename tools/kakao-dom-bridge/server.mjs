@@ -1,4 +1,4 @@
-import {pricingOwnerNotice,queuePricingOwnerNotice,flushPricingOwnerNotices} from '../ai-browser-worker/pricing-owner-notices.mjs';
+import {pricingOwnerNotice,queuePricingOwnerNotice,flushPricingOwnerNotices,liveReplyFailureNotice} from '../ai-browser-worker/pricing-owner-notices.mjs';
 import {reservationOwnerNotice,reservationFailureOwnerNotice} from '../ai-browser-worker/reservation-intake-guard.mjs';
 import {verifiedPricingAudit} from '../ai-browser-worker/verified-pricing.mjs';
 import http from 'node:http';
@@ -2786,7 +2786,7 @@ export function createGatewayResultApplicationCoordinator({
   }
 
   async function notifyApplicationFailure(failedJob, error, source) {
-    if (!notificationDeliveryEnabled) return; // Preserve pending; never pretend a notice was delivered.
+    if (!notificationDeliveryEnabled) return false; // Preserve pending; never pretend a notice was delivered.
     await onFailure({ durableJob: failedJob, error });
     await channel.markApplicationFailureNotified({
       job_id: failedJob.job_id,
@@ -2796,6 +2796,7 @@ export function createGatewayResultApplicationCoordinator({
         error_type: String(failedJob.application?.error?.type || error?.code || 'gateway_application_failed').slice(0, 120)
       }
     });
+    return true;
   }
 
   async function enqueueCompletedJob(completedJob = {}) {
@@ -2840,8 +2841,8 @@ export function createGatewayResultApplicationCoordinator({
       for (const job of pending) {
         const error = failureErrorForJob(job);
         try {
-          await notifyApplicationFailure(job, error, 'startup_recovery');
-          recovered.push({ job_id: job.job_id, notified: true });
+          const notified = await notifyApplicationFailure(job, error, 'startup_recovery');
+          recovered.push({ job_id: job.job_id, notified });
         } catch (notificationError) {
           recovered.push({
             job_id: job.job_id,
@@ -7040,7 +7041,19 @@ const pricingNoticeTimer = process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID
     try{
       const directory=path.join(CONFIG.queueDir,'pricing-owner-notices');
       const failures=[];
-      if(gatewayChannel && process.env.AI_WORKER_RESERVATION_CLARIFICATION_AUTO_SEND === '1') {
+      if (gatewayChannel && recoveryHold) {
+        const now = Date.now();
+        const config = getKakaoWorkerRuntimeConfigForTransport();
+        const scope = { createdAfter: new Date(now - 2 * 60 * 60 * 1000).toISOString() };
+        const pending = await gatewayChannel.listPendingApplicationFailureNotifications(scope);
+        for (const job of pending) {
+          const notice = liveReplyFailureNotice(config, job, now);
+          if (!notice) continue;
+          await queuePricingOwnerNotice(directory, notice);
+          failures.push({ job, notice });
+          if (failures.length >= 5) break;
+        }
+      } else if(gatewayChannel && process.env.AI_WORKER_RESERVATION_CLARIFICATION_AUTO_SEND === '1') {
         const config=getKakaoWorkerRuntimeConfigForTransport();
         // Filter compact metadata before reading any historical conversation files.
         const scope={createdAfter:config.reservationRecoveryEnabledAfter};
@@ -7054,7 +7067,7 @@ const pricingNoticeTimer = process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID
       await flushPricingOwnerNotices(directory,{token:process.env.SLACK_BOT_TOKEN});
       for(const {job,notice} of failures) {
         const delivered=JSON.parse(fs.readFileSync(path.join(directory,notice.key+'.json'),'utf8'));
-        if(delivered.state==='sent') {
+        if(delivered.state==='sent' && delivered.slackTs) {
           const audit={kind:'fresh_automation_failure',slack_ts:delivered.slackTs};
           if(job.application?.state==='failed')await gatewayChannel.markApplicationFailureNotified({job_id:job.job_id,
             application_id:job.application.application_id,audit});

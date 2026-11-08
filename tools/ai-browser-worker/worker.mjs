@@ -8788,7 +8788,41 @@ function freshestJobEventDate(job = {}, events = []) {
   return candidates.sort((a, b) => b.getTime() - a.getTime())[0];
 }
 
-export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWindowMinutes = 20, eventFreshnessMinutes = 60 } = {}) {
+function matchesMidnightUnreadMessage(job, event, snapshot, now, freshnessMinutes) {
+  const eventAt = parseIsoDate(event?.detectedAt || event?.raw?.detectedAt);
+  const eventAge = eventAt ? (now - eventAt) / 60000 : NaN;
+  if (!Number.isFinite(eventAge) || eventAge < 0 || eventAge > freshnessMinutes
+    || kstClockMinutes(eventAt) >= freshnessMinutes || event?.recoveryOnly === true
+    || !['top_row_changed', 'top_rows_backstop'].includes(event?.reason)
+    || !(Number(event.unreadCount ?? event.unread_count ?? event.raw?.unreadCount) > 0)) return false;
+
+  const displayTime = text(event.displayTime || event.raw?.displayTime || job.displayTime).trim();
+  const previousDay = kstClockParts(new Date(eventAt.getTime() - 86400000));
+  const dateLabel = /^(\d{1,2})월\s*(\d{1,2})일$/.exec(displayTime);
+  if (!dateLabel || Number(dateLabel[1]) !== previousDay.month || Number(dateLabel[2]) !== previousDay.day) return false;
+
+  const evidence = snapshot?.navigation?.conversation_evidence;
+  const snapshotAge = now - Date.parse(snapshot?.capturedAt || '');
+  if (snapshot?.schema !== 'kakao-room-snapshot/v1' || !snapshot.jobId || !snapshot.roomKey || !snapshot.roomRevision
+    || snapshot.jobId !== (job.jobId || job.id) || snapshot.roomKey !== (job.roomKey || job.room_key)
+    || snapshot.roomRevision !== Number(job.roomRevision || job.room_revision)
+    || !Number.isFinite(snapshotAge) || snapshotAge < -1000 || snapshotAge > 60000
+    || evidence?.hint_matched !== true || evidence.capture_integrity?.reason !== 'trigger_message_observed'
+    || evidence.capture_integrity.ok !== true) return false;
+
+  // The unread event supplies incoming direction when Kakao does not label a bubble.
+  // Require the complete trigger as the unique final message; a newer staff reply wins.
+  const canonical = value => text(value).normalize('NFKC').replace(/\s+/gu, '').trim();
+  const trigger = canonical(event.messagePreview || event.raw?.messagePreview || job.messagePreview);
+  const messages = evidence.messages || [];
+  const last = messages.at(-1);
+  return trigger.length >= 4 && !/(?:…|\.{3})$/.test(trigger)
+    && ['customer', 'unknown'].includes(last?.role) && canonical(last.text) === trigger
+    && messages.filter(message => canonical(message.text) === trigger).length === 1;
+}
+
+export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWindowMinutes = 20,
+  eventFreshnessMinutes = 60, revalidatedSnapshot = null } = {}) {
   const replayedFromSupabase = job.replayedFromSupabase === true
     || job.payload?.replayedFromSupabase === true
     || job.recoverySource === 'supabase_recovery_sweeper'
@@ -8816,7 +8850,12 @@ export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWind
     return { eligible: true, reason: hasUnread ? 'top_row_unread' : 'top_row_live_time_format' };
   }
   if (/\d{4}\.\d{1,2}\.\d{1,2}\s*$/.test(preview)) return { eligible: false, reason: 'preview_has_absolute_date' };
-  if (hasNonCurrentKakaoDateLabel(preview, referenceNow)) return { eligible: false, reason: 'preview_has_old_date' };
+  if (hasNonCurrentKakaoDateLabel(preview, referenceNow)) {
+    if (matchesMidnightUnreadMessage(job, events.at(-1), revalidatedSnapshot, now, eventFreshnessMinutes)) {
+      return { eligible: true, reason: 'midnight_unread_message_verified' };
+    }
+    return { eligible: false, reason: 'preview_has_old_date' };
+  }
   if (hasUnread) return { eligible: true, reason: 'top_row_unread' };
   if (parseKakaoKoreanMonthDayLabels(preview).length) return { eligible: true, reason: 'top_row_current_date_label' };
   return { eligible: false, reason: 'preview_not_live_time_format' };
@@ -8847,7 +8886,9 @@ function canResumeVerifiedDocument({config,decision,job,dependencies,liveGate}) 
 }
 
 export async function maybeAutoSendReply({ config, decision, job, navigationContext, dependencies = {} }) {
-  const liveGate = isAutoSendEligibleLiveJob(job);
+  const liveGate = isAutoSendEligibleLiveJob(job, {
+    revalidatedSnapshot: typeof dependencies.assertFreshBeforeSend === 'function' ? dependencies.revalidatedSnapshot : null
+  });
   if (!liveGate.eligible && !canResumeVerifiedDocument({config,decision,job,dependencies,liveGate})) {
     const result = { attempted: false, sent: false, gate: { allowed: false, reason: liveGate.reason } };
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', preview: job.preview_text || job.previewText || '' });

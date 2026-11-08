@@ -3,7 +3,22 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {pricingOwnerNotice,queuePricingOwnerNotice,flushPricingOwnerNotices} from './pricing-owner-notices.mjs';
+import {pricingOwnerNotice,queuePricingOwnerNotice,flushPricingOwnerNotices,liveReplyFailureNotice} from './pricing-owner-notices.mjs';
+
+test('recovery hold surfaces only recent unresolved live replies with one durable notice per job', () => {
+  const now = Date.parse('2026-11-06T15:08:00Z');
+  const config = {recoveryLiveAutoSendEnabled:true,recoveryFreezeBefore:'2026-11-06T14:00:00Z',pricingOwnerSlackUserId:'UOWNER'};
+  const job = {job_id:'midnight-quote',event:{detected_at:'2026-11-06T15:03:53Z'},
+    local_context:{job:{customerName:'테스트',events:[{reason:'top_rows_backstop'}]}},
+    application:{state:'failed',application_id:'app-1',failure_notification:{state:'pending'},
+      error:{message:'gateway_reply_execution_unresolved: preview_has_old_date'}}};
+  const first = liveReplyFailureNotice(config,job,now);
+  assert.match(first.text,/카톡 자동 답변 확인 필요/);
+  assert.equal(liveReplyFailureNotice(config,job,now+30000).key,first.key);
+  assert.equal(liveReplyFailureNotice(config,job,now+3*60*60*1000),null);
+  assert.equal(liveReplyFailureNotice(config,{...job,application:{...job.application,state:'applied'}},now),null);
+  assert.equal(liveReplyFailureNotice(config,{...job,local_context:{job:{events:[{reason:'startup_catchup'}]}}},now),null);
+});
 
 const config={verifiedPricingAutoSendEnabled:true,verifiedPricingEnabledAfter:'2026-11-02T00:00:00Z',pricingOwnerSlackUserId:'UOWNER'};
 const job={jobId:'new-price',detectedAt:'2026-11-02T01:00:00Z'};

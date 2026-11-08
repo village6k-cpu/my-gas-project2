@@ -3,8 +3,36 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {maybeAutoSendReply, autoReplyTextHash} from './worker.mjs';
+import {maybeAutoSendReply, autoReplyTextHash, isAutoSendEligibleLiveJob} from './worker.mjs';
 import {completeVerifiedPricingWork} from './verified-pricing.mjs';
+
+test('yesterday label at midnight uses verified unread trigger and rejects old or answered conversations', () => {
+  const now = new Date('2026-11-06T15:07:58.892Z');
+  const question = '넵! 견적서는 방문 후 수령인가요?';
+  const event = {reason:'top_rows_backstop',unreadCount:1,detectedAt:'2026-11-06T15:03:53.164Z',
+    displayTime:'11월 6일',messagePreview:question};
+  const job = {jobId:'midnight-quote',roomKey:'chat:123',roomRevision:4,
+    detectedAt:event.detectedAt,previewText:question+' 11월 6일',events:[event]};
+  const message = {role:'unknown',text:question};
+  const snapshot = {schema:'kakao-room-snapshot/v1',jobId:job.jobId,roomKey:job.roomKey,
+    roomRevision:job.roomRevision,capturedAt:now.toISOString(),navigation:{conversation_evidence:{
+      hint_matched:true,capture_integrity:{ok:true,reason:'trigger_message_observed'},messages:[message]}}};
+  const check = (currentJob = job, proof = snapshot, at = now) =>
+    isAutoSendEligibleLiveJob(currentJob,{now:at,revalidatedSnapshot:proof});
+  const withMessages = messages => ({...snapshot,navigation:{conversation_evidence:{
+    ...snapshot.navigation.conversation_evidence,messages}}});
+  assert.deepEqual(check(),{eligible:true,reason:'midnight_unread_message_verified'});
+  assert.equal(check(job,null).eligible,false);
+  assert.equal(check(job,{...snapshot,roomRevision:3}).eligible,false);
+  assert.equal(check(job,withMessages([message,{role:'staff',text:'견적서를 전달드렸습니다.'}])).eligible,false);
+  assert.equal(check(job,withMessages([message,message])).eligible,false);
+  assert.equal(check({...job,events:[{...event,unreadCount:0,reason:'top_row_changed'}]}).eligible,false);
+  assert.equal(check({...job,events:[{...event,reason:'startup_catchup'}]}).eligible,false);
+  assert.equal(check({...job,replayedFromSupabase:true}).eligible,false);
+  assert.equal(check({...job,previewText:question+' 11월 5일',events:[{...event,displayTime:'11월 5일'}]}).eligible,false);
+  const later = new Date('2026-11-06T16:10:00Z');
+  assert.equal(check(job,{...snapshot,capturedAt:later.toISOString()},later).eligible,false);
+});
 
 test('one sent quotation cannot resolve another rental or a combined unpriced case',()=>{
   const matching={type:'quote_send',taskKey:'quote-send:RQ-261104-001',requiresHumanAction:true};
