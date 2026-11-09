@@ -1,7 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {createHash} from 'node:crypto';
 const privatePdf=Buffer.from('%PDF-1.7\n'+'.'.repeat(60));
 const privateAttachment={documentAccess:'private',mimeType:'application/pdf',ownerUrl:'https://docs.google.com/spreadsheets/d/statement-test/edit',pdfBase64:privatePdf.toString('base64'),pdfSha256:createHash('sha256').update(privatePdf).digest('hex')};
-import {automaticQuoteRequest,automaticStatementRequest,verifiedPricingIssue,verifiedPricingFreshJob,sendAutomaticPricingDocument,verifiedPricingConfigured,completeVerifiedPricingWork} from './verified-pricing.mjs';
+import {quoteNeedsSeparateVerification,automaticQuoteRequest,automaticStatementRequest,verifiedPricingIssue,verifiedPricingFreshJob,sendAutomaticPricingDocument,verifiedPricingConfigured,completeVerifiedPricingWork} from './verified-pricing.mjs';
 const quote={source:'catalog',customer_name:'테스트',phone:'01012345678',discount_type:'학생',start_date:'2026-11-03',start_time:'10:00',end_date:'2026-11-04',end_time:'10:00',items:[{name:'렌즈',quantity:1}]};
 const decision={customer:{name:'테스트'},price_quote:quote,reply_decision:{safetyClass:'sensitive_commitment',grounding:'authoritative_sheet',requiresRag:false}};
 const verification={complete:true,totalVatIncluded:7700,unresolved:[],calculations:[{discountType:'학생',customerDiscountSource:'conversation',pricedItems:[{name:'렌즈',price:10000,qty:1}],payment:{days:1}}]};
@@ -126,4 +126,22 @@ test('accepted quotation polls the same persisted operation until provider deliv
  const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid/exec',documentApiKey:'test'},decision,verification,job,waitImpl:async()=>{},
   fetchImpl:async(_url,request)=>{const body=JSON.parse(request.body);operations.push(body.operationId);return{ok:true,json:async()=>({status:operations.length<3?'QUEUED':'OK',operationId:body.operationId,deliveryConfirmed:operations.length>=3,totalVatIncluded:7700,pdfUrl:'https://drive.google.com/file/d/test/view'})}}});
  assert.equal(receipt.deliveryConfirmed,true);assert.equal(operations.length,3);assert.equal(new Set(operations).size,1);
+});
+
+
+test('a partial quote cannot send or complete a two-period request', () => {
+  const task = {type: 'quote_send', title: '11/5·11/9 견적서 전달',
+    evidence: ['customer_request: 오늘꺼랑 11-5일 꺼 견적서 받을 수 있나요??']};
+  const combined = {...decision, price_quote: {source: 'trade', id: '261105-002'},
+    follow_up_items: [task]};
+  assert.equal(quoteNeedsSeparateVerification(combined), true);
+  assert.throws(() => automaticQuoteRequest({decision: combined, verification, job}),
+    /quote_scope_requires_separate_verification/);
+  const prepared = {decision: combined, availabilityAwareRows: [task]};
+  const result = completeVerifiedPricingWork(prepared, {verifiedPricing: true, sent: true,
+    readbackReceipt: {}, pricingDocumentReceipt: {deliveryConfirmed: true, documentType: 'quote'}});
+  assert.deepEqual(result.decision.follow_up_items, [task]);
+  assert.deepEqual(result.availabilityAwareRows, [task]);
+  assert.equal(quoteNeedsSeparateVerification({...combined,
+    follow_up_items: [{type: 'quote_send', title: '11/5~11/6 대여 견적서'}]}), false);
 });

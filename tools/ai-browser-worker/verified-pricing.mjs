@@ -34,6 +34,23 @@ export function pricingDocumentRequested(decision = {}) {
   return Boolean(decision.statement_request) || (decision.follow_up_items || []).some(item => item.type === 'quote_send');
 }
 
+// A single price source cannot authorize or close a request for several quotes.
+export function quoteNeedsSeparateVerification(decision = {}) {
+  const tasks = (decision.follow_up_items || []).filter(item => item.type === 'quote_send');
+  if (!tasks.length) return false;
+  if (tasks.length > 1) return true;
+  const [task] = tasks;
+  const scope = [task.title, task.summary, task.recommended_action, ...(task.evidence || [])].join(' ');
+  const refs = new Set(scope.match(/\b(?:RQ-)?\d{6}-\d{3}\b/g) || []);
+  if (refs.size > 1) return true;
+  const request = [task.title, decision.latest_customer_message_cluster, task.suggested_reply_draft,
+    ...(task.evidence || []).filter(value => typeof value === 'string' && value.startsWith('customer_request:'))].join(' ');
+  const day = String.raw`\d{1,2}(?:\s*[/.\-]\s*|\s*월\s*)\d{1,2}(?:\s*일)?`;
+  return /(?:두|2|여러)\s*건(?:의)?\s*견적서|견적서.{0,24}(?:두|2|여러)\s*건/.test(request)
+    || new RegExp(day + String.raw`(?:\s*(?:건|꺼))?\s*(?:[·ㆍ,]|과|와|하고|이랑|랑|및)\s*` + day).test(request)
+    || new RegExp(String.raw`(?:오늘|어제)\s*(?:건|꺼|거)?\s*(?:과|와|하고|이랑|랑|및)\s*` + day).test(request);
+}
+
 export function automaticStatementRequest({config = {}, decision, verification, job}) {
   const quote=decision.price_quote, request=decision.statement_request;
   if(verifiedPricingIssue(verification,quote))throw new Error('statement_price_incomplete');
@@ -53,6 +70,7 @@ export function automaticStatementRequest({config = {}, decision, verification, 
 }
 
 export function automaticQuoteRequest({ decision, verification, job }) {
+  if (quoteNeedsSeparateVerification(decision)) throw new Error('quote_scope_requires_separate_verification');
   const quote = decision.price_quote;
   const issue = verifiedPricingIssue(verification, quote);
   if (issue) throw new Error(issue);
@@ -158,7 +176,10 @@ export function completeVerifiedPricingWork(prepared, result) {
     return !reference || !keys.length || keys.some(key=>String(key).split(':').includes(reference));
   };
   const fulfilled=item=>(completed.has(item.type)
-    && (!['quote_send','price_review'].includes(item.type) || sameQuote(item))) || (statementDone && item.type==='contract_document'
+    && (!['quote_send','price_review'].includes(item.type) || sameQuote(item))
+    && (item.type !== 'quote_send' || !quoteNeedsSeparateVerification({
+      ...prepared.decision, follow_up_items: [item]
+    }))) || (statementDone && item.type==='contract_document'
     && /거래명세|statement/i.test([item.title,item.summary,item.taskKey,item.task_key,item.payload?.task_key].join(' ')));
   const remaining=(prepared.decision.follow_up_items || []).filter(item=>!fulfilled(item));
   return {...prepared,decision:{...prepared.decision,follow_up_items:remaining,

@@ -3,7 +3,7 @@ import {refreshKakaoConversationWithoutDraft} from './stale-conversation-refresh
 import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
 import {reservationClarificationConfigured, freshReservationJob, RESERVATION_DATE_POLICY, RESERVATION_PRIORITY_POLICY} from './reservation-intake-guard.mjs';
-import { completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, sendAutomaticPricingDocument } from './verified-pricing.mjs';
+import { completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, quoteNeedsSeparateVerification, sendAutomaticPricingDocument } from './verified-pricing.mjs';
 import fs from 'node:fs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
 import os from 'node:os';
@@ -775,7 +775,7 @@ ${INVENTORY_JUDGMENT}
 ${(() => {try {const entries=JSON.parse(process.env.AI_WORKER_STATEMENT_RECIPIENT_AUTHORIZATIONS || '[]');const current=Array.isArray(entries)?entries.filter(entry=>entry.roomKey===(job.roomKey || job.room_key)):[];return current.length ? '- Owner-confirmed statement recipient authorizations for THIS ROOM: '+JSON.stringify(current)+'\n' : '';}catch{return '';}})()}- For statements, resolve the exact registered trade (including the booking name in the customer request), read kind=quote/source=trade, and set FINAL_JSON.statement_request={trade_id,booking_customer_name}, price_quote={source:"trade",id:trade_id}. Keep one contract_document follow-up titled 거래명세서 as host execution intent. Host verifies the ledger and sends the private official PDF attachment in this room; never substitute an estimate or claim delivery early. The requester must match the booking customer or an exact owner-approved recipient authorization; otherwise ask who may receive it. Reply text includes trade ID and verified VAT total. Do not call village_document_send for statements.
 - Pricing protocol (statements use the trade context above): finish verified prices/quotes in this first AI turn without owner handoff. Copy the exact verified price_quote: use source="trade" or "request" with the exact live ID for an existing record; use the full source="catalog" object for a new estimate. Set replyMode="auto_send", safetyClass="sensitive_commitment", grounding="authoritative_sheet", requiresRag=false, owner_review_required=false. State exact VAT-inclusive total/discount; no availability/delivery claim. A requested PDF remains one quote_send follow_up_item as HOST EXECUTION INTENT: host rechecks the recipient, current prices and amount, sends, audits and removes completed work. A delivery receipt is not required to REQUEST this host execution; do not downgrade a fully verified pending quote to draft_only merely because the host has not sent it yet. Do not also call village_document_send. Missing/zero prices, unknown discounts or conflicting earlier amounts require focused owner review; never drop items or invent discounts. Verified sends are recorded and reported, not assigned as approval work.
 - For an explicit VAT-exclusive registered-trade document, use village_document_send with exact trade_id and tax_mode="supply_only"; this is separate from the VAT-inclusive initial pricing protocol. A successful correlated tool receipt proves this direct tool delivery. Never claim delivery before either the tool or host has confirmed it; a pending host execution intent is not a delivery claim.
-- A pending quote_send task is not a delivery claim. Preserve it when document prerequisites are missing, while answering independently grounded price/policy questions where possible. State the specific unresolved prerequisite; do not silently replace a requested document with an incomplete price or a generic acknowledgment. Do not omit equipment or assume a missing price is free to make a quote complete.
+- For multiple quote periods or an accepted cart differing from the ledger, preserve the unresolved quote work for separate verification. Do not send an older or partial quote, and keep internal ledger details out of customer replies. A pending quote_send task is not a delivery claim. Preserve it when document prerequisites are missing, while answering independently grounded price/policy questions where possible. State the specific unresolved prerequisite; do not silently replace a requested document with an incomplete price or a generic acknowledgment. Do not omit equipment or assume a missing price is free to make a quote complete.
 - A registration receipt proves registration only. If a later customer also requested a quote document, retain that exact open document follow-up after registration success; do not discard it or mark it delivered. Follow the single-operation receipt boundary and do not replay registration to generate a document.
 - If an RQ is absent, reconcile live contracts and schedules first. Do not retry the mutation tool under the consumed lease; absence can mean registration completed.
 - A no_action receipt is not creation success and grants no retry authority. Reconcile through read-only lookup, preserving any already completed operation.
@@ -8858,6 +8858,11 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   if (reservationClarificationConfigured(config, decision) && !freshReservationJob(config, job)) {
     return {attempted:false,sent:false,gate:{allowed:false,reason:'clarification_before_activation_cutoff'}};
   }
+  if (quoteNeedsSeparateVerification(decision)) {
+    const result = { attempted: false, sent: false, gate: { allowed: false, reason: 'quote_scope_requires_separate_verification' } };
+    logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
+    return result;
+  }
   const documentGate = canAutoSendCustomerDocumentAssets(decision, config);
   let priceVerification = null;
   let gate;
@@ -8876,6 +8881,9 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
     const result = { attempted: false, sent: false, gate, ...(priceVerification ? { priceVerification } : {}) };
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
     return result;
+  }
+  if (isKakaoUiPlaceholderLine(gate.text)) {
+    return { attempted: false, sent: false, gate: { allowed: false, reason: 'kakao_ui_placeholder' } };
   }
   if(decision.statement_request && !gate.text.includes(decision.statement_request.trade_id))gate={...gate,text:`거래 ${decision.statement_request.trade_id}\n${gate.text}`};
   const dedupeKey = buildAutoReplyDedupeKey({ decision, job, replyText: gate.text });
