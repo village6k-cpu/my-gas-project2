@@ -111,6 +111,33 @@ test('unique bank payer can automatically allocate on first receipt revision', a
   const allocation = h.calls.rpc.find(call => call.name === 'payment_set_allocations');
   assert.deepEqual(allocation.args.p_allocations, [{ trade_id: '261020-001', amount: 100000 }]);
 });
+test('bank sender with multiple reservations matches the unique exact balance using the sender field', async () => {
+  const h = harness({
+    accounts: [account(), account({ trade_id: '261020-002', balance: 60000 })],
+    receipts: [receipt({ payer_name: '김수납(촬영팀) 모바일', raw: { remark1: '김수납(촬영팀)' } })],
+  });
+  const result = await h.api.ingestPayment(inputFor('bank'), 'bank_bridge', { refresh: false, project: false });
+  assert.equal(result.status, 'allocated');
+  const allocation = h.calls.rpc.find(call => call.name === 'payment_set_allocations');
+  assert.deepEqual(allocation.args.p_allocations, [{ trade_id: '261020-001', amount: 100000 }]);
+});
+test('bank amount tie-break leaves equal balances, old bookings, and a settled exact match unallocated', async () => {
+  const alternate = account({ trade_id: '261020-002', balance: 60000 });
+  for (const accounts of [
+    [account(), account({ trade_id: '261020-003' })],
+    [account(), alternate, account({ trade_id: '261020-003', balance: 0, paid_amount: 100000 })],
+    [alternate, account({ trade_id: '261020-003', checkout_at: '2026-08-01T09:00:00+09:00' })],
+    [alternate, account({ trade_id: '261020-003', payer_name: '김수', customer_name: '김수' })],
+  ]) {
+    const h = harness({
+      accounts,
+      receipts: [receipt({ payer_name: '김수납(촬영팀) 모바일', raw: { remark1: '김수납(촬영팀)' } })],
+    });
+    const result = await h.api.ingestPayment(inputFor('bank'), 'bank_bridge', { refresh: false, project: false });
+    assert.equal(result.status, 'unmatched');
+    assert.equal(h.calls.rpc.some(call => call.name === 'payment_set_allocations'), false);
+  }
+});
 test('duplicate bank receipt manually unlinked at a later revision never automatically rematches', async () => {
   const h = harness({ duplicate: true, receipts: [receipt({ revision: 3 })] });
   const result = await h.api.ingestPayment(inputFor('bank'), 'repeated_bank_feed', { refresh: false, project: false });
