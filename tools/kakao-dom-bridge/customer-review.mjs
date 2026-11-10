@@ -67,19 +67,21 @@ function documentBlock(doc) {
 export async function queueCustomerReview({config, job, prepared, applied, now = Date.now()}) {
   const decision = prepared?.decision;
   const snapshot = prepared?.snapshot;
+  const evidence = snapshot?.navigation?.conversation_evidence;
+  const lastRole = evidence?.messages?.at(-1)?.role;
   const result = applied?.autoReplyResult || {};
   const channel = reportChannel(config);
   if (!channel || !ownerId(config.pricingOwnerSlackUserId) || !freshJob(job, now) || !decision
-    || snapshot?.navigation?.conversation_evidence?.capture_integrity?.ok !== true
-    || snapshot.navigation.conversation_evidence.hint_matched !== true
+    || evidence?.capture_integrity?.ok !== true || evidence.hint_matched !== true
     || !/^chat:\d+$/.test(snapshot.roomKey) || snapshot.roomRevision < 1
-    || snapshot.navigation.conversation_evidence.messages?.at(-1)?.role !== 'customer'
+    || !['customer', 'unknown'].includes(lastRole)
     || result.attempted === true || result.sent === true || result.pricingDocumentReceipt
     || result.pricingDocumentFailure || applied?.superseded || applied?.snapshotChanged
     || ['duplicate_recent_auto_reply', 'duplicate_room_reply_text_24h'].includes(result.gate?.reason)) return false;
   const mode = decision.reply_decision?.replyMode;
   if (mode === 'no_reply') return false;
   const work = (decision.follow_up_items || []).find(item => item.requiresHumanAction === true);
+  if (lastRole === 'unknown' && (!work || evidence.capture_integrity.reason !== 'trigger_message_observed')) return false;
   const typedDocument = pricingDocumentRequested(decision);
   const needsDocument = typedDocument || work?.type === 'contract_document';
   if (!work && mode !== 'draft_only' && !(needsDocument && mode === 'auto_send')) return false;
@@ -109,7 +111,7 @@ export async function queueCustomerReview({config, job, prepared, applied, now =
         pdf, pdfSha256: preparedDocument.pdfSha256, requestHash: hash(JSON.stringify(body))};
     } catch { /* The card will show the unresolved document and will not offer approval. */ }
   }
-  const hasApproval = Boolean(draft) && (!needsDocument || Boolean(doc)) && (!work || mode === 'draft_only' || Boolean(doc))
+  const hasApproval = lastRole === 'customer' && Boolean(draft) && (!needsDocument || Boolean(doc)) && (!work || mode === 'draft_only' || Boolean(doc))
     && !/^(?:schedule_check|reservation_review|payment_check|tax_invoice|price_review)$/.test(work?.type || '')
     && (!/\d\s*원/.test(draft) || Boolean(doc));
   const hint = String(work?.recommended_action || work?.summary || '').trim()
@@ -117,7 +119,7 @@ export async function queueCustomerReview({config, job, prepared, applied, now =
   const customer = String(decision.customer?.name || job.customerName || '고객').replace(/\d{3}[- ]?\d{4}[- ]?\d{4}/g, '').slice(0, 70);
   const text = [`카카오 응대 검토 · ${customer}`, draft && `${hasApproval ? '보낼 답변' : '검토용 초안'}\n${draft}`,
     documentBlock(doc), needsDocument && !doc && '확인 필요 · 요청한 문서의 대상·품목·금액을 각각 확인해 주세요.',
-    hint && `남은 확인 · ${hint}`, !hasApproval && '내용 확인 후 후속조치에서 처리해 주세요.']
+    hint && `남은 확인 · ${hint}`, lastRole === 'unknown' && '카카오에서 발신자 구분을 확인해 주세요.', !hasApproval && '내용 확인 후 후속조치에서 처리해 주세요.']
     .filter(Boolean).join('\n\n');
   const clientMsgId = `${key.slice(0,8)}-${key.slice(8,12)}-4${key.slice(13,16)}-a${key.slice(17,20)}-${key.slice(20,32)}`;
   await queuePricingOwnerNotice(dir, {schema: 'village-pricing-owner-notice/v1', key, clientMsgId,

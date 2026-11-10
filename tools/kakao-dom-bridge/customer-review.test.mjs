@@ -76,3 +76,18 @@ test('success digest counts only readback and confirmed document delivery and de
   assert.match(notice,/답변 1건 · 견적서 0건 · 거래명세서 1건/);
   assert.match(notice,/테스트 고객 · 답변 \/ 거래명세서/);
 });
+
+test('an exact matched inquiry with unknown speaker gets a draft card without send approval', async t => {
+  const f = await setup(t);
+  const evidence = f.prepared.snapshot.navigation.conversation_evidence;
+  evidence.messages[0].role = 'unknown';
+  assert.equal(await queueCustomerReview(f), false);
+  evidence.capture_integrity.reason = 'trigger_message_observed';
+  assert.equal(await queueCustomerReview(f), true);
+  const dir = path.join(f.config.queueDir, 'pricing-owner-notices');
+  const [file] = await fs.readdir(dir);
+  const saved = JSON.parse(await fs.readFile(path.join(dir,file),'utf8'));
+  assert.match(saved.text,/검토용 초안/);
+  assert.match(saved.text,/발신자 구분을 확인/);
+  assert.equal(saved.approval,undefined);
+});
