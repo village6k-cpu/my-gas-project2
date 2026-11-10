@@ -6781,7 +6781,7 @@ const server = http.createServer(async (req, res) => {
 
     // Gateway dry-run decisions remain available; general operational POSTs can send or write.
     if (req.method === 'POST' && (CONFIG.hermesTransport === 'gateway_no_send'
-      || (recoveryHold && !recoveryGeneralPostAllowed(url.pathname)))) {
+      || (recoveryHold && url.pathname !== '/slack/customer-review' && !recoveryGeneralPostAllowed(url.pathname)))) {
       return json(res, 403, { ok: false, error: 'writes_disabled' });
     }
 
