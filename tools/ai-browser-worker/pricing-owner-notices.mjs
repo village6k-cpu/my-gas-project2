@@ -49,7 +49,7 @@ export async function flushPricingOwnerNotices(directory,{token,fetchImpl=fetch,
   for(const file of files.filter(file=>/^[a-f0-9]{64}\.json$/.test(file)).sort()){
     const target=path.join(directory,file),notice=JSON.parse(await fs.readFile(target,'utf8'));
     if(notice.state==='sent' || Number(notice.nextAttemptAt || 0)>now)continue;
-    if(notice.schema!=='village-pricing-owner-notice/v1' || !/^U[A-Z0-9]+$/.test(notice.channel))continue;
+    if(notice.schema!=='village-pricing-owner-notice/v1' || !/^[UCG][A-Z0-9]+$/.test(notice.channel))continue;
     if (notice.review && now - Date.parse(notice.createdAt) > 2 * 60 * 60 * 1000) {
       notice.state = 'suppressed';
       await fs.writeFile(target, JSON.stringify(notice), {mode: 0o600});

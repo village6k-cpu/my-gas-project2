@@ -10,7 +10,7 @@ async function setup(t) {
   const queueDir = await fs.mkdtemp(path.join(os.tmpdir(), 'village-review-test-'));
   t.after(() => fs.rm(queueDir, {recursive: true, force: true}));
   const now = Date.parse('2026-11-10T03:30:00Z');
-  const config = {queueDir, pricingOwnerSlackUserId:'UOWNER'};
+  const config = {queueDir, pricingOwnerSlackUserId:'UOWNER', customerReportSlackChannelId:'CREPORT'};
   const job = {id:'job1', detectedAt:new Date(now - 5000).toISOString(),
     events:[{reason:'top_row_changed'}]};
   const decision = {customer:{name:'테스트 고객'},
@@ -30,10 +30,11 @@ test('only the owner can approve the exact posted draft, and a repeat cannot sen
   await flushPricingOwnerNotices(dir, {now:fixture.now,token:'fixture',
     fetchImpl:async (_url,opts)=>{
       request = JSON.parse(opts.body);
-      return new Response(JSON.stringify({ok:true,channel:'DOWNER',ts:'1.000001'}));
+      return new Response(JSON.stringify({ok:true,channel:'CREPORT',ts:'1.000001'}));
     }});
+  assert.equal(request.channel,'CREPORT');
   const button = request.blocks.at(-1).elements[0];
-  const approved = {value:button.value, user_id:'UOWNER', channel_id:'DOWNER', message_ts:'1.000001'};
+  const approved = {value:button.value, user_id:'UOWNER', channel_id:'CREPORT', message_ts:'1.000001'};
   let calls = 0;
   const apply = async ({prepared}) => {
     calls += 1;
@@ -41,6 +42,7 @@ test('only the owner can approve the exact posted draft, and a repeat cannot sen
     return {autoReplyResult:{sent:true}};
   };
   assert.equal((await approveCustomerReview(fixture.config,{...approved,user_id:'UOTHER'},fixture.now,apply)).state,'unavailable');
+  assert.equal((await approveCustomerReview(fixture.config,{...approved,channel_id:'COTHER'},fixture.now,apply)).state,'expired');
   assert.equal((await approveCustomerReview(fixture.config,{...approved,message_ts:'2.000001'},fixture.now,apply)).state,'expired');
   assert.equal((await approveCustomerReview(fixture.config,approved,fixture.now,apply)).state,'sent');
   assert.equal((await approveCustomerReview(fixture.config,approved,fixture.now,apply)).state,'expired');
@@ -70,6 +72,7 @@ test('success digest counts only readback and confirmed document delivery and de
   const [file,...others] = await fs.readdir(dir);
   assert.equal(others.length,0);
   const notice = await fs.readFile(path.join(dir,file),'utf8');
+  assert.equal(JSON.parse(notice).channel,'CREPORT');
   assert.match(notice,/답변 1건 · 견적서 0건 · 거래명세서 1건/);
   assert.match(notice,/테스트 고객 · 답변 \/ 거래명세서/);
 });

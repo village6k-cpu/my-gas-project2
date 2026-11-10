@@ -15,6 +15,12 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const ownerId = value => /^U[A-Z0-9]+$/.test(value || '');
 const reviewDir = config => path.join(config.queueDir, 'pricing-owner-notices');
 
+function reportChannel(config) {
+  const channel = config.customerReportSlackChannelId ?? process.env.AI_WORKER_CUSTOMER_REPORT_SLACK_CHANNEL_ID;
+  if (channel === undefined || channel === '') return config.pricingOwnerSlackUserId;
+  return /^[CG][A-Z0-9]+$/.test(channel) ? channel : '';
+}
+
 function freshJob(job, now) {
   const time = Date.parse(job.detectedAt || job.detected_at || '');
   const events = job.events || [];
@@ -62,7 +68,8 @@ export async function queueCustomerReview({config, job, prepared, applied, now =
   const decision = prepared?.decision;
   const snapshot = prepared?.snapshot;
   const result = applied?.autoReplyResult || {};
-  if (!ownerId(config.pricingOwnerSlackUserId) || !freshJob(job, now) || !decision
+  const channel = reportChannel(config);
+  if (!channel || !ownerId(config.pricingOwnerSlackUserId) || !freshJob(job, now) || !decision
     || snapshot?.navigation?.conversation_evidence?.capture_integrity?.ok !== true
     || snapshot.navigation.conversation_evidence.hint_matched !== true
     || !/^chat:\d+$/.test(snapshot.roomKey) || snapshot.roomRevision < 1
@@ -114,7 +121,7 @@ export async function queueCustomerReview({config, job, prepared, applied, now =
     .filter(Boolean).join('\n\n');
   const clientMsgId = `${key.slice(0,8)}-${key.slice(8,12)}-4${key.slice(13,16)}-a${key.slice(17,20)}-${key.slice(20,32)}`;
   await queuePricingOwnerNotice(dir, {schema: 'village-pricing-owner-notice/v1', key, clientMsgId,
-    channel: config.pricingOwnerSlackUserId, requiresHumanAction: true, state: 'pending',
+    channel, requiresHumanAction: true, state: 'pending',
     createdAt: new Date(now).toISOString(), text,
     ...(hasApproval ? {approval: {action: approvalAction, value: key},
       review: {job, snapshot, decision, draft, doc, status: 'ready'}} : {})});
@@ -205,7 +212,8 @@ export async function recordCustomerCompletion(config, job, applied, now = Date.
 }
 
 export async function queueCustomerCompletionDigest(config, now = Date.now()) {
-  if (!ownerId(config.pricingOwnerSlackUserId)) return;
+  const channel = reportChannel(config);
+  if (!channel || !ownerId(config.pricingOwnerSlackUserId)) return;
   const directory = path.join(config.queueDir, 'customer-completion-digests');
   const files = await fs.readdir(directory).catch(error => {
     if (error.code === 'ENOENT') return [];
@@ -241,7 +249,7 @@ export async function queueCustomerCompletionDigest(config, now = Date.now()) {
   const key = hash(`customer-completion:${end}`);
   const clientMsgId = `${key.slice(0,8)}-${key.slice(8,12)}-4${key.slice(13,16)}-a${key.slice(17,20)}-${key.slice(20,32)}`;
   if (Object.values(counts).some(Boolean)) await queuePricingOwnerNotice(reviewDir(config), {schema:'village-pricing-owner-notice/v1',
-    kind:'completion_digest', key, clientMsgId, channel:config.pricingOwnerSlackUserId,
+    kind:'completion_digest', key, clientMsgId, channel,
     requiresHumanAction:false, state:'pending', createdAt:new Date(now).toISOString(),
     text:[`카카오 자동처리 누적 결과 · 답변 ${counts.reply}건 · 견적서 ${counts.quote}건 · 거래명세서 ${counts.statement}건`,
       ...lines].join('\n')});
