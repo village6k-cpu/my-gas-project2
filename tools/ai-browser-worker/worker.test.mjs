@@ -6541,6 +6541,42 @@ test('native full catalog lookup exposes alternative spelling after a partial qu
   assert.equal(result.inventory_context.status,'unavailable');
 });
 
+test('native exact RQ read keeps every kit component inline with only booking-specific stock evidence', async () => {
+  const rq = 'RQ-261101-001';
+  const kit = '시네마 풀세트';
+  const components = Array.from({ length: 18 }, (_, i) => `구성품 ${i + 1}`);
+  const rows = [kit, '별도 대여 장비', ...components].map((name, i) => {
+    const data = Array(18).fill('');
+    data[0] = rq;
+    data[5] = name;
+    data[6] = i === 19 ? 4 : 1;
+    if (i >= 2) data[16] = `[세트]${kit}`;
+    return { row: i + 2, data };
+  });
+  const modelChoices = [{ name: components[0], candidates: [{ name: '확인된 후보', shortages: [{
+    requested: 2, available: 1, shortage: 1, bookings: [{ customer: '다른 고객' }]
+  }] }] }];
+  const catalog = Array.from({ length: 1000 }, (_, i) => ({
+    name: `다른 장비 ${i}`, aliases: ['해당 예약과 무관한 장비의 긴 설명'.repeat(8)]
+  }));
+  const fetchImpl = async value => {
+    const action = new URL(value).searchParams.get('action');
+    const payload = action === 'search'
+      ? { headers: [], results: [...rows, { row: 999, data: [rq + '0'] }] }
+      : { success: true, result: { mode: 'read_only', equipment: catalog, sets: [],
+          request: { rows }, modelChoices, evaluation: { shortages: [], uncertain: [{ kind: 'unknown_equipment', equipment: components[0] }] } } };
+    return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+  };
+  const result = await workerModule.executeVillageReadOnlyLookup({ fetchImpl }, { kind: 'request', query: rq });
+  assert.deepEqual(result.sources[0].rows, rows);
+  assert.equal(result.sources[0].truncated, false);
+  assert.equal(result.inventory_context.evaluation.uncertain[0].equipment, components[0]);
+  assert.equal(result.inventory_context.modelChoices[0].candidates[0].shortages[0].available, 1);
+  const serialized = JSON.stringify(result);
+  assert.equal(/해당 예약과 무관한|다른 고객/.test(serialized), false);
+  assert.ok(serialized.length < 6000, `Exact request lookup used ${serialized.length} characters`);
+});
+
 test('buildReadOnlyLookupContext reads kill switch from GAS header-only read responses', async () => {
   const fetchImpl = async () => ({
     ok: true,

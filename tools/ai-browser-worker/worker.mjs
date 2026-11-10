@@ -754,7 +754,7 @@ ${RESERVATION_PRIORITY_POLICY}
 - Before choosing pending registration, compare the customer and period with active registered trades. An existing RQ can represent additions to that trade; in that case use village_registered_reservation_change with the exact missing delta and matching RQ, not a second pending registration. Only an independent rental should become a separate trade.
 ${INVENTORY_JUDGMENT}
 
-- Before registration, use village_read(kind=request,query=exact RQ). For a new inquiry, use catalog query="*" for identity, then village_read(kind=quote,quote.source=catalog) with the proposed period and full items before deciding availability. The request/quote inventory_context includes full physical inventory, set manifests, source issues and period-specific modelChoices. Interpret these yourself: do not stop at a raw name mismatch, do not treat an included cable/packing manifest as an independent unavailable rental, and do not call a catalog-only stock record a matching failure or a shortage. Resolve real model choices from the full conversation and shop defaults, compare available choices, and put every choice in set_component_selections. If a material customer preference remains, prepare one specific customer question naming the viable choices through the existing reply authorization policy; preserve approved demand and ask that concrete question; do not turn a supply or catalog warning into a registration block. Never invent a stock count, conflate different filter types, or drop a tracked demand. Data/transport failures remain evidence gaps.
+- Before registration, use village_read(kind=request,query=exact RQ). Its sources contain the current RQ rows, including every component and its quantity; in A:R, Q beginning with [세트] identifies a component and its parent set. Use these rows for the registration baseline. Its inventory_context contains this booking's evaluation and period-specific modelChoices. Use a separate targeted catalog query for equipment identity if needed. For a new inquiry, use catalog query="*" for identity, then village_read(kind=quote,quote.source=catalog) with the proposed period and full items before deciding availability. Interpret the evidence yourself: do not stop at a raw name mismatch, do not treat an included cable/packing manifest as an independent unavailable rental, and do not call a catalog-only stock record a matching failure or a shortage. Resolve real model choices from the full conversation and shop defaults, compare available choices, and put every choice in set_component_selections. If a material customer preference remains, prepare one specific customer question naming the viable choices through the existing reply authorization policy; preserve approved demand and ask that concrete question; do not turn a supply or catalog warning into a registration block. Never invent a stock count, conflate different filter types, or drop a tracked demand. Data/transport failures remain evidence gaps.
 - For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit once before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
 - After a successful village_confirmed_reservation_commit receipt, FINAL_JSON may omit staff_confirmed_registration instead of copying the full input and set components again. The host retains the sealed authorization and exact readback. Report remaining questions with their reply_decision, price_quote and grounding context; do not re-read or re-register a verified successful operation just to restate it in FINAL_JSON.
 - Fast/coalesced turn: if this same snapshot contains the inquiry and clear staff authorization but no RQ exists, call village_confirmed_reservation_commit once with request_id=null. pending_request_candidate contains exactly customer_name, phone, discount_type, memo and extra_request. Put set_component_selections at registration top level, never inside pending_request_candidate. This atomic operation creates/reuses and verifies the RQ, applies exact choices and registers it. Never invent an RQ ID or split intake and registration into two calls.
@@ -3115,6 +3115,31 @@ async function fetchNativeInventoryContext(config, options = {}) {
   } catch {return {mode:'read_only',status:'unavailable',reason:'inventory_context_read_failed'};}
 }
 
+// An exact RQ read must fit in the native tool result. Full shop inventory and
+// other bookings are not its baseline; targeted catalog reads remain available.
+function scopeNativeRequestInventory(inventory) {
+  if (inventory.status === 'unavailable') return inventory;
+  const withoutBookings = rows => (rows || []).map(({ bookings, ...row }) => row);
+  const evaluation = inventory.evaluation;
+  return {
+    mode: inventory.mode,
+    sourceIssues: inventory.sourceIssues || [],
+    evaluation: evaluation ? {
+      ...evaluation,
+      shortages: withoutBookings(evaluation.shortages),
+      uncertain: withoutBookings(evaluation.uncertain)
+    } : null,
+    modelChoices: (inventory.modelChoices || []).map(choice => ({
+      ...choice,
+      candidates: (choice.candidates || []).map(candidate => ({
+        ...candidate,
+        shortages: withoutBookings(candidate.shortages),
+        uncertainty: withoutBookings(candidate.uncertainty)
+      }))
+    }))
+  };
+}
+
 export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
   if (request.kind === 'knowledge') {
     requireReadKeys(request, ['kind', 'question']);
@@ -3225,9 +3250,18 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
     }
     const matched = ['request','trade'].includes(request.kind)
       ? rows.filter(row => text(row?.data?.[col.charCodeAt(0)-65]).trim() === request.query) : rows;
-    return {sheet,headers,rows:matched.slice(0,100),truncated:matched.length>100};
+    // The registration contract permits 40 top-level rows and 120 components.
+    const limit = request.kind === 'request' ? 160 : 100;
+    return {sheet,headers,rows:matched.slice(0,limit),truncated:matched.length>limit};
   }));
-  return inventoryContextPromise?{sources,inventory_context:await inventoryContextPromise}:{sources};
+  if (!inventoryContextPromise) return { sources };
+  const inventory = scopeNativeRequestInventory(await inventoryContextPromise);
+  // Keep optional stock diagnostics from pushing the exact rows out of the
+  // model's tool response. The rows still include their availability columns.
+  const inventory_context = JSON.stringify(inventory).length <= 12_000
+    ? inventory
+    : { mode: inventory.mode, status: 'details_omitted', reason: 'inventory_detail_limit' };
+  return { sources, inventory_context };
 }
 
 export async function buildAuthoritativePriceVerification(config = {}, decision = {}) {
