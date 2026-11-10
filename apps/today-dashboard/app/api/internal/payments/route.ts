@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { acknowledgePaymentProjections, ingestPayment, paymentBalances, paymentDb, projectPaymentBalances, projectionItem, refreshPaymentAccounts, validPaymentInternalKey } from "@/lib/server/paymentLedger";
+import { recheckBankPaymentFollowups } from "@/lib/server/bankPaymentFollowups";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 180;
@@ -25,7 +26,18 @@ export async function POST(req: NextRequest) {
         results.push(safe);
       }
       const pending = (await paymentBalances(undefined, db)).filter(a => a.needs_projection).slice(0, 50).map(a => a.trade_id);
-      return json({ success: true, results, syncWarnings: await projectPaymentBalances(pending, db) });
+      const syncWarnings = await projectPaymentBalances(pending, db);
+      // Follow-up failure cannot undo stored bank receipts. The next bank batch retries it.
+      try { await recheckBankPaymentFollowups(); }
+      catch (error) {
+        console.error("bank payment follow-up recheck failed", error);
+        syncWarnings.push("입금 확인 카드 갱신 대기");
+      }
+      return json({ success: true, results, syncWarnings });
+    }
+    if (body.action === "recheckBankFollowups") {
+      if (typeof body.dryRun !== "boolean") throw new Error("dryRun boolean 필요");
+      return json({ success: true, ...await recheckBankPaymentFollowups({ dryRun: body.dryRun }) });
     }
     if (body.action === "syncSnapshot") {
       const tids = await refreshPaymentAccounts(undefined, body.accounts, db);
