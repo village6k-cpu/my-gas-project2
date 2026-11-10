@@ -66,6 +66,10 @@ test('success digest counts only readback and confirmed document delivery and de
   await recordCustomerCompletion(f.config,{...f.job,customerName:'테스트 고객'},{autoReplyResult:{sent:true,readbackReceipt:{id:'proof'},
     pricingDocumentReceipt:{documentType:'statement',deliveryConfirmed:true}}},f.now);
   await recordCustomerCompletion(f.config,{...f.job,id:'unconfirmed'},{autoReplyResult:{sent:true}},f.now);
+  await recordCustomerCompletion(f.config,{...f.job,id:'follow-up',customerName:'결제 검토 고객'},{
+    autoReplyResult:{sent:true,readbackReceipt:{id:'follow-up-proof'}},
+    prepared:{decision:{follow_up_items:[{requiresHumanAction:true,status:'open'}]}}
+  },f.now);
   await queueCustomerCompletionDigest(f.config,f.now+3600000);
   await queueCustomerCompletionDigest(f.config,f.now+3600000);
   const dir = path.join(f.config.queueDir,'pricing-owner-notices');
@@ -73,8 +77,9 @@ test('success digest counts only readback and confirmed document delivery and de
   assert.equal(others.length,0);
   const notice = await fs.readFile(path.join(dir,file),'utf8');
   assert.equal(JSON.parse(notice).channel,'CREPORT');
-  assert.match(notice,/답변 1건 · 견적서 0건 · 거래명세서 1건/);
+  assert.match(notice,/답변 2건 · 견적서 0건 · 거래명세서 1건/);
   assert.match(notice,/테스트 고객 · 답변 \/ 거래명세서/);
+  assert.doesNotMatch(notice,/결제 검토 고객/);
 });
 
 test('an exact matched inquiry with unknown speaker gets a draft card without send approval', async t => {
@@ -90,4 +95,25 @@ test('an exact matched inquiry with unknown speaker gets a draft card without se
   assert.match(saved.text,/검토용 초안/);
   assert.match(saved.text,/발신자 구분을 확인/);
   assert.equal(saved.approval,undefined);
+});
+
+test('pending automated follow-up DMs route to the report channel once', async t => {
+  const {config,now} = await setup(t);
+  const directory = path.join(config.queueDir, 'pricing-owner-notices');
+  await fs.mkdir(directory);
+  const entries = ['자동 응대 확인 필요', '카톡 자동 답변 확인 필요', '예약 자동반영 확인 필요', '자동 가격·서류 확인 필요'];
+  for (const [index, text] of entries.entries()) {
+    await fs.writeFile(path.join(directory, String(index).repeat(64)+'.json'), JSON.stringify({
+      schema:'village-pricing-owner-notice/v1', channel:'UOWNER', text:text+'\n고객: 테스트', state:'pending'
+    }));
+  }
+  const posts = [];
+  const send = async (_url, opts) => {
+    posts.push(JSON.parse(opts.body));
+    return new Response(JSON.stringify({ok:true,channel:'CREPORT',ts:'1.000001'}));
+  };
+  const options = {token:'fixture',now,fetchImpl:send,reportConfig:config};
+  assert.equal((await flushPricingOwnerNotices(directory,options)).sent,entries.length);
+  assert.equal((await flushPricingOwnerNotices(directory,options)).sent,0);
+  assert(posts.every(post => post.channel === 'CREPORT'));
 });

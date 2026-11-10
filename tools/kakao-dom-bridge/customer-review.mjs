@@ -7,19 +7,13 @@ import {
   sendKakaoMessageViaChrome
 } from '../ai-browser-worker/worker.mjs';
 import { automaticQuoteRequest, automaticStatementRequest, pricingDocumentRequested } from '../ai-browser-worker/verified-pricing.mjs';
-import { queuePricingOwnerNotice } from '../ai-browser-worker/pricing-owner-notices.mjs';
+import { customerReportChannel, queuePricingOwnerNotice } from '../ai-browser-worker/pricing-owner-notices.mjs';
 
 const approvalAction = 'village_customer_review_approve';
 const lifetimeMs = 2 * 60 * 60 * 1000;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const ownerId = value => /^U[A-Z0-9]+$/.test(value || '');
 const reviewDir = config => path.join(config.queueDir, 'pricing-owner-notices');
-
-function reportChannel(config) {
-  const channel = config.customerReportSlackChannelId ?? process.env.AI_WORKER_CUSTOMER_REPORT_SLACK_CHANNEL_ID;
-  if (channel === undefined || channel === '') return config.pricingOwnerSlackUserId;
-  return /^[CG][A-Z0-9]+$/.test(channel) ? channel : '';
-}
 
 function freshJob(job, now) {
   const time = Date.parse(job.detectedAt || job.detected_at || '');
@@ -70,7 +64,7 @@ export async function queueCustomerReview({config, job, prepared, applied, now =
   const evidence = snapshot?.navigation?.conversation_evidence;
   const lastRole = evidence?.messages?.at(-1)?.role;
   const result = applied?.autoReplyResult || {};
-  const channel = reportChannel(config);
+  const channel = customerReportChannel(config);
   if (!channel || !ownerId(config.pricingOwnerSlackUserId) || !freshJob(job, now) || !decision
     || evidence?.capture_integrity?.ok !== true || evidence.hint_matched !== true
     || !/^chat:\d+$/.test(snapshot.roomKey) || snapshot.roomRevision < 1
@@ -205,16 +199,18 @@ export async function recordCustomerCompletion(config, job, applied, now = Date.
   if (!jobId) return;
   const key = hash(String(jobId));
   const directory = path.join(config.queueDir, 'customer-completion-digests');
+  const hasFollowUp = (applied.prepared?.decision?.follow_up_items || []).some(item => item.requiresHumanAction === true
+    && !['done', 'completed', 'resolved', 'cancelled', 'dismissed'].includes(item.status));
   const customer = String(job.customerName || job.customer_name || '').replace(/[<>@&\r\n]/g, '')
     .replace(/01[016789][ -]?\d{3,4}[ -]?\d{4}/g, '').trim().slice(0, 70);
   await fs.mkdir(directory, {recursive:true, mode:0o700});
   await fs.writeFile(path.join(directory, key + '.json'), JSON.stringify({
-    at:now, customer, reply, document:document?.deliveryConfirmed ? document.documentType : null
+    at:now, customer, hasFollowUp, reply, document:document?.deliveryConfirmed ? document.documentType : null
   }), {flag:'wx', mode:0o600}).catch(error => { if (error.code !== 'EEXIST') throw error; });
 }
 
 export async function queueCustomerCompletionDigest(config, now = Date.now()) {
-  const channel = reportChannel(config);
+  const channel = customerReportChannel(config);
   if (!channel || !ownerId(config.pricingOwnerSlackUserId)) return;
   const directory = path.join(config.queueDir, 'customer-completion-digests');
   const files = await fs.readdir(directory).catch(error => {
@@ -243,11 +239,13 @@ export async function queueCustomerCompletionDigest(config, now = Date.now()) {
     if (entry.document === 'quote' || entry.document === 'statement') counts[entry.document] += 1;
     completed.push(entry);
   }
-  const lines = completed.sort((left, right) => left.at - right.at).slice(0, 15).map(entry => {
+  const details = completed.filter(entry => !entry.hasFollowUp);
+  const lines = details.sort((left, right) => left.at - right.at).slice(0, 15).map(entry => {
     const actions = [entry.reply && '답변', entry.document === 'quote' && '견적서', entry.document === 'statement' && '거래명세서'];
     return `• ${entry.customer || '카카오 문의'} · ${actions.filter(Boolean).join(' / ')}`;
   });
-  if (completed.length > lines.length) lines.push(`외 ${completed.length - lines.length}건`);
+  if (details.length > lines.length) lines.push(`외 ${details.length - lines.length}건`);
+  if (completed.length > details.length) lines.push(`이 중 ${completed.length - details.length}건은 후속 확인이 남아 있습니다.`);
   const key = hash(`customer-completion:${end}`);
   const clientMsgId = `${key.slice(0,8)}-${key.slice(8,12)}-4${key.slice(13,16)}-a${key.slice(17,20)}-${key.slice(20,32)}`;
   if (Object.values(counts).some(Boolean)) await queuePricingOwnerNotice(reviewDir(config), {schema:'village-pricing-owner-notice/v1',

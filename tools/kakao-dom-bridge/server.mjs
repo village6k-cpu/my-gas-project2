@@ -2773,13 +2773,11 @@ export function createGatewayResultApplicationCoordinator({
       }
     });
     triggerAuditProjection({ durableJob, prepared, applied });
-    if (config.verifiedPricingAutoSendEnabled && config.pricingOwnerSlackUserId) {
-      try {await queuePricingOwnerNotice(path.join(config.queueDir || CONFIG.queueDir,'pricing-owner-notices'),pricingOwnerNotice(config,job,finalized));}
-      catch { console.error('pricing_owner_notice_storage_failed', String(job.jobId || job.id || '')); }
-    }
-    if (config.reservationClarificationAutoSendEnabled && config.pricingOwnerSlackUserId) {
-      try {await queuePricingOwnerNotice(path.join(config.queueDir || CONFIG.queueDir,'pricing-owner-notices'),reservationOwnerNotice(config,job,finalized));}
-      catch { console.error('reservation_owner_notice_storage_failed', String(job.jobId || job.id || '')); }
+    if ((config.verifiedPricingAutoSendEnabled || config.reservationClarificationAutoSendEnabled) && config.pricingOwnerSlackUserId) {
+      try {
+        const notice = proactiveReview ? null : pricingOwnerNotice(config, job, finalized) || reservationOwnerNotice(config, job, finalized);
+        await queuePricingOwnerNotice(path.join(config.queueDir || CONFIG.queueDir,'pricing-owner-notices'), notice);
+      } catch { console.error('owner_notice_storage_failed', String(job.jobId || job.id || '')); }
     }
     return finalized;
   }

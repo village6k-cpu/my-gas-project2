@@ -4,6 +4,28 @@ import {createHash} from 'node:crypto';
 import {verifiedPricingFreshJob,verifiedPricingAudit,pricingDocumentUrl} from './verified-pricing.mjs';
 
 const clean=value=>String(value || '').replace(/[\r\n<>]/g,' ').trim();
+
+const customerFollowUpTitles = new Set([
+  '자동 응대 확인 필요', '카톡 자동 답변 확인 필요',
+  '예약 자동반영 확인 필요', '자동 가격·서류 확인 필요'
+]);
+
+export function customerReportChannel(config = {}) {
+  const channel = config.customerReportSlackChannelId ?? process.env.AI_WORKER_CUSTOMER_REPORT_SLACK_CHANNEL_ID;
+  if (channel === undefined || channel === '') return config.pricingOwnerSlackUserId;
+  return /^[CG][A-Z0-9]+$/.test(channel) ? channel : '';
+}
+
+function routeCustomerFollowUp(notice, config) {
+  const title = String(notice.text || '').split('\n', 1)[0];
+  if (!/^U[A-Z0-9]+$/.test(notice.channel) || !customerFollowUpTitles.has(title)) return notice.channel;
+  return customerReportChannel({...config, pricingOwnerSlackUserId: notice.channel});
+}
+
+export function pricingOwnerNoticeKey(jobId) {
+  return createHash('sha256').update(String(jobId) + ':pricing-owner-notice').digest('hex');
+}
+
 export function pricingOwnerNotice(config,job,finalized){
   if(!config.verifiedPricingAutoSendEnabled || !verifiedPricingFreshJob(config,job))return null;
   const decision=finalized.decision || {},result=finalized.autoReplyResult || {};
@@ -29,9 +51,9 @@ export function pricingOwnerNotice(config,job,finalized){
     lines.push('확인된 완료 건은 승인 업무를 만들지 않습니다.');
   }else lines.push('확인 내용: '+clean(result.gate?.reason || decision.reason || '가격·할인 또는 발송 결과 불확실').slice(0,800));
   lines.push('헤이빌리 > 후속조치 > 자동처리: https://today-dashboard-ten.vercel.app/');
-  const key=createHash('sha256').update(String(job.jobId || job.id)+':pricing-owner-notice').digest('hex');
+  const key=pricingOwnerNoticeKey(job.jobId || job.id);
   const uuid=key.slice(0,8)+'-'+key.slice(8,12)+'-4'+key.slice(13,16)+'-a'+key.slice(17,20)+'-'+key.slice(20,32);
-  return {schema:'village-pricing-owner-notice/v1',key,clientMsgId:uuid,channel:config.pricingOwnerSlackUserId,text:lines.join('\n'),createdAt:new Date().toISOString(),state:'pending'};
+  return {schema:'village-pricing-owner-notice/v1',key,clientMsgId:uuid,channel:config.pricingOwnerSlackUserId,...(result.pricingDocumentFailure ? {kind:'document_delivery_check'} : {}),text:lines.join('\n'),createdAt:new Date().toISOString(),state:'pending'};
 }
 
 export async function queuePricingOwnerNotice(directory,notice){
@@ -41,7 +63,7 @@ export async function queuePricingOwnerNotice(directory,notice){
   catch(error){if(error.code!=='EEXIST')throw error;}
 }
 
-export async function flushPricingOwnerNotices(directory,{token,fetchImpl=fetch,now=Date.now()}={}){
+export async function flushPricingOwnerNotices(directory,{token,fetchImpl=fetch,now=Date.now(),reportConfig}={}){
   if(!token)return {sent:0,pending:0};
   let files;try{files=await fs.readdir(directory)}catch(error){if(error.code==='ENOENT')return{sent:0,pending:0};throw error}
   let sent=0,pending=0;
@@ -50,6 +72,8 @@ export async function flushPricingOwnerNotices(directory,{token,fetchImpl=fetch,
     const target=path.join(directory,file),notice=JSON.parse(await fs.readFile(target,'utf8'));
     if(notice.state==='sent' || Number(notice.nextAttemptAt || 0)>now)continue;
     if(notice.schema!=='village-pricing-owner-notice/v1' || !/^[UCG][A-Z0-9]+$/.test(notice.channel))continue;
+    notice.channel = routeCustomerFollowUp(notice, reportConfig);
+    if (!notice.channel) continue;
     if (notice.review && now - Date.parse(notice.createdAt) > 2 * 60 * 60 * 1000) {
       notice.state = 'suppressed';
       await fs.writeFile(target, JSON.stringify(notice), {mode: 0o600});
