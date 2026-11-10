@@ -37,3 +37,15 @@ test('persisted owner notifications survive Slack failure and retry without rese
  assert.equal((await flushPricingOwnerNotices(directory,{token:'test',now:7200001,fetchImpl})).sent,0);assert.equal(calls,2);
  }finally{await fs.rm(directory,{recursive:true,force:true})}
 });
+
+test('fresh malformed decisions produce an actionable notice without replaying old inquiries', async () => {
+ const {liveReplyFailureNotice} = await import('./pricing-owner-notices.mjs');
+ const now=Date.parse('2026-11-10T10:40:00Z');
+ const config={pricingOwnerSlackUserId:'UOWNER',recoveryLiveAutoSendEnabled:true,recoveryFreezeBefore:'2026-11-06T00:00:00Z'};
+ const job={job_id:'real-job',event:{detected_at:'2026-11-10T10:20:00Z'},
+   local_context:{job:{customerName:'검증',events:[{reason:'top_row_changed'}]}},
+   application:{state:'failed',application_id:'apply',failure_notification:{state:'pending'},
+     error:{message:'gateway_invalid_model_result: no valid final decision was produced'}}};
+ assert.equal(liveReplyFailureNotice(config,job,now)?.kind,'decision_failure');
+ assert.equal(liveReplyFailureNotice(config,{...job,event:{detected_at:'2026-11-10T05:20:00Z'}},now),null);
+});

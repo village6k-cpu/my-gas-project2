@@ -26,6 +26,32 @@ export function pricingOwnerNoticeKey(jobId) {
   return createHash('sha256').update(String(jobId) + ':pricing-owner-notice').digest('hex');
 }
 
+export function liveReplyFailureNotice(config, durableJob, now = Date.now()) {
+  const job = durableJob.local_context?.job;
+  const application = durableJob.application;
+  const detected = Date.parse(durableJob.event?.detected_at || '');
+  const cutoff = Date.parse(config.recoveryFreezeBefore || '');
+  const error = application?.error?.message || '';
+  const invalidDecision = error.startsWith('gateway_invalid_model_result:');
+  const reason = invalidDecision
+    ? '자동화 판단 결과를 적용하지 못했습니다. 최신 문의와 예약·견적 원장을 대조해 주세요.'
+    : /^gateway_reply_execution_unresolved: ([a-z0-9_]+)$/.exec(error)?.[1];
+  if (config.recoveryLiveAutoSendEnabled !== true || !/^U[A-Z0-9]+$/.test(config.pricingOwnerSlackUserId || '')
+    || !durableJob.job_id || !application?.application_id || application.state !== 'failed'
+    || application.failure_notification?.state !== 'pending' || !reason
+    || !Number.isFinite(detected) || !Number.isFinite(cutoff) || detected <= cutoff || detected > now
+    || now - detected > 2 * 60 * 60 * 1000 || job?.replayedFromSupabase === true
+    || job?.events?.some(event => event.recoveryOnly === true || event.reason === 'startup_catchup')
+    || !job?.events?.some(event => ['top_row_changed', 'top_rows_backstop'].includes(event.reason))) return null;
+
+  const key = createHash('sha256').update(durableJob.job_id + ':live-reply-failure').digest('hex');
+  const clientMsgId = `${key.slice(0,8)}-${key.slice(8,12)}-4${key.slice(13,16)}-a${key.slice(17,20)}-${key.slice(20,32)}`;
+  const customer = clean(job.customerName).replace(/01[016789][ -]?\d{3,4}[ -]?\d{4}/g, '[연락처 생략]').slice(0,80) || '상담방 확인';
+  return { schema:'village-pricing-owner-notice/v1', key, clientMsgId, channel:config.pricingOwnerSlackUserId,
+    ...(invalidDecision ? {kind:'decision_failure'} : {}), requiresHumanAction:true, createdAt:new Date(now).toISOString(), state:'pending',
+    text:`카톡 자동 답변 확인 필요\n고객: ${customer}\n사유: ${reason}\n${invalidDecision ? '헤이빌리 > 후속조치: https://today-dashboard-ten.vercel.app/' : '카카오톡 채팅방에서 답변이 이미 나갔는지 확인해주세요.'}` };
+}
+
 export function pricingOwnerNotice(config,job,finalized){
   if(!config.verifiedPricingAutoSendEnabled || !verifiedPricingFreshJob(config,job))return null;
   const decision=finalized.decision || {},result=finalized.autoReplyResult || {};
