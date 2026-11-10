@@ -61,7 +61,7 @@ test('missing requested PDF produces a review without a send button, and recover
 
 test('success digest counts only readback and confirmed document delivery and deduplicates', async t => {
   const f = await setup(t);
-  await recordCustomerCompletion(f.config,f.job,{autoReplyResult:{sent:true,readbackReceipt:{id:'proof'},
+  await recordCustomerCompletion(f.config,{...f.job,customerName:'테스트 고객'},{autoReplyResult:{sent:true,readbackReceipt:{id:'proof'},
     pricingDocumentReceipt:{documentType:'statement',deliveryConfirmed:true}}},f.now);
   await recordCustomerCompletion(f.config,{...f.job,id:'unconfirmed'},{autoReplyResult:{sent:true}},f.now);
   await queueCustomerCompletionDigest(f.config,f.now+3600000);
@@ -69,5 +69,7 @@ test('success digest counts only readback and confirmed document delivery and de
   const dir = path.join(f.config.queueDir,'pricing-owner-notices');
   const [file,...others] = await fs.readdir(dir);
   assert.equal(others.length,0);
-  assert.match(await fs.readFile(path.join(dir,file),'utf8'),/답변 1건 · 견적서 0건 · 거래명세서 1건/);
+  const notice = await fs.readFile(path.join(dir,file),'utf8');
+  assert.match(notice,/답변 1건 · 견적서 0건 · 거래명세서 1건/);
+  assert.match(notice,/테스트 고객 · 답변 \/ 거래명세서/);
 });

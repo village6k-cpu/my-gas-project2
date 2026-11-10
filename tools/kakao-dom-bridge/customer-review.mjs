@@ -68,7 +68,8 @@ export async function queueCustomerReview({config, job, prepared, applied, now =
     || !/^chat:\d+$/.test(snapshot.roomKey) || snapshot.roomRevision < 1
     || snapshot.navigation.conversation_evidence.messages?.at(-1)?.role !== 'customer'
     || result.attempted === true || result.sent === true || result.pricingDocumentReceipt
-    || result.pricingDocumentFailure || applied?.superseded || applied?.snapshotChanged) return false;
+    || result.pricingDocumentFailure || applied?.superseded || applied?.snapshotChanged
+    || ['duplicate_recent_auto_reply', 'duplicate_room_reply_text_24h'].includes(result.gate?.reason)) return false;
   const mode = decision.reply_decision?.replyMode;
   if (mode === 'no_reply') return false;
   const work = (decision.follow_up_items || []).find(item => item.requiresHumanAction === true);
@@ -191,11 +192,15 @@ export async function recordCustomerCompletion(config, job, applied, now = Date.
   const document = result?.pricingDocumentReceipt;
   const reply = result?.sent === true && Boolean(result.readbackReceipt?.id);
   if (!reply && !document?.deliveryConfirmed) return;
-  const key = hash(String(job.jobId || job.id || ''));
+  const jobId = job.jobId || job.id;
+  if (!jobId) return;
+  const key = hash(String(jobId));
   const directory = path.join(config.queueDir, 'customer-completion-digests');
+  const customer = String(job.customerName || job.customer_name || '').replace(/[<>@&\r\n]/g, '')
+    .replace(/01[016789][ -]?\d{3,4}[ -]?\d{4}/g, '').trim().slice(0, 70);
   await fs.mkdir(directory, {recursive:true, mode:0o700});
   await fs.writeFile(path.join(directory, key + '.json'), JSON.stringify({
-    at:now, reply, document:document?.deliveryConfirmed ? document.documentType : null
+    at:now, customer, reply, document:document?.deliveryConfirmed ? document.documentType : null
   }), {flag:'wx', mode:0o600}).catch(error => { if (error.code !== 'EEXIST') throw error; });
 }
 
@@ -215,6 +220,7 @@ export async function queueCustomerCompletionDigest(config, now = Date.now()) {
   if (lastEnd >= end) return;
   const start = Math.max(lastEnd, end - 24 * hour);
   const counts = {reply:0, quote:0, statement:0};
+  const completed = [];
   for (const file of files) {
     if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
     const entry = JSON.parse(await fs.readFile(path.join(directory, file), 'utf8'));
@@ -225,12 +231,19 @@ export async function queueCustomerCompletionDigest(config, now = Date.now()) {
     if (entry.at < start || entry.at >= end) continue;
     if (entry.reply) counts.reply += 1;
     if (entry.document === 'quote' || entry.document === 'statement') counts[entry.document] += 1;
+    completed.push(entry);
   }
+  const lines = completed.sort((left, right) => left.at - right.at).slice(0, 15).map(entry => {
+    const actions = [entry.reply && '답변', entry.document === 'quote' && '견적서', entry.document === 'statement' && '거래명세서'];
+    return `• ${entry.customer || '카카오 문의'} · ${actions.filter(Boolean).join(' / ')}`;
+  });
+  if (completed.length > lines.length) lines.push(`외 ${completed.length - lines.length}건`);
   const key = hash(`customer-completion:${end}`);
   const clientMsgId = `${key.slice(0,8)}-${key.slice(8,12)}-4${key.slice(13,16)}-a${key.slice(17,20)}-${key.slice(20,32)}`;
   if (Object.values(counts).some(Boolean)) await queuePricingOwnerNotice(reviewDir(config), {schema:'village-pricing-owner-notice/v1',
     kind:'completion_digest', key, clientMsgId, channel:config.pricingOwnerSlackUserId,
     requiresHumanAction:false, state:'pending', createdAt:new Date(now).toISOString(),
-    text:`카카오 자동처리 누적 결과 · 답변 ${counts.reply}건 · 견적서 ${counts.quote}건 · 거래명세서 ${counts.statement}건`});
+    text:[`카카오 자동처리 누적 결과 · 답변 ${counts.reply}건 · 견적서 ${counts.quote}건 · 거래명세서 ${counts.statement}건`,
+      ...lines].join('\n')});
   await writeNotice(cursor, end);
 }
