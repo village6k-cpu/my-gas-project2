@@ -17163,19 +17163,8 @@ function commitConfirmedReservation(args) {
           confirmedResult.inventory_review.identity_error=String(identityError.message || identityError);
         }
       }
-      // 카카오 자동등록은 원장 재확인 후 예약 확정·견적 안내를 보낸다.
-      if (confirmedResult.authoritative) {
-        try {
-          var confirmedGroup = confirmedResult.authoritative.request;
-          var confirmedPeriod = confirmedResult.authoritative.registered_trade.contract;
-          var confirmationNotice = sendBookingConfirmationAlimtalk_(confirmedResult.trade_id, confirmedGroup.name,
-            confirmedGroup.phone, confirmedPeriod.startDate, confirmedPeriod.startTime,
-            confirmedPeriod.endDate, confirmedPeriod.endTime);
-          if (confirmationNotice) confirmedResult.bookingConfirmationNotification = confirmationNotice;
-        } catch (notificationError) {
-          Logger.log('예약 확정·견적 안내 확인 필요: ' + confirmedResult.trade_id);
-        }
-      }
+      // 이 내부 반영 경로는 readback 이후에도 no-send를 유지한다.
+      // 고객 안내는 별도의 발송 승인/receipt 경로에서 수행해야 한다.
     }
     return confirmedResult;
   } catch (error) {

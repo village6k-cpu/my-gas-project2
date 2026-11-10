@@ -1912,6 +1912,26 @@ test('missing, stale, conflicting, or failed confirmed registration receipt is o
   }
 });
 
+test('uncertain booking remains unresolved through finalization even when an unrelated reply was delivered', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  for (const status of ['partial_success', 'failed', 'blocked']) {
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      job, turn, finalText: JSON.stringify(confirmedRegistrationDecisionFixture()),
+      trustedToolReceipts: [confirmedRegistrationReceiptFixture(job, {
+        status, authoritative_result: null, applied_stages: [],
+        error: { type: 'outcome_unknown', message: 'fetch failed' }
+      })]
+    });
+    const final = await finalizePreparedKakaoDecision({
+      config: { followUpRowsEnabled: false, workOrchestratorV2WorkItemsEnabled: false },
+      job, applied: { prepared, autoReplyResult: verifiedAutoReplyResult() }
+    });
+    assert.equal(final.status, 'ai_business_unresolved', status);
+    assert.equal(final.automationResolutionResult.state, 'needs_human', status);
+    assert.equal(final.decision.should_write_to_sheet, false, 'no automatic replay');
+  }
+});
+
 function extractSourceFunction(source, name) {
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `${name} must exist`);
@@ -4064,7 +4084,7 @@ test('Work Orchestrator v2 work item errors never return or log secrets and raw 
     }
   }));
 
-  assert.equal(result.status, 'ai_completed');
+  assert.equal(result.status, 'ai_follow_up_unresolved');
   assert.equal(result.followUpResult.skipped, true);
   assert.equal(result.workOrchestratorResult.error, 'work_orchestrator_v2_store_failed');
   assert.doesNotMatch(JSON.stringify(result.workOrchestratorResult), new RegExp(`${secret}|${customerContent}`));

@@ -12608,7 +12608,12 @@ export async function finalizePreparedKakaoDecision({ config, job, applied, depe
   }
   return {
     ...prepared,
-    status: ['blocked', 'delivery_uncertain'].includes(replyExecutionOutcome.state)
+    status: workOrchestratorResult.error || followUpResult.error || slackDeliveryResult.error
+      ? 'ai_follow_up_unresolved'
+      : prepared.decision?.owner_review_required === true || prepared.decision?.ownerReviewRequired === true
+        || prepared.decision?.requires_owner_approval === true
+        ? 'ai_business_unresolved'
+      : ['blocked', 'delivery_uncertain'].includes(replyExecutionOutcome.state)
       ? 'ai_reply_unresolved'
       : ['paused', 'superseded', 'awaiting_review'].includes(replyExecutionOutcome.state) ? 'ai_reply_deferred' : 'ai_completed',
     replyExecutionOutcome,

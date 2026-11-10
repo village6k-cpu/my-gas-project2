@@ -13,6 +13,18 @@ import test from 'node:test';
 
 const resolutionModule = import('./automation-resolution.mjs');
 
+test('an unrelated delivered reply cannot resolve an explicitly unresolved business operation', async () => {
+  for (const key of ['owner_review_required', 'ownerReviewRequired', 'requires_owner_approval']) {
+    const result = await derive({
+      decision: { [key]: true },
+      autoReplyResult: { sent: true, readbackReceipt: {
+        id: `reply-readback-${'a'.repeat(64)}`, confirmedAt: '2026-11-10T00:00:00.000Z'
+      } }
+    });
+    assert.equal(result.state, 'needs_human', key);
+  }
+});
+
 test('reply execution distinguishes verified delivery, deliberate deferral, and unresolved sends', async () => {
   const { deriveCustomerReplyOutcome: outcome } = await resolutionModule;
   const decision = { reply_decision: { replyMode: 'auto_send' } };

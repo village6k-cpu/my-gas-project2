@@ -263,6 +263,29 @@ function productionNormalizeContext() {
   return context;
 }
 
+test('the complete internal commit never calls a customer sender after authoritative readback', () => {
+  let sends = 0;
+  const h = productionCommitContext({
+    Logger: { log() {} },
+    sendBookingConfirmationAlimtalk_: () => { sends++; return { sent: true }; },
+    _confirmedReservationResult_: () => ({ success: true, status: 'ok', trade_id: '261110-001',
+      customerNotificationAttempted: false, customerNotificationSent: false,
+      authoritative: { request: { name: '테스트', phone: '01000000000' },
+        registered_trade: { contract: { startDate: '2026-11-11', startTime: '09:00',
+          endDate: '2026-11-12', endTime: '09:00' } } }
+    })
+  });
+  h.context.registerByReqID = (_sheet, _row, options) => {
+    assert.equal(options.suppressCustomerNotification, true);
+    h.scriptLock.releaseLock();
+    return { success: true };
+  };
+  const result = h.context.commitConfirmedReservation({ registration: {},
+    operation_id: '11111111-2222-4333-8444-555555555555' });
+  assert.equal(result.success, true);
+  assert.equal(sends, 0, 'the internal no-send contract includes post-readback hooks');
+});
+
 test('confirmed commit transfers the approved rounds only with its exact registration lock capability', () => {
   const h = productionCommitContext();
   h.normalized.billing_rounds = 2.5;

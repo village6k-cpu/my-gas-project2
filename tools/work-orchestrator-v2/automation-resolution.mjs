@@ -147,7 +147,8 @@ export function deriveAutomationResolution(input = {}) {
     status: sheetResult.success === true ? 'succeeded' : sheetResult.success === false ? 'failed' : null
   });
 
-  if (decision.requires_owner_approval === true) {
+  if (decision.requires_owner_approval === true
+    || decision.owner_review_required === true || decision.ownerReviewRequired === true) {
     return result(
       'needs_human',
       'owner_approval_required',
