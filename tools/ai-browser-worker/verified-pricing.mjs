@@ -34,6 +34,23 @@ export function pricingDocumentRequested(decision = {}) {
   return Boolean(decision.statement_request) || (decision.follow_up_items || []).some(item => item.type === 'quote_send');
 }
 
+// A single price source cannot authorize or close a request for several quotes.
+export function quoteNeedsSeparateVerification(decision = {}) {
+  const tasks = (decision.follow_up_items || []).filter(item => item.type === 'quote_send');
+  if (!tasks.length) return false;
+  if (tasks.length > 1) return true;
+  const [task] = tasks;
+  const scope = [task.title, task.summary, task.recommended_action, ...(task.evidence || [])].join(' ');
+  const refs = new Set(scope.match(/\b(?:RQ-)?\d{6}-\d{3}\b/g) || []);
+  if (refs.size > 1) return true;
+  const request = [task.title, decision.latest_customer_message_cluster, task.suggested_reply_draft,
+    ...(task.evidence || []).filter(value => typeof value === 'string' && value.startsWith('customer_request:'))].join(' ');
+  const day = String.raw`\d{1,2}(?:\s*[/.\-]\s*|\s*월\s*)\d{1,2}(?:\s*일)?`;
+  return /(?:두|2|여러)\s*건(?:의)?\s*견적서|견적서.{0,24}(?:두|2|여러)\s*건/.test(request)
+    || new RegExp(day + String.raw`(?:\s*(?:건|꺼))?\s*(?:[·ㆍ,]|과|와|하고|이랑|랑|및)\s*` + day).test(request)
+    || new RegExp(String.raw`(?:오늘|어제)\s*(?:건|꺼|거)?\s*(?:과|와|하고|이랑|랑|및)\s*` + day).test(request);
+}
+
 export function automaticStatementRequest({config = {}, decision, verification, job}) {
   const quote=decision.price_quote, request=decision.statement_request;
   if(verifiedPricingIssue(verification,quote))throw new Error('statement_price_incomplete');
@@ -53,6 +70,7 @@ export function automaticStatementRequest({config = {}, decision, verification, 
 }
 
 export function automaticQuoteRequest({ decision, verification, job }) {
+  if (quoteNeedsSeparateVerification(decision)) throw new Error('quote_scope_requires_separate_verification');
   const quote = decision.price_quote;
   const issue = verifiedPricingIssue(verification, quote);
   if (issue) throw new Error(issue);
@@ -106,7 +124,7 @@ export async function sendAutomaticPricingDocument({ config, decision, verificat
     await waitImpl(1000 * 2**attempt);
     response=await request();result=await response.json();
   }
-  if (!response.ok || (statement ? result.status!=='PREPARED' || result.documentType!=='statement' || result.tradeID!==body.id
+  if (!response.ok || result.operationId !== body.operationId || (statement ? result.status!=='PREPARED' || result.documentType!=='statement' || result.tradeID!==body.id
       : result.status !== 'OK' || result.deliveryConfirmed !== true)
     || result.totalVatIncluded !== verification.totalVatIncluded || (statement
       ? result.documentAccess!=='private' || result.mimeType!=='application/pdf' || !pricingDocumentUrl(result.ownerUrl)
@@ -143,23 +161,71 @@ export function pricingDocumentUrl(value) {
     && /^\/(?:file\/d|spreadsheets\/d)\/[a-zA-Z0-9_-]+/.test(url.pathname) ? url.origin+url.pathname : null;} catch{return null;}
 }
 
+// A prepared PDF can be fetched repeatedly, but a customer attachment must not
+// be resent after a process crash or lost UI response. Keep the claim on disk;
+// only a verified send can be replayed as complete. Unknown outcomes stay open.
+export async function deliverStatementOnce({config, receipt, replyText, send}) {
+  if (!/^[a-f0-9]{64}$/.test(receipt.operationId || '')) throw new Error('statement_operation_required');
+  const directory = config.statementDeliveryDirectory || `${config.autoSendLogPath}.documents`;
+  fs.mkdirSync(directory, {recursive:true, mode:0o700});
+  const file = path.join(directory, `${receipt.operationId}.json`);
+  const replyHash = createHash('sha256').update(String(replyText).replace(/\s+/g,' ').trim()).digest('hex');
+  let fd;
+  try { fd = fs.openSync(file, 'wx', 0o600); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    let prior;
+    try { prior = JSON.parse(fs.readFileSync(file,'utf8')); } catch { /* crash during claim */ }
+    if (prior?.status === 'confirmed' && prior.operationId === receipt.operationId
+      && prior.replyHash === replyHash && prior.pdfSha256 === receipt.pdfSha256) {
+      return {...prior.sendResult, documentDeliveryReplayed:true};
+    }
+    return {sent:false, reason:'statement_delivery_outcome_unknown'};
+  }
+  try {
+    fs.writeFileSync(fd, JSON.stringify({operationId:receipt.operationId,status:'started',replyHash,
+      pdfSha256:receipt.pdfSha256,at:new Date().toISOString()}));
+    fs.fsyncSync(fd);
+  } finally { fs.closeSync(fd); }
+  const result = await send();
+  if (result.sent === true && result.readback_confirmed === true && result.observed_reply_hash === replyHash
+    && result.attachments?.attached === true && result.attachments?.readbackConfirmed === true) {
+    const temporary = `${file}.${process.pid}.tmp`;
+    const payload = {operationId:receipt.operationId,status:'confirmed',replyHash,pdfSha256:receipt.pdfSha256,
+      at:new Date().toISOString(),sendResult:{sent:true,readback_confirmed:true,observed_reply_hash:replyHash,
+        attachments:{attached:true,readbackConfirmed:true},reason:'statement_delivery_verified'}};
+    const out = fs.openSync(temporary,'wx',0o600);
+    try {fs.writeFileSync(out,JSON.stringify(payload));fs.fsyncSync(out);} finally {fs.closeSync(out);}
+    fs.renameSync(temporary,file);
+  }
+  return result;
+}
+
 export function completeVerifiedPricingWork(prepared, result) {
   if (!result?.verifiedPricing) return prepared;
   const completed = new Set();
   if (result.sent === true && result.readbackReceipt) {completed.add('reply_needed');completed.add('price_review');}
   if (result.pricingDocumentReceipt?.deliveryConfirmed === true && result.pricingDocumentReceipt.documentType!=='statement') completed.add('quote_send');
-  const statementDone=result.pricingDocumentReceipt?.deliveryConfirmed===true && result.pricingDocumentReceipt.documentType==='statement';
+  const statementDone=result.pricingDocumentReceipt?.deliveryConfirmed===true && result.pricingDocumentReceipt.documentType==='statement'
+    && result.pricingDocumentReceipt.tradeId===prepared.decision.statement_request?.trade_id
+    && result.pricingDocumentReceipt.tradeId===prepared.decision.price_quote?.id;
   if (!completed.size && !statementDone) return prepared;
   const reference=prepared.decision.price_quote?.id;
   const sameQuote=item=>{
-    const keys=[item.businessKey,item.business_key,item.taskKey,item.task_key].filter(Boolean);
+    const keys=[item.businessKey,item.business_key,item.taskKey,item.task_key,item.payload?.task_key].filter(Boolean);
     // Older single-quote intents have no keys. Keyed work must name the exact
     // verified reference; a combined/mismatched case is still outstanding.
-    return !reference || !keys.length || keys.some(key=>String(key).split(':').includes(reference));
+    if (!keys.length) return true;
+    if (!reference) return false;
+    const references=keys.flatMap(key=>String(key).match(/(?:RQ-)?\d{6}-\d{3}/g) || []);
+    return references.length > 0 && references.every(value=>value===reference);
   };
   const fulfilled=item=>(completed.has(item.type)
-    && (!['quote_send','price_review'].includes(item.type) || sameQuote(item))) || (statementDone && item.type==='contract_document'
-    && /거래명세|statement/i.test([item.title,item.summary,item.taskKey,item.task_key,item.payload?.task_key].join(' ')));
+    && (!['quote_send','price_review'].includes(item.type) || sameQuote(item))
+    && (item.type !== 'quote_send' || !quoteNeedsSeparateVerification({
+      ...prepared.decision, follow_up_items: [item]
+    }))) || (statementDone && item.type==='contract_document'
+    && sameQuote(item) && /거래명세|statement/i.test([item.title,item.summary,item.taskKey,item.task_key,item.payload?.task_key].join(' ')));
   const remaining=(prepared.decision.follow_up_items || []).filter(item=>!fulfilled(item));
   return {...prepared,decision:{...prepared.decision,follow_up_items:remaining,
     reply_decision:{...prepared.decision.reply_decision,shouldCreateTask:remaining.some(item=>item.requiresHumanAction===true)}},

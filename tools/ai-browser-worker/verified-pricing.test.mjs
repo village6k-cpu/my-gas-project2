@@ -18,7 +18,7 @@ test('statements use the exact registered trade and reject an unauthorized deleg
  assert.throws(()=>automaticStatementRequest({decision:statementDecision,verification:{...statementVerification,calculations:[{...statementVerification.calculations[0],tradeId:'261024-008'}]},job}),/trade_mismatch/);
 });
 test('a prepared statement PDF does not count as sent until Kakao readback',async()=>{
- const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid',documentApiKey:'test'},decision:statementDecision,verification:statementVerification,job,fetchImpl:async()=>({ok:true,json:async()=>({status:'PREPARED',documentType:'statement',tradeID:'261024-007',...privateAttachment,totalVatIncluded:7700})})});
+ const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid',documentApiKey:'test'},decision:statementDecision,verification:statementVerification,job,fetchImpl:async(_url,request)=>({ok:true,json:async()=>({operationId:JSON.parse(request.body).operationId,status:'PREPARED',documentType:'statement',tradeID:'261024-007',...privateAttachment,totalVatIncluded:7700})})});
  assert.equal(receipt.documentType,'statement');assert.equal(receipt.deliveryConfirmed,false);
  const work={type:'contract_document',title:'거래명세서 발송',requiresHumanAction:true},other={type:'contract_document',title:'계약서 수정',requiresHumanAction:true};
  const prepared={decision:{...statementDecision,follow_up_items:[work,other]},availabilityAwareRows:[work,other]};
@@ -83,13 +83,13 @@ test('registered quote reaches the document API with an authoritative payload',a
    calls++;const body=JSON.parse(request.body);
    assert.equal(body.action,'sendEstimateManual');assert.equal(body.expectedTotal,7700);assert.equal(body.manualData.고객명,'테스트');
    assert.deepEqual(body.pricingSource,{source:'trade',id:'261024-007'});
-   return {ok:true,json:async()=>({status:'OK',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/test/view',totalVatIncluded:7700})};
+   return {ok:true,json:async()=>({operationId:body.operationId,status:'OK',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/test/view',totalVatIncluded:7700})};
   }});
  assert.equal(calls,1);assert.equal(receipt.deliveryConfirmed,true);
 });
 test('transport acceptance, a PDF alone and wrong totals never prove quotation delivery',async()=>{
  for(const payload of [{status:'OK',pdfUrl:'https://drive.google.com/file/d/test/view'},{status:'OK',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/test/view',totalVatIncluded:1},{status:'QUEUED'}])await assert.rejects(sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid',documentApiKey:'test'},decision,verification,job,fetchImpl:async()=>({ok:true,json:async()=>payload})}),/not_confirmed/);
- let checked=false;const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid',documentApiKey:'test'},decision,verification,job,assertFresh:async()=>{checked=true},fetchImpl:async(_url,request)=>{assert.equal(checked,true);assert.equal(JSON.parse(request.body).automaticPricing,true);return{ok:true,json:async()=>({status:'OK',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/test/view',totalVatIncluded:7700})}}});assert.equal(receipt.deliveryConfirmed,true);
+ let checked=false;const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid',documentApiKey:'test'},decision,verification,job,assertFresh:async()=>{checked=true},fetchImpl:async(_url,request)=>{assert.equal(checked,true);assert.equal(JSON.parse(request.body).automaticPricing,true);return{ok:true,json:async()=>({operationId:JSON.parse(request.body).operationId,status:'OK',deliveryConfirmed:true,pdfUrl:'https://drive.google.com/file/d/test/view',totalVatIncluded:7700})}}});assert.equal(receipt.deliveryConfirmed,true);
 });
 
 test('first AI response sends a verified quotation and price with general automatic replies held',async()=>{
@@ -113,8 +113,8 @@ test('first AI response sends a verified quotation and price with general automa
  assert.equal(result.sent,true,JSON.stringify(result));assert.equal(result.pricingDocumentReceipt.deliveryConfirmed,true);assert.ok(result.readbackReceipt);assert.ok(calls.indexOf('fresh-price')<calls.indexOf('pdf'));assert.ok(calls.indexOf('pdf')<calls.indexOf('answer'));
  const statement=await maybeAutoSendReply({config,decision:{...currentDecision,...statementDecision,reply_decision:currentDecision.reply_decision},job:{...currentJob,jobId:'statement-job'},dependencies:{
   buildAuthoritativePriceVerification:async()=>statementVerification,assertFreshBeforeSend:async()=>{},
-  sendAutomaticPricingDocument:async()=>({schema:'village-auto-pricing-document-receipt/v1',documentType:'statement',status:'prepared',deliveryConfirmed:false,attachmentPaths:['/tmp/test-statement.pdf']}),
-  sendKakaoMessage:async (text,_context,options)=>{assert.match(text,/261024-007/);assert.doesNotMatch(text,/https:\/\//);assert.deepEqual(options.attachmentPaths,['/tmp/test-statement.pdf']);return{sent:true,readback_confirmed:true,observed_reply_hash:autoReplyTextHash(text),attachments:{attached:true}}}
+  sendAutomaticPricingDocument:async()=>({schema:'village-auto-pricing-document-receipt/v1',documentType:'statement',operationId:'a'.repeat(64),tradeId:'261024-007',pdfSha256:'test',status:'prepared',deliveryConfirmed:false,attachmentPaths:['/tmp/test-statement.pdf']}),
+  sendKakaoMessage:async (text,_context,options)=>{assert.match(text,/261024-007/);assert.doesNotMatch(text,/https:\/\//);assert.deepEqual(options.attachmentPaths,['/tmp/test-statement.pdf']);return{sent:true,readback_confirmed:true,observed_reply_hash:autoReplyTextHash(text),attachments:{attached:true,readbackConfirmed:true}}}
  }});
  assert.equal(statement.sent,true);assert.equal(statement.pricingDocumentReceipt.deliveryConfirmed,true);assert.equal(statement.pricingDocumentReceipt.deliveryChannel,'kakao_attachment');
  const stale=await maybeAutoSendReply({config:{...config,verifiedPricingEnabledAfter:new Date(now.getTime()+60000).toISOString()},decision:currentDecision,job:currentJob});assert.equal(stale.sent,false);assert.equal(stale.gate.reason,'pricing_before_activation_cutoff');

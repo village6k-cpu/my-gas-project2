@@ -13867,6 +13867,7 @@ test('sendKakaoMessageViaDevtools attaches local files through Chrome DevTools a
   fs.writeFileSync(businessPath, 'business');
   const cdpCalls = [];
   const evalExpressions = [];
+  let snapshots=0;
 
   const result = await sendKakaoMessageViaDevtools('요청하신 통장 사본과 사업자등록증 전달드립니다.', {
     conversation_target: {
@@ -13878,6 +13879,8 @@ test('sendKakaoMessageViaDevtools attaches local files through Chrome DevTools a
     attachmentPaths: [bankbookPath, businessPath],
     evaluateImpl: async (_target, expression) => {
       evalExpressions.push(expression);
+      if (expression.includes('kakaoConversationText')) return {href:'https://business.kakao.com/chats/test',
+        messages:snapshots++ ? ['bankbook.jpeg','business.jpeg'].map(text=>({role:'staff',text})) : []};
       if (expression.includes('kakaoSendMessage')) {
         return { sent: true, reason: 'sent_via_devtools_verified', window_title: '최재형' };
       }

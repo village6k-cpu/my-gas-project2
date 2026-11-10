@@ -3,7 +3,7 @@ import {refreshKakaoConversationWithoutDraft} from './stale-conversation-refresh
 import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
 import {reservationClarificationConfigured, freshReservationJob, RESERVATION_DATE_POLICY, RESERVATION_PRIORITY_POLICY} from './reservation-intake-guard.mjs';
-import { completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, sendAutomaticPricingDocument } from './verified-pricing.mjs';
+import { deliverStatementOnce, completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, quoteNeedsSeparateVerification, sendAutomaticPricingDocument } from './verified-pricing.mjs';
 import fs from 'node:fs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
 import os from 'node:os';
@@ -6398,19 +6398,12 @@ function buildKakaoSendPendingAttachmentsExpression(expectedCount = 0) {
     };
     const inputs = deepQueryAll('input[type="file"]');
     const selectedFileCount = inputs.reduce((sum, input) => sum + (input.files?.length || 0), 0);
-    for (const input of inputs) {
-      if (input.files?.length) {
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    }
     await sleep(700);
     const buttons = deepQueryAll('button').filter((button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true');
     const sendButton = [...buttons].reverse().find((button) => (button.innerText || button.textContent || '').trim() === '전송')
       || [...buttons].reverse().find((button) => String(button.className || '').includes('btn_submit'));
     if (sendButton) {
-      sendButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-      sendButton.click?.();
+      sendButton.click();
       await sleep(1800);
     }
     return {
@@ -6422,16 +6415,53 @@ function buildKakaoSendPendingAttachmentsExpression(expectedCount = 0) {
   }.toString()})(${JSON.stringify(expectedCount)})`;
 }
 
+export function kakaoAttachmentReadback(before, after, files) {
+  if (!before?.href || before.href !== after?.href || !Array.isArray(before.messages) || !Array.isArray(after.messages)) return false;
+  const names = files.map(file=>path.basename(file).normalize('NFC'));
+  if (!names.length || new Set(names).size !== names.length) return false;
+  const count = (snapshot, name) => snapshot.messages.filter(message=>{
+    const value=String(message.text || '').normalize('NFC').trim();
+    // Kakao file cards concatenate the name and metadata without whitespace.
+    const fileCard=value.startsWith(name) && /^(?:$|\s|유효기간|용량)/.test(value.slice(name.length));
+    const layout=message.layout;
+    const rightMargin=layout?.viewport_width-layout?.right;
+    // Saved production file cards use a 20px right gutter, even at 420px width.
+    // Do not infer ordinary message roles from width or text. For an exact file
+    // card only, this narrow right-edge signature can resolve unknown metadata.
+    const outgoingFileCard=message.role==='unknown' && /유효기간.*용량/.test(value)
+      && Number.isFinite(rightMargin) && rightMargin>=0 && rightMargin<=32
+      && Number.isFinite(layout.left) && layout.left>=80 && layout.left>rightMargin+40;
+    return fileCard && (message.role==='staff' || outgoingFileCard)
+      && !/전송\s*실패|전송\s*중|업로드\s*중|다시\s*전송|failed|uploading/i.test(value);
+  }).length;
+  return names.every(name=>count(after,name)>count(before,name));
+}
+
 export async function attachKakaoFilesViaDevtools(target, attachmentPaths = [], {
   timeoutMs = 20000,
   evaluateImpl = devtoolsEvaluateOnTarget,
-  cdpCallImpl = devtoolsCdpCallOnTarget
+  cdpCallImpl = devtoolsCdpCallOnTarget,
+  evidenceMaxAttempts = 8,
+  evidencePollMs = 500
 } = {}) {
   if (!target?.webSocketDebuggerUrl) return { attached: false, reason: 'conversation_target_missing' };
   const files = normalizeKakaoAttachmentPaths(attachmentPaths);
   if (!files.length) return { attached: false, reason: 'no_attachment_paths', files: [] };
   const missing = files.filter((filePath) => !fs.existsSync(filePath));
   if (missing.length) return { attached: false, reason: 'attachment_file_missing', files, missing };
+
+  const readSnapshot = () => evaluateImpl(target, buildKakaoConversationTextExpression(), {timeoutMs});
+  let before;
+  try { before = await readSnapshot(); } catch { return {attached:false,reason:'attachment_baseline_unavailable',files}; }
+  if (!before?.href || !Array.isArray(before.messages)) return {attached:false,reason:'attachment_baseline_unavailable',files};
+  const verify = async () => {
+    for (let attempt=0; attempt<evidenceMaxAttempts; attempt++) {
+      if (attempt && evidencePollMs) await new Promise(resolve=>setTimeout(resolve,evidencePollMs));
+      const after = await readSnapshot().catch(()=>null);
+      if (kakaoAttachmentReadback(before, after, files)) return {attached:true,readbackConfirmed:true,reason:'new_attachment_messages_verified'};
+    }
+    return {attached:false,readbackConfirmed:false,reason:'attachment_send_not_verified'};
+  };
 
   let revealResult = null;
   try {
@@ -6541,37 +6571,13 @@ export async function attachKakaoFilesViaDevtools(target, attachmentPaths = [], 
       await new Promise((r) => setTimeout(r, 2500));
       const sendResult = await evaluateImpl(target, buildKakaoSendPendingAttachmentsExpression(files.length), { timeoutMs })
         .catch((error) => ({ sendClicked: false, error: error.message.slice(0, 500) }));
-      const selectedFileCount = Number(sendResult?.selectedFileCount || assignResult.fileCount || 0);
-      const attached = selectedFileCount >= files.length && sendResult?.sendClicked !== false;
-      // Kakao sometimes auto-sends file bubbles on change without needing submit.
-      const autoAttached = assignResult.ok && (sendResult?.selectedFileCount > 0 || sendResult?.sendClicked === false);
-      return {
-        attached: attached || Boolean(assignResult.ok),
-        reason: (attached || assignResult.ok) ? 'files_assigned_via_datatransfer' : 'attachment_send_not_verified',
-        files,
-        fileCount: files.length,
-        inputNodeId: 0,
-        revealResult,
-        assignResult,
-        sendResult,
-        autoAttached
-      };
+      return {...await verify(),files,fileCount:files.length,inputNodeId:0,revealResult,assignResult,sendResult};
     }
 
     await cdpCallImpl(target, 'DOM.setFileInputFiles', { nodeId, files }, { timeoutMs });
     const sendResult = await evaluateImpl(target, buildKakaoSendPendingAttachmentsExpression(files.length), { timeoutMs })
       .catch((error) => ({ sendClicked: false, error: error.message.slice(0, 500) }));
-    const selectedFileCount = Number(sendResult?.selectedFileCount || 0);
-    const attached = selectedFileCount >= files.length && sendResult?.sendClicked !== false;
-    return {
-      attached,
-      reason: attached ? 'files_selected_and_send_clicked' : 'attachment_send_not_verified',
-      files,
-      fileCount: files.length,
-      inputNodeId: nodeId,
-      revealResult,
-    sendResult
-  };
+    return {...await verify(),files,fileCount:files.length,inputNodeId:nodeId,revealResult,sendResult};
 }
 
 async function devtoolsFetchTextWithFallbackMethod(baseUrl, pathname, options = {}) {
@@ -8934,6 +8940,11 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   if (reservationClarificationConfigured(config, decision) && !freshReservationJob(config, job)) {
     return {attempted:false,sent:false,gate:{allowed:false,reason:'clarification_before_activation_cutoff'}};
   }
+  if (quoteNeedsSeparateVerification(decision)) {
+    const result = { attempted: false, sent: false, gate: { allowed: false, reason: 'quote_scope_requires_separate_verification' } };
+    logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
+    return result;
+  }
   const documentGate = canAutoSendCustomerDocumentAssets(decision, config);
   let priceVerification = null;
   let gate;
@@ -8954,13 +8965,18 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
     return result;
   }
   if(decision.statement_request && !gate.text.includes(decision.statement_request.trade_id))gate={...gate,text:`거래 ${decision.statement_request.trade_id}\n${gate.text}`};
-  const dedupeKey = buildAutoReplyDedupeKey({ decision, job, replyText: gate.text });
+  // A price-only answer must not suppress a subsequently requested document.
+  // Different bookings with equal prices also need independent delivery keys.
+  const documentScope = verifiedPricingConfigured(config,decision) && pricingDocumentRequested(decision)
+    ? '|document:' + createHash('sha256').update(JSON.stringify({quote:decision.price_quote,
+      statement:decision.statement_request || null,calculations:priceVerification?.calculations})).digest('hex') : '';
+  const dedupeKey = buildAutoReplyDedupeKey({ decision, job, replyText: gate.text }) + documentScope;
   if (hasRecentSentAutoReply(config, dedupeKey)) {
     const result = { attempted: false, sent: false, gate: { allowed: false, reason: 'duplicate_recent_auto_reply' } };
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', dedupeKey });
     return result;
   }
-  const roomReplyKey = buildRoomReplyDedupeKey({ decision, job, replyText: gate.text });
+  const roomReplyKey = buildRoomReplyDedupeKey({ decision, job, replyText: gate.text }) + documentScope;
   if (roomReplyKey && hasRecentSentAutoReply(config, roomReplyKey, { windowMs: 24 * 60 * 60 * 1000, keyField: 'roomReplyKey' })) {
     const result = { attempted: false, sent: false, gate: { allowed: false, reason: 'duplicate_room_reply_text_24h' } };
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', dedupeKey, roomReplyKey });
@@ -9003,9 +9019,11 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
       });
       if(pricingDocumentReceipt.documentType==='statement')gate={...gate,attachmentPaths:pricingDocumentReceipt.attachmentPaths};
     } catch (error) {
-      return {attempted:false,sent:false,text:gate.text,priceVerification,verifiedPricing:true,
+      const failure = {attempted:false,sent:false,text:gate.text,priceVerification,verifiedPricing:true,
         pricingDocumentFailure:{schema:'village-auto-pricing-document-receipt/v1',documentType:decision.statement_request?'statement':'quote',status:'unconfirmed',occurredAt:new Date().toISOString(),error:error.message},
         gate:{allowed:false,reason:decision.statement_request && /^[a-z_]{1,100}$/.test(error.message)?error.message:'quote_delivery_not_confirmed'}};
+      logAutoReply(config,{jobId:job.id || job.jobId,result:failure,dedupeKey,roomReplyKey});
+      return failure;
     }
   }
   if (pricingDocumentReceipt) {
@@ -9019,7 +9037,7 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   let sendResult;
   try {
     const sendMessage = dependencies.sendKakaoMessage || sendKakaoMessageViaChrome;
-    sendResult = await sendMessage(gate.text, navigationContext, {
+    const send = () => sendMessage(gate.text, navigationContext, {
       timeoutMs: config.autoSendTimeoutMs,
       cuaDriverCommand: config.cuaDriverCommand,
       attachmentPaths: gate.attachmentPaths || [],
@@ -9027,6 +9045,8 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
       controlMode: config.workerControlMode,
       cuaMinIdleSeconds: config.cuaMinIdleSeconds
     });
+    sendResult = pricingDocumentReceipt?.documentType==='statement'
+      ? await deliverStatementOnce({config,receipt:pricingDocumentReceipt,replyText:gate.text,send}) : await send();
   } catch (error) {
     sendResult = { sent: false, reason: 'send_error', error: error.message.slice(0, 500) };
   }
@@ -9044,7 +9064,7 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
       readbackReceipt = null;
     }
   }
-  if(pricingDocumentReceipt?.documentType==='statement' && readbackReceipt && sendResult.attachments?.attached===true)pricingDocumentReceipt={...pricingDocumentReceipt,
+  if(pricingDocumentReceipt?.documentType==='statement' && readbackReceipt && sendResult.attachments?.attached===true && sendResult.attachments?.readbackConfirmed===true)pricingDocumentReceipt={...pricingDocumentReceipt,
     status:'sent',deliveryConfirmed:true,deliveryChannel:'kakao_attachment',occurredAt:new Date().toISOString()};
   const result = {
     attempted: true,
