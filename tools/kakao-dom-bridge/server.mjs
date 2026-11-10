@@ -1,3 +1,4 @@
+import {approveCustomerReview, queueCustomerReview, recordCustomerCompletion, queueCustomerCompletionDigest} from './customer-review.mjs';
 import {pricingOwnerNotice,queuePricingOwnerNotice,flushPricingOwnerNotices} from '../ai-browser-worker/pricing-owner-notices.mjs';
 import {reservationOwnerNotice,reservationFailureOwnerNotice} from '../ai-browser-worker/reservation-intake-guard.mjs';
 import {verifiedPricingAudit} from '../ai-browser-worker/verified-pricing.mjs';
@@ -2738,6 +2739,10 @@ export function createGatewayResultApplicationCoordinator({
     durableJob.application = persistedAppliedJob?.application
       ? cloneForAudit(persistedAppliedJob.application)
       : { ...(durableJob.application || {}), state: 'applied', applied_audit: appliedAudit };
+    // A later application or dashboard write must not hide a review card or a verified send.
+    const reviewConfig = {...config, queueDir: config.queueDir || CONFIG.queueDir};
+    const proactiveReview = await queueCustomerReview({config: reviewConfig, job, prepared, applied}).catch(() => false);
+    await recordCustomerCompletion(reviewConfig, job, applied).catch(() => {});
     if (applied?.autoReplyResult?.pricingDocumentFailure) {
       // A document failure can make finalization reject the turn. Preserve its
       // audit and owner notice before that rejection, independently of task saves.
@@ -6917,6 +6922,17 @@ const server = http.createServer(async (req, res) => {
       return json(res, row ? 200 : 404, { ok: Boolean(row), row });
     }
 
+    if (req.method === 'POST' && url.pathname === '/slack/customer-review') {
+      const expected = Buffer.from('Bearer ' + String(process.env.SLACK_BOT_TOKEN || ''));
+      const supplied = Buffer.from(req.headers.authorization || '');
+      if (expected.length <= 7 || expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
+        return json(res, 401, {state:'unavailable'});
+      }
+      const config = {...getKakaoWorkerRuntimeConfigForTransport(), queueDir:CONFIG.queueDir};
+      const body = await readJsonBody(req);
+      return json(res, 200, await approveCustomerReview(config, body));
+    }
+
     if (req.method === 'POST' && url.pathname === '/slack/actions') {
       const body = await readJsonBody(req);
       const result = await applySlackFollowUpActionRequest(body);
@@ -7053,6 +7069,7 @@ const pricingNoticeTimer = process.env.AI_WORKER_PRICING_OWNER_SLACK_USER_ID
           if(notice){await queuePricingOwnerNotice(directory,notice);failures.push({job,notice});}
         }
       }
+      await queueCustomerCompletionDigest({...getKakaoWorkerRuntimeConfigForTransport(), queueDir:CONFIG.queueDir});
       await flushPricingOwnerNotices(directory,{token:process.env.SLACK_BOT_TOKEN});
       for(const {job,notice} of failures) {
         const delivered=JSON.parse(fs.readFileSync(path.join(directory,notice.key+'.json'),'utf8'));

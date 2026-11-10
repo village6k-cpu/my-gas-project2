@@ -37,7 +37,7 @@ export function pricingOwnerNotice(config,job,finalized){
 export async function queuePricingOwnerNotice(directory,notice){
   if(!notice)return;
   await fs.mkdir(directory,{recursive:true});
-  try{await fs.writeFile(path.join(directory,notice.key+'.json'),JSON.stringify(notice),{encoding:'utf8',flag:'wx'});}
+  try{await fs.writeFile(path.join(directory,notice.key+'.json'),JSON.stringify(notice),{encoding:'utf8',flag:'wx',mode:0o600});}
   catch(error){if(error.code!=='EEXIST')throw error;}
 }
 
@@ -50,11 +50,22 @@ export async function flushPricingOwnerNotices(directory,{token,fetchImpl=fetch,
     const target=path.join(directory,file),notice=JSON.parse(await fs.readFile(target,'utf8'));
     if(notice.state==='sent' || Number(notice.nextAttemptAt || 0)>now)continue;
     if(notice.schema!=='village-pricing-owner-notice/v1' || !/^U[A-Z0-9]+$/.test(notice.channel))continue;
+    if (notice.review && now - Date.parse(notice.createdAt) > 2 * 60 * 60 * 1000) {
+      notice.state = 'suppressed';
+      await fs.writeFile(target, JSON.stringify(notice), {mode: 0o600});
+      continue;
+    }
+    const blocks = notice.approval ? [
+      {type:'section',text:{type:'plain_text',text:notice.text.slice(0,2900)}},
+      ...(notice.review?.doc?.url ? [{type:'section',text:{type:'mrkdwn',text:`<${notice.review.doc.url}|문서 미리보기 열기>`}}] : []),
+      {type:'actions',elements:[{type:'button',style:'primary',
+        text:{type:'plain_text',text:'승인 후 발송'},action_id:notice.approval.action,value:notice.approval.value}]}
+    ] : undefined;
     if(attempted++>=100)break;
     try{
-      const response=await fetchImpl('https://slack.com/api/chat.postMessage',{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({channel:notice.channel,text:notice.text,client_msg_id:notice.clientMsgId,mrkdwn:false,unfurl_links:false,unfurl_media:false}),signal:AbortSignal.timeout(15000)});
+      const response=await fetchImpl('https://slack.com/api/chat.postMessage',{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({channel:notice.channel,text:notice.text,client_msg_id:notice.clientMsgId,...(blocks ? {blocks} : {}),mrkdwn:false,unfurl_links:false,unfurl_media:false}),signal:AbortSignal.timeout(15000)});
       const result=await response.json();if(!response.ok || result.ok!==true || !result.ts)throw Error('slack_delivery_unconfirmed');
-      notice.state='sent';notice.slackTs=result.ts;notice.sentAt=new Date(now).toISOString();sent++;
+      notice.state='sent';notice.slackTs=result.ts;notice.slackChannel=result.channel || '';notice.sentAt=new Date(now).toISOString();sent++;
     }catch{notice.attempts=(notice.attempts || 0)+1;notice.nextAttemptAt=now+Math.min(3600000,30000*2**Math.min(notice.attempts,7));pending++;}
     const temporary=target+'.tmp';
     await fs.writeFile(temporary,JSON.stringify(notice));
