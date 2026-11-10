@@ -715,7 +715,7 @@ export function buildHermesPrompt(job, options = {}) {
     : '';
   const promptPolicyConfig = loadCurrentConfirmedPolicyConfig();
   const currentConfirmedPolicyText = promptPolicyConfig
-    ? `\nCURRENT_CONFIRMED_POLICY: ${promptPolicyConfig.prompt.current_confirmed_policy}\n`
+    ? `\nCURRENT_CONFIRMED_POLICY: ${promptPolicyConfig.prompt.current_confirmed_policy}\n${buildConfirmedFaqPrompt(promptPolicyConfig)}`
     : '';
   const policyCalcRuleLine = text(promptPolicyConfig?.prompt?.calc_rule_line).trim()
     || '금액 산식은 CURRENT_CONFIRMED_POLICY를 따른다. 정책 설정이 없으면 금액 확정 안내는 auto_send하지 않는다.';
@@ -7934,6 +7934,16 @@ export function loadCurrentConfirmedPolicyConfig(configPath = process.env.VILLAG
       || !text(parsed?.mutable_policy_trigger?.pattern).trim()) {
       throw new Error('topics/prompt/mutable_policy_trigger가 비어 있음');
     }
+    if (parsed.faq_answers !== undefined) {
+      if (!Array.isArray(parsed.faq_answers)) throw new Error('faq_answers must be an array');
+      const keys = new Set();
+      for (const faq of parsed.faq_answers) {
+        if (![faq?.key, faq?.question, faq?.question_pattern, faq?.answer, faq?.source].every(value => typeof value === 'string' && value.trim())
+          || keys.has(faq.key)) throw new Error('confirmed FAQ needs unique key, question, pattern, answer and source');
+        new RegExp(faq.question_pattern, 'i');
+        keys.add(faq.key);
+      }
+    }
     cachedPolicyConfig = { ...parsed, __path: configPath };
   } catch (error) {
     // 정책 파일이 깨지면 옛 내장값으로 조용히 돌지 않는다: 게이트는 정책 주제
@@ -7950,6 +7960,36 @@ export function loadCurrentConfirmedPolicyConfig(configPath = process.env.VILLAG
 export function resetCurrentConfirmedPolicyConfigCache() {
   cachedPolicyConfig = undefined;
   policyConfigLoadErrorLogged = false;
+}
+
+function buildConfirmedFaqPrompt(config) {
+  const faqs = config.faq_answers || [];
+  if (!faqs.length) return '';
+  return '\nCURRENT_CONFIRMED_FAQ (사장 확정 정책과 동일 권한): 단순 반복 문의는 해당 답변 정본을 그대로 사용한다. 여러 FAQ는 빈 줄로 구분한다. 대표 재확인·RAG 대기 없이 classification=faq, replyMode=auto_send, confidence=high, safetyClass=current_policy_answer, grounding=current_confirmed_policy, requiresRag=false. 순수 FAQ만 남았다면 owner_review_required=false, follow_up_items=[]. 실제 예약 변경·발행·수납·분쟁 등 별도 업무가 함께 있으면 해당 업무와 검증을 유지하며 FAQ만으로 완료 처리하지 않는다. 계좌번호·건별 구성품 수량·입금/발송 완료를 추측하지 않는다.\n'
+    + faqs.map(faq => `${faq.question} → ${faq.answer}`).join('\n') + '\n';
+}
+
+function confirmedFaqReplySupport(config, decision, reply) {
+  const normalize = value => text(value).normalize('NFKC').replace(/\s+/g, ' ').trim();
+  const question = latestCustomerMessageForRag(decision);
+  const faqs = (config.faq_answers || []).map(faq => ({ ...faq, normalizedAnswer: normalize(faq.answer) }));
+  let remaining = normalize(reply);
+  const selected = [];
+  while (remaining) {
+    const match = faqs.find(faq => remaining === faq.normalizedAnswer || remaining.startsWith(faq.normalizedAnswer + ' '));
+    if (!match) break;
+    selected.push(match);
+    remaining = remaining.slice(match.normalizedAnswer.length).trim();
+  }
+  // Only exact, sourced answers may use this path. Extra prose must not smuggle
+  // in an unverified completed action or a new policy under a familiar answer.
+  if (!selected.length && !faqs.some(faq => normalize(reply).startsWith(faq.normalizedAnswer))) return null;
+  const failed = selected.filter(faq => !new RegExp(faq.question_pattern, 'i').test(question)).map(faq => faq.key);
+  const allowed = selected.length > 0 && !remaining && !failed.length;
+  return { applicable: true, allowed,
+    reason: allowed ? 'current_confirmed_policy_match' : 'current_policy_reply_mismatch',
+    topics: selected.map(faq => faq.key),
+    failedTopics: remaining ? [...failed, 'confirmed_faq_extra_content'] : failed };
 }
 
 export function mutablePolicyAutoReplyRisk(decision = {}, replyText = '') {
@@ -8001,6 +8041,8 @@ export function currentConfirmedPolicyAutoReplySupport(decision = {}, replyText 
   if (!policyConfig) {
     return { applicable: false, allowed: false, reason: 'policy_config_unavailable' };
   }
+  const faqSupport = confirmedFaqReplySupport(policyConfig, decision, reply);
+  if (faqSupport) return faqSupport;
   const checks = [];
   for (const topic of policyConfig.topics) {
     const trigger = new RegExp(topic.trigger, topic.trigger_flags || '');

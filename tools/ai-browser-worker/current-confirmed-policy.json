@@ -1,6 +1,6 @@
 {
   "version": "2026-11-10",
-  "note": "사장 확정 정책의 단일 소스. 이 파일만 고치면 Hermes 프롬프트(CURRENT_CONFIRMED_POLICY)와 자동발송 검증 게이트에 함께 반영된다. 정책 변경에 코드 수정은 필요 없다. 패턴은 JS RegExp 문법.",
+  "note": "사장 확정 정책의 단일 소스. 이 파일만 고치면 Hermes 프롬프트(CURRENT_CONFIRMED_POLICY)와 자동발송 검증 게이트에 함께 반영된다. 정책 변경에 코드 수정은 필요 없다. 패턴은 JS RegExp 문법. faq_answers는 출처가 확인된 반복 문의의 답변 정본이며, 프롬프트와 발송 검증이 함께 읽는다.",
   "prompt": {
     "current_confirmed_policy": "주소=서울 마포구 동교로 23길 32 엠페로빌딩 2층, 지도=https://naver.me/FCAutZta, 영업=24시간. 절차=장비명+기간→가용확인→방문수령→반납, 필수=장비명/수량/반출일시/반납일시/예약자명/연락처. 할인=학생 30%, 개인사업자/프리랜서 20%, 단골=개사프20%+10%, 제휴=개사프20%+20%. 장기=2일10%,3~5일20%,6~9일35%,10~14일40%,15~19일45%,20일+50%. 계산=할인 곱셈, 24시간 1일, +3시간 동일, 3시간 초과 +1일, VAT=할인후*1.1 10원 올림. 재고 공급=요청한 세트마스터 장비명·단가는 유지하고 호환되는 상위 기종으로 대체 가능(소니 GM 70-200mm→소니 GM 70-200mm II). GAS 가용성 결과의 실제 상위 배정과 재고를 사용하고 역방향 대체는 하지 않는다. 메모리·배터리는 재고 충돌에서 제외하며 예약 품목·수량은 유지한다. 외부 제휴 조달은 해당 스케줄의 공급처·품목·기간·확정 수량만 자체 재고에서 제외한다. 동일 고객·기간의 추가·변경은 기존 거래에 반영한다. 남은 RQ나 registered_trade_exists는 반영 완료를 뜻하지 않는다. 직원 승인 수요는 재고·이름 연결 문제와 관계없이 먼저 등록·수정하고 공급 문제는 반드시 사후 보고한다. 짧은 승인과 장비 연결은 AI가 전체 맥락으로 판단한다. 필수 일시·고객 선택만 질문하고, 시간·장비 동시 변경은 원자적으로 처리한다. 확정 가격·견적은 AI가 자동 완료·기록·알림.",
     "calc_rule_line": "금액: 24시간=1일, +3시간 동일, 초과 +1일. 고객·장기할인 곱셈 후 VAT1.1, 10원 올림.",
@@ -148,6 +148,92 @@
           "pattern": "^단순 계좌이체 시에는 VAT를 별도로 추가 청구하지 않습니다\\. 세금계산서 또는 현금영수증 발행 시에는 VAT 10%가 추가됩니다\\.$"
         }
       ]
+    }
+  ],
+  "faq_answers": [
+    {
+      "key": "shop_location_faq",
+      "question": "매장 주소가 어디인가요?",
+      "question_pattern": "주소|위치|몇\\s*층|어디.*(?:찾아|방문|가면)",
+      "answer": "서울 마포구 동교로 23길 32 엠페로빌딩 2층입니다. 지도: https://naver.me/FCAutZta",
+      "source": "current_confirmed_policy: address/map"
+    },
+    {
+      "key": "business_contact_hours_faq",
+      "question": "영업시간과 상담시간은 어떻게 되나요?",
+      "question_pattern": "영업|운영|상담|응대|몇\\s*시(?:부터|까지)|야간|24\\s*시간",
+      "answer": "매장은 24시간 운영하며, 카카오톡·전화 응대 시간은 오전 8시부터 오후 11시까지입니다. 예약한 픽업·반납 시간 변경은 일정 확인 후 안내드립니다.",
+      "source": "village-homepage/client/src/lib/faq.ts@e6a0adf (existing published FAQ; no conflicting current policy imported)"
+    },
+    {
+      "key": "deposit_prepayment_faq",
+      "question": "예약할 때 보증금이나 선결제가 있나요?",
+      "question_pattern": "보증금|선결제|예약금|디파짓",
+      "answer": "예약 시 선결제나 보증금은 받지 않습니다. 픽업 시 또는 반납 후 정산합니다.",
+      "source": "village-homepage/client/src/lib/faq.ts@e6a0adf (existing published FAQ; no conflicting current policy imported)"
+    },
+    {
+      "key": "student_proof_faq",
+      "question": "학생할인 받으려면 학생증과 재학증명서 둘 다 필요한가요?",
+      "question_pattern": "학생|학생증|재학\\s*증명",
+      "answer": "학생증 또는 재학증명서 중 하나를 픽업 시 보여주시면 전 장비 30% 할인이 적용됩니다.",
+      "source": "village-homepage/client/src/lib/faq.ts@e6a0adf (existing published FAQ; no conflicting current policy imported)"
+    },
+    {
+      "key": "business_proof_faq",
+      "question": "사업자나 프리랜서 할인은 어떤 증빙이 필요한가요?",
+      "question_pattern": "사업자|프리랜서|개사프",
+      "answer": "사업자등록증 또는 프리랜서 증빙 자료를 보여주시면 전 장비 20% 할인이 적용됩니다.",
+      "source": "village-homepage/client/src/lib/faq.ts@e6a0adf (existing published FAQ; no conflicting current policy imported)"
+    },
+    {
+      "key": "payment_methods_faq",
+      "question": "현장에서 카드로 결제해도 되나요?",
+      "question_pattern": "결제|카드|정산|입금.*(?:언제|방법)",
+      "answer": "현금·계좌이체·카드로 결제하실 수 있고, 픽업 시 또는 반납 후 정산합니다.",
+      "source": "village-homepage/client/src/lib/faq.ts@e6a0adf (existing published FAQ; no conflicting current policy imported)"
+    },
+    {
+      "key": "minimum_rental_day_faq",
+      "question": "12시간이나 당일만 빌리면 더 저렴한가요?",
+      "question_pattern": "12\\s*시간|24\\s*시간|당일|반나절|짧게|하루|요금제|일수",
+      "answer": "대여료는 24시간 단위이며, 별도 12시간 요금제는 없습니다. 당일에 짧게 이용해도 기본 1일 요금은 같습니다.",
+      "source": "current_confirmed_policy: 24 hours/day; homepage FAQ short rental only (old 1.5 round excluded)"
+    },
+    {
+      "key": "booking_required_fields_faq",
+      "question": "예약 양식은 어떻게 되나요?",
+      "question_pattern": "예약.*(?:어떻게|방법|양식|정보)|대여.*(?:방법|절차)",
+      "answer": "카카오톡으로 이름·연락처·할인유형(학생/사업자/일반)·장비명과 수량·반출 및 반납 일시를 보내주세요. 재고와 일정을 확인한 뒤 예약 확정을 안내드립니다.",
+      "source": "current_confirmed_policy: required fields and availability before registration"
+    },
+    {
+      "key": "unattended_return_faq",
+      "question": "직원이 없으면 반납은 어디에 하나요?",
+      "question_pattern": "반납|반납체크|반납\\s*존|직원.*없",
+      "answer": "반납 존에 장비를 올려두고 사진을 남긴 뒤 문을 잘 닫고 가시면 됩니다. 맡기신 신분증이 있으면 챙겨주세요. 장비 상태 확인 후 이상이 있으면 별도로 연락드립니다.",
+      "source": "village-homepage/client/src/lib/faq.ts@e6a0adf (existing published FAQ; no conflicting current policy imported)"
+    },
+    {
+      "key": "quick_pickup_faq",
+      "question": "첫 거래인데 퀵으로 수령할 수 있나요?",
+      "question_pattern": "퀵|배송|배달|택배",
+      "answer": "최초 거래는 퀵 수령이 불가하므로 직접 방문해주셔야 합니다. 법인도 최초 거래는 동일합니다. 이후 퀵 수령은 신원이 확인된 일부 고객 또는 거래 이력이 있는 단골 고객에 한해 사전 확인 후 제한적으로 가능합니다.",
+      "source": "owner instruction 2026-11-05; village-homepage FAQ@9abc8cb"
+    },
+    {
+      "key": "invoice_request_channel_faq",
+      "question": "세금계산서 발행 자료는 어디로 보내나요?",
+      "question_pattern": "세금\\s*계산서|사업자\\s*등록증|증빙.*(?:자료|어디)|발행.*자료",
+      "answer": "세금계산서는 입금 완료 후 카카오톡 채널로 요청해주세요. 사업자등록증 등 발행 자료도 카카오톡 채널로 보내주시면 됩니다.",
+      "source": "village-homepage/client/src/lib/faq.ts@e6a0adf (existing published FAQ; no conflicting current policy imported)"
+    },
+    {
+      "key": "discount_combination_faq",
+      "question": "학생할인과 장기할인은 중복되나요?",
+      "question_pattern": "중복|할인.*(?:계산|곱|더|합산)|장기.*할인",
+      "answer": "고객 할인과 장기 할인은 각 할인율을 곱해서 적용합니다. 예를 들어 학생 30%와 장기 20%는 0.7×0.8로 계산해 정가 대비 총 44% 할인입니다.",
+      "source": "current_confirmed_policy: multiplicative discounts (no new coupon/referral policy)"
     }
   ]
 }
