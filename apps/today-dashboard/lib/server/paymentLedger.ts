@@ -112,6 +112,31 @@ export function receiptCandidates(receipt: Row, accounts: Row[]) {
     return a.balance === receipt.remaining_amount && Number.isFinite(checkout) && Math.abs(at - checkout) <= 2 * 86400000;
   });
 }
+export function selectAutomaticBankAccount(receipt: Row, accounts: Row[]) {
+  const candidates = receiptCandidates(receipt, accounts);
+  if (candidates.length === 1) {
+    return receipt.remaining_amount <= candidates[0].balance ? candidates[0] : undefined;
+  }
+  // Compare the actual sender display, separate from bank channel and transfer-type remarks.
+  const sender = String(receipt.raw?.remark1 ?? "").trim();
+  const senderNames = [normalizedName(sender), normalizedName(sender.replace(/\s*\([^()]+\)\s*$/, ""))];
+  const occurredAt = Date.parse(receipt.occurred_at);
+  const sameRecentPayer = (account: Row) =>
+    !["취소", "계약누락"].includes(account.contract_status) &&
+    Math.abs(Date.parse(account.checkout_at ?? "") - occurredAt) <= 14 * 86400000 &&
+    [account.payer_name, account.customer_name].some(value => {
+      const name = normalizedName(value);
+      return name.length >= 2 && senderNames.includes(name);
+    });
+  const samePayer = candidates.filter(sameRecentPayer);
+  if (samePayer.length < 2) return;
+  const exact = samePayer.filter(account => account.balance === receipt.remaining_amount);
+  if (exact.length !== 1) return;
+  const alreadyPaid = accounts.some(account =>
+    account.balance === 0 && account.billed_amount === receipt.remaining_amount && sameRecentPayer(account)
+  );
+  if (!alreadyPaid) return exact[0];
+}
 export async function allocatePayment(input: Row, actor: string, allowOverpay = false, db = paymentDb()) {
   if (!Array.isArray(input.allocations) || typeof input.requestId !== "string" || !input.requestId.trim()) throw new Error("배분 요청 형식 오류");
   const allocations = input.allocations.map((a: Row) => ({ trade_id: String(a.tradeId ?? a.trade_id ?? "").trim(), amount: a.amount }));
@@ -229,10 +254,10 @@ export async function ingestPayment(input: Row, actor: string, options: { refres
   const cutover = Date.parse(process.env.PAYMENT_LEDGER_CUTOVER_AT ?? "");
   const newReceipt = Number.isFinite(cutover) && Date.parse(occurredAt) >= cutover;
   if (options.auto !== false && stored.source === "bank" && stored.revision === 1 && stored.status === "active" && !stored.review_reason && stored.allocated_amount === 0 && newReceipt) {
-    const candidates = receiptCandidates(stored, await paymentBalances(undefined, db));
-    if (candidates.length === 1 && stored.remaining_amount <= candidates[0].balance) {
+    const account = selectAutomaticBankAccount(stored, await paymentBalances(undefined, db));
+    if (account) {
       checked(await db.rpc("payment_set_allocations", {
-        p_receipt_id: stored.id, p_allocations: [{ trade_id: candidates[0].trade_id, amount: stored.amount }],
+        p_receipt_id: stored.id, p_allocations: [{ trade_id: account.trade_id, amount: stored.amount }],
         p_expected_revision: stored.revision, p_request_id: `auto:${stored.id}`,
         p_actor: "automatic_unique_candidate", p_note: "현재 잔액과 유일한 입금 후보 확인", p_allow_overpay: false,
       }));
