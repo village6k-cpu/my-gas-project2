@@ -862,6 +862,8 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices, expectedTrad
 function getDashboardData(targetDate, skipCache, options) {
   var today = targetDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
   options = options || {};
+  // DB 투영은 품목 체크를 쓰지 않는다. 부분 결과는 일반 대시보드와 별도 캐시에 저장한다.
+  var includeCheckoutState = options.includeCheckoutState !== false;
   // 성능 진단용 단계별 마크 (profile=1일 때만; 캐시에 저장되지 않음)
   var dashProfile = options.profile === true || options.profile === 1 ||
     options.profile === '1' || options.profile === 'true';
@@ -877,8 +879,10 @@ function getDashboardData(targetDate, skipCache, options) {
   // 캐시 5분으로 확장. 등록/취소/일정변경 시 invalidateDashboardCache() 호출로 무효화.
   var cache = CacheService.getScriptCache();
   var cacheKey = 'dashboard_v7_' + today;
+  var projectionCacheKey = 'dashboard_projection_v1_' + today;
   if (!skipCache) {
     var cachedResult = getDashboardCacheJson_(cache, cacheKey);
+    if (!cachedResult && !includeCheckoutState) cachedResult = getDashboardCacheJson_(cache, projectionCacheKey);
     if (cachedResult) {
       if (!cachedResult.date) cachedResult.date = today;
       return finishDashboardCautions_(cachedResult, options);
@@ -1002,7 +1006,7 @@ function getDashboardData(targetDate, skipCache, options) {
   // 품목 체크 정본: Supabase checkout_state (Script Properties 는 용량/정리로 자주 비어 있음)
   var checkoutStateMap = {};
   try {
-    if (typeof supaGetScheduleItemCheckoutStateMap_ === 'function') {
+    if (includeCheckoutState && typeof supaGetScheduleItemCheckoutStateMap_ === 'function') {
       var checkoutMapRes = supaGetScheduleItemCheckoutStateMap_(dashboardTradeIds);
       checkoutStateMap = (checkoutMapRes && checkoutMapRes.byScheduleId) || {};
     }
@@ -1140,7 +1144,7 @@ function getDashboardData(targetDate, skipCache, options) {
     return result;
   }
   // 등록/취소/일정변경 시 invalidateDashboardCache로 무효화되므로, 날짜 이동 체감을 위해 15분 유지.
-  putDashboardCacheJson_(cache, cacheKey, result, 900);
+  putDashboardCacheJson_(cache, includeCheckoutState ? cacheKey : projectionCacheKey, result, 900);
   return finishDashboardCautions_(result, options);
 }
 
@@ -1180,6 +1184,10 @@ function putDashboardCacheJson_(cache, cacheKey, value, seconds) {
     var text = JSON.stringify(value);
     if (text.length < DASHBOARD_CACHE_CHUNK_SIZE_) {
       cache.put(cacheKey, text, seconds || 900);
+      // 새 단일 값을 저장한 뒤 옛 청크 형식을 제거한다. 실패한 쓰기는 기존 값을 보존한다.
+      var obsoleteChunks = [cacheKey + '__count'];
+      for (var oldChunk = 0; oldChunk < DASHBOARD_CACHE_MAX_CHUNKS_; oldChunk++) obsoleteChunks.push(cacheKey + '__' + oldChunk);
+      cache.removeAll(obsoleteChunks);
       return;
     }
 
@@ -1194,6 +1202,8 @@ function putDashboardCacheJson_(cache, cacheKey, value, seconds) {
       );
     }
     cache.putAll(payload, seconds || 900);
+    // 청크 저장 후 옛 단일 값을 제거해 manifest 퇴거 시 오래된 값으로 돌아가지 않게 한다.
+    cache.remove(cacheKey);
   } catch (e) {}
 }
 
@@ -2575,6 +2585,7 @@ function invalidateDashboardCache(extraDates) {
     });
     Object.keys(dateKeys).forEach(function(d) {
       removeDashboardCacheJson_(cache, 'dashboard_v7_' + d);
+      removeDashboardCacheJson_(cache, 'dashboard_projection_v1_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v6_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v5_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v4_' + d);
@@ -16968,20 +16979,29 @@ function commitConfirmedReservation(args) {
   var scriptLockHeld = false;
   var userLockHeld = false;
   try {
+    // 확인요청의 시트 기반 운영 기록도 UserLock → ScriptLock 순서로 쓴다.
+    // 이 진입점은 ScriptLock 소유권을 등록 함수에 넘기므로 상속받은 락은 받지 않는다.
+    if (scriptLock.hasLock()) {
+      var inheritedLockError = new Error("등록 작업은 기존 ScriptLock 밖에서 호출해야 합니다.");
+      inheritedLockError.code = "registration_busy";
+      throw inheritedLockError;
+    }
+    try {
+      if (!userLock.hasLock()) {
+        userLock.waitLock(30000);
+        userLockHeld = true;
+      }
+    } catch (userLockError) {
+      var inputBusyError = new Error("다른 예약 입력을 처리 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.");
+      inputBusyError.code = "registration_busy";
+      throw inputBusyError;
+    }
     if (!scriptLock.tryLock(30000)) {
       var busyError = new Error("다른 등록 작업이 진행 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.");
       busyError.code = "registration_busy";
       throw busyError;
     }
     scriptLockHeld = true;
-    try {
-      userLock.waitLock(30000);
-      userLockHeld = true;
-    } catch (userLockError) {
-      var inputBusyError = new Error("다른 예약 입력을 처리 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.");
-      inputBusyError.code = "registration_busy";
-      throw inputBusyError;
-    }
     normalized = _normalizeConfirmedReservationCommit_(args && args.registration ? args.registration : args);
     var operationId = String(args && args.operation_id || "").trim().toLowerCase();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)) {
@@ -22803,6 +22823,15 @@ function correctRegisteredTrade(args) {
       operationId: correction.operationId,
       appliedStages: stages.slice(),
       attemptedStage: attemptedStage,
+      // Preserve the conservative outer no-replay result after earlier writes.
+      // Only this regeneration attempt is known not to have started.
+      attemptedStageState: attemptedStage === 'regenerateContract' && error &&
+        error.stageState === 'not_started' &&
+        (error.code === 'CONTRACT_REGEN_LOCK_BUSY' || error.code === 'CONTRACT_REGEN_ALREADY_RUNNING')
+        ? 'not_started' : 'unknown',
+      stageErrorCode: attemptedStage === 'regenerateContract' && error &&
+        (error.code === 'CONTRACT_REGEN_LOCK_BUSY' || error.code === 'CONTRACT_REGEN_ALREADY_RUNNING')
+        ? error.code : '', 
       error: error && error.message ? error.message : String(error || 'unknown'),
       readback: partialReadback,
       authoritativeReadback: lockedBaseline && partialReadback

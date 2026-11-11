@@ -1418,7 +1418,8 @@ function buildSupabaseTrades_(tids) {
     var dd;
     // skipCache=false: 편집 경로가 변경 시 대시보드 캐시를 선별 무효화하므로 웜 캐시 재사용이 안전.
     // 강제 재구축(true)은 매분 플러시마다 날짜당 2~6초 전체 리빌드로 트리거 쿼터를 소모했다.
-    try { dd = getDashboardData(dk, false, { includeCautions: false }); } catch (x) { continue; }
+    // checkout_state는 이 투영에서 쓰지 않으므로 전역 락 안의 불필요한 HTTP/토큰 갱신을 생략한다.
+    try { dd = getDashboardData(dk, false, { includeCautions: false, includeCheckoutState: false }); } catch (x) { continue; }
     (dd.checkout || []).concat(dd.checkin || []).forEach(function (t) {
       if (want[t.tradeId] && !detail[t.tradeId]) detail[t.tradeId] = t;
     });

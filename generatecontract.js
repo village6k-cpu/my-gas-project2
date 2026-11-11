@@ -1113,15 +1113,28 @@ function deleteAndRegenerateContract(ss, 거래ID, 추가요청, options) {
   const regenLock = LockService.getScriptLock();
   const inheritedLock = regenLock.hasLock();
   const exclusionKey = 'contractDirectRegen_v1_' + 거래ID;
-  const exclusion = JSON.stringify({ at: Date.now(), token: Utilities.getUuid() });
-  if (!inheritedLock && !regenLock.tryLock(1000)) throw new Error('계약서 변경 작업 진행 중입니다');
+  var exclusion;
+  // Wait only for the pre-write claim lock. Never retry file/ledger mutations.
+  if (!inheritedLock && !regenLock.tryLock(30000)) {
+    var lockBusy = new Error('계약서 변경 작업 잠금 대기 시간이 초과되었습니다');
+    lockBusy.code = 'CONTRACT_REGEN_LOCK_BUSY';
+    lockBusy.stageState = 'not_started';
+    throw lockBusy;
+  }
   try {
     const existing = props.getProperty(exclusionKey);
     if (existing) {
       var previous = JSON.parse(existing);
       // GAS 실행 한도(6분)보다 길게 둬 살아 있는 재생성을 중복 선점하지 않는다.
-      if (!previous.at || Date.now() - previous.at < 9 * 60 * 1000) throw new Error('계약서 재생성이 이미 진행 중입니다');
+      if (!previous.at || Date.now() - previous.at < 9 * 60 * 1000) {
+        var alreadyRunning = new Error('계약서 재생성이 이미 진행 중입니다');
+        alreadyRunning.code = 'CONTRACT_REGEN_ALREADY_RUNNING';
+        // Another claimant is not evidence that this operation was accepted.
+        alreadyRunning.stageState = 'not_started';
+        throw alreadyRunning;
+      }
     }
+    exclusion = JSON.stringify({ at: Date.now(), token: Utilities.getUuid() });
     props.setProperty(exclusionKey, exclusion);
   } finally { if (!inheritedLock) regenLock.releaseLock(); }
 

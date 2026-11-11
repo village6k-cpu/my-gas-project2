@@ -69,16 +69,24 @@ function reconcilePendingRequest(args) {
     proof.requestId = requestId;
     proof.baselineFormat = args.baselineFormat;
     proof.sourceEvidence = args.sourceEvidence;
-    // Same order as commitConfirmedReservation. ScriptLock excludes legacy
+    // UserLock then ScriptLock, as in request writers and confirmed commits.
+    // ScriptLock excludes legacy
     // registration; UserLock excludes request edits, inserts and row deletion.
     scriptLock = LockService.getScriptLock();
     userLock = LockService.getUserLock();
-    if (!scriptLock.tryLock(30000)) {
-      throw pendingRequestReconciliationError_("registration_busy", "Registration lock is busy.");
+    if (scriptLock.hasLock() && !userLock.hasLock()) {
+      throw pendingRequestReconciliationError_("registration_busy", "Request reconciliation cannot wait for UserLock while holding ScriptLock.");
     }
-    scriptHeld = true;
-    userLock.waitLock(10000);
-    userHeld = true;
+    if (!userLock.hasLock()) {
+      userLock.waitLock(10000);
+      userHeld = true;
+    }
+    if (!scriptLock.hasLock()) {
+      if (!scriptLock.tryLock(30000)) {
+        throw pendingRequestReconciliationError_("registration_busy", "Registration lock is busy.");
+      }
+      scriptHeld = true;
+    }
     // Lock wait must not turn an expired source into accepted evidence.
     pendingRequestReconciliationInput_(args);
     sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("확인요청");
