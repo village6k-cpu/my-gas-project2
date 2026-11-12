@@ -429,8 +429,14 @@ function handleRequestCore_(e) {
 
     switch (action) {
 
+      case "masterCorrectionProvision":
+        var masterProvisionPostError = requireVillagePost_(e, action);
+        if (masterProvisionPostError) return masterProvisionPostError;
+        return jsonResponse(mcProvision_(postBody));
+
       case "masterCorrection":
-        requireVillagePost_(e, action);
+        var masterCorrectionPostError = requireVillagePost_(e, action);
+        if (masterCorrectionPostError) return masterCorrectionPostError;
         return jsonResponse(masterCorrection_(postBody));
 
       case "oneoffA7M5SetMaster":

@@ -84,6 +84,7 @@ function masterCorrection_(input){
   return {success:true,status:'preview',revision:r.expectedRevision,plan:plan,manualEditorRaceProtected:false};
  }
  mcAuthorizeApply_(r);
+ delete r.ownerProof;
  const lock=LockService.getScriptLock();if(!lock.tryLock(20000))mcFail_('master correction busy');
  try{
   const digest=mcHash_(r),auditName='마스터정정이력';let audit=ss.getSheetByName(auditName);
@@ -169,8 +170,39 @@ function mcSyncTemplateTarget_(ss,target){
  }else sh.getRange(sh.getLastRow()+1,1,1,2).setValues([[target,expected[0]]]);
 }
 
-// Fail closed until authenticated owner-message retrieval is wired to this server boundary.
-// source.verifiedOwner and local approval-memory records alone are not authorization.
-function mcAuthorizeApply_(request){
- throw new Error('MASTER_APPLY_DISABLED: authenticated owner message verification is not connected; preview only');
+// Dedicated catalog proof key only; the Slack credential never leaves the issuer.
+function mcAuthorizeApply_(r){
+ const props=PropertiesService.getScriptProperties();
+ const key=props.getProperty('MASTER_CORRECTION_PROOF_KEY');
+ const owner=props.getProperty('MASTER_CORRECTION_OWNER_ID'),team=props.getProperty('MASTER_CORRECTION_TEAM_ID');
+ if(props.getProperty('MASTER_CORRECTION_APPLY_ENABLED')!=='true'||!key||!owner||!team)throw new Error('MASTER_APPLY_DISABLED: authenticated owner issuer not configured; preview only');
+ if(r.kind!=='price'||r.scope!=='standing'||r.replace)throw new Error('automatic proof only permits standing price fill');
+ const proof=r.ownerProof;
+ if(!proof||typeof proof.claims!=='string'||proof.claims.length>3000||! /^[a-f0-9]{64}$/.test(proof.signature||''))throw new Error('owner proof required');
+ const actual=Utilities.computeHmacSha256Signature(proof.claims,key,Utilities.Charset.UTF_8).map(b=>('0'+((b+256)%256).toString(16)).slice(-2)).join('');
+ let mismatch=0;for(let i=0;i<64;i++)mismatch|=actual.charCodeAt(i)^proof.signature.charCodeAt(i);
+ if(mismatch)throw new Error('invalid owner proof signature');
+ const claims=JSON.parse(Utilities.newBlob(Utilities.base64Decode(proof.claims)).getDataAsString());
+ const now=Date.now();
+ if(claims.v!==1||claims.aud!=='village-master-correction'||claims.ownerId!==owner||claims.teamId!==team||!Number.isFinite(claims.issuedAt)||!Number.isFinite(claims.expiresAt)||claims.issuedAt>now+10000||claims.expiresAt<now||claims.expiresAt-claims.issuedAt>120000||claims.expiresAt<=claims.issuedAt)throw new Error('owner proof expired or wrong authority');
+ const payload={correctionId:r.operationId,kind:r.kind,target:r.target,scope:r.scope,unit:r.unit??null,price:r.price??null,components:r.components??null,replace:r.replace??null,expectedRevision:r.expectedRevision,source:r.source};
+ if(claims.digest!==mcHash_(payload)||r.source?.ownerId!==owner||r.source?.teamId!==team)throw new Error('owner proof payload mismatch');
+ const sourceMs=Number(r.source.ts)*1000;
+ if(!Number.isFinite(sourceMs)||sourceMs>now+60000||now-sourceMs>3600000)throw new Error('owner source requires current review');
+ const sourceKey=r.source.channel+'|'+r.source.ts;
+ const stable='mc-'+Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,sourceKey,Utilities.Charset.UTF_8).map(b=>('0'+((b+256)%256).toString(16)).slice(-2)).join('').slice(0,32);
+ if(r.operationId!==stable)throw new Error('owner source operation identity mismatch');
+ return claims;
+}
+// One-time internal deployment setup, not an owner-proof issuer or a reset endpoint.
+function mcProvision_(input){
+ const key=input.proofKey,owner=input.ownerId,team=input.teamId;
+ if(typeof key!=='string'||! /^[a-f0-9]{64}$/.test(key)||!/^U[A-Z0-9]+$/.test(owner||'')||!/^T[A-Z0-9]+$/.test(team||''))throw new Error('invalid provisioning configuration');
+ const lock=LockService.getScriptLock();if(!lock.tryLock(20000))throw new Error('provisioning busy');
+ try{
+  const props=PropertiesService.getScriptProperties();
+  if(props.getProperty('MASTER_CORRECTION_PROOF_KEY'))throw new Error('already provisioned; reset requires administrator outside this API');
+  props.setProperties({MASTER_CORRECTION_PROOF_KEY:key,MASTER_CORRECTION_OWNER_ID:owner,MASTER_CORRECTION_TEAM_ID:team,MASTER_CORRECTION_APPLY_ENABLED:input.enable===true?'true':'false'});
+  return {success:true,provisioned:true,enabled:props.getProperty('MASTER_CORRECTION_APPLY_ENABLED')==='true'};
+ }finally{lock.releaseLock();}
 }
