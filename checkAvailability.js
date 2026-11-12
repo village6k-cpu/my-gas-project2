@@ -11660,6 +11660,10 @@ function handleScheduleEdit(e) {
  * ★ 또는 onOpen()에서 자동 실행되도록 설정되어 있습니다.
  */
 function refreshEquipmentList(skipIfUnchanged) {
+  const listLock = LockService.getScriptLock();
+  const ownsListLock = !listLock.hasLock();
+  if (ownsListLock && !listLock.tryLock(20000)) throw new Error("장비 목록 갱신 중입니다. 잠시 후 재시도하세요.");
+  try {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
   const setSheet = ss.getSheetByName("세트마스터");
@@ -11697,15 +11701,14 @@ function refreshEquipmentList(skipIfUnchanged) {
     listSheet = ss.insertSheet("목록");
     ss.moveActiveSheet(ss.getNumSheets());
   }
-  listSheet.clear();
-
-  listSheet.getRange(1, 1).setValue("장비/세트명");
+  // Generated A column only. Preserve other columns, notes, formatting and formulas.
+  // One range write avoids an observable clear-then-fill gap; pad stale trailing names.
+  const oldListRows = listSheet.getLastRow();
+  const writeRows = Math.max(oldListRows, sorted.length + 1, 1);
+  const listValues = Array.from({length: writeRows}, (_, i) =>
+    [i === 0 ? "장비/세트명" : (sorted[i - 1] || "")]);
+  listSheet.getRange(1, 1, writeRows, 1).setValues(listValues);
   listSheet.getRange(1, 1).setFontWeight("bold");
-
-  if (sorted.length > 0) {
-    const values = sorted.map(n => [n]);
-    listSheet.getRange(2, 1, values.length, 1).setValues(values);
-  }
 
   listSheet.hideSheet();
 
@@ -11716,7 +11719,7 @@ function refreshEquipmentList(skipIfUnchanged) {
     const range = reqSheet.getRange(2, 6, lastDataRow - 1, 1);
 
     const rule = SpreadsheetApp.newDataValidation()
-      .requireValueInRange(listSheet.getRange("A2:A" + (sorted.length + 1)), true)
+      .requireValueInRange(listSheet.getRange("A2:A" + (Math.max(sorted.length + 1, 2))), true)
       .setAllowInvalid(true)
       .setHelpText("장비명 또는 세트명을 검색하세요")
       .build();
@@ -11763,7 +11766,7 @@ function refreshEquipmentList(skipIfUnchanged) {
   if (schedSheet) {
     const schedLastRow = schedSheet.getMaxRows();
     const schedRule = SpreadsheetApp.newDataValidation()
-      .requireValueInRange(listSheet.getRange("A2:A" + (sorted.length + 1)), true)
+      .requireValueInRange(listSheet.getRange("A2:A" + (Math.max(sorted.length + 1, 2))), true)
       .setAllowInvalid(true)
       .setHelpText("장비명 또는 세트명을 검색하세요")
       .build();
@@ -11778,6 +11781,11 @@ function refreshEquipmentList(skipIfUnchanged) {
   }
 
   return sorted.length;
+  } finally {
+    if (ownsListLock) {
+      try { SpreadsheetApp.flush(); } finally { listLock.releaseLock(); }
+    }
+  }
 }
 
 

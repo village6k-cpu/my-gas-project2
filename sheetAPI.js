@@ -91,6 +91,7 @@ function getVillageOperationCapabilities_() {
       }
     },
     capabilities: [
+      { id: "catalog.correct_master", action: "masterCorrection", policy: "internal_write", verification: "authoritative_readback" },
       { id: "inventory.lookup", action: "search", policy: "read_only" },
       { id: "schedule.lookup", action: "search", policy: "read_only" },
       { id: "customer.lookup", action: "search", policy: "read_only" },
@@ -427,6 +428,16 @@ function handleRequestCore_(e) {
     }
 
     switch (action) {
+
+      case "masterCorrectionProvision":
+        var masterProvisionPostError = requireVillagePost_(e, action);
+        if (masterProvisionPostError) return masterProvisionPostError;
+        return jsonResponse(mcProvision_(postBody));
+
+      case "masterCorrection":
+        var masterCorrectionPostError = requireVillagePost_(e, action);
+        if (masterCorrectionPostError) return masterCorrectionPostError;
+        return jsonResponse(masterCorrection_(postBody));
 
       case "oneoffA7M5SetMaster":
         return jsonResponse(oneoffA7M5SetMaster_(params));
