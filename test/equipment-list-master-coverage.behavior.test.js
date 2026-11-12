@@ -20,7 +20,7 @@ function extractFunction(name) {
 }
 
 for (const prelocked of [false, true]) test('rental dropdowns preserve non-A data and serialize snapshot reads; prelocked=' + prelocked, () => {
-  let locked=prelocked, acquisitions=0, releases=0;
+  let locked=prelocked, acquisitions=0, releases=0; const events=[];
   const nonA={note:'KEEP',formula:'=1+2'};
   let writtenNames = [];
   const validations = [];
@@ -57,8 +57,9 @@ for (const prelocked of [false, true]) test('rental dropdowns preserve non-A dat
     '스케줄상세': { getMaxRows: () => 40, getRange: (row,col,count,width) => ({setDataValidation(rule) {validations.push({sheet:'스케줄상세',row,col,count,width,rule});}}) }
   };
   const context = {
-    LockService: {getScriptLock:()=>({hasLock:()=>locked,tryLock:()=>{acquisitions++;locked=true;return true;},releaseLock(){releases++;locked=false;}})},
+    LockService: {getScriptLock:()=>({hasLock:()=>locked,tryLock:()=>{acquisitions++;locked=true;return true;},releaseLock(){events.push("release");releases++;locked=false;}})},
     SpreadsheetApp: {
+      flush(){events.push("flush");},
       getActiveSpreadsheet() {
         return {
           getSheetByName: (name) => sheets[name] ?? null,
@@ -100,7 +101,7 @@ for (const prelocked of [false, true]) test('rental dropdowns preserve non-A dat
     [{sheet:'확인요청',col:6,count:29},{sheet:'스케줄상세',col:3,count:39},{sheet:'스케줄상세',col:4,count:39}]);
   assert.ok(removedCaches.includes('dashboardEquipNameList_v1'));
   assert.deepEqual(nonA,{note:'KEEP',formula:'=1+2'});
-  assert.equal(acquisitions,prelocked?0:1);assert.equal(releases,prelocked?0:1);assert.equal(locked,prelocked);
+  assert.equal(acquisitions,prelocked?0:1);assert.equal(releases,prelocked?0:1);assert.equal(locked,prelocked);assert.deepEqual(events,prelocked?[]:["flush","release"]);
 });
 
 test('busy list writer never reads a stale snapshot or writes and does not release another lock',()=>{
@@ -111,7 +112,14 @@ test('busy list writer never reads a stale snapshot or writes and does not relea
 });
 test('list write failure releases owned lock for a safe rerun',()=>{
  let releases=0;
- const context={LockService:{getScriptLock:()=>({hasLock:()=>false,tryLock:()=>true,releaseLock:()=>releases++})},SpreadsheetApp:{getActiveSpreadsheet:()=>{throw Error('sheet offline');}}};
+ const context={LockService:{getScriptLock:()=>({hasLock:()=>false,tryLock:()=>true,releaseLock:()=>releases++})},SpreadsheetApp:{flush(){},getActiveSpreadsheet:()=>{throw Error('sheet offline');}}};
  assert.throws(()=>vm.runInNewContext(`${extractFunction('refreshEquipmentList')}\nrefreshEquipmentList(false);`,context),/offline/);
  assert.equal(releases,1);
+});
+
+test('flush failure still releases owned list lock',()=>{
+ const events=[];
+ const context={LockService:{getScriptLock:()=>({hasLock:()=>false,tryLock:()=>true,releaseLock:()=>events.push('release')})},SpreadsheetApp:{getActiveSpreadsheet:()=>{throw Error('offline');},flush:()=>{events.push('flush');throw Error('flush failed');}}};
+ assert.throws(()=>vm.runInNewContext(`${extractFunction('refreshEquipmentList')}\nrefreshEquipmentList(false);`,context),/flush failed/);
+ assert.deepEqual(events,['flush','release']);
 });

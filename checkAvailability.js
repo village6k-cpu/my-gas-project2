@@ -11782,7 +11782,9 @@ function refreshEquipmentList(skipIfUnchanged) {
 
   return sorted.length;
   } finally {
-    if (ownsListLock) listLock.releaseLock();
+    if (ownsListLock) {
+      try { SpreadsheetApp.flush(); } finally { listLock.releaseLock(); }
+    }
   }
 }
 

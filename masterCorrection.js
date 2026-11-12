@@ -114,7 +114,7 @@ function masterCorrection_(input){
   if(mcRevision_(mcSnapshot_(ss))!==plan.afterRevision||!mcMatches_(ss,plan))mcFail_('master readback mismatch; manual review required');
   audit.getRange(row,3).setValue('verified');SpreadsheetApp.flush();
   return mcFinishSync_(ss,audit,row,r,plan,false);
- }finally{lock.releaseLock();}
+ }finally{try{SpreadsheetApp.flush();}finally{lock.releaseLock();}}
 }
 
 function mcFinishSync_(ss,audit,row,r,plan,replay){
