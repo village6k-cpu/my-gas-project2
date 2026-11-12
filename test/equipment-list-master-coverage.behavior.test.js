@@ -19,7 +19,9 @@ function extractFunction(name) {
   throw new Error(`unterminated function ${name}`);
 }
 
-test('rental dropdowns use only the set-master product names and refresh their cached list', () => {
+for (const prelocked of [false, true]) test('rental dropdowns preserve non-A data and serialize snapshot reads; prelocked=' + prelocked, () => {
+  let locked=prelocked, acquisitions=0, releases=0;
+  const nonA={note:'KEEP',formula:'=1+2'};
   let writtenNames = [];
   const validations = [];
   const removedCaches = [];
@@ -31,7 +33,7 @@ test('rental dropdowns use only the set-master product names and refresh their c
     setDataValidation() { return this; }
   };
   const setSheet = {
-    getLastRow() { return 3; },
+    getLastRow() { assert.equal(locked,true); return 3; },
     getRange() { return { getValues: () => [['세트B'], ['세트A']] }; }
   };
   const equipmentSheet = {
@@ -42,8 +44,9 @@ test('rental dropdowns use only the set-master product names and refresh their c
     }
   };
   const listSheet = {
-    clear() {},
-    getRange() { return range; },
+    clear() { throw Error('whole sheet clear forbidden'); },
+    getLastRow() { return 4; },
+    getRange(row,col,count,width) { assert.equal(locked,true); if(count) assert.deepEqual([col,width],[1,1]); return range; },
     hideSheet() {}
   };
   const sheets = {
@@ -54,6 +57,7 @@ test('rental dropdowns use only the set-master product names and refresh their c
     '스케줄상세': { getMaxRows: () => 40, getRange: (row,col,count,width) => ({setDataValidation(rule) {validations.push({sheet:'스케줄상세',row,col,count,width,rule});}}) }
   };
   const context = {
+    LockService: {getScriptLock:()=>({hasLock:()=>locked,tryLock:()=>{acquisitions++;locked=true;return true;},releaseLock(){releases++;locked=false;}})},
     SpreadsheetApp: {
       getActiveSpreadsheet() {
         return {
@@ -90,9 +94,24 @@ test('rental dropdowns use only the set-master product names and refresh their c
 
   assert.deepEqual(
     JSON.parse(JSON.stringify(writtenNames)),
-    ['세트A', '세트B']
+    ['장비/세트명', '세트A', '세트B', '']
   );
   assert.deepEqual(validations.filter(x=>x.sheet==='스케줄상세'||x.col===6).map(({sheet,col,count})=>({sheet,col,count})),
     [{sheet:'확인요청',col:6,count:29},{sheet:'스케줄상세',col:3,count:39},{sheet:'스케줄상세',col:4,count:39}]);
   assert.ok(removedCaches.includes('dashboardEquipNameList_v1'));
+  assert.deepEqual(nonA,{note:'KEEP',formula:'=1+2'});
+  assert.equal(acquisitions,prelocked?0:1);assert.equal(releases,prelocked?0:1);assert.equal(locked,prelocked);
+});
+
+test('busy list writer never reads a stale snapshot or writes and does not release another lock',()=>{
+ let reads=0,releases=0;
+ const context={LockService:{getScriptLock:()=>({hasLock:()=>false,tryLock:()=>false,releaseLock:()=>releases++})},SpreadsheetApp:{getActiveSpreadsheet:()=>{reads++;throw Error('read forbidden');}}};
+ assert.throws(()=>vm.runInNewContext(`${extractFunction('refreshEquipmentList')}\nrefreshEquipmentList(false);`,context),/갱신 중/);
+ assert.equal(reads,0);assert.equal(releases,0);
+});
+test('list write failure releases owned lock for a safe rerun',()=>{
+ let releases=0;
+ const context={LockService:{getScriptLock:()=>({hasLock:()=>false,tryLock:()=>true,releaseLock:()=>releases++})},SpreadsheetApp:{getActiveSpreadsheet:()=>{throw Error('sheet offline');}}};
+ assert.throws(()=>vm.runInNewContext(`${extractFunction('refreshEquipmentList')}\nrefreshEquipmentList(false);`,context),/offline/);
+ assert.equal(releases,1);
 });

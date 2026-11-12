@@ -21,3 +21,8 @@ Live headers were read and match A:G set fields and equipment D names. Official 
 - Existing refreshEquipmentList uses whole-sheet clear and lacks shared writer lock. Do NOT activate automatic downstream path until narrowed and concurrency reviewed. No live mutation/deployment yet.
 - Baseline confirmed-reservation-commit.behavior.test.js fails 7 tests in unchanged main and feature. Official integrate gate must not be bypassed.
 - Active Hermes skills not yet changed to call this candidate.
+
+## Follow-up hardening
+- refreshEquipmentList now acquires ScriptLock BEFORE reading the catalog, respects an already-held current-execution lock via hasLock, and releases only locks it acquired. All existing list writer call sites use this function. A-column single-range replacement preserves B+ values and sheet formatting; stale A names are blank-padded without whole-sheet clear.
+- Production mcAuthorizeApply_ fails closed with MASTER_APPLY_DISABLED. No caller-supplied verifiedOwner flag grants apply. Authenticated owner message retrieval is not yet wired; previews remain available. Behavioral tests explicitly replace this gate only inside their isolated VM to test storage mechanics, plus a real-gate test verifies no writes for forged authority.
+- Focused master/list tests: 17 passed. Independent review pending. Baseline test fixture fix assigned separately.

@@ -83,6 +83,7 @@ function masterCorrection_(input){
   if(plan.updates.length>1)mcFail_('multiple price cells require manual review');
   return {success:true,status:'preview',revision:r.expectedRevision,plan:plan,manualEditorRaceProtected:false};
  }
+ mcAuthorizeApply_(r);
  const lock=LockService.getScriptLock();if(!lock.tryLock(20000))mcFail_('master correction busy');
  try{
   const digest=mcHash_(r),auditName='마스터정정이력';let audit=ss.getSheetByName(auditName);
@@ -166,4 +167,10 @@ function mcSyncTemplateTarget_(ss,target){
   if(sh.getRange(row,2).getFormulas()[0][0])throw new Error('template price formula requires review');
   if(matches[0].x[1]!==expected[0])sh.getRange(row,2,1,1).setValues([[expected[0]]]);
  }else sh.getRange(sh.getLastRow()+1,1,1,2).setValues([[target,expected[0]]]);
+}
+
+// Fail closed until authenticated owner-message retrieval is wired to this server boundary.
+// source.verifiedOwner and local approval-memory records alone are not authorization.
+function mcAuthorizeApply_(request){
+ throw new Error('MASTER_APPLY_DISABLED: authenticated owner message verification is not connected; preview only');
 }
