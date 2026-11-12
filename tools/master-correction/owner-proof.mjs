@@ -9,6 +9,7 @@ export function parseStandingPrice(text){
  const patterns=[/^(?:앞으로|상시|기본)\s+(.+?)\s+(?:단가(?:는|를)?\s*)?(?:하루|1일|일일)\s*([\d,]+)\s*원(?:으로)?(?:\s*(?:해|해줘|적용해|등록해|수정해|이야))?$/u,/^(.+?)\s+(?:상시|기본)\s*단가(?:는|를)?\s*([\d,]+)\s*원\s*\/\s*일(?:로)?(?:\s*(?:등록해|수정해|해줘))?$/u];
  let m;for(const p of patterns){m=t.match(p);if(m)break;}
  if(!m||/(이번|거래|고객|손님|무료로 해드|할인|취소|말고|아니|견적|문의|전달|라고|라면|할까|하면)/u.test(t))throw Error('needs_review: not an explicit standing daily price');
+ if(!/^(?:\d+|[1-9]\d{0,2}(?:,\d{3})+)$/.test(m[2]))throw Error('needs_review: malformed amount');
  const target=m[1].trim(),price=Number(m[2].replaceAll(',',''));
  if(!target||!Number.isSafeInteger(price)||price<0)throw Error('needs_review: invalid price');
  return {kind:'price',scope:'standing',target,price,unit:'KRW/day'};
@@ -29,13 +30,17 @@ export async function issueProof({request,config,fetchImpl=fetch,now=Date.now()}
  const m=body.messages?.find(x=>x.ts===src.ts);
  if(!m||m.user!==config.ownerId||m.bot_id||m.app_id||m.subtype||m.edited||m.files?.length||m.attachments?.length)throw Error('untrusted owner source');
  const parsed=parseStandingPrice(m.text);
- const newerQuery={channel:src.channel,oldest:src.ts,inclusive:'false',limit:'100'};if(src.threadTs)newerQuery.ts=src.threadTs;
- const newer=await slack(src.threadTs?'conversations.replies':'conversations.history',newerQuery);
- if(newer.has_more)throw Error('needs_review: incomplete later-message context');
- if((newer.messages||[]).some(x=>Number(x.ts)>Number(src.ts)&&x.user===config.ownerId&&(src.threadTs||String(x.text||'').includes(parsed.target)||/(취소|아니|말고|정정)/u.test(x.text||''))))throw Error('needs_review: later owner message may supersede correction');
+ const threadRoot=m.thread_ts||(m.reply_count>0?m.ts:src.threadTs);
+ const laterQueries=[{method:'conversations.history',query:{channel:src.channel,oldest:src.ts,inclusive:'false',limit:'100'},thread:false}];
+ if(threadRoot)laterQueries.push({method:'conversations.replies',query:{channel:src.channel,ts:threadRoot,oldest:src.ts,inclusive:'false',limit:'100'},thread:true});
+ for(const item of laterQueries){
+  const newer=await slack(item.method,item.query);
+  if(newer.has_more)throw Error('needs_review: incomplete later-message context');
+  if((newer.messages||[]).some(x=>Number(x.ts)>Number(src.ts)&&x.user===config.ownerId&&(item.thread||String(x.text||'').includes(parsed.target)||/(취소|아니|말고|정정)/u.test(x.text||''))))throw Error('needs_review: later owner message may supersede correction');
+ }
  for(const k of ['kind','scope','target','price','unit'])if(parsed[k]!==request[k])throw Error('source correction mismatch');
  if(request.replace)throw Error('needs_review: existing price replacement requires specific reviewed authorization');
- const source={platform:'slack',channel:src.channel,ts:src.ts,...(src.threadTs?{threadTs:src.threadTs}:{}),ref:'slack:'+src.channel+':'+src.ts,quote:m.text,verifiedOwner:true,ownerId:config.ownerId,teamId:config.teamId};
+ const source={platform:'slack',channel:src.channel,ts:src.ts,...(threadRoot?{threadTs:threadRoot}:{}),ref:'slack:'+src.channel+':'+src.ts,quote:m.text,verifiedOwner:true,ownerId:config.ownerId,teamId:config.teamId};
  const verified={...request,source};
  const claims={v:1,aud:'village-master-correction',digest:digest(verified),ownerId:config.ownerId,teamId:config.teamId,issuedAt:now,expiresAt:now+120000};
  const encoded=Buffer.from(JSON.stringify(claims)).toString('base64');
