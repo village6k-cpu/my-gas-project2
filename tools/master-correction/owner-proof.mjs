@@ -1,3 +1,4 @@
+import {resolveContextualPrice} from './contextual-price.mjs';
 import {createHash,createHmac} from 'node:crypto';
 export function payload(r){return {correctionId:r.correctionId||r.operationId,kind:r.kind,target:r.target,scope:r.scope,unit:r.unit??null,price:r.price??null,components:r.components??null,replace:r.replace??null,expectedRevision:r.expectedRevision,source:r.source};}
 export const correctionIdForSource=s=>'mc-'+createHash('sha256').update(s.channel+'|'+s.ts).digest('hex').slice(0,32);
@@ -22,15 +23,23 @@ export async function issueProof({request,config,fetchImpl=fetch,now=Date.now()}
  if(sourceMs>now+60000||now-sourceMs>3600000)throw Error('needs_review: source is old or future dated');
  if(request.correctionId!==correctionIdForSource(src))throw Error('source must use its stable correction ID');
  async function slack(method,params={}){const u=new URL('https://slack.com/api/'+method);for(const [k,v]of Object.entries(params))u.searchParams.set(k,v);const res=await fetchImpl(u,{headers:{Authorization:'Bearer '+config.slackToken},signal:AbortSignal.timeout(15000)});if(!res.ok)throw Error('Slack unavailable');const body=await res.json();if(!body.ok)throw Error('Slack rejected source lookup');return body;}
- if((await slack('auth.test')).team_id!==config.teamId)throw Error('workspace mismatch');
+ const auth=await slack('auth.test');
+ if(auth.team_id!==config.teamId)throw Error('workspace mismatch');
  if(src.threadTs&&!/^\d{10}\.\d{6}$/.test(src.threadTs))throw Error('invalid thread reference');
  const query={channel:src.channel,oldest:src.ts,latest:src.ts,inclusive:'true',limit:'100'};
  if(src.threadTs)query.ts=src.threadTs;
  const body=await slack(src.threadTs?'conversations.replies':'conversations.history',query);
  const m=body.messages?.find(x=>x.ts===src.ts);
  if(!m||m.user!==config.ownerId||m.bot_id||m.app_id||m.subtype||m.edited||m.files?.length||m.attachments?.length)throw Error('untrusted owner source');
- const parsed=parseStandingPrice(m.text);
+ let parsed,question;
  const threadRoot=m.thread_ts||(m.reply_count>0?m.ts:src.threadTs);
+ try{parsed=parseStandingPrice(m.text);}catch(error){
+  if(!threadRoot)throw error;
+  const thread=await slack('conversations.replies',{channel:src.channel,ts:threadRoot,limit:'100'});
+  if(thread.has_more)throw Error('needs_review: incomplete question context');
+  const result=resolveContextualPrice({messages:thread.messages,questionTs:src.questionTs,answerTs:src.ts,ownerId:config.ownerId,botId:config.questionBotId||auth.bot_id,threadTs:threadRoot});
+  parsed=result;const original=thread.messages.find(x=>x.ts===result.questionTs);question={ts:original.ts,text:original.text,botId:original.bot_id};
+ }
  const laterQueries=[{method:'conversations.history',query:{channel:src.channel,oldest:src.ts,inclusive:'false',limit:'100'},thread:false}];
  if(threadRoot)laterQueries.push({method:'conversations.replies',query:{channel:src.channel,ts:threadRoot,oldest:src.ts,inclusive:'false',limit:'100'},thread:true});
  for(const item of laterQueries){
@@ -40,7 +49,7 @@ export async function issueProof({request,config,fetchImpl=fetch,now=Date.now()}
  }
  for(const k of ['kind','scope','target','price','unit'])if(parsed[k]!==request[k])throw Error('source correction mismatch');
  if(request.replace)throw Error('needs_review: existing price replacement requires specific reviewed authorization');
- const source={platform:'slack',channel:src.channel,ts:src.ts,...(threadRoot?{threadTs:threadRoot}:{}),ref:'slack:'+src.channel+':'+src.ts,quote:m.text,verifiedOwner:true,ownerId:config.ownerId,teamId:config.teamId};
+ const source={...(question?{questionTs:question.ts,contextQuestion:question}:{}),platform:'slack',channel:src.channel,ts:src.ts,...(threadRoot?{threadTs:threadRoot}:{}),ref:'slack:'+src.channel+':'+src.ts,quote:m.text,verifiedOwner:true,ownerId:config.ownerId,teamId:config.teamId};
  const verified={...request,source};
  const claims={v:1,aud:'village-master-correction',digest:digest(verified),ownerId:config.ownerId,teamId:config.teamId,issuedAt:now,expiresAt:now+120000};
  const encoded=Buffer.from(JSON.stringify(claims)).toString('base64');

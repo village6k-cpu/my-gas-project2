@@ -7,6 +7,7 @@ import {issueProof,correctionIdForSource} from '../tools/master-correction/owner
 const require=createRequire(import.meta.url),{parseEnv}=require('./windows/village-live-read.js');
 function envValue(text,name){const line=text.split(/\r?\n/).find(x=>x.trim().startsWith(name+'='));if(!line)throw Error('issuer credential unavailable');return line.slice(line.indexOf('=')+1).trim().replace(/^["']|["']$/g,'');}
 async function main(){
+ if(process.env.VILLAGE_NATIVE_MASTER_TOOL!=='1'||process.env.HERMES_DELEGATED_CHILD_CONTEXT)throw Error('Current native owner tool invocation required; standalone CLI disabled');
  const [configFile,requestFile]=process.argv.slice(2);if(!configFile||!requestFile)throw Error('private config and request file required');
  if((fs.statSync(configFile).mode&0o077)!==0)throw Error('issuer config must be private (0600)');
  const config=JSON.parse(fs.readFileSync(configFile,'utf8'));
@@ -19,7 +20,7 @@ async function main(){
  let prepared;
  if(fs.existsSync(stateFile)){const saved=JSON.parse(fs.readFileSync(stateFile,'utf8'));if(saved.inputDigest!==inputDigest)throw Error('prepared request differs; do not reuse operation ID');prepared=saved.request;}
  else {const preview=await post({...request,mode:'preview'});prepared={...request,mode:'apply',expectedRevision:preview.revision};}
- const verified=await issueProof({request:prepared,config:{ownerId:config.ownerId,teamId:config.teamId,signingKey:config.signingKey,slackToken:envValue(fs.readFileSync(config.slackEnvFile,'utf8'),'SLACK_BOT_TOKEN')}});
+ const verified=await issueProof({request:prepared,config:{ownerId:config.ownerId,teamId:config.teamId,questionBotId:config.questionBotId,signingKey:config.signingKey,slackToken:envValue(fs.readFileSync(config.slackEnvFile,'utf8'),'SLACK_BOT_TOKEN')}});
  if(!fs.existsSync(stateFile)){const saved={...verified};delete saved.ownerProof;fs.writeFileSync(stateFile,JSON.stringify({inputDigest,request:saved},null,2)+'\n',{mode:0o600,flag:'wx'});}
  // A timeout must be retried with the SAME correctionId, never a new operation.
  const result=await post(verified);

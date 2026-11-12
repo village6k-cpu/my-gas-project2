@@ -1,0 +1,6 @@
+name: village-master
+version: 0.1.0
+description: "Source-verified catalog corrections from the current owner's Slack reply. Candidate, disabled until explicitly installed."
+author: Village
+provides_tools:
+  - village_master_price
