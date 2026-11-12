@@ -8,19 +8,19 @@ const id='RQ-261021-001';
 const row=(item='장비')=>[id,'2026-10-23','09:00','2026-10-24','09:00',item,1,'확인','가용','상세','테스트','01000000000','일반','','','','비고','추가요청'];
 function fixture(options={}) {
  const rows=structuredClone(options.rows||[row(),row('구성품'),['RQ-261021-002',...row().slice(1)]]),writes=[],order=[];
- let scriptHeld=false,userHeld=false,followups=0;
- const script={tryLock(){order.push('script');if(options.scriptBusy)return false;options.beforeLock?.(rows);scriptHeld=true;return true;},releaseLock(){order.push('release-script');scriptHeld=false;}};
- const user={waitLock(){assert.equal(scriptHeld,true);order.push('user');if(options.userBusy)throw Error('input busy');userHeld=true;},releaseLock(){order.push('release-user');userHeld=false;}};
+ let scriptHeld=!!options.inheritedScript,userHeld=!!options.inheritedUser,followups=0;
+ const script={hasLock(){return scriptHeld;},tryLock(){assert.equal(userHeld,true);order.push('script');if(options.scriptBusy)return false;options.beforeLock?.(rows);scriptHeld=true;return true;},releaseLock(){order.push('release-script');scriptHeld=false;}};
+ const user={hasLock(){return userHeld;},waitLock(){assert.equal(scriptHeld,false);order.push('user');if(options.userBusy)throw Error('input busy');userHeld=true;},releaseLock(){order.push('release-user');userHeld=false;}};
  const sheet={getLastRow:()=>rows.length+1,getRange(r,c,n=1,m=1){return {getValues:()=>rows.slice(r-2,r-2+n).map(x=>x.slice(c-1,c-1+m)),setValue(v){assert.ok(scriptHeld&&userHeld);writes.push([r,c,v]);rows[r-2][c-1]=v;return this;},clearContent(){return this.setValue('');},setBackground(){return this;}};}};
  const context={Date,JSON,LockService:{getScriptLock:()=>script,getUserLock:()=>user},SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:n=>n==='확인요청'?sheet:null}),flush(){options.onFlush?.(rows);}},Utilities:{formatDate:(v,tz,format)=>{assert.equal(tz,'Asia/Seoul');assert.equal(format,'yyyy-MM-dd HH:mm:ss');return '2026-10-23 00:00:00';}},cancelPreRegistrationStockResume_(){followups++;if(options.followupError)throw Error('queue unavailable');}};
  vm.runInNewContext(rejectSource+'\n'+source,context);
  const input={requestId:id,baselineFormat:'sheet-api-values-18-v1',expectedRows:rows.filter(r=>r[0]===id).map(r=>r.slice()),disposition:'reject',send:false,sourceEvidence:{roomKey:'chat:1234567890',snapshotSha256:'a'.repeat(64),capturedAt:new Date().toISOString(),decisionMessageIds:['dom-1','dom-2'],confirmed:true}};
- return {rows,writes,order,input,run(patch={}){assert.equal(typeof context.reconcilePendingRequest,'function','guarded pending reconciliation entry point must exist');return context.reconcilePendingRequest({...input,...patch});},get followups(){return followups;}};
+ return {rows,writes,order,input,run(patch={}){assert.equal(typeof context.reconcilePendingRequest,'function','guarded pending reconciliation entry point must exist');return context.reconcilePendingRequest({...input,...patch});},get followups(){return followups;},get locks(){return {scriptHeld,userHeld};}};
 }
-test('valid exact pending request rejects only its O/N cells under ScriptLock then UserLock, with independent readback',()=>{
+test('valid exact pending request rejects only its O/N cells under UserLock then ScriptLock, with independent readback',()=>{
  const f=fixture(),before=structuredClone(f.rows),out=f.run();
  assert.equal(out.ok,true);assert.equal(out.status,'applied');assert.equal(out.customerNotificationSent,false);assert.equal(out.readbackVerified,true);assert.equal(out.noReplay,true);
- assert.deepEqual(f.order,['script','user','release-user','release-script']);assert.equal(f.writes.length,4);assert.equal(f.followups,1);
+ assert.deepEqual(f.order,['user','script','release-user','release-script']);assert.equal(f.writes.length,4);assert.equal(f.followups,1);
  for(let i=0;i<before.length;i++){const expected=before[i];if(expected[0]===id)expected[14]='거절';assert.deepEqual(f.rows[i],expected);}
 });
 test('exact already-rejected state is read-only proof and never invokes reject or followup again',()=>{
@@ -32,8 +32,8 @@ test('registration appearing before lock acquisition causes zero writes',()=>{
  }
 });
 test('busy registration or request-edit lock fails closed and releases only acquired locks',()=>{
- const script=fixture({scriptBusy:true});assert.equal(script.run().code,'registration_busy');assert.equal(script.writes.length,0);assert.deepEqual(script.order,['script']);
- const user=fixture({userBusy:true});assert.equal(user.run().status,'blocked');assert.equal(user.writes.length,0);assert.deepEqual(user.order,['script','user','release-script']);
+ const script=fixture({scriptBusy:true});assert.equal(script.run().code,'registration_busy');assert.equal(script.writes.length,0);assert.deepEqual(script.order,['user','script','release-user']);
+ const user=fixture({userBusy:true});assert.equal(user.run().status,'blocked');assert.equal(user.writes.length,0);assert.deepEqual(user.order,['user']);
 });
 test('row shifts before lock are resolved by current request identity and complete row multiplicity',()=>{
  const f=fixture({beforeLock:r=>r.unshift(['RQ-261021-003',...row('unrelated inserted').slice(1)])});const out=f.run();assert.equal(out.ok,true);assert.equal(f.rows[0][14],'');assert.equal(f.rows[1][14],'거절');assert.equal(f.rows[2][14],'거절');assert.equal(f.rows[3][14],'');
@@ -72,4 +72,15 @@ test('guarded reconciliation denies public credentials and GET before any dispat
  assert.equal(calls.length,0);
  assert.equal(c.handleRequestCore_(request('private-test-key','POST')).payload.success,true);
  assert.equal(calls.length,1);
+});
+
+test('inherited ScriptLock without UserLock is rejected without mutation or releasing caller ownership',()=>{
+ const f=fixture({inheritedScript:true}),out=f.run();
+ assert.equal(out.code,'registration_busy');assert.equal(f.writes.length,0);assert.deepEqual(f.order,[]);
+ assert.deepEqual(f.locks,{scriptHeld:true,userHeld:false});
+});
+test('inherited UserLock is preserved while only the acquired ScriptLock is released',()=>{
+ const f=fixture({inheritedUser:true}),out=f.run();
+ assert.equal(out.ok,true);assert.deepEqual(f.order,['script','release-script']);
+ assert.deepEqual(f.locks,{scriptHeld:false,userHeld:true});
 });

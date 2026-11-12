@@ -13,7 +13,8 @@ function projectAfterInvalidation() {
     ['target-01', 'target', '', '카메라A', 1, '2026-10-23', '19:00', '2026-10-25', '22:00', '예약', '', 10000],
     ['other-01', 'other', '', '카메라B', 1, '2026-10-23', '20:00', '2026-10-25', '22:00', '예약', '', 10000]
   ];
-  let cautionRequests = 0;
+  let cautionRequests = 0, checkoutStateRequests = 0;
+  const cacheWrites = [];
   const cache = { get: () => null, getAll: () => ({}), put() {}, putAll() {} };
   const sheet = { getLastRow: () => 3, getRange: () => ({ getValues: () => rows, getDisplayValues: () => rows }) };
   const context = {
@@ -32,12 +33,13 @@ function projectAfterInvalidation() {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8'), context);
   Object.assign(context, {
-    getDashboardCacheJson_: () => null, putDashboardCacheJson_: () => {},
+    getDashboardCacheJson_: () => null,
+    putDashboardCacheJson_: (_cache, key) => cacheWrites.push(key),
     findDashboardRowsByValue_: () => [2, 3], readDashboardScheduleRowsDisplay_: () => rows,
     getDashboardContractMapForIds_: () => ({ target: { name: '대상' }, other: { name: '다른 예약' } }),
     getTradeExtrasForIds_: () => ({ target: { tradeRowFound: true, actualAmount: 182160, contractUrl: 'https://example.invalid/contract' } }),
     getEquipmentCheckMapForIds_: () => ({}), getEquipmentCheckForTrade_: () => ({}),
-    getDashboardCheckinItemDefault_: () => false, supaGetScheduleItemCheckoutStateMap_: () => ({ byScheduleId: {} }),
+    getDashboardCheckinItemDefault_: () => false, supaGetScheduleItemCheckoutStateMap_: () => { checkoutStateRequests++; return { byScheduleId: {} }; },
     getTradePaymentOptions_: () => [], getTradeProofTypeOptions_: () => [], getTradeIssueStatusOptions_: () => [],
     getTradeDepositStatusOptions_: () => [], getTradeBillingCompanyOptions_: () => [],
     getTimelineData: () => ({ groups: [], items: [{ tid: 'target', s: Date.parse('2026-10-23T10:00Z'), e: Date.parse('2026-10-25T13:00Z') }] })
@@ -49,8 +51,12 @@ function projectAfterInvalidation() {
   vm.runInContext(source.slice(start, end), context);
   const projected = context.buildSupabaseTrades_(['target']);
   const backgroundRequests = cautionRequests;
+  const backgroundCheckoutRequests = checkoutStateRequests;
+  const backgroundCacheKeys = cacheWrites.slice();
   const staff = context.getDashboardData('2026-10-23', true);
-  return { projected, staff, backgroundRequests, staffRequests: cautionRequests - backgroundRequests };
+  return { projected, staff, backgroundRequests, staffRequests: cautionRequests - backgroundRequests,
+    backgroundCheckoutRequests, staffCheckoutRequests: checkoutStateRequests - backgroundCheckoutRequests,
+    backgroundCacheKeys, staffCacheKeys: cacheWrites.slice(backgroundCacheKeys.length) };
 }
 
 test('one corrected trade does not fan out display HTTP across its pickup day', () => {
@@ -67,4 +73,12 @@ test('the same cold day still serves all staff cards and their cautions', () => 
   assert.equal(result.staffRequests, 2);
   assert.equal(result.staff.checkout.length, 2);
   assert.ok(result.staff.checkout.every(card => card.cardCautions[0].text === '기존 주의사항'));
+});
+
+test('projection cache and staff cache stay distinct and only staff fetches checkout state', () => {
+  const result = projectAfterInvalidation();
+  assert.equal(result.backgroundCheckoutRequests, 0);
+  assert.equal(result.staffCheckoutRequests, 1);
+  assert.deepEqual(result.backgroundCacheKeys, ['dashboard_projection_v1_2026-10-23']);
+  assert.deepEqual(result.staffCacheKeys, ['dashboard_v7_2026-10-23']);
 });
