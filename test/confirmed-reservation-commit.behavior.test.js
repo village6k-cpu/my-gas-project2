@@ -177,11 +177,13 @@ function productionCommitContext(overrides = {}) {
   assert.ok(bootstrapStart >= 0 && bootstrapEnd > bootstrapStart && start > bootstrapEnd && end > start);
   const scriptLock = {
     held: false, acquisitions: 0, releases: 0,
+    hasLock() { return this.held; },
     tryLock() { this.held = true; this.acquisitions += 1; return true; },
     releaseLock() { assert.equal(this.held, true); this.held = false; this.releases += 1; }
   };
   const userLock = {
     held: false, acquisitions: 0, releases: 0,
+    hasLock() { return this.held; },
     waitLock() { this.held = true; this.acquisitions += 1; },
     releaseLock() { assert.equal(this.held, true); this.held = false; this.releases += 1; }
   };
@@ -823,6 +825,43 @@ test('confirmed registration keeps replacement and registration in one transferr
   assert.equal(harness.scriptLock.releases, 1);
   assert.equal(harness.userLock.acquisitions, 1);
   assert.equal(harness.userLock.releases, 1);
+});
+
+test('confirmed commit rejects an inherited ScriptLock without releasing caller locks or writing', () => {
+  const h = productionCommitContext();
+  h.scriptLock.held = true;
+  let writes = 0;
+  h.context._insertAndCheckRequest = () => { writes++; throw new Error('must not write'); };
+  h.context.registerByReqID = () => { writes++; throw new Error('must not register'); };
+  const result = h.context.commitConfirmedReservation({
+    registration: {}, operation_id: '11111111-2222-4333-8444-555555555555'
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.error.type, 'registration_busy');
+  assert.equal(writes, 0);
+  assert.equal(h.scriptLock.held, true);
+  assert.equal(h.scriptLock.acquisitions, 0);
+  assert.equal(h.scriptLock.releases, 0);
+  assert.equal(h.userLock.acquisitions, 0);
+});
+
+test('confirmed commit reuses an inherited UserLock without releasing it', () => {
+  const h = productionCommitContext();
+  h.userLock.held = true;
+  h.context.registerByReqID = () => {
+    assert.equal(h.userLock.held, true);
+    h.scriptLock.releaseLock();
+    return { success: true };
+  };
+  const result = h.context.commitConfirmedReservation({
+    registration: {}, operation_id: '11111111-2222-4333-8444-555555555555'
+  });
+  assert.equal(result.success, true);
+  assert.equal(h.userLock.held, true);
+  assert.equal(h.userLock.acquisitions, 0);
+  assert.equal(h.userLock.releases, 0);
+  assert.equal(h.scriptLock.acquisitions, 1);
+  assert.equal(h.scriptLock.releases, 1);
 });
 
 test('cutover ambiguity preserves the surviving staged RQ identity in the durable receipt evidence', () => {

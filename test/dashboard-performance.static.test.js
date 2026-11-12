@@ -200,7 +200,7 @@ assert.match(
 
 assert.match(
   backend,
-  /putDashboardCacheJson_\(cache,\s*cacheKey,\s*result,\s*900\)/,
+  /putDashboardCacheJson_\(cache,\s*includeCheckoutState\s*\?\s*cacheKey\s*:\s*projectionCacheKey,\s*result,\s*900\)/,
   'getDashboardData must write dashboard payloads through the chunked cache helper'
 );
 
