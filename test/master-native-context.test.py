@@ -6,6 +6,12 @@ child=False
 sys.modules['agent.delegation_context']=types.SimpleNamespace(is_delegated_child_process_context=lambda:child)
 config={'ownerId':'UOWNER','teamId':'TTEAM'}
 class ContextTests(unittest.TestCase):
+ def test_both_tools_use_the_same_optional_toolset(self):
+  registered=[]
+  plugin.register(types.SimpleNamespace(register_tool=lambda **kwargs:registered.append(kwargs)))
+  self.assertEqual([x['name'] for x in registered],['village_master_price','village_master_create'])
+  self.assertTrue(all(x['toolset']=='village_master' for x in registered))
+  self.assertIn('components',registered[1]['schema']['parameters']['required'])
  def invoke(self, values):
   def run():
    for name,value in values.items():contextvars.ContextVar('HERMES_SESSION_'+name).set(value)

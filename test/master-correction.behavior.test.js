@@ -34,11 +34,31 @@ test('Node issuer proof verifies in GAS and forged/changed payload cannot write'
  ({h,r}=await setup());r.price=999;assert.throws(()=>h.context.masterCorrection_(r),/payload mismatch/);assert.equal(h.writes.length,0);
  ({h,r}=await setup());r.ownerProof.signature='0'.repeat(64);assert.throws(()=>h.context.masterCorrection_(r),/signature/);assert.equal(h.writes.length,0);
  for(const patch of [{aud:'other'},{ownerId:'UOTHER'},{teamId:'TOTHER'},{expiresAt:Date.now()-1},{issuedAt:Date.now()+100000}]){({h,r}=await setup());const claims={...JSON.parse(Buffer.from(r.ownerProof.claims,'base64').toString()),...patch};r.ownerProof.claims=Buffer.from(JSON.stringify(claims)).toString('base64');r.ownerProof.signature=crypto.createHmac('sha256','s'.repeat(32)).update(r.ownerProof.claims).digest('hex');assert.throws(()=>h.context.masterCorrection_(r),/expired|authority/);assert.equal(h.writes.length,0);}
- ({h,r}=await setup());r.kind='create';assert.throws(()=>h.context.masterCorrection_(r),/only permits/);assert.equal(h.writes.length,0);
+ ({h,r}=await setup());r.kind='create';assert.throws(()=>h.context.masterCorrection_(r),/verified component question/);assert.equal(h.writes.length,0);
 });
 test('provisioning is one time and never returns signing secret',()=>{const h=harness(),props={};h.context.PropertiesService={getScriptProperties:()=>({getProperty:k=>props[k],setProperties:x=>Object.assign(props,x)})};const r={proofKey:'a'.repeat(64),ownerId:'UOWNER',teamId:'TTEAM',enable:false},out=h.context.mcProvision_(r);assert.equal(out.enabled,false);assert.equal(JSON.stringify(out).includes(r.proofKey),false);assert.throws(()=>h.context.mcProvision_(r),/already provisioned/);});
 test('actual dispatch rejects public and GET before provisioning or correction',()=>{
  const source=fs.readFileSync(require.resolve('../sheetAPI.js'),'utf8');const fn=name=>{const start=source.indexOf('function '+name+'('),end=source.indexOf('\nfunction ',start+1);return source.slice(start,end<0?undefined:end);};let calls=0;
  const c={jsonResponse:(body,status=200)=>({body,status}),villageApiPrincipal_:key=>key==='internal'?'internal':key==='public'?'public':null,mcProvision_:()=>{calls++;return{}},masterCorrection_:()=>{calls++;return{}}};vm.createContext(c);vm.runInContext(fn('requireVillagePost_')+'\n'+fn('handleRequestCore_'),c);
  for(const action of ['masterCorrection','masterCorrectionProvision']){const event=(key,method)=>({parameter:{},villageHttpMethod_:method,postData:{contents:JSON.stringify({key,action})}});assert.equal(c.handleRequestCore_(event('public','POST')).status,403);assert.equal(c.handleRequestCore_(event('internal','GET')).status,405);assert.equal(calls,0);}
+});
+
+test('new physical inventory preview plans catalog rows without creating stock or a receipt',()=>{
+ const h=harness(),r={...h.request(),kind:'create',target:'New',components:[{name:'New',qty:1}],newEquipment:[{name:'New',major:'기타',category:'기타',stockTotal:2,stockMaintenance:0}]};
+ const p=h.context.masterCorrection_(r);assert.equal(p.plan.append[0][0],'New');assert.equal(h.writes.length,0);assert.equal(h.tables.장비마스터.length,3);
+ assert.throws(()=>h.context.masterCorrection_({...r,mode:'apply',expectedRevision:p.revision}),/unknown|inventory|장비/);assert.equal(h.writes.length,0);
+});
+test('signed new catalog creation verifies exact rows and deduplicates retries',async()=>{
+ const h=harness();h.tables.template=[['장비명','단가'],['Other',300]];h.context.mcSyncTemplateTarget_=h.context.realTemplateSync;
+ const {issueProof,correctionIdForSource}=await import('../tools/master-correction/owner-proof.mjs');
+ const now=Date.now(),threadTs=((now-10000)/1000).toFixed(6),source={verifiedOwner:true,ref:'fixture',quote:'pending authoritative read',platform:'slack',channel:'C123456789',ts:(now/1000).toFixed(6),threadTs};
+ const r={...h.request(),kind:'create',target:'New',price:5000,components:[{name:'Body',qty:1},{name:'Battery',qty:2}],source,correctionId:correctionIdForSource(source)};
+ const p=h.context.masterCorrection_(r),q={bot_id:'BBOT',ts:threadTs,text:'New 세트마스터에 새 품목으로 등록하겠습니다. 구성은 Body 1개, Battery 2개입니다. 1개 하루 기본 단가 얼마로 등록할까요?'},answer={user:'UOWNER',ts:source.ts,thread_ts:threadTs,text:'5,000원'};
+ const config={ownerId:'UOWNER',teamId:'TTEAM',slackToken:'test',signingKey:'s'.repeat(32)},fetchImpl=async u=>({ok:true,json:async()=>String(u).includes('auth.test')?{ok:true,team_id:'TTEAM',bot_id:'BBOT'}:String(u).includes('inclusive=true')?{ok:true,messages:[answer]}:String(u).includes('inclusive=false')?{ok:true,messages:[]}:{ok:true,messages:[q,answer]}});
+ const proof=await issueProof({request:{...r,mode:'apply',expectedRevision:p.revision},config,fetchImpl,now});
+ const props={MASTER_CORRECTION_APPLY_ENABLED:'true',MASTER_CORRECTION_PROOF_KEY:config.signingKey,MASTER_CORRECTION_OWNER_ID:'UOWNER',MASTER_CORRECTION_TEAM_ID:'TTEAM',CONTRACT_TEMPLATE_ID:'template-id'};
+ h.context.PropertiesService={getScriptProperties:()=>({getProperty:k=>props[k]})};Object.assign(h.context.Utilities,{computeHmacSha256Signature:(s,k)=>[...crypto.createHmac('sha256',k).update(s).digest()],base64Decode:s=>[...Buffer.from(s,'base64')],newBlob:b=>({getDataAsString:()=>Buffer.from(b).toString()})});h.context.mcAuthorizeApply_=h.context.realAuthorize;
+ const changed=JSON.parse(JSON.stringify(proof));changed.components[1].qty=20;assert.throws(()=>h.context.masterCorrection_(changed),/payload/);assert.equal(h.writes.length,0);
+ assert.equal(h.context.masterCorrection_(proof).status,'verified');assert.deepEqual(h.tables.세트마스터.slice(-2),[['New','Body',1,'','','Y',5000],['New','Battery',2,'','','Y','']]);
+ assert.deepEqual(h.tables.template.slice(-1),[['New',5000]]);assert.equal(h.context.masterCorrection_(proof).status,'already_verified');assert.equal(h.tables.세트마스터.length,4);
 });
