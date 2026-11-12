@@ -127,6 +127,7 @@ interprets business intent.
   require regeneration.
 
 For the common fast path, follow the focused quote skill's documented live-read → official preview → readback → approved-send contract. Expand into supporting references only when live evidence selects a named branch or exception.
+For missing standard rates, new catalog products or entirely new physical equipment/stock, use [source-verified master registration](references/master-correction-native.md): bind the ordinary owner reply with `village_master_price`/`village_master_create`, verify inventory/catalog/list/template readback, then resume the saved quote. This verified standing correction exception supersedes blanket no-global-write wording; trade waivers and existing-price conflicts retain their boundaries.
 
 For registered multi-trade quote bundles, ad-hoc stacked discounts, or a question
 about an existing bundle total, open

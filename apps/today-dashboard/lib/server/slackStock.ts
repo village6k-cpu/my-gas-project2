@@ -36,7 +36,7 @@ export async function getStockReports(reportId?:unknown){
  const reports=reportId?c.reports.filter((r:Obj)=>r.id===reportId):stockQuestionBatch(c.reports);
  return {ok:true,reports,deferred:reportId?0:Math.max(0,c.reports.length-reports.length),investigations:c.investigations,catalog:c.catalog,catalogHash:c.catalogHash,sourceIssues:c.sourceIssues||[]};
 }
-async function mirrorOne(equipmentId:string) {
+export async function mirrorConfirmedStock(equipmentId:string) {
  const db=getInventoryAuditServiceClient();const {data:row,error}=await db.from('equipment_ledger').select('*').eq('equipment_id',equipmentId).single();if(error || !row)throw Error('생성한 재고 원장 조회 실패');
  async function read(){const data=await gas('read',{sheet:'장비마스터',range:'A:L'},10000);if(!Array.isArray(data.headers)||!Array.isArray(data.data))throw Error('장비마스터 형식 오류');return data;}
  let sheet=await read();
@@ -56,7 +56,7 @@ async function mirrorOne(equipmentId:string) {
 }
 export async function retryConfirmedStockMirrors(){
  const db=getInventoryAuditServiceClient();const {data,error}=await db.from('inventory_stock_confirmations').select('equipment_id').is('synced_at',null).order('last_attempted_at',{nullsFirst:true}).limit(1);if(error)throw Error('재고 반영 대기 조회 실패');const results=[];
- for(const id of [...new Set((data || []).map(r=>r.equipment_id))]){await db.from('inventory_stock_confirmations').update({last_attempted_at:new Date().toISOString()}).eq('equipment_id',id).is('synced_at',null);try{results.push(await mirrorOne(id));}catch(e){const message=e instanceof Error?e.message:'재고 반영 재시도 필요';await db.from('inventory_stock_confirmations').update({last_error:message}).eq('equipment_id',id).is('synced_at',null);results.push({equipmentId:id,pending:true,message});}}
+ for(const id of [...new Set((data || []).map(r=>r.equipment_id))]){await db.from('inventory_stock_confirmations').update({last_attempted_at:new Date().toISOString()}).eq('equipment_id',id).is('synced_at',null);try{results.push(await mirrorConfirmedStock(id));}catch(e){const message=e instanceof Error?e.message:'재고 반영 재시도 필요';await db.from('inventory_stock_confirmations').update({last_error:message}).eq('equipment_id',id).is('synced_at',null);results.push({equipmentId:id,pending:true,message});}}
  return results;
 }
 export async function scanStockQuestions(evidence:unknown){

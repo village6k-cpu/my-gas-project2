@@ -1,6 +1,6 @@
-import {resolveContextualPrice} from './contextual-price.mjs';
+import {resolveContextualPrice,resolveContextualCreate} from './contextual-price.mjs';
 import {createHash,createHmac} from 'node:crypto';
-export function payload(r){return {correctionId:r.correctionId||r.operationId,kind:r.kind,target:r.target,scope:r.scope,unit:r.unit??null,price:r.price??null,components:r.components??null,replace:r.replace??null,expectedRevision:r.expectedRevision,source:r.source};}
+export function payload(r){return {correctionId:r.correctionId||r.operationId,kind:r.kind,target:r.target,scope:r.scope,unit:r.unit??null,price:r.price??null,components:r.components??null,replace:r.replace??null,expectedRevision:r.expectedRevision,source:r.source,...(r.newEquipment?{newEquipment:r.newEquipment}:{})};}
 export const correctionIdForSource=s=>'mc-'+createHash('sha256').update(s.channel+'|'+s.ts).digest('hex').slice(0,32);
 export const digest=r=>createHash('sha256').update(JSON.stringify(payload(r))).digest('hex');
 // Intentionally conservative complete statements. Customer/thread exceptions never qualify.
@@ -15,13 +15,14 @@ export function parseStandingPrice(text){
  if(!target||!Number.isSafeInteger(price)||price<0)throw Error('needs_review: invalid price');
  return {kind:'price',scope:'standing',target,price,unit:'KRW/day'};
 }
-export async function issueProof({request,config,fetchImpl=fetch,now=Date.now()}){
- if(!config.ownerId||!config.teamId||!config.slackToken||!config.signingKey||config.signingKey.length<32)throw Error('issuer not configured');
+export async function verifyOwnerCorrection({request,config,fetchImpl=fetch,now=Date.now()}){
+ if(!config.ownerId||!config.teamId||!config.slackToken)throw Error('issuer not configured');
  const src=request.source;
  if(src?.platform!=='slack'||!/^([CDG])[A-Z0-9]+$/.test(src.channel||'')||!/^\d{10}\.\d{6}$/.test(src.ts||''))throw Error('exact source required');
  const sourceMs=Number(src.ts)*1000;
  if(sourceMs>now+60000||now-sourceMs>3600000)throw Error('needs_review: source is old or future dated');
  if(request.correctionId!==correctionIdForSource(src))throw Error('source must use its stable correction ID');
+ if(!['price','create'].includes(request.kind))throw Error('unsupported automatic correction');
  async function slack(method,params={}){const u=new URL('https://slack.com/api/'+method);for(const [k,v]of Object.entries(params))u.searchParams.set(k,v);const res=await fetchImpl(u,{headers:{Authorization:'Bearer '+config.slackToken},signal:AbortSignal.timeout(15000)});if(!res.ok)throw Error('Slack unavailable');const body=await res.json();if(!body.ok)throw Error('Slack rejected source lookup');return body;}
  const auth=await slack('auth.test');
  if(auth.team_id!==config.teamId)throw Error('workspace mismatch');
@@ -33,11 +34,12 @@ export async function issueProof({request,config,fetchImpl=fetch,now=Date.now()}
  if(!m||m.user!==config.ownerId||m.bot_id||m.app_id||m.subtype||m.edited||m.files?.length||m.attachments?.length)throw Error('untrusted owner source');
  let parsed,question;
  const threadRoot=m.thread_ts||(m.reply_count>0?m.ts:src.threadTs);
- try{parsed=parseStandingPrice(m.text);}catch(error){
+ try{if(request.kind==='create')throw Error('needs_review: new product requires an exact component question');parsed=parseStandingPrice(m.text);}catch(error){
   if(!threadRoot)throw error;
   const thread=await slack('conversations.replies',{channel:src.channel,ts:threadRoot,limit:'100'});
   if(thread.has_more)throw Error('needs_review: incomplete question context');
-  const result=resolveContextualPrice({messages:thread.messages,questionTs:src.questionTs,answerTs:src.ts,ownerId:config.ownerId,botId:config.questionBotId||auth.bot_id,threadTs:threadRoot});
+  const resolver=request.kind==='create'?resolveContextualCreate:resolveContextualPrice;
+  const result=resolver({messages:thread.messages,questionTs:src.questionTs,answerTs:src.ts,ownerId:config.ownerId,botId:config.questionBotId||auth.bot_id,threadTs:threadRoot});
   parsed=result;const original=thread.messages.find(x=>x.ts===result.questionTs);question={ts:original.ts,text:original.text,botId:original.bot_id};
  }
  const laterQueries=[{method:'conversations.history',query:{channel:src.channel,oldest:src.ts,inclusive:'false',limit:'100'},thread:false}];
@@ -48,9 +50,18 @@ export async function issueProof({request,config,fetchImpl=fetch,now=Date.now()}
   if((newer.messages||[]).some(x=>Number(x.ts)>Number(src.ts)&&x.user===config.ownerId&&(item.thread||String(x.text||'').includes(parsed.target)||/(취소|아니|말고|정정)/u.test(x.text||''))))throw Error('needs_review: later owner message may supersede correction');
  }
  for(const k of ['kind','scope','target','price','unit'])if(parsed[k]!==request[k])throw Error('source correction mismatch');
+ if(request.kind==='create'){
+  const components=value=>Array.isArray(value)?value.map(c=>({name:c.name,qty:c.qty})):value;
+  const inventory=value=>Array.isArray(value)?value.map(e=>({name:e.name,major:e.major,category:e.category,stockTotal:e.stockTotal,stockMaintenance:e.stockMaintenance})):value;
+  if(JSON.stringify(components(request.components))!==JSON.stringify(parsed.components)||JSON.stringify(inventory(request.newEquipment)||[])!==JSON.stringify(parsed.newEquipment||[]))throw Error('source correction mismatch: composition or physical stock');
+ }else if(request.newEquipment||request.components)throw Error('source correction mismatch: price fill cannot add inventory');
  if(request.replace)throw Error('needs_review: existing price replacement requires specific reviewed authorization');
  const source={...(question?{questionTs:question.ts,contextQuestion:question}:{}),platform:'slack',channel:src.channel,ts:src.ts,...(threadRoot?{threadTs:threadRoot}:{}),ref:'slack:'+src.channel+':'+src.ts,quote:m.text,verifiedOwner:true,ownerId:config.ownerId,teamId:config.teamId};
- const verified={...request,source};
+ return {...request,source};
+}
+export async function issueProof({request,config,fetchImpl=fetch,now=Date.now()}){
+ if(!config.signingKey||config.signingKey.length<32)throw Error('issuer not configured');
+ const verified=await verifyOwnerCorrection({request,config,fetchImpl,now});
  const claims={v:1,aud:'village-master-correction',digest:digest(verified),ownerId:config.ownerId,teamId:config.teamId,issuedAt:now,expiresAt:now+120000};
  const encoded=Buffer.from(JSON.stringify(claims)).toString('base64');
  const signature=createHmac('sha256',config.signingKey).update(encoded).digest('hex');

@@ -10,13 +10,22 @@ function mcValidate_(r){
  if(!mcName_(r.target))mcFail_('exact target required');
  if(!['price','create','component'].includes(r.kind))mcFail_('unsupported correction');
  if(['price','create'].includes(r.kind)&&(r.unit!=='KRW/day'||typeof r.price!=='number'||!Number.isSafeInteger(r.price)||r.price<0))mcFail_('explicit nonnegative integer daily price required');
+ if(r.newEquipment){
+  if(r.kind!=='create'||!Array.isArray(r.newEquipment)||!r.newEquipment.length||r.newEquipment.length>50)mcFail_('new inventory requires catalog creation');
+  const seen=new Set();
+  r.newEquipment.forEach(e=>{
+   if(![e.name,e.major,e.category].every(mcName_)||!Number.isInteger(e.stockTotal)||e.stockTotal<0||e.stockTotal>9999||!Number.isInteger(e.stockMaintenance)||e.stockMaintenance<0||e.stockMaintenance>e.stockTotal)mcFail_('invalid new inventory');
+   if(!r.components?.some(c=>c.name===e.name)||seen.has(mcKey_(e.name)))mcFail_('new inventory must uniquely identify a component');seen.add(mcKey_(e.name));
+  });
+ }
 }
 function mcComponents_(r,s){
  if(!Array.isArray(r.components)||!r.components.length||r.components.length>50)mcFail_('complete components required');
  const seen=new Set();
  return r.components.map(c=>{
   if(!mcName_(c.name)||!Number.isSafeInteger(c.qty)||c.qty<1||c.qty>1000)mcFail_('invalid component');
-  if(s.equipment.filter(n=>n===c.name).length!==1)mcFail_('unknown or duplicate equipment identity');
+   const count=s.equipment.filter(n=>n===c.name).length;
+   if(count!==1&&!(count===0&&r.mode!=='apply'&&r.newEquipment?.some(e=>e.name===c.name)))mcFail_('unknown or duplicate equipment identity');
   if(seen.has(mcKey_(c.name)))mcFail_('duplicate component');seen.add(mcKey_(c.name));
   return [r.target,c.name,c.qty,'','','Y',''];
  });
@@ -30,6 +39,7 @@ function mcPlan_(r,s){
  const p={target:r.target,updates:[],append:[],beforeRevision:r.expectedRevision};
  if(r.kind==='create'){
   if(exact.length)mcFail_('target exists');
+  if(r.mode==='apply'&&r.newEquipment)mcVerifyNewEquipment_(r);
   p.append=mcComponents_(r,s);p.append[0][6]=r.price;
  }else{
   if(!exact.length)mcFail_('target missing');
@@ -54,6 +64,14 @@ function mcPlan_(r,s){
  if(after.formulas)after.formulas.push(...p.append.map(()=>Array(7).fill('')));
  p.afterRevision=mcRevision_(after);
  return p;
+}
+function mcVerifyNewEquipment_(r){
+ const sh=SpreadsheetApp.getActiveSpreadsheet().getSheetByName('장비마스터');
+ const rows=sh.getLastRow()>1?sh.getRange(2,1,sh.getLastRow()-1,12).getValues():[];
+ for(const e of r.newEquipment){
+  const matches=rows.filter(x=>x[3]===e.name);
+  if(matches.length!==1||matches[0][0]!==e.major||matches[0][2]!==e.category||matches[0][4]!==e.stockTotal||matches[0][7]!==e.stockMaintenance)mcFail_('new inventory mirror is missing or changed; retry verified inventory stage');
+ }
 }
 
 // Narrow master write boundary. ScriptLock serializes this API, not manual Sheets edits.
@@ -81,7 +99,7 @@ function masterCorrection_(input){
   const snapshot=mcSnapshot_(ss);r.expectedRevision=mcRevision_(snapshot);
   const plan=mcPlan_(r,snapshot);
   if(plan.updates.length>1)mcFail_('multiple price cells require manual review');
-  return {success:true,status:'preview',revision:r.expectedRevision,plan:plan,manualEditorRaceProtected:false};
+  return {success:true,status:'preview',revision:r.expectedRevision,plan:plan,manualEditorRaceProtected:false,...(r.newEquipment?{inventory:mcInventoryPreview_(ss,r)}:{})};
  }
  mcAuthorizeApply_(r);
  delete r.ownerProof;
@@ -108,6 +126,7 @@ function masterCorrection_(input){
   SpreadsheetApp.flush();
   // Recheck immediately before write. Manual editors are still not covered by ScriptLock.
   if(mcRevision_(mcSnapshot_(ss))!==plan.beforeRevision)mcFail_('master changed after prepare; no write');
+  if(r.newEquipment)mcVerifyNewEquipment_(r);
   const sh=ss.getSheetByName('세트마스터');
   if(plan.updates.length){const u=plan.updates[0];sh.getRange(u.row,u.col,1,1).setValues([[u.value]]);}
   if(plan.append.length)sh.getRange(plan.appendStart,1,plan.append.length,7).setValues(plan.append);
@@ -118,7 +137,14 @@ function masterCorrection_(input){
  }finally{try{SpreadsheetApp.flush();}finally{lock.releaseLock();}}
 }
 
+function mcInventoryPreview_(ss,r){
+ const sh=ss.getSheetByName('장비마스터'),rows=sh.getLastRow()>1?sh.getRange(2,1,sh.getLastRow()-1,4).getValues():[];
+ const key=x=>String(x||'').normalize('NFKC').toLowerCase().replace(/[^0-9a-z가-힣]/g,'');
+ return r.newEquipment.map(e=>({name:e.name,matches:rows.filter(x=>key(x[3])===key(e.name)).map(x=>({id:String(x[1]),name:x[3]}))}));
+}
+
 function mcFinishSync_(ss,audit,row,r,plan,replay){
+ if(r.newEquipment)mcVerifyNewEquipment_(r);
  const state=audit.getRange(row,3).getValues()[0][0];
  if(state==='synced'){
   const list=ss.getSheetByName('목록');
@@ -131,6 +157,7 @@ function mcFinishSync_(ss,audit,row,r,plan,replay){
   return {success:true,status:'already_verified',correctionId:r.operationId,downstreamSync:'verified'};
  }
  try {
+  if(r.newEquipment)mcSyncNewEquipmentAudit_(ss,r);
   refreshEquipmentList();
   mcSyncTemplateTarget_(ss,r.target);
   SpreadsheetApp.flush();
@@ -146,6 +173,22 @@ function mcFinishSync_(ss,audit,row,r,plan,replay){
   return {success:true,status:replay?'already_verified':'verified',correctionId:r.operationId,revision:plan.afterRevision,downstreamSync:'verified',manualEditorRaceProtected:false};
  }catch(error){
   return {success:true,status:'master_saved_sync_pending',correctionId:r.operationId,downstreamSync:'pending',errorDetail:String(error.message||error),retrySameCorrectionId:true};
+ }
+}
+
+// Append only identities created by this operation; preserve all existing audit inputs.
+function mcSyncNewEquipmentAudit_(ss,r){
+ const sh=ss.getSheetByName('실사 기록');if(!sh)throw new Error('new equipment audit sheet missing');
+ if(JSON.stringify(sh.getRange(1,1,1,4).getValues()[0])!==JSON.stringify(['대분류','장비ID','카테고리','장비명']))throw new Error('equipment audit schema changed');
+ const master=ss.getSheetByName('장비마스터'),rows=master.getRange(2,1,master.getLastRow()-1,4).getValues();
+ for(const e of r.newEquipment){
+  const target=rows.filter(x=>x[3]===e.name);if(target.length!==1)throw new Error('new equipment identity changed');
+  const current=sh.getLastRow()>1?sh.getRange(2,1,sh.getLastRow()-1,4).getValues():[];
+  const matches=current.filter(x=>x[1]===target[0][1]);
+  if(matches.length>1||matches.length===1&&JSON.stringify(matches[0])!==JSON.stringify(target[0]))throw new Error('new equipment audit identity conflict');
+  if(!matches.length)sh.getRange(sh.getLastRow()+1,1,1,4).setValues([target[0]]);
+  const after=sh.getRange(2,1,sh.getLastRow()-1,4).getValues().filter(x=>x[1]===target[0][1]);
+  if(after.length!==1||JSON.stringify(after[0])!==JSON.stringify(target[0]))throw new Error('new equipment audit readback mismatch');
  }
 }
 
@@ -176,7 +219,8 @@ function mcAuthorizeApply_(r){
  const key=props.getProperty('MASTER_CORRECTION_PROOF_KEY');
  const owner=props.getProperty('MASTER_CORRECTION_OWNER_ID'),team=props.getProperty('MASTER_CORRECTION_TEAM_ID');
  if(props.getProperty('MASTER_CORRECTION_APPLY_ENABLED')!=='true'||!key||!owner||!team)throw new Error('MASTER_APPLY_DISABLED: authenticated owner issuer not configured; preview only');
- if(r.kind!=='price'||r.scope!=='standing'||r.replace)throw new Error('automatic proof only permits standing price fill');
+ if(!['price','create'].includes(r.kind)||r.scope!=='standing'||r.replace)throw new Error('automatic proof only permits standing price fill or verified creation');
+ if(r.kind==='create'&&!r.source?.contextQuestion)throw new Error('new product requires a verified component question');
  const proof=r.ownerProof;
  if(!proof||typeof proof.claims!=='string'||proof.claims.length>3000||! /^[a-f0-9]{64}$/.test(proof.signature||''))throw new Error('owner proof required');
  const actual=Utilities.computeHmacSha256Signature(proof.claims,key,Utilities.Charset.UTF_8).map(b=>('0'+((b+256)%256).toString(16)).slice(-2)).join('');
@@ -185,7 +229,7 @@ function mcAuthorizeApply_(r){
  const claims=JSON.parse(Utilities.newBlob(Utilities.base64Decode(proof.claims)).getDataAsString());
  const now=Date.now();
  if(claims.v!==1||claims.aud!=='village-master-correction'||claims.ownerId!==owner||claims.teamId!==team||!Number.isFinite(claims.issuedAt)||!Number.isFinite(claims.expiresAt)||claims.issuedAt>now+10000||claims.expiresAt<now||claims.expiresAt-claims.issuedAt>120000||claims.expiresAt<=claims.issuedAt)throw new Error('owner proof expired or wrong authority');
- const payload={correctionId:r.operationId,kind:r.kind,target:r.target,scope:r.scope,unit:r.unit??null,price:r.price??null,components:r.components??null,replace:r.replace??null,expectedRevision:r.expectedRevision,source:r.source};
+ const payload={correctionId:r.operationId,kind:r.kind,target:r.target,scope:r.scope,unit:r.unit??null,price:r.price??null,components:r.components??null,replace:r.replace??null,expectedRevision:r.expectedRevision,source:r.source,...(r.newEquipment?{newEquipment:r.newEquipment}:{})};
  if(claims.digest!==mcHash_(payload)||r.source?.ownerId!==owner||r.source?.teamId!==team)throw new Error('owner proof payload mismatch');
  const sourceMs=Number(r.source.ts)*1000;
  if(!Number.isFinite(sourceMs)||sourceMs>now+60000||now-sourceMs>3600000)throw new Error('owner source requires current review');
