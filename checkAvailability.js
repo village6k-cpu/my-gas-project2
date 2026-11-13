@@ -17774,12 +17774,19 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   } catch (e) { }
 
   var approvedBillingNote = '';
+  var fixedQuoteNote = fixedTermQuoteRegistrationNote_(allData, reqID, {
+    startDate: 반출일str, startTime: 반출시간str, endDate: 반납일str, endTime: 반납시간str
+  });
+  if (fixedQuoteNote && (mergeMode || registerOptions.billingRounds !== undefined)) {
+    throw new Error('기간확정견적은 신규 단독 거래로 등록해야 하며 승인회차와 함께 적용할 수 없습니다');
+  }
   if (hasTransferredConfirmedLock && registerOptions.billingRounds !== undefined) {
     회차 = registerOptions.billingRounds;
     approvedBillingNote = writeApprovedBillingRoundsNote_('', 회차, {
       startDate: 반출일str, startTime: 반출시간str, endDate: 반납일str, endTime: 반납시간str
     });
   }
+  if (fixedQuoteNote) approvedBillingNote = fixedQuoteNote;
   var registrationSupplyNotes = {};
   if(typeof inventorySupplyApplyRows_ === 'function') {
     var supplyRows=mergeSchedulePlan.writeSourceIndexes.map(function(i){var d=allData[i];return ['',거래ID,String(d[16]||'').indexOf('[세트]')===0?String(d[16]).slice(4):d[5],d[5],d[6]||1,반출일str,반출시간str,반납일str,반납시간str,'대기','',0,예약자명];});

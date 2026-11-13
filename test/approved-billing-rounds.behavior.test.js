@@ -41,7 +41,7 @@ test('source-bound approved half rounds survive worker, Windows and GAS normaliz
   }
 });
 
-function generator({ note = marker, rounds = 2.5, endTime = period.endTime, pendingPrice = false, rawTimeCells = false } = {}) {
+function generator({ note = marker, rounds = 2.5, endTime = period.endTime, pendingPrice = false, rawTimeCells = false, discount = '일반' } = {}) {
   const ctx = context(), cells = new Map(), formulas = new Map(), events = [];
   function range(row, col, height = 1, width = 1) {
     if (typeof row === 'string') { const m = row.match(/^([A-Z]+)(\d+)$/); col = [...m[1]].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0); row = Number(m[2]); }
@@ -58,7 +58,7 @@ function generator({ note = marker, rounds = 2.5, endTime = period.endTime, pend
     return r;
   }
   const ws = { getRange: range, getLastRow: () => 50, getLastColumn: () => 13 };
-  const row = ['261101-001', '합성고객', 'synthetic-contact', '', period.startDate, period.startTime, period.endDate, endTime, rounds, '예약', '일반', note];
+  const row = ['261101-001', '합성고객', 'synthetic-contact', '', period.startDate, period.startTime, period.endDate, endTime, rounds, '예약', discount, note];
   const displayRow = row.map(String);
   if (rawTimeCells) { row[5] = new Date('1899-12-30T11:27:52Z'); row[7] = new Date('1899-12-29T17:27:52Z'); }
   const item = ['261101-001-01', '261101-001', '', '카메라', 2, period.startDate, period.startTime, period.endDate, endTime, '대기', pendingPrice ? '[단가확인필요]' : '', pendingPrice ? '' : 10000];
@@ -156,10 +156,11 @@ test('actual initial contract row writes approved I and durable period-bound L i
   const end = source.indexOf('    // ── 스케줄상세에 장비 등록', begin);
   assert.ok(begin > 0 && end > begin);
   const ctx = context(), writes = [];
+  load(ctx, 'generatecontract.js');
   Object.assign(ctx, { 반출일str: period.startDate, 반출시간str: period.startTime, 반납일str: period.endDate, 반납시간str: period.endTime,
     예약자명: '합성고객', 연락처: 'synthetic', 할인유형: '일반', 거래ID: '261101-001',
     hasTransferredConfirmedLock: true, registerOptions: { billingRounds: 2.5 },
-    mergeMode: false, registrationPriceNotes: {}, contractLastRow: 1,
+    mergeMode: false, registrationPriceNotes: {}, contractLastRow: 1, allData: [], reqID: 'RQ-261101-001',
     contractSheet: { getRange: (row, col, height, width) => ({ setValues(values) { writes.push({ row, col, height, width, values: JSON.parse(JSON.stringify(values)) }); } }) },
     parseDT: (date, time) => new Date(date + 'T' + time + ':00+09:00') });
   vm.runInContext(source.slice(begin, end), ctx);
@@ -260,4 +261,66 @@ test('worker never acknowledges a registered trade that omitted or changed appro
     assert.equal(posts, 1);
   }
   }
+});
+
+
+const fixedPeriod = {startDate:'2026-12-01',startTime:'14:00',endDate:'2027-12-01',endTime:'14:00'};
+const annualQuote = {period:'2026-12-01T14:00/2027-12-01T14:00', sourceUrl:'https://docs.google.com/spreadsheets/d/source-quote/edit', grossTotal:3050000, items:[
+  {name:'AX700',quantity:1,netUnit:1590909}, {name:'AX43A',quantity:1,netUnit:681818}, {name:'Camgear Mark4',quantity:1,netUnit:500000}]};
+const fixedNote = quote => '[기간확정견적:v1 ' + JSON.stringify(quote) + ']';
+const annualItems = annualQuote.items.map(x => ({세트명:x.name,장비명:x.name,수량:x.quantity,단가:10000}));
+function fixedContext() { const ctx=context(); load(ctx,'generatecontract.js'); return ctx; }
+test('annual fixed quote keeps the accepted gross total and exact per-term allocations', () => {
+  const quote=fixedContext().readFixedTermQuote_(fixedNote(annualQuote),fixedPeriod,annualItems);
+  assert.equal(quote.grossTotal,3050000);
+  assert.equal(quote.netTotal,2772727);
+});
+test('unmarked contracts retain ordinary pricing and a fixed quote rejects period, items, quantity and total drift', () => {
+  const ctx=fixedContext();
+  assert.equal(ctx.readFixedTermQuote_('existing memo',fixedPeriod,annualItems),null);
+  const note=fixedNote(annualQuote);
+  for(const [n,p,i] of [
+    [note,{...fixedPeriod,endTime:'15:00'},annualItems],
+    [note,fixedPeriod,annualItems.slice(1)],
+    [note,fixedPeriod,annualItems.map((x,k)=>k===0?{...x,수량:2}:x)],
+    [fixedNote({...annualQuote,grossTotal:3050010}),fixedPeriod,annualItems],
+    [note+'\n'+note,fixedPeriod,annualItems],
+    ['[기간확정견적:v1 damaged]',fixedPeriod,annualItems],
+    [note,fixedPeriod,[...annualItems,{세트명:'AX700',장비명:'paid accessory',수량:1,단가:1000}]]
+  ]) assert.throws(()=>ctx.readFixedTermQuote_(n,p,i),/기간확정견적/);
+});
+test('fixed term generation writes one full-term unit and applies no second discount', () => {
+  const quote={period:'2026-11-02T20:00/2026-11-05T02:00',sourceUrl:annualQuote.sourceUrl,grossTotal:220000,items:[{name:'카메라',quantity:2,netUnit:100000}]};
+  const h=generator({note:fixedNote(quote),discount:'학생'});
+  // Evaluate this fixture's emitted quantity/term/unit cells as Sheets would.
+  h.ctx.readContractAmount_=()=>Math.ceil(h.cells.get('15:4')*h.cells.get('15:5')*h.cells.get('15:6')*11/100)*10;
+  assert.equal(h.run().finalAmount,220000);
+  assert.equal(h.cells.get('15:5'),1);
+  assert.equal(h.cells.get('15:6'),100000);
+  assert.equal(h.cells.get('40:3'),'해당없음');
+  assert.equal(h.cells.get('42:3'),'해당없음');
+  assert.equal(h.cells.get('14:5'),'전체기간');
+  assert.equal(h.cells.get('14:6'),'기간단가');
+});
+test('stale fixed quote cannot copy a document or write a replacement ledger amount', () => {
+  const h=generator({note:fixedNote(annualQuote)});
+  assert.throws(h.run,/기간확정견적/);
+  assert.deepEqual(h.events,[]);
+});
+
+test('wrong evaluated fixed quote total never replaces the financial ledger amount', () => {
+  const quote={period:'2026-11-02T20:00/2026-11-05T02:00',sourceUrl:annualQuote.sourceUrl,grossTotal:220000,items:[{name:'카메라',quantity:2,netUnit:100000}]};
+  const h=generator({note:fixedNote(quote)});
+  h.ctx.readContractAmount_=()=>999990;
+  assert.throws(h.run,/합의된 총액/);
+  assert.equal(h.events.includes('ledger'),false);
+});
+
+test('registration validates the fixed quote and copies its durable marker out of the request memo', () => {
+  const row=(name,qty,note)=>['RQ-261105-005','','','','',name,qty,'','세트','','','','','','','',note];
+  const rows=annualQuote.items.map((x,i)=>row(x.name,x.quantity,i===0?'source memo\n'+fixedNote(annualQuote):''));
+  const ctx=fixedContext();
+  assert.equal(ctx.fixedTermQuoteRegistrationNote_(rows,'RQ-261105-005',fixedPeriod),fixedNote(annualQuote));
+  rows[1][6]=2;
+  assert.throws(()=>ctx.fixedTermQuoteRegistrationNote_(rows,'RQ-261105-005',fixedPeriod),/기간확정견적/);
 });
