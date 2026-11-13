@@ -19,6 +19,55 @@
 // 메뉴에서 호출
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+// A negotiated whole-period quote belongs to this trade, never the daily catalog.
+// Bind it to the exact period and all top-level items before any document write.
+function readFixedTermQuote_(note, period, items) {
+  note = String(note || '');
+  if (note.indexOf('[기간확정견적') === -1) return null;
+  var prefix = '[기간확정견적:v1 ';
+  var lines = note.split(/\r?\n/).filter(function(line) { return line.indexOf('[기간확정견적') !== -1; });
+  if (lines.length !== 1 || lines[0].indexOf(prefix) !== 0 || !lines[0].endsWith(']')) throw new Error('기간확정견적 표식 중복 또는 형식 오류');
+  var quote;
+  try { quote = JSON.parse(lines[0].slice(prefix.length, -1)); }
+  catch (e) { throw new Error('기간확정견적 JSON 형식 오류'); }
+  if (!quote || quote.period !== approvedBillingPeriodKey_(period) || !/^https:\/\/docs\.google\.com\/spreadsheets\/d\/[\w-]+(?:\/|$)/.test(quote.sourceUrl || '') ||
+      !Number.isSafeInteger(quote.grossTotal) || quote.grossTotal <= 0 || !Array.isArray(quote.items) || !quote.items.length) {
+    throw new Error('기간확정견적 기간·원본·합계 확인 필요');
+  }
+  var actual = Object.create(null), prices = Object.create(null), netTotal = 0;
+  items.forEach(function(item) {
+    if (item.세트명 && item.세트명 !== item.장비명) {
+      if (Number(item.단가 || 0) !== 0 || item.단가미확정) throw new Error('기간확정견적에 유료 또는 미확정 구성품이 있습니다');
+      return;
+    }
+    var qty = Number(item.수량);
+    if (!Number.isSafeInteger(qty) || qty <= 0) throw new Error('기간확정견적 수량 오류');
+    actual[item.장비명] = (actual[item.장비명] || 0) + qty;
+  });
+  quote.items.forEach(function(item) {
+    if (!item || typeof item.name !== 'string' || !item.name.trim() || item.name !== item.name.trim() || Object.prototype.hasOwnProperty.call(prices, item.name) ||
+        !Number.isSafeInteger(item.quantity) || item.quantity <= 0 || !Number.isSafeInteger(item.netUnit) || item.netUnit < 0 || actual[item.name] !== item.quantity) {
+      throw new Error('기간확정견적 품목·수량·단가 확인 필요');
+    }
+    prices[item.name] = item.netUnit;
+    netTotal += item.quantity * item.netUnit;
+  });
+  if (Object.keys(actual).length !== quote.items.length || !Number.isSafeInteger(netTotal) || netTotal <= 0 || Math.ceil(netTotal * 11 / 100) * 10 !== quote.grossTotal) {
+    throw new Error('기간확정견적 품목 또는 부가세 포함 합계 불일치');
+  }
+  return { text: lines[0], prices: prices, grossTotal: quote.grossTotal, netTotal: netTotal, sourceUrl: quote.sourceUrl };
+}
+
+function fixedTermQuoteRegistrationNote_(rows, reqID, period) {
+  var matching = rows.filter(function(row) { return row[0] === reqID && row[14] !== '제외' && row[14] !== '거절'; });
+  var note = matching.map(function(row) { return String(row[16] || ''); }).filter(function(value) { return value.indexOf('[기간확정견적') !== -1; }).join('\n');
+  var items = matching.map(function(row) {
+    return { 세트명: String(row[16] || '').indexOf('[세트]') === 0 ? String(row[16]).slice(4) : row[5], 장비명: row[5], 수량: row[6], 단가: 0 };
+  });
+  var quote = readFixedTermQuote_(note, period, items);
+  return quote ? quote.text : '';
+}
+
 function createContractFromMenu() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
@@ -160,6 +209,14 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
     });
   }
 
+  var fixedQuote = contract.비고.indexOf('[기간확정견적') === -1 ? null : readFixedTermQuote_(contract.비고, {
+    startDate: contract.반출일, startTime: contract.반출시간, endDate: contract.반납일, endTime: contract.반납시간
+  }, items);
+  if (fixedQuote && approvedRounds !== null) throw new Error('기간확정견적과 승인회차를 함께 적용할 수 없습니다');
+  if (fixedQuote) items.forEach(function(item) {
+    item.단가 = item.세트명 && item.세트명 !== item.장비명 ? 0 : fixedQuote.prices[item.장비명];
+    item.단가미확정 = false;
+  });
   const pendingPriceItems = items.filter(function(item) { return item.단가미확정; }).map(function(item) { return item.장비명; });
   const pricingPending = pendingPriceItems.length > 0;
 
@@ -223,7 +280,7 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   ws.getRange(rows.rentalStart, rentalStartCol).setValue(반출일시);
 
   // 대여일수 계산 (24시간=1일, 3시간 이내 초과는 같은 일수, 초과 시 +1일)
-  const 일수 = approvedRounds === null
+  const 일수 = fixedQuote ? 1 : approvedRounds === null
     ? calcRentalDays(contract.반출일, contract.반출시간, contract.반납일, contract.반납시간)
     : approvedRounds;
 
@@ -248,6 +305,11 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
 
   rows = expandContractItemTableIfNeeded_(ws, rows, Math.max(1, Math.ceil(combinedItems.length / 2)));
   repairContractItemHeaders_(ws, rows);
+
+  if (fixedQuote) {
+    ws.getRange(rows.itemStart - 1, 5, 1, 2).setValues([["전체기간", "기간단가"]]);
+    ws.getRange(rows.itemStart - 1, 11, 1, 2).setValues([["전체기간", "기간단가"]]);
+  }
 
   const ITEMS_PER_SIDE = rows.itemRows || 22;
   const itemStart = rows.itemStart;
@@ -347,6 +409,7 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
       사전할인 = "개인사업자/프리랜서20%"; 추가할인 = "제휴업체20%"; break;
     default: break;  // 일반 또는 미지정
   }
+  if (fixedQuote) { 사전할인 = "해당없음"; 추가할인 = "해당없음"; }
   // ── 할인 셀 4개 모두 텍스트 포맷 강제 (중요!) ──
   // setValue("10%") 처럼 % 포함 문자열을 percent 셀에 쓰면 Sheets가 0.1 숫자로 자동 변환.
   // 그러면 할인 수식의 REGEXEXTRACT가 0.1에서 "0"만 추출해 할인 0% 처리됨.
@@ -357,7 +420,7 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   ws.getRange(paymentRefs.couponDiscountCell).setNumberFormat("@").setValue("해당없음");
 
   // ── 장기할인 — 일수 기반 직접 setValue + 드롭다운 적용 ──
-  var ltRate = getLongTermDiscountRate(일수 || 1);
+  var ltRate = fixedQuote ? 0 : getLongTermDiscountRate(일수 || 1);
   var ltText = ltRate === 0 ? "해당없음" : (ltRate + "%");
   var ltRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(["해당없음", "10%", "20%", "35%", "40%", "45%", "50%"], true)
@@ -398,6 +461,7 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   // 저장
   SpreadsheetApp.flush();
   const finalAmount = readContractAmount_(ws, paymentRefs.finalAmountCell);
+  if (fixedQuote && finalAmount !== fixedQuote.grossTotal) throw new Error('기간확정견적 생성 금액이 합의된 총액과 다릅니다');
 
   // ── 링크가 있는 사람은 누구나 열람 가능 (직원 PC 열람용) ──
   try {
