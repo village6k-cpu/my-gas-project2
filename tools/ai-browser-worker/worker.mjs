@@ -11325,8 +11325,9 @@ function exactConfirmedRegistrationAuthoritativeReadback(receipt, registration) 
   if (!result || typeof result !== 'object' || Array.isArray(result)
     || result.schema !== 'village-confirmed-reservation-commit-result/v1'
     || result.success !== true || result.status !== 'ok'
-    || result.customerNotificationAttempted !== false
-    || result.customerNotificationSent !== false) return false;
+    || typeof result.customerNotificationAttempted !== 'boolean'
+    || typeof result.customerNotificationSent !== 'boolean'
+    || (result.customerNotificationSent && !result.customerNotificationAttempted)) return false;
   const requestId = text(registration?.request_id).trim().toUpperCase();
   const effectiveRequestId = text(result.effective_request_id).trim().toUpperCase();
   const tradeId = text(result.trade_id).trim();

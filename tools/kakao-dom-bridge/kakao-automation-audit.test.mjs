@@ -446,6 +446,20 @@ test('trusted registered mutation and document send preserve typed action and au
   assert.deepEqual(document[0].evidence, { schema: 'village-document-receipt/v1', status: 'ok', readback: true });
 });
 
+test('registration Alimtalk does not invalidate the exact registration audit result', () => {
+  for (const sent of [false, true]) {
+    const receipt = confirmedRegistrationReceipt();
+    receipt.authoritative_result.customerNotificationAttempted = true;
+    receipt.authoritative_result.customerNotificationSent = sent;
+    const events = buildKakaoAutomationAuditEvents({ durableJob: baseJob({
+      tool: 'confirmed_reservation_commit', operationId: REGISTRATION_OPERATION, receipt
+    }) });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].outcome, 'success');
+    assert.equal(events[0].evidence.readback, true);
+  }
+});
+
 test('staff-authorized pending registration becomes one no-send owner-readable audit event', () => {
   const events = buildKakaoAutomationAuditEvents({
     durableJob: baseJob({

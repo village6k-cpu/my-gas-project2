@@ -606,8 +606,9 @@ export async function executeVillageConfirmedReservationCommit(request = {}, opt
          result.authoritative?.registered_trade?.contract?.billingRounds === registration.billing_rounds))
       && exactComponentReadback(result, registration)
       && exactAuthoritativeRequestReadback(result, registration)
-      && result.customerNotificationAttempted === false
-      && result.customerNotificationSent === false
+      && typeof result.customerNotificationAttempted === 'boolean'
+      && typeof result.customerNotificationSent === 'boolean'
+      && (!result.customerNotificationSent || result.customerNotificationAttempted)
       && result.authoritative && typeof result.authoritative === 'object' && !Array.isArray(result.authoritative);
     if (exactSuccess) {
       return buildReceipt({ status: 'ok', authoritativeResult: result, appliedStages });

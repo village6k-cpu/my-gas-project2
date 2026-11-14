@@ -19558,8 +19558,10 @@ function testRegisterAlimtalk(args) {
   args = args || {};
   var 연락처 = String(args.연락처 || args.phone || "").trim();
   if (!연락처) return { error: "연락처 필수" };
-  var tpl = PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_REGISTER');
-  if (!tpl) return { error: "POPBILL_TPL_REGISTER 미설정" };
+  var quoteGuide = args.quoteGuide === true;
+  var tpl = quoteGuide ? bookingConfirmationTemplateCode_()
+    : PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_REGISTER');
+  if (!tpl) return { error: quoteGuide ? "예약 확정·견적서 안내 템플릿 승인 확인 필요" : "POPBILL_TPL_REGISTER 미설정" };
 
   var 고객명 = "테스트", 반출표시 = "2026-06-15 10:00", 반납표시 = "2026-06-18 18:00";
   var tid = String(args.거래ID || args.tradeId || "").trim() || "TEST-001";
@@ -19568,8 +19570,14 @@ function testRegisterAlimtalk(args) {
     if (snap) { 고객명 = snap.customerName; 반출표시 = snap.checkoutAt; 반납표시 = snap.returnAt; }
   }
   var link = getMyPageLink(tid);
-  var msg = _buildRegisterMsg(고객명, 반출표시, 반납표시);
+  if (quoteGuide && (!link.success || !link.token ||
+      link.url !== BOOKING_CONFIRMATION_LINK_ + encodeURIComponent(link.token))) {
+    return { error: "예약·견적서 링크 생성 불가" };
+  }
+  var msg = quoteGuide ? buildBookingConfirmationMessage_(고객명, 반출표시, 반납표시)
+    : _buildRegisterMsg(고객명, 반출표시, 반납표시);
   var vars = { '#{고객명}': 고객명, '#{반출일시}': 반출표시, '#{반납일시}': 반납표시 };
+  if (quoteGuide) vars['#{예약토큰}'] = link.token;
   var btns = [{ n: '내 예약 확인', t: 'WL', u1: link.url, u2: link.url }];
   try {
     var res = sendAlimtalk(tpl, 연락처, 고객명, msg, vars, btns, { altSendType: '' });

@@ -99,8 +99,8 @@ For `commit-registration-live`, require all of:
 - final plan, period, and component selections equal the AI-decided plan;
 - RQ rows read back as registered to the same trade;
 - contract and every expected schedule row read back for that trade and period;
-- `customerNotificationAttempted: false` and `customerNotificationSent: false`.
+- boolean `customerNotificationAttempted` and `customerNotificationSent`; a sent notification must also have been attempted. A new confirmed registration uses the normal, deduplicated booking confirmation Alimtalk, including the reservation and quote link.
 
-Then report trade ID, effective RQ, period, registered equipment, any explicit stock warning, and that no customer message was sent. Never claim completion from the old RQ alone because a changed plan may create a replacement effective RQ.
+Then report trade ID, effective RQ, period, registered equipment, any explicit stock warning, and the returned Alimtalk outcome. `customerNotificationSent` means provider acceptance, not verified delivery. Do not send another chat reply or claim delivery without provider readback. Never claim completion from the old RQ alone because a changed plan may create a replacement effective RQ.
 
 Keep customer-specific facts out of this root skill. Hermes native background review may improve this focused package after the response; preserve its agent provenance so Curator can consolidate or archive stale learning instead of turning the routine entrypoint into an incident log.

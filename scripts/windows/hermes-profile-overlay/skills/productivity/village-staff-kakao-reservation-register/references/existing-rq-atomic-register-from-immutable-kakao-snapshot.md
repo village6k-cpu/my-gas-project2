@@ -36,4 +36,4 @@ The backend may replace the old RQ and return a new `effective_request_id`; that
 
 ## Success readback
 
-Require `status: ok`, valid effective RQ and trade ID, final plan/period/components matching the decision, registered RQ rows sharing the trade ID, and matching contract/schedule rows. This route must also report `customerNotificationAttempted: false` and `customerNotificationSent: false` unless a separately authorized send path was used.
+Require `status: ok`, valid effective RQ and trade ID, final plan/period/components matching the decision, registered RQ rows sharing the trade ID, and matching contract/schedule rows. Notification outcome fields must be booleans, and sent implies attempted. Registration now sends the normal deduplicated booking confirmation Alimtalk with the reservation and quote link. Report the returned outcome; provider acceptance does not prove delivery. Do not send a second chat reply.
