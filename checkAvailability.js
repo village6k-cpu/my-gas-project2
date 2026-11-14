@@ -17153,9 +17153,9 @@ function commitConfirmedReservation(args) {
       failIfBusy: true,
       forbidRegisteredMerge: true,
       noAutomaticReplay: true,
-      // 카카오 헤르메스가 같은 대화에서 이미 확정 답변을 낸 뒤 수행하는 내부 반영이다.
-      // 등록완료 알림톡까지 보내면 고객에게 중복 응답이 되므로 이 경로에서만 억제한다.
-      suppressCustomerNotification: true,
+      // 대화의 확정 답변과 별도로 내 예약·견적서 링크를 안내한다.
+      // 수동 등록과 같은 거래별 중복 방지 경로가 발송을 담당한다.
+      suppressCustomerNotification: false,
       preAcquiredScriptLock: scriptLock,
       confirmedReservationLockCapability: CONFIRMED_RESERVATION_LOCK_CAPABILITY_,
       confirmedReservationFence: {
@@ -17191,8 +17191,7 @@ function commitConfirmedReservation(args) {
           confirmedResult.inventory_review.identity_error=String(identityError.message || identityError);
         }
       }
-      // 이 내부 반영 경로는 readback 이후에도 no-send를 유지한다.
-      // 고객 안내는 별도의 발송 승인/receipt 경로에서 수행해야 한다.
+      // 알림톡은 registerByReqID의 락 해제 후 발송한다. 재조회 뒤에는 재발송하지 않는다.
     }
     return confirmedResult;
   } catch (error) {
@@ -19559,8 +19558,10 @@ function testRegisterAlimtalk(args) {
   args = args || {};
   var 연락처 = String(args.연락처 || args.phone || "").trim();
   if (!연락처) return { error: "연락처 필수" };
-  var tpl = PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_REGISTER');
-  if (!tpl) return { error: "POPBILL_TPL_REGISTER 미설정" };
+  var quoteGuide = args.quoteGuide === true;
+  var tpl = quoteGuide ? bookingConfirmationTemplateCode_()
+    : PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_REGISTER');
+  if (!tpl) return { error: quoteGuide ? "예약 확정·견적서 안내 템플릿 승인 확인 필요" : "POPBILL_TPL_REGISTER 미설정" };
 
   var 고객명 = "테스트", 반출표시 = "2026-06-15 10:00", 반납표시 = "2026-06-18 18:00";
   var tid = String(args.거래ID || args.tradeId || "").trim() || "TEST-001";
@@ -19569,8 +19570,14 @@ function testRegisterAlimtalk(args) {
     if (snap) { 고객명 = snap.customerName; 반출표시 = snap.checkoutAt; 반납표시 = snap.returnAt; }
   }
   var link = getMyPageLink(tid);
-  var msg = _buildRegisterMsg(고객명, 반출표시, 반납표시);
+  if (quoteGuide && (!link.success || !link.token ||
+      link.url !== BOOKING_CONFIRMATION_LINK_ + encodeURIComponent(link.token))) {
+    return { error: "예약·견적서 링크 생성 불가" };
+  }
+  var msg = quoteGuide ? buildBookingConfirmationMessage_(고객명, 반출표시, 반납표시)
+    : _buildRegisterMsg(고객명, 반출표시, 반납표시);
   var vars = { '#{고객명}': 고객명, '#{반출일시}': 반출표시, '#{반납일시}': 반납표시 };
+  if (quoteGuide) vars['#{예약토큰}'] = link.token;
   var btns = [{ n: '내 예약 확인', t: 'WL', u1: link.url, u2: link.url }];
   try {
     var res = sendAlimtalk(tpl, 연락처, 고객명, msg, vars, btns, { altSendType: '' });

@@ -91,3 +91,29 @@ test('booking confirmation has its own delivery record and cannot suppress sched
   assert.equal(lastPayload.phone, booking.cust.tel);
   assert.equal(lastPayload.btns, null);
 });
+
+test('quote-guide test uses the production template and link without marking the customer booking as sent',()=>{
+  const ca=fs.readFileSync('checkAvailability.js','utf8');
+  const source=ca.slice(ca.indexOf('function testRegisterAlimtalk('),ca.indexOf('\nfunction getRegisterAlimtalkTradeSnapshot_('));
+  let approved=true,validLink=true,payload;
+  const ctx={
+    PropertiesService:{getScriptProperties:()=>({getProperty:()=>{throw Error('legacy template must not be selected');}})},
+    bookingConfirmationTemplateCode_:()=>approved?'026110000786':'',
+    BOOKING_CONFIRMATION_LINK_:'https://today-dashboard-ten.vercel.app/my?t=',
+    getRegisterAlimtalkTradeSnapshot_:()=>({customerName:'검증',checkoutAt:'2026-11-15 12:00',returnAt:'2026-11-16 12:00'}),
+    getMyPageLink:()=>({success:true,token:'test/token',url:validLink?'https://today-dashboard-ten.vercel.app/my?t=test%2Ftoken':'https://example.invalid/'}),
+    buildBookingConfirmationMessage_:(name)=>name+' 견적서 보기',
+    _buildRegisterMsg:()=>{throw Error('legacy body must not be selected');},
+    myPagePrimeFastCaches_:()=>{},
+    sendAlimtalk:(...args)=>{payload=args;return {receiptNum:'026111400000000001'};}
+  };
+  vm.runInNewContext(source,ctx);
+  const args={phone:'01000000000',tradeId:'261114-001',quoteGuide:true};
+  approved=false;assert.match(ctx.testRegisterAlimtalk(args).error,/승인/);assert.equal(payload,undefined);
+  approved=true;validLink=false;assert.match(ctx.testRegisterAlimtalk(args).error,/링크/);assert.equal(payload,undefined);
+  validLink=true;assert.equal(ctx.testRegisterAlimtalk(args).success,true);
+  assert.equal(payload[0],'026110000786');assert.equal(payload[1],args.phone);
+  assert.match(payload[3],/견적서 보기/);assert.equal(payload[4]['#{예약토큰}'],'test/token');
+  assert.equal(payload[5][0].u1,'https://today-dashboard-ten.vercel.app/my?t=test%2Ftoken');
+  assert.equal(payload[6].altSendType,'');
+});

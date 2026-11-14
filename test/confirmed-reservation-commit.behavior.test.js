@@ -45,7 +45,7 @@ test('registration revalidates the exact desired plan and all four period fields
   );
 });
 
-test('automatic confirmed registration suppresses customer notification without changing the manual default', () => {
+test('automatic confirmed registration enables the normal deduplicated confirmation sender', () => {
   const commitStart = gas.indexOf('function commitConfirmedReservation(');
   const commitEnd = gas.indexOf('\nfunction registerByReqID(', commitStart);
   const registerEnd = gas.indexOf('\nfunction perfLog_', commitEnd);
@@ -53,7 +53,7 @@ test('automatic confirmed registration suppresses customer notification without 
 
   const commitBody = gas.slice(commitStart, commitEnd);
   const registerBody = gas.slice(commitEnd, registerEnd);
-  assert.match(commitBody, /suppressCustomerNotification:\s*true/);
+  assert.match(commitBody, /suppressCustomerNotification:\s*false/);
   assert.match(registerBody, /registerOptions\.suppressCustomerNotification\s*===\s*true/);
   assert.match(registerBody, /if\s*\(\s*!suppressCustomerNotification\s*\)\s*\{[\s\S]*?_postRegisterAlimtalk\s*=\s*\{/);
   assert.match(registerBody, /customerNotificationAttempted:\s*!suppressCustomerNotification/);
@@ -265,7 +265,7 @@ function productionNormalizeContext() {
   return context;
 }
 
-test('the complete internal commit never calls a customer sender after authoritative readback', () => {
+test('confirmed commit delegates notification to registration without sending again after readback', () => {
   let sends = 0;
   const h = productionCommitContext({
     Logger: { log() {} },
@@ -278,14 +278,14 @@ test('the complete internal commit never calls a customer sender after authorita
     })
   });
   h.context.registerByReqID = (_sheet, _row, options) => {
-    assert.equal(options.suppressCustomerNotification, true);
+    assert.equal(options.suppressCustomerNotification, false);
     h.scriptLock.releaseLock();
     return { success: true };
   };
   const result = h.context.commitConfirmedReservation({ registration: {},
     operation_id: '11111111-2222-4333-8444-555555555555' });
   assert.equal(result.success, true);
-  assert.equal(sends, 0, 'the internal no-send contract includes post-readback hooks');
+  assert.equal(sends, 0, 'registration owns the send; post-readback must not send it twice');
 });
 
 test('confirmed commit transfers the approved rounds only with its exact registration lock capability', () => {
@@ -798,7 +798,7 @@ test('confirmed registration keeps replacement and registration in one transferr
     assert.equal(options.preAcquiredScriptLock, harness.scriptLock);
     assert.equal(options.confirmedReservationLockCapability, harness.capability);
     assert.equal(options.forbidRegisteredMerge, true);
-    assert.equal(options.suppressCustomerNotification, true);
+    assert.equal(options.suppressCustomerNotification, false);
     harness.scriptLock.releaseLock();
     return { success: true };
   };

@@ -725,8 +725,9 @@ function buildConfirmedRegistrationEvent({ durableJob, operation, receipt, custo
     && sameValue(result.final_period, registration.desired_period)
     && confirmedRegistrationComponentReadback(result, registration)
     && confirmedRegistrationRequestReadback(result, registration)
-    && result.customerNotificationAttempted === false
-    && result.customerNotificationSent === false
+    && typeof result.customerNotificationAttempted === 'boolean'
+    && typeof result.customerNotificationSent === 'boolean'
+    && (!result.customerNotificationSent || result.customerNotificationAttempted)
     && isRecord(result.authoritative);
   if (outcome === 'success' && (!tradeId || !effectiveRequestId || !readback
     || (bootstrapped && !receipt.applied_stages?.includes('pending_request_bootstrap')))) {

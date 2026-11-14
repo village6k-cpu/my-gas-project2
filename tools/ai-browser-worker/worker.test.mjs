@@ -1666,11 +1666,36 @@ test('successful registration retains the separate requested quote document unti
   assert.equal(prepared.decision.reply_decision.replyMode,'no_reply');
 });
 
-test('confirmed registration success fails closed when customer notification was attempted or sent', async () => {
+test('confirmed registration accepts the separate Alimtalk outcome without a duplicate customer reply', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = confirmedRegistrationDecisionFixture();
+  for (const sent of [false, true]) {
+    const receipt = confirmedRegistrationReceiptFixture(job);
+    Object.assign(receipt.authoritative_result, {
+      customerNotificationAttempted: true, customerNotificationSent: sent
+    });
+    const result = receipt.authoritative_result;
+    const executed = await executeVillageConfirmedReservationCommit({
+      config: {}, job: { job_id: job.jobId, room_key: job.roomKey, room_revision: job.roomRevision },
+      roomRevision: job.roomRevision, registration: confirmedRegistrationFixture(),
+      dependencies: { randomUUID: () => 'alimtalk-receipt', commitConfirmedReservation: async () => result }
+    }, { operationFence: { operation_id: '11111111-2222-4333-8444-555555555555' } });
+    assert.equal(executed.status, 'ok');
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn, finalText: JSON.stringify(decision), trustedToolReceipts: [receipt]
+    });
+    assert.equal(prepared.decision.owner_review_required, false);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+    assert.deepEqual(prepared.gatewaySafetyFailures, []);
+  }
+});
+
+test('confirmed registration rejects inconsistent or untyped notification outcomes', async () => {
   const { job, turn } = gatewayTurnFixture();
   const decision = confirmedRegistrationDecisionFixture();
   for (const notificationOverride of [
-    { customerNotificationAttempted: true, customerNotificationSent: false },
+    { customerNotificationAttempted: 'true', customerNotificationSent: false },
+    { customerNotificationAttempted: true, customerNotificationSent: null },
     { customerNotificationAttempted: false, customerNotificationSent: true }
   ]) {
     const receipt = confirmedRegistrationReceiptFixture(job);
