@@ -17153,9 +17153,9 @@ function commitConfirmedReservation(args) {
       failIfBusy: true,
       forbidRegisteredMerge: true,
       noAutomaticReplay: true,
-      // 카카오 헤르메스가 같은 대화에서 이미 확정 답변을 낸 뒤 수행하는 내부 반영이다.
-      // 등록완료 알림톡까지 보내면 고객에게 중복 응답이 되므로 이 경로에서만 억제한다.
-      suppressCustomerNotification: true,
+      // 대화의 확정 답변과 별도로 내 예약·견적서 링크를 안내한다.
+      // 수동 등록과 같은 거래별 중복 방지 경로가 발송을 담당한다.
+      suppressCustomerNotification: false,
       preAcquiredScriptLock: scriptLock,
       confirmedReservationLockCapability: CONFIRMED_RESERVATION_LOCK_CAPABILITY_,
       confirmedReservationFence: {
@@ -17191,8 +17191,7 @@ function commitConfirmedReservation(args) {
           confirmedResult.inventory_review.identity_error=String(identityError.message || identityError);
         }
       }
-      // 이 내부 반영 경로는 readback 이후에도 no-send를 유지한다.
-      // 고객 안내는 별도의 발송 승인/receipt 경로에서 수행해야 한다.
+      // 알림톡은 registerByReqID의 락 해제 후 발송한다. 재조회 뒤에는 재발송하지 않는다.
     }
     return confirmedResult;
   } catch (error) {
