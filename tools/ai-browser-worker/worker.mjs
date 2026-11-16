@@ -14,6 +14,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { INQUIRY_LIFECYCLE_PROMPT, inquiryLifecycleErrors, validatePendingInquiryRevision } from './inquiry-lifecycle.mjs';
 import { reconcileConfirmationBatchReceipt } from './confirmation-batch-reconciliation.mjs';
 import { isSharedHermesGatewayIdle } from './shared-hermes-browser.mjs';
+import { createBackgroundTarget } from './background-browser.mjs';
 import { captureOwnedKakaoRoom, closeOwnedKakaoRoom, buildOwnedDraftInspectionExpression } from './owned-room-capture.mjs';
 import { effectiveRegisteredOperationReceipts } from './registered-operation-recovery.mjs';
 import { assessKakaoCaptureIntegrity } from './capture-integrity.mjs';
@@ -6592,7 +6593,9 @@ export async function ensureKakaoChannelManagerTabViaDevtools({
   url = DEFAULT_KAKAO_CHANNEL_MANAGER_URL,
   cdpBaseUrl,
   timeoutMs = 10000,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  cdpCallImpl = devtoolsCdpCallOnTarget,
+  readDisplay
 } = {}) {
   if (!cdpBaseUrl) throw new Error('KAKAO_REMOTE_DEBUGGING_PORT or KAKAO_DEVTOOLS_URL is required');
   const targets = await devtoolsFetchJson(cdpBaseUrl, '/json/list', { fetchImpl, timeoutMs });
@@ -6601,17 +6604,12 @@ export async function ensureKakaoChannelManagerTabViaDevtools({
     return { status: 'ready_list_via_devtools', targetId: existing.id, url: existing.url || '' };
   }
 
-  const newTargetBody = await devtoolsFetchTextWithFallbackMethod(
-    cdpBaseUrl,
-    `/json/new?${encodeURIComponent(url)}`,
-    { fetchImpl, timeoutMs }
-  );
-  let newTarget = null;
-  try { newTarget = newTargetBody ? JSON.parse(newTargetBody) : null; } catch {}
-  if (newTarget?.id) {
-    await devtoolsFetchTextWithFallbackMethod(cdpBaseUrl, `/json/activate/${encodeURIComponent(newTarget.id)}`, { fetchImpl, timeoutMs }).catch(() => '');
-  }
-  return { status: 'opened_list_via_devtools', targetId: newTarget?.id || null, url };
+  const version = await devtoolsFetchJson(cdpBaseUrl, '/json/version', { fetchImpl, timeoutMs });
+  const newTarget = await createBackgroundTarget({
+    url, readDisplay,
+    send: (method, params) => cdpCallImpl(version, method, params, { timeoutMs })
+  });
+  return { status: 'opened_list_via_devtools', targetId: newTarget.targetId, url };
 }
 
 async function ensureKakaoChannelManagerTabViaAppleScript({ url, timeoutMs, spawnImpl }) {
@@ -6662,6 +6660,9 @@ export async function ensureKakaoChannelManagerTab({
         );
       }
     }
+  }
+  if (!allowAppleScriptFallback || normalizeKakaoWorkerControlMode(process.env.KAKAO_WORKER_CONTROL_MODE) === 'devtools_only') {
+    throw new Error('Kakao background browser is unavailable; foreground control is disabled');
   }
   return ensureKakaoChannelManagerTabViaAppleScript({ url, timeoutMs, spawnImpl });
 }
@@ -6741,9 +6742,10 @@ export async function closeKakaoConversationWindow(windowInfo = {}, {
   });
 }
 
-function ownedRoomDependencies({ cdpBaseUrl, timeoutMs, fetchImpl, evaluateImpl, cdpCallImpl }) {
+function ownedRoomDependencies({ cdpBaseUrl, timeoutMs, fetchImpl, evaluateImpl, cdpCallImpl, readDisplay }) {
   return {
     cdpBaseUrl,
+    readDisplay,
     fetchJson: (base, endpoint) => devtoolsFetchJson(base, endpoint, { fetchImpl, timeoutMs }),
     callCdp: (target, method, params) => cdpCallImpl(target, method, params, { timeoutMs }),
     inspectDraft: (target) => evaluateImpl(target, buildOwnedDraftInspectionExpression(), { timeoutMs })
@@ -7586,7 +7588,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
   evidencePollMs = 200,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   refreshStaleConversation = true,
-  refreshImpl = refreshKakaoConversationWithoutDraft
+  refreshImpl = refreshKakaoConversationWithoutDraft,
+  readDisplay
 } = {}) {
   const hints = extractNavigationHints(job);
   const roomIds = extractKakaoRoomIds(job);
@@ -7635,7 +7638,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
     && /^https:\/\/business\.kakao\.com\/space\/[^/]+\/channel\/[^/]+\/chats(?:[/?#]|$)/.test(mainTarget.url)) {
     try {
       const captured = await captureOwnedKakaoRoom({
-        ...ownedRoomDependencies({ cdpBaseUrl, timeoutMs, fetchImpl, evaluateImpl, cdpCallImpl }),
+        ...ownedRoomDependencies({ cdpBaseUrl, timeoutMs, fetchImpl, evaluateImpl, cdpCallImpl, readDisplay }),
         mainTarget, knownTargets: targetList, roomId: roomIds[0], sleepImpl,
         readEvidence: target => readUsableKakaoConversationEvidence(target, { job, hints, timeoutMs, evaluateImpl,
           evidenceMaxAttempts, evidencePollMs, sleepImpl, source: 'live_kakao_dom_owned_conversation' })

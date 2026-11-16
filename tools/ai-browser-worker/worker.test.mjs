@@ -6989,7 +6989,32 @@ test('ensureKakaoChannelManagerTabViaDevtools reuses automation profile tab with
   assert.deepEqual(requests.map((request) => request.method), ['GET']);
 });
 
-test('ensureKakaoChannelManagerTab invokes osascript with target chat URL when CDP is not configured', { skip: process.platform !== 'darwin' }, async () => {
+test('missing Kakao list is created in a background portable window without activating Chrome', async () => {
+  const commands = [];
+  const bounds = { left: 640, top: 1080, width: 1280, height: 800 };
+  const result = await ensureKakaoChannelManagerTabViaDevtools({
+    cdpBaseUrl: 'http://127.0.0.1:9223', readDisplay: async () => bounds,
+    fetchImpl: async url => new Response(JSON.stringify(url.endsWith('/json/list') ? [] : { webSocketDebuggerUrl: 'ws://127.0.0.1:9223/devtools/browser/fixture' })),
+    cdpCallImpl: async (_target, method, params) => {
+      commands.push({ method, params });
+      if (method === 'Target.getTargets') return { targetInfos: [] };
+      if (method === 'Target.createTarget') return { targetId: 'new-list' };
+      if (method === 'Browser.getWindowForTarget') return { windowId: 1, bounds: { windowState: 'normal', ...bounds } };
+      assert.fail('Unexpected CDP command ' + method);
+    }
+  });
+  assert.equal(result.targetId, 'new-list');
+  assert.equal(commands.find(c => c.method === 'Target.createTarget').params.background, true);
+  assert.equal(commands.find(c => c.method === 'Target.createTarget').params.focus, false);
+  assert.ok(!commands.some(c => /activate|focus/i.test(c.method)));
+});
+
+test('missing background browser never silently invokes foreground AppleScript', async () => {
+  await assert.rejects(ensureKakaoChannelManagerTab({ cdpBaseUrl: '', allowAppleScriptFallback: false,
+    spawnImpl: () => assert.fail('Foreground fallback must not run') }), /foreground control is disabled/);
+});
+
+test('ensureKakaoChannelManagerTab uses explicit legacy foreground opt-in only when CDP is not configured', { skip: process.platform !== 'darwin' }, async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
@@ -7006,7 +7031,8 @@ test('ensureKakaoChannelManagerTab invokes osascript with target chat URL when C
     url: 'https://business.kakao.com/test/chats',
     timeoutMs: 1000,
     spawnImpl,
-    cdpBaseUrl: ''
+    cdpBaseUrl: '',
+    allowAppleScriptFallback: true
   });
   child.stdout.write('focused_list\n');
   child.emit('close', 0);

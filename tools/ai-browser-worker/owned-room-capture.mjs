@@ -1,3 +1,4 @@
+import { createBackgroundTarget } from './background-browser.mjs';
 // Only this module can authorize closure of a tab it created in this process.
 const owned = new Map();
 function exactListUrl(value) {
@@ -39,7 +40,7 @@ export async function captureOwnedKakaoRoom(options={}){
  const version=await fetchJson(cdpBaseUrl,'/json/version');
  if(!sameBrowserSocket(version?.webSocketDebuggerUrl,base))throw Error('Invalid owned capture browser socket');
  const browser={webSocketDebuggerUrl:version.webSocketDebuggerUrl};
- const created=await callCdp(browser,'Target.createTarget',{url,background:true});
+ const created=await createBackgroundTarget({url,send:(method,params)=>callCdp(browser,method,params),readDisplay:options.readDisplay,knownTargetIds:knownTargets.map(t=>t.id)});
  const id=created?.targetId;
  if(typeof id!=='string'||!id||knownTargets.some(t=>t.id===id))throw Error('Owned capture create response is invalid or names an existing target');
  let targetInfo={id,url,owned_capture:true},success=false,outcome,stage='create';
