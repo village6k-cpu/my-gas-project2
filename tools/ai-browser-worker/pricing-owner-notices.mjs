@@ -18,8 +18,13 @@ export function pricingOwnerNotice(config,job,finalized){
   const document=result.pricingDocumentReceipt,documentSent=document?.deliveryConfirmed===true;
   const confirmed=priceSent || documentSent;
   const customer=clean(decision.customer?.name || job.customerName).slice(0,80) || '고객 확인 필요';
-  const label=document?.documentType==='statement' || decision.statement_request ? '거래명세서':'견적서';
+  const label=decision.document_requests ? '요청 서류' : document?.documentType==='statement' || decision.statement_request ? '거래명세서':'견적서';
   const lines=[confirmed?'자동 가격·서류 처리 알림':'자동 가격·서류 확인 필요',`고객: ${customer}`];
+  if (decision.document_requests) {
+    const receipts=result.pricingDocumentReceipts || [];
+    lines.push(`서류 처리: ${receipts.filter(item=>item.deliveryConfirmed===true).length}/${decision.document_requests.length}건 발송 확인`);
+    for(const receipt of receipts)lines.push(`${receipt.documentType==='statement'?'거래명세서':'견적서'} · ${clean(receipt.tradeId || receipt.pricingSource?.id || '신규 견적')} · ${receipt.deliveryConfirmed===true?'발송 확인':'준비됨 · 발송 미확인'}`);
+  }
   if(document?.tradeId)lines.push('거래: '+clean(document.tradeId));
   if(pricing){lines.push(`금액: ${pricing.totalVatIncluded.toLocaleString('ko-KR')}원 (부가세 포함)`,`할인: ${clean(pricing.discountType)}`);
     lines.push('품목: '+pricing.items.map(item=>`${clean(item.name)} ×${item.qty}`).join(', ').slice(0,2400));}

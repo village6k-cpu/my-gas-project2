@@ -16,6 +16,10 @@ test('one sent quotation cannot resolve another rental or a combined unpriced ca
   const result=completeVerifiedPricingWork(prepared,{verifiedPricing:true,sent:true,readbackReceipt:{},pricingDocumentReceipt:{deliveryConfirmed:true}});
   assert.deepEqual(result.decision.follow_up_items,[other,combined,unknownPrice]);
   assert.deepEqual(result.availabilityAwareRows,[other,combined,unknownPrice]);
+  const projectedOther={type:'quote_send',payload:{follow_up_task_key:'quote-send:261029-006'}};
+  const projected=completeVerifiedPricingWork({...prepared,availabilityAwareRows:[projectedOther]},
+    {verifiedPricing:true,sent:true,readbackReceipt:{},pricingDocumentReceipt:{deliveryConfirmed:true}});
+  assert.deepEqual(projected.availabilityAwareRows,[projectedOther]);
 });
 
 test('a recovered explicit document request is delivered after current-room and price revalidation', async () => {
@@ -47,6 +51,20 @@ test('a recovered explicit document request is delivered after current-room and 
     assert.equal(result.sent,true,JSON.stringify(result));
     assert.equal(result.pricingDocumentReceipt.deliveryConfirmed,true);
     assert.equal(sends,1);
+
+    const question={...decision,classification:'document_request',price_quote:null,
+      document_clarification:{document_type:'quote',missing_fields:['rental_period'],customer_message_ids:['dom-1']},
+      reply_decision:{...decision.reply_decision,text:'어느 날짜 대여 건의 견적서가 필요하신가요?',
+        safetyClass:'contact_request',grounding:'visible_conversation'}};
+    const questionSnapshot=role=>({...snapshot,navigation:{conversation_evidence:{hint_matched:true,
+      capture_integrity:{ok:true},messages:[{message_id:'dom-1',role,text:'견적서 부탁드립니다.'}]}}});
+    for(const role of ['customer','unknown','staff']) {
+      const count=sends;
+      const response=await maybeAutoSendReply({config:{...config,autoSendLogPath:path.join(directory,`question-${role}.ndjson`)},
+        decision:question,job,dependencies:{...dependencies,revalidatedSnapshot:questionSnapshot(role)}});
+      assert.equal(response.sent,role!=='staff',`recovered question for ${role}`);
+      assert.equal(sends,count,'asking a question must not invoke the document API');
+    }
 
     // Each negative case has its own reply log, so a duplicate-text guard cannot
     // mask an unsafe recovery gate. Ordinary recovered answers remain held.
