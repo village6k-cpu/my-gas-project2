@@ -51,6 +51,13 @@ export function quoteNeedsSeparateVerification(decision = {}) {
     || new RegExp(String.raw`(?:오늘|어제)\s*(?:건|꺼|거)?\s*(?:과|와|하고|이랑|랑|및)\s*` + day).test(request);
 }
 
+function normalizeDocumentRecipientPhone(value) {
+  const digits = String(value ?? '').replace(/\D/g, '');
+  // Numeric Sheets cells lose the initial zero. Restore only the exact
+  // remaining Korean mobile-number shape; other incomplete numbers still fail.
+  return /^1[016789]\d{7,8}$/.test(digits) ? `0${digits}` : digits;
+}
+
 export function automaticStatementRequest({config = {}, decision, verification, job}) {
   const quote=decision.price_quote, request=decision.statement_request;
   if(verifiedPricingIssue(verification,quote))throw new Error('statement_price_incomplete');
@@ -61,7 +68,7 @@ export function automaticStatementRequest({config = {}, decision, verification, 
   const delegated=(config.statementRecipientAuthorizations || []).some(entry=>entry.tradeId===request.trade_id
     && entry.roomKey===room && entry.requesterName===requester && entry.bookingCustomerName===calculation.customer);
   if(requester!==calculation.customer && !delegated)throw new Error('statement_recipient_authorization_required');
-  const phone=String(calculation.phone || '').replace(/\D/g,'');
+  const phone=normalizeDocumentRecipientPhone(calculation.phone);
   if(!/^01[016789]\d{7,8}$/.test(phone) || !calculation.period)throw new Error('statement_identity_incomplete');
   const body={action:'prepareAutomaticStatement',id:request.trade_id,expectedTotal:verification.totalVatIncluded,
     expectedCustomerName:calculation.customer,expectedPhone:phone,expectedPeriod:calculation.period,
@@ -88,7 +95,7 @@ export function automaticQuoteRequest({ decision, verification, job }) {
     recipientPhone = calculation.phone;
     period = calculation.period;
   } else throw new Error('quote_document_context_required');
-  const phone = String(recipientPhone || '').replace(/[^0-9]/g, '');
+  const phone = normalizeDocumentRecipientPhone(recipientPhone);
   if (!/^01[016789]\d{7,8}$/.test(phone)) throw new Error('quote_recipient_required');
   if (!customerName || customerName.trim() !== decision.customer?.name?.trim()) throw new Error('quote_customer_mismatch');
   if (!/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d ~ \d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d$/.test(period || '')) throw new Error('quote_period_invalid');

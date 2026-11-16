@@ -8,6 +8,25 @@ const verification={complete:true,totalVatIncluded:7700,unresolved:[],calculatio
 const job={jobId:'event-one',roomKey:'room-one',roomRevision:2};
 const statementDecision={...decision,price_quote:{source:'trade',id:'261024-007'},statement_request:{trade_id:'261024-007',booking_customer_name:'테스트'}};
 const statementVerification={...verification,calculations:[{...verification.calculations[0],tradeId:'261024-007',customer:'테스트',phone:'01012345678',period:'2026-11-03 10:00 ~ 2026-11-04 10:00'}]};
+test('quote and statement recipients accept a mobile number stored numerically in Sheets',()=>{
+ const canonicalQuote=automaticQuoteRequest({decision:statementDecision,verification:statementVerification,job});
+ const canonicalStatement=automaticStatementRequest({decision:statementDecision,verification:statementVerification,job});
+ for(const phone of [1012345678,'1012345678','010-1234-5678']){
+  const current={...statementVerification,calculations:[{...statementVerification.calculations[0],phone}]};
+  const quotation=automaticQuoteRequest({decision:statementDecision,verification:current,job});
+  const statement=automaticStatementRequest({decision:statementDecision,verification:current,job});
+  assert.equal(quotation.manualData.연락처,'01012345678');
+  assert.equal(statement.expectedPhone,'01012345678');
+  assert.equal(quotation.operationId,canonicalQuote.operationId);
+  assert.equal(statement.operationId,canonicalStatement.operationId);
+  assert.equal(automaticQuoteRequest({decision:{...decision,price_quote:{...quote,phone}},verification,job}).manualData.연락처,'01012345678');
+ }
+ for(const phone of ['',1234567890,'10123456','10123456789']){
+  const current={...statementVerification,calculations:[{...statementVerification.calculations[0],phone}]};
+  assert.throws(()=>automaticQuoteRequest({decision:statementDecision,verification:current,job}),/quote_recipient_required/);
+  assert.throws(()=>automaticStatementRequest({decision:statementDecision,verification:current,job}),/statement_identity_incomplete/);
+ }
+});
 test('statements use the exact registered trade and reject an unauthorized delegate',()=>{
  const request=automaticStatementRequest({decision:statementDecision,verification:statementVerification,job});assert.equal(request.action,'prepareAutomaticStatement');assert.equal(request.expectedTotal,7700);
  const delegated={...statementDecision,customer:{name:'대리 요청자'}};
