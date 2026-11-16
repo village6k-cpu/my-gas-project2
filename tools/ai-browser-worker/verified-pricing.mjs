@@ -1,11 +1,12 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import {documentDecisions, documentWorkflowErrors, priceSourceKey} from './document-workflow.mjs';
 
 export function isVerifiedPricingReply(decision = {}) {
   const reply = decision.reply_decision || {};
-  return Boolean(decision.price_quote) && reply.safetyClass === 'sensitive_commitment'
+  return (Boolean(decision.price_quote) || Array.isArray(decision.document_requests)) && reply.safetyClass === 'sensitive_commitment'
     && reply.grounding === 'authoritative_sheet' && reply.requiresRag === false;
 }
 
@@ -20,6 +21,22 @@ export function verifiedPricingFreshJob(config = {}, job = {}) {
 }
 
 export function verifiedPricingIssue(verification = {}, quote = {}) {
+  if (Array.isArray(quote)) {
+    if (documentWorkflowErrors({document_requests:quote}).length || !Array.isArray(verification.documents)
+      || verification.documents.length !== quote.length) return 'invalid_document_plan';
+    const totals = new Map();
+    for (const [index, request] of quote.entries()) {
+      const item = verification.documents[index];
+      if (priceSourceKey(item.request) !== priceSourceKey(request)) return 'document_verification_mismatch';
+      const issue = verifiedPricingIssue(item.verification, request.price_quote);
+      if (issue) return issue;
+      const key = priceSourceKey(request.price_quote), total = item.verification.totalVatIncluded;
+      if (totals.has(key) && totals.get(key) !== total) return 'document_verification_mismatch';
+      totals.set(key, total);
+    }
+    return verification.complete === true && verification.totalVatIncluded === [...totals.values()].reduce((a,b) => a+b, 0)
+      ? null : 'price_incomplete';
+  }
   if (verification.complete !== true || !Number.isSafeInteger(verification.totalVatIncluded) || verification.totalVatIncluded <= 0) return 'price_incomplete';
   if (verification.unresolved?.length || verification.calculations?.length !== 1) return 'price_incomplete';
   const calculation = verification.calculations[0];
@@ -31,11 +48,13 @@ export function verifiedPricingIssue(verification = {}, quote = {}) {
 }
 
 export function pricingDocumentRequested(decision = {}) {
-  return Boolean(decision.statement_request) || (decision.follow_up_items || []).some(item => item.type === 'quote_send');
+  return Boolean(decision.statement_request) || Array.isArray(decision.document_requests)
+    || (decision.follow_up_items || []).some(item => item.type === 'quote_send');
 }
 
 // A single price source cannot authorize or close a request for several quotes.
 export function quoteNeedsSeparateVerification(decision = {}) {
+  if (decision.document_requests != null) return documentWorkflowErrors(decision).length > 0;
   const tasks = (decision.follow_up_items || []).filter(item => item.type === 'quote_send');
   if (!tasks.length) return false;
   if (tasks.length > 1) return true;
@@ -119,6 +138,7 @@ export async function sendAutomaticPricingDocument({ config, decision, verificat
   waitImpl = ms => new Promise(resolve => setTimeout(resolve,ms)) }) {
   const statement=Boolean(decision.statement_request);
   const body = statement ? automaticStatementRequest({config,decision,verification,job}) : automaticQuoteRequest({ decision, verification, job });
+  try {
   if (!config.documentApiBaseUrl || !config.documentApiKey) throw new Error('quote_delivery_not_configured');
   await assertFresh?.();
   const request = () => fetchImpl(config.documentApiBaseUrl, {method:'POST',headers:{'content-type':'application/json'},
@@ -127,7 +147,7 @@ export async function sendAutomaticPricingDocument({ config, decision, verificat
   // The server persists an accepted operation before returning QUEUED. Reusing
   // that exact operation only reads its provider outcome and cannot resend it.
   for (let attempt=0; !statement && response.ok && result.status==='QUEUED'
-    && result.operationId===body.operationId && result.totalVatIncluded===verification.totalVatIncluded && attempt<3; attempt++) {
+    && result.operationId===body.operationId && result.totalVatIncluded===verification.totalVatIncluded && attempt<5; attempt++) {
     await waitImpl(1000 * 2**attempt);
     response=await request();result=await response.json();
   }
@@ -149,14 +169,52 @@ export async function sendAutomaticPricingDocument({ config, decision, verificat
     attachment={privateFile:true,fileName,attachmentPaths:[attachmentPath],ownerDocumentUrl:result.ownerUrl,pdfSha256:result.pdfSha256};
   }
   return {schema:'village-auto-pricing-document-receipt/v1',operationId:body.operationId,
-    documentType:statement?'statement':'quote',...(statement?{tradeId:body.id}:{}),
+    documentType:statement?'statement':'quote',pricingSource:decision.price_quote,
+    ...((body.id || decision.price_quote?.source === 'trade')?{tradeId:body.id || decision.price_quote.id}:{}),
     status:statement?'prepared':'sent',deliveryConfirmed:!statement,...(!statement?{pdfUrl:result.pdfUrl}:attachment),fileId:result.fileId,
     totalVatIncluded:result.totalVatIncluded,discountType:verification.calculations[0].discountType,
     occurredAt:new Date().toISOString()};
+  } catch (error) { error.operationId = body.operationId; throw error; }
+}
+
+export function automaticDocumentPlan({config, decision, verification, job}) {
+  const issue = verifiedPricingIssue(verification, decision.document_requests);
+  if (issue) throw new Error(issue);
+  return documentDecisions(decision).map((child, index) => {
+    const verified = verification.documents[index].verification;
+    // Construct EVERY request before the first effect: an invalid second
+    // recipient must not leave the first customer's document already sent.
+    const body = child.statement_request
+      ? automaticStatementRequest({config, decision:child, verification:verified, job})
+      : automaticQuoteRequest({decision:child, verification:verified, job});
+    return {decision:child, verification:verified, body};
+  });
+}
+
+export async function sendAutomaticPricingDocuments(options) {
+  const plans = automaticDocumentPlan(options), receipts = [];
+  for (const plan of plans) {
+    try {
+      receipts.push(await sendAutomaticPricingDocument({...options, decision:plan.decision, verification:plan.verification}));
+    } catch (error) {
+      error.pricingDocumentReceipts = receipts;
+      error.operationId ||= plan.body.operationId;
+      throw error;
+    }
+  }
+  return receipts;
 }
 
 export function verifiedPricingAudit(result = {}) {
   const verification=result.priceVerification, calculation=verification?.calculations?.[0];
+  if (result.verifiedPricing && verification?.documents) {
+    const requests = verification.documents.map(item => item.request);
+    if (verifiedPricingIssue(verification, requests)) return null;
+    return {schema:'village-verified-pricing-audit/v1',totalVatIncluded:verification.totalVatIncluded,
+      discountType:[...new Set(verification.calculations.map(item => item.discountType))].join(' / '),
+      days:verification.calculations.map(item => item.payment.days),
+      items:verification.calculations.flatMap(item => item.pricedItems.map(line => ({name:line.name,qty:line.qty,price:line.price})))};
+  }
   if (!result.verifiedPricing || verifiedPricingIssue(verification || {}, {source:'trade'})) return null;
   return {schema:'village-verified-pricing-audit/v1',totalVatIncluded:verification.totalVatIncluded,
     discountType:calculation.discountType,days:calculation.payment.days,
@@ -172,44 +230,95 @@ export function pricingDocumentUrl(value) {
 // be resent after a process crash or lost UI response. Keep the claim on disk;
 // only a verified send can be replayed as complete. Unknown outcomes stay open.
 export async function deliverStatementOnce({config, receipt, replyText, send}) {
-  if (!/^[a-f0-9]{64}$/.test(receipt.operationId || '')) throw new Error('statement_operation_required');
+  return deliverStatementsOnce({config, receipts:[receipt], replyText, send});
+}
+
+export async function deliverStatementsOnce({config, receipts, replyText, send}) {
+  if (!Array.isArray(receipts) || !receipts.length || receipts.some(receipt => !/^[a-f0-9]{64}$/.test(receipt.operationId || ''))
+    || new Set(receipts.map(item => item.operationId)).size !== receipts.length) throw new Error('statement_operation_required');
   const directory = config.statementDeliveryDirectory || `${config.autoSendLogPath}.documents`;
   fs.mkdirSync(directory, {recursive:true, mode:0o700});
-  const file = path.join(directory, `${receipt.operationId}.json`);
   const replyHash = createHash('sha256').update(String(replyText).replace(/\s+/g,' ').trim()).digest('hex');
-  let fd;
-  try { fd = fs.openSync(file, 'wx', 0o600); }
-  catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    let prior;
-    try { prior = JSON.parse(fs.readFileSync(file,'utf8')); } catch { /* crash during claim */ }
-    if (prior?.status === 'confirmed' && prior.operationId === receipt.operationId
-      && prior.replyHash === replyHash && prior.pdfSha256 === receipt.pdfSha256) {
-      return {...prior.sendResult, documentDeliveryReplayed:true};
+  const entries = receipts.map(receipt => ({receipt,file:path.join(directory,`${receipt.operationId}.json`)}));
+  const unknown = () => ({sent:false,reason:'statement_delivery_outcome_unknown'});
+  const prior = entries.map(({file}) => {
+    if (!fs.existsSync(file)) return null;
+    try { return JSON.parse(fs.readFileSync(file,'utf8')); } catch { return {}; }
+  });
+  if (prior.some(Boolean)) {
+    if (prior.every((value,index) => value?.status === 'confirmed' && value.operationId === entries[index].receipt.operationId
+      && value.replyHash === replyHash && value.pdfSha256 === entries[index].receipt.pdfSha256)) {
+      return {...prior[0].sendResult,documentDeliveryReplayed:true};
     }
-    return {sent:false, reason:'statement_delivery_outcome_unknown'};
+    // A reordered, overlapping, subset or legacy-to-batch replay must not
+    // bypass a constituent's started/uncertain delivery claim.
+    return unknown();
   }
+  const claimId = randomUUID(), claimed = [];
+  const payload = ({receipt},status) => ({operationId:receipt.operationId,status,claimId,replyHash,
+    pdfSha256:receipt.pdfSha256,at:new Date().toISOString()});
   try {
-    fs.writeFileSync(fd, JSON.stringify({operationId:receipt.operationId,status:'started',replyHash,
-      pdfSha256:receipt.pdfSha256,at:new Date().toISOString()}));
-    fs.fsyncSync(fd);
-  } finally { fs.closeSync(fd); }
+    for (const entry of entries) {
+      const fd = fs.openSync(entry.file,'wx',0o600);
+      claimed.push(entry);
+      try { fs.writeFileSync(fd,JSON.stringify(payload(entry,'reserved')));fs.fsyncSync(fd); }
+      finally { fs.closeSync(fd); }
+    }
+  } catch (error) {
+    // No transport ran. Release only this invocation's own reservations.
+    for (const entry of claimed) {
+      try {const saved=JSON.parse(fs.readFileSync(entry.file,'utf8'));
+        if(saved.claimId===claimId && saved.status==='reserved')fs.unlinkSync(entry.file);
+      } catch { /* incomplete claims remain blocked for independent review */ }
+    }
+    if(error.code==='EEXIST')return unknown();
+    throw error;
+  }
+  const put = (entry,value) => {
+    const temporary = `${entry.file}.${claimId}.tmp`, out = fs.openSync(temporary,'wx',0o600);
+    try {fs.writeFileSync(out,JSON.stringify(value));fs.fsyncSync(out);} finally {fs.closeSync(out);}
+    fs.renameSync(temporary,entry.file);
+  };
+  for(const entry of entries)put(entry,payload(entry,'started'));
   const result = await send();
   if (result.sent === true && result.readback_confirmed === true && result.observed_reply_hash === replyHash
     && result.attachments?.attached === true && result.attachments?.readbackConfirmed === true) {
-    const temporary = `${file}.${process.pid}.tmp`;
-    const payload = {operationId:receipt.operationId,status:'confirmed',replyHash,pdfSha256:receipt.pdfSha256,
-      at:new Date().toISOString(),sendResult:{sent:true,readback_confirmed:true,observed_reply_hash:replyHash,
-        attachments:{attached:true,readbackConfirmed:true},reason:'statement_delivery_verified'}};
-    const out = fs.openSync(temporary,'wx',0o600);
-    try {fs.writeFileSync(out,JSON.stringify(payload));fs.fsyncSync(out);} finally {fs.closeSync(out);}
-    fs.renameSync(temporary,file);
+    for(const entry of entries)put(entry,{...payload(entry,'confirmed'),sendResult:{sent:true,
+      readback_confirmed:true,observed_reply_hash:replyHash,attachments:{attached:true,readbackConfirmed:true},reason:'statement_delivery_verified'}});
   }
   return result;
 }
 
 export function completeVerifiedPricingWork(prepared, result) {
   if (!result?.verifiedPricing) return prepared;
+  if (Array.isArray(prepared.decision.document_requests)) {
+    const receipts = result.pricingDocumentReceipts || [];
+    const delivered = request => receipts.some(receipt => receipt.deliveryConfirmed === true
+      && receipt.documentType === request.document_type
+      && priceSourceKey(receipt.pricingSource) === priceSourceKey(request.price_quote));
+    const requests = prepared.decision.document_requests;
+    const allDelivered = requests.length > 0 && requests.every(delivered);
+    const fulfilled = item => {
+      if (item.type === 'reply_needed') return allDelivered && result.sent === true && Boolean(result.readbackReceipt);
+      if (item.type === 'price_review') {
+        const references = [item.businessKey,item.business_key,item.taskKey,item.task_key,
+          item.payload?.business_key,item.payload?.follow_up_task_key].filter(Boolean)
+          .flatMap(key => String(key).match(/(?:RQ-)?\d{6}-\d{3}/g) || []);
+        return references.length > 0 && references.every(id => requests.some(request => request.price_quote.id === id))
+          && allDelivered && result.sent === true && Boolean(result.readbackReceipt);
+      }
+      const type = item.type === 'quote_send' ? 'quote'
+        : item.type === 'contract_document' && /거래명세|statement/i.test([item.title,item.summary,item.taskKey].join(' ')) ? 'statement' : null;
+      if (!type) return false;
+      const scoped = requests.filter(request => request.document_type === type
+        && request.task_key === (item.taskKey || item.task_key || item.payload?.follow_up_task_key));
+      return scoped.length === 1 && scoped.every(delivered);
+    };
+    const remaining = (prepared.decision.follow_up_items || []).filter(item => !fulfilled(item));
+    return {...prepared,decision:{...prepared.decision,follow_up_items:remaining,
+      reply_decision:{...prepared.decision.reply_decision,shouldCreateTask:remaining.some(item => item.requiresHumanAction === true)}},
+      availabilityAwareRows:(prepared.availabilityAwareRows || []).filter(item => !fulfilled(item))};
+  }
   const completed = new Set();
   if (result.sent === true && result.readbackReceipt) {completed.add('reply_needed');completed.add('price_review');}
   if (result.pricingDocumentReceipt?.deliveryConfirmed === true && result.pricingDocumentReceipt.documentType!=='statement') completed.add('quote_send');
@@ -219,7 +328,8 @@ export function completeVerifiedPricingWork(prepared, result) {
   if (!completed.size && !statementDone) return prepared;
   const reference=prepared.decision.price_quote?.id;
   const sameQuote=item=>{
-    const keys=[item.businessKey,item.business_key,item.taskKey,item.task_key,item.payload?.task_key].filter(Boolean);
+    const keys=[item.businessKey,item.business_key,item.taskKey,item.task_key,
+      item.payload?.taskKey,item.payload?.task_key,item.payload?.business_key,item.payload?.follow_up_task_key].filter(Boolean);
     // Older single-quote intents have no keys. Keyed work must name the exact
     // verified reference; a combined/mismatched case is still outstanding.
     if (!keys.length) return true;
@@ -232,7 +342,8 @@ export function completeVerifiedPricingWork(prepared, result) {
     && (item.type !== 'quote_send' || !quoteNeedsSeparateVerification({
       ...prepared.decision, follow_up_items: [item]
     }))) || (statementDone && item.type==='contract_document'
-    && sameQuote(item) && /거래명세|statement/i.test([item.title,item.summary,item.taskKey,item.task_key,item.payload?.task_key].join(' ')));
+    && sameQuote(item) && /거래명세|statement/i.test([item.title,item.summary,item.taskKey,item.task_key,
+      item.payload?.task_key,item.payload?.follow_up_task_key].join(' ')));
   const remaining=(prepared.decision.follow_up_items || []).filter(item=>!fulfilled(item));
   return {...prepared,decision:{...prepared.decision,follow_up_items:remaining,
     reply_decision:{...prepared.decision.reply_decision,shouldCreateTask:remaining.some(item=>item.requiresHumanAction===true)}},

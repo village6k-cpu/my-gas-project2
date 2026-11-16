@@ -3,7 +3,8 @@ import {refreshKakaoConversationWithoutDraft} from './stale-conversation-refresh
 import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
 import {reservationClarificationConfigured, freshReservationJob, RESERVATION_DATE_POLICY, RESERVATION_PRIORITY_POLICY} from './reservation-intake-guard.mjs';
-import { deliverStatementOnce, completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, quoteNeedsSeparateVerification, sendAutomaticPricingDocument } from './verified-pricing.mjs';
+import { deliverStatementOnce, deliverStatementsOnce, completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, quoteNeedsSeparateVerification, sendAutomaticPricingDocument, sendAutomaticPricingDocuments } from './verified-pricing.mjs';
+import {documentWorkflowErrors, documentClarificationConfigured, verifyDocumentPlan, DOCUMENT_WORKFLOW_PROMPT} from './document-workflow.mjs';
 import fs from 'node:fs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
 import os from 'node:os';
@@ -731,7 +732,7 @@ export function buildHermesPrompt(job, options = {}) {
 - village_read is the native read-only tool; use it in this turn instead of unavailable terminal/file tools. request.kind=catalog with query finds exact 세트마스터 names and G-column prices; customer with name/phone reads 고객DB; reservations with query=customer name reads contracts and RQs; request/trade with query=exact ID reads that record. Results can be truncated: narrow the query before deciding absence or completeness. Reads do not consume the mutation lease.
 - Read shop terminology/defaults with village_read(request={kind:"knowledge",question:"context and question"}), or skills reading village-operations equipment references. Verify exact names in the current catalog. Knowledge cannot prove stock, price, identity or booking authority; historical procedures cannot override current policy.
 - For a price question, resolve the exact billable equipment and period from conversation plus village_read, then call kind=quote with quote={source:"catalog",customer_name,phone,discount_type,start_date,start_time,end_date,end_time,items:[{name,quantity}]}. Dates are YYYY-MM-DD, times HH:mm, phone may be empty, and items contain every billable set/standalone item once (not included accessories). Or use quote={source:"request"|"trade",id:the exact live ID}. For catalog quotes, use the conversation-supported discount_type, or an empty string when absent for identity-safe DB fallback. The tool applies that resolved discount, rental days, long-term discount and VAT; copy that exact quote object into FINAL_JSON.price_quote for fresh send-time verification.
-- If quote.complete=true, answer the customer's actual price question now using totalVatIncluded, clearly saying 부가세 포함. Use classification="price", sensitive_commitment, authoritative_sheet, requiresRag=false. Do not substitute "확인해볼게요/견적 확인 후 안내드릴게요" for a lookup you can do in this turn, or repeat an earlier empty acknowledgement. If a billable item/period is genuinely unresolved, ask the one specific missing question; never present a partial sum as the total. Sending a quote document still requires village_document_send; a computed price is not proof of delivery.
+- If quote.complete=true, answer the customer's actual price question now using totalVatIncluded, clearly saying 부가세 포함. Use classification="price", sensitive_commitment, authoritative_sheet, requiresRag=false. Do not substitute "확인해볼게요/견적 확인 후 안내드릴게요" for a lookup you can do in this turn, or repeat an earlier empty acknowledgement. If a billable item/period is genuinely unresolved, ask the one specific missing question; never present a partial sum as the total. Requested VAT-inclusive quotations/statements use the host execution protocol below; a computed price is not proof of delivery. Do not separately call village_document_send.
 - A successful inquiry receipt can require schedule review while its independent, complete price answer is still auto-sendable with price_quote. Keep the schedule review follow-up, but do not claim availability or registration in the price reply. Failed/partial mutations still require no-send owner review.
 - INQUIRY LIFECYCLE에 따라 genuinely new 또는 아직 미반영인 변경 문의만 village_confirmation_request로 접수한다. 이미 처리된 예약/품목, 거절된 요청, 단순 보유 질문은 입력하지 않는다.
 - 일정은 먼저 대화/기존 예약/명시된 1회차 운영 기준으로 해석한다. 그래도 모르는 필드만 빈칸, plan_complete=false로 접수한다.
@@ -775,7 +776,8 @@ ${INVENTORY_JUDGMENT}
 ${(() => {try {const entries=JSON.parse(process.env.AI_WORKER_STATEMENT_RECIPIENT_AUTHORIZATIONS || '[]');const current=Array.isArray(entries)?entries.filter(entry=>entry.roomKey===(job.roomKey || job.room_key)):[];return current.length ? '- Owner-confirmed statement recipient authorizations for THIS ROOM: '+JSON.stringify(current)+'\n' : '';}catch{return '';}})()}- For statements, resolve the exact registered trade (including the booking name in the customer request), read kind=quote/source=trade, and set FINAL_JSON.statement_request={trade_id,booking_customer_name}, price_quote={source:"trade",id:trade_id}. Keep one contract_document follow-up titled 거래명세서 as host execution intent. Host verifies the ledger and sends the private official PDF attachment in this room; never substitute an estimate or claim delivery early. The requester must match the booking customer or an exact owner-approved recipient authorization; otherwise ask who may receive it. Reply text includes trade ID and verified VAT total. Do not call village_document_send for statements.
 - Pricing protocol (statements use the trade context above): finish verified prices/quotes in this first AI turn without owner handoff. Copy the exact verified price_quote: use source="trade" or "request" with the exact live ID for an existing record; use the full source="catalog" object for a new estimate. Set replyMode="auto_send", safetyClass="sensitive_commitment", grounding="authoritative_sheet", requiresRag=false, owner_review_required=false. State exact VAT-inclusive total/discount; no availability/delivery claim. A requested PDF remains one quote_send follow_up_item as HOST EXECUTION INTENT: host rechecks the recipient, current prices and amount, sends, audits and removes completed work. A delivery receipt is not required to REQUEST this host execution; do not downgrade a fully verified pending quote to draft_only merely because the host has not sent it yet. Do not also call village_document_send. Missing/zero prices, unknown discounts or conflicting earlier amounts require focused owner review; never drop items or invent discounts. Verified sends are recorded and reported, not assigned as approval work.
 - For an explicit VAT-exclusive registered-trade document, use village_document_send with exact trade_id and tax_mode="supply_only"; this is separate from the VAT-inclusive initial pricing protocol. A successful correlated tool receipt proves this direct tool delivery. Never claim delivery before either the tool or host has confirmed it; a pending host execution intent is not a delivery claim.
-- A pending quote_send task is not a delivery claim. Preserve it when document prerequisites are missing, while answering independently grounded price/policy questions where possible. State the specific unresolved prerequisite; do not silently replace a requested document with an incomplete price or a generic acknowledgment. Do not omit equipment or assume a missing price is free to make a quote complete.
+${DOCUMENT_WORKFLOW_PROMPT}
+- If the accepted cart materially differs from the ledger, reconcile the exact discrepancy rather than send an older or partial quote. Keep internal ledger details out of customer replies. Preserve the document request when prerequisites are missing, and ask the specific missing customer fact using document_clarification. Do not omit equipment or assume a missing shop price is free to make a quote complete.
 - A registration receipt proves registration only. If a later customer also requested a quote document, retain that exact open document follow-up after registration success; do not discard it or mark it delivered. Follow the single-operation receipt boundary and do not replay registration to generate a document.
 - If an RQ is absent, reconcile live contracts and schedules first. Do not retry the mutation tool under the consumed lease; absence can mean registration completed.
 - A no_action receipt is not creation success and grants no retry authority. Reconcile through read-only lookup, preserving any already completed operation.
@@ -910,6 +912,8 @@ The JSON schema:
   "confidence": "low" | "medium" | "high",
   "classification": "reservation" | "price" | "faq" | "ignore" | "already_answered" | "unclear",
   "price_quote": object | null,
+  "document_requests": array | null,
+  "document_clarification": object | null,
   "kill_switch_observed": "active" | "paused" | "price_paused" | "not_checked",
   "customer": { "name": string, "source": "Kakao Channel Manager", "chat_status": string | null },
   "owner_case": {"caseKey":string,"title":string,"requestSummary":string,"problemSummary":string,"nextActionSummary":string},
@@ -1372,6 +1376,7 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
     return { valid: false, errors: ['decision must be an object'] };
   }
   errors.push(...inquiryLifecycleErrors(decision, options));
+  errors.push(...documentWorkflowErrors(decision, options));
   if (Object.hasOwn(decision, 'confirmation_requests')) {
     const batch = validateConfirmationBatchDecision(decision, { validateDecision: child => Object.hasOwn(child, 'confirmation_requests') ? {valid:false,errors:['nested batch']} : validateVillageConfirmationExecutionDecision(child, options) });
     errors.push(...batch.errors);
@@ -1698,7 +1703,7 @@ export function canAutoSendCustomerDocumentAssets(decision = {}, config = {}) {
   if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
   if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
   if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
-  if (decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };
+  if (decision.requires_owner_approval === true || decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };
   const attachmentPaths = customerDocumentAssetPathsForDecision(decision, config);
   if (!attachmentPaths.length) return { allowed: false, reason: 'customer_document_assets_missing_config' };
   const missing = attachmentPaths.filter((filePath) => !fs.existsSync(filePath));
@@ -3267,6 +3272,11 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
 export async function buildAuthoritativePriceVerification(config = {}, decision = {}) {
   if (replySafetyClass(decision) !== 'sensitive_commitment') {
     return { required: false, complete: true, reason: 'not_numeric_price_commitment' };
+  }
+  if (decision.document_requests != null) {
+    try {
+      return await verifyDocumentPlan(decision, quote => executeVillageReadOnlyLookup(config, {kind:'quote', quote}));
+    } catch { return {required:true,complete:false,reason:'document_plan_lookup_failed',totalVatIncluded:null}; }
   }
   if (decision.price_quote) {
     try {
@@ -7792,16 +7802,17 @@ export function classifyConservativeTerminalAcknowledgement(job = {}, navigation
 }
 
 function currencyAmountsInReply(value = '') {
-  return [...text(value).normalize('NFKC').matchAll(/([0-9][0-9,]*)\s*(만)?\s*원/g)]
+  return [...text(value).normalize('NFKC').matchAll(/([+-]?[0-9][0-9,]*(?:\.[0-9]+)?)\s*(만)?\s*원/g)]
     .map((match) => parseNumber(match[1], 0) * (match[2] ? 10000 : 1))
-    .filter((amount) => Number.isFinite(amount) && amount > 0);
+    .filter((amount) => Number.isFinite(amount));
 }
 
 // Validate the AI's reply plan. Live operator control belongs exclusively to
 // maybeAutoSendReply at the effect boundary, for text and document delivery alike.
 export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = {}) {
   if (!config.autoSendEnabled && !verifiedPricingConfigured(config, decision)
-    && !reservationClarificationConfigured(config, decision)) return { allowed: false, reason: 'auto_send_disabled' };
+    && !reservationClarificationConfigured(config, decision)
+    && !documentClarificationConfigured(config, decision)) return { allowed: false, reason: 'auto_send_disabled' };
   const typedPriceReply = isTypedPriceReply(decision);
   if (!hasIndependentCustomerReply(decision) && (decision?.post_action_reconciled === true
     || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object'))) {
@@ -7888,12 +7899,19 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
       return { allowed: false, reason: 'authoritative_price_verification_incomplete' };
     }
     if (verifiedPricingConfigured(config, decision)) {
-      const issue = verifiedPricingIssue(verification, decision.price_quote);
+      const issue = verifiedPricingIssue(verification, decision.document_requests || decision.price_quote);
       if (issue) return { allowed:false, reason:issue };
     }
     const expectedTotal = Number(verification.totalVatIncluded);
     const replyAmounts = currencyAmountsInReply(textValue);
-    if (expectedTotal <= 0 || !replyAmounts.includes(expectedTotal)) {
+    const documentTotals = Array.isArray(decision.document_requests)
+      ? [...new Set(verification.documents.map(item => item.verification.totalVatIncluded))] : [];
+    // A multi-period answer may state every verified period separately instead
+    // of repeating their sum. Reject any extra unverified monetary amount.
+    const documentAmountsMatch = documentTotals.length > 0
+      && replyAmounts.every(amount => amount === expectedTotal || documentTotals.includes(amount))
+      && (replyAmounts.includes(expectedTotal) || documentTotals.every(amount => replyAmounts.includes(amount)));
+    if (expectedTotal <= 0 || (documentTotals.length ? !documentAmountsMatch : !replyAmounts.includes(expectedTotal))) {
       return { allowed: false, reason: 'authoritative_price_total_mismatch' };
     }
   }
@@ -8904,27 +8922,34 @@ export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWind
 }
 
 function canResumeVerifiedDocument({config,decision,job,dependencies,liveGate}) {
-  // A restart must not discard an outstanding, explicitly requested quotation.
+  // A restart must not discard an outstanding document or its needed question.
   // The broad historical-reply hold stays in place. Only the host's fresh,
   // unchanged room readback can authorize this narrow document path; AI output
   // cannot supply it. Price, recipient, policy, dedupe and delivery checks below
   // still run normally.
   if (!['startup_catchup_never_auto_sends','supabase_recovery_never_auto_sends',
     'top_row_time_outside_live_window'].includes(liveGate.reason)
-    || !verifiedPricingConfigured(config,decision) || !verifiedPricingFreshJob(config,job)
-    || !pricingDocumentRequested(decision) || decision.reply_decision?.replyMode !== 'auto_send'
+    || !(verifiedPricingConfigured(config,decision) || documentClarificationConfigured(config,decision))
+    || !verifiedPricingFreshJob(config,job)
+    || !(pricingDocumentRequested(decision) || documentClarificationConfigured(config,decision)) || decision.reply_decision?.replyMode !== 'auto_send'
     || decision.reply_decision.alreadyDelivered===true || decision.reply_decision.attachmentKeys?.length
     || typeof dependencies.assertFreshBeforeSend !== 'function') return false;
   const snapshot=dependencies.revalidatedSnapshot;
   const age=Date.now()-Date.parse(snapshot?.capturedAt || '');
   const evidence=snapshot?.navigation?.conversation_evidence;
+  const last = evidence?.messages?.at(-1);
+  const interpreted = decision.conversation_turns?.at(-1);
+  const customerTurn = last?.role === 'customer' || (last?.role === 'unknown'
+    && decision.safety_checks?.latest_customer_message_after_last_staff_reply === true
+    && ((interpreted?.speaker_type === 'customer' && interpreted.message === last.text)
+      || decision.document_clarification?.customer_message_ids?.includes(last.message_id)));
   return snapshot?.schema==='kakao-room-snapshot/v1'
     && snapshot.jobId===(job.jobId || job.id)
     && snapshot.roomKey===(job.roomKey || job.room_key)
     && snapshot.roomRevision===Number(job.roomRevision || job.room_revision)
     && Number.isFinite(age) && age>=-1000 && age<=60000
     && evidence?.hint_matched===true && evidence?.capture_integrity?.ok===true
-    && evidence.messages?.at(-1)?.role==='customer';
+    && customerTurn;
 }
 
 export async function maybeAutoSendReply({ config, decision, job, navigationContext, dependencies = {} }) {
@@ -8937,10 +8962,13 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   if (verifiedPricingConfigured(config, decision) && !verifiedPricingFreshJob(config, job)) {
     return {attempted:false,sent:false,gate:{allowed:false,reason:'pricing_before_activation_cutoff'}};
   }
+  if (documentClarificationConfigured(config, decision) && !verifiedPricingFreshJob(config, job)) {
+    return {attempted:false,sent:false,gate:{allowed:false,reason:'document_clarification_before_activation_cutoff'}};
+  }
   if (reservationClarificationConfigured(config, decision) && !freshReservationJob(config, job)) {
     return {attempted:false,sent:false,gate:{allowed:false,reason:'clarification_before_activation_cutoff'}};
   }
-  if (quoteNeedsSeparateVerification(decision)) {
+  if (!documentClarificationConfigured(config, decision) && quoteNeedsSeparateVerification(decision)) {
     const result = { attempted: false, sent: false, gate: { allowed: false, reason: 'quote_scope_requires_separate_verification' } };
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
     return result;
@@ -8968,7 +8996,7 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   // A price-only answer must not suppress a subsequently requested document.
   // Different bookings with equal prices also need independent delivery keys.
   const documentScope = verifiedPricingConfigured(config,decision) && pricingDocumentRequested(decision)
-    ? '|document:' + createHash('sha256').update(JSON.stringify({quote:decision.price_quote,
+    ? '|document:' + createHash('sha256').update(JSON.stringify({documents:decision.document_requests,quote:decision.price_quote,
       statement:decision.statement_request || null,calculations:priceVerification?.calculations})).digest('hex') : '';
   const dedupeKey = buildAutoReplyDedupeKey({ decision, job, replyText: gate.text }) + documentScope;
   if (hasRecentSentAutoReply(config, dedupeKey)) {
@@ -9011,16 +9039,27 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   // Reads above may span a newer room event. The caller owns the room revision.
   await dependencies.assertFreshBeforeSend?.();
   let pricingDocumentReceipt = null;
+  let pricingDocumentReceipts = [];
   if (verifiedPricingConfigured(config, decision) && pricingDocumentRequested(decision)) {
     try {
-      pricingDocumentReceipt = await (dependencies.sendAutomaticPricingDocument || sendAutomaticPricingDocument)({
-        config, decision, verification:priceVerification, job, assertFresh:dependencies.assertFreshBeforeSend,
-        fetchImpl:config.fetchImpl || fetch
-      });
+      const options = {config, decision, verification:priceVerification, job,
+        assertFresh:async () => {
+          const policyGate = canExecuteCustomerReply(decision, await readCustomerReplyExecutionPolicy(config));
+          if (!policyGate.allowed) throw new Error(policyGate.reason);
+          await dependencies.assertFreshBeforeSend?.();
+        }, fetchImpl:config.fetchImpl || fetch};
+      if (decision.document_requests) {
+        pricingDocumentReceipts = await (dependencies.sendAutomaticPricingDocuments || sendAutomaticPricingDocuments)(options);
+        pricingDocumentReceipt = {schema:'village-auto-pricing-document-receipt/v1',documentType:'batch',
+          totalVatIncluded:priceVerification.totalVatIncluded,deliveryConfirmed:pricingDocumentReceipts.every(item => item.deliveryConfirmed === true)};
+        gate = {...gate,attachmentPaths:pricingDocumentReceipts.flatMap(item => item.attachmentPaths || [])};
+      } else pricingDocumentReceipt = await (dependencies.sendAutomaticPricingDocument || sendAutomaticPricingDocument)(options);
       if(pricingDocumentReceipt.documentType==='statement')gate={...gate,attachmentPaths:pricingDocumentReceipt.attachmentPaths};
     } catch (error) {
       const failure = {attempted:false,sent:false,text:gate.text,priceVerification,verifiedPricing:true,
-        pricingDocumentFailure:{schema:'village-auto-pricing-document-receipt/v1',documentType:decision.statement_request?'statement':'quote',status:'unconfirmed',occurredAt:new Date().toISOString(),error:error.message},
+        pricingDocumentReceipts:error.pricingDocumentReceipts || [],
+        pricingDocumentFailure:{schema:'village-auto-pricing-document-receipt/v1',documentType:decision.document_requests?'batch':decision.statement_request?'statement':'quote',
+          operationId:error.operationId || null,status:error.result?.status === 'QUEUED'?'queued':'unconfirmed',occurredAt:new Date().toISOString(),error:error.message},
         gate:{allowed:false,reason:decision.statement_request && /^[a-z_]{1,100}$/.test(error.message)?error.message:'quote_delivery_not_confirmed'}};
       logAutoReply(config,{jobId:job.id || job.jobId,result:failure,dedupeKey,roomReplyKey});
       return failure;
@@ -9029,9 +9068,9 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   if (pricingDocumentReceipt) {
     const latestPolicy = await readCustomerReplyExecutionPolicy(config);
     const latestGate = canExecuteCustomerReply(decision, latestPolicy);
-    if (!latestGate.allowed) return {attempted:false,sent:false,pricingDocumentReceipt,priceVerification,verifiedPricing:true,gate:latestGate};
+    if (!latestGate.allowed) return {attempted:false,sent:false,pricingDocumentReceipt,pricingDocumentReceipts,priceVerification,verifiedPricing:true,gate:latestGate};
     try { await dependencies.assertFreshBeforeSend?.(); }
-    catch { return {attempted:false,sent:false,pricingDocumentReceipt,priceVerification,verifiedPricing:true,
+    catch { return {attempted:false,sent:false,pricingDocumentReceipt,pricingDocumentReceipts,priceVerification,verifiedPricing:true,
       gate:{allowed:false,reason:'superseded_after_quote_delivery'}}; }
   }
   let sendResult;
@@ -9045,8 +9084,10 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
       controlMode: config.workerControlMode,
       cuaMinIdleSeconds: config.cuaMinIdleSeconds
     });
-    sendResult = pricingDocumentReceipt?.documentType==='statement'
-      ? await deliverStatementOnce({config,receipt:pricingDocumentReceipt,replyText:gate.text,send}) : await send();
+    const statements = pricingDocumentReceipts.filter(item => item.documentType === 'statement');
+    sendResult = statements.length ? await deliverStatementsOnce({config,receipts:statements,replyText:gate.text,send})
+      : pricingDocumentReceipt?.documentType === 'statement'
+        ? await deliverStatementOnce({config,receipt:pricingDocumentReceipt,replyText:gate.text,send}) : await send();
   } catch (error) {
     sendResult = { sent: false, reason: 'send_error', error: error.message.slice(0, 500) };
   }
@@ -9066,6 +9107,13 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
   }
   if(pricingDocumentReceipt?.documentType==='statement' && readbackReceipt && sendResult.attachments?.attached===true && sendResult.attachments?.readbackConfirmed===true)pricingDocumentReceipt={...pricingDocumentReceipt,
     status:'sent',deliveryConfirmed:true,deliveryChannel:'kakao_attachment',occurredAt:new Date().toISOString()};
+  if (pricingDocumentReceipts.length) {
+    if (readbackReceipt && sendResult.attachments?.attached === true && sendResult.attachments?.readbackConfirmed === true) {
+      pricingDocumentReceipts = pricingDocumentReceipts.map(item => item.documentType === 'statement'
+        ? {...item,deliveryConfirmed:true,deliveryChannel:'kakao_attachment',status:'sent',occurredAt:new Date().toISOString()} : item);
+    }
+    pricingDocumentReceipt = {...pricingDocumentReceipt,deliveryConfirmed:pricingDocumentReceipts.every(item => item.deliveryConfirmed === true)};
+  }
   const result = {
     attempted: true,
     sent: Boolean(sendResult.sent),
@@ -9077,7 +9125,8 @@ export async function maybeAutoSendReply({ config, decision, job, navigationCont
     ragSupport,
     ...(priceVerification ? { priceVerification } : {}),
     ...(verifiedPricingConfigured(config, decision) ? {verifiedPricing:true} : {}),
-    ...(pricingDocumentReceipt ? { pricingDocumentReceipt } : {})
+    ...(pricingDocumentReceipt ? { pricingDocumentReceipt } : {}),
+    ...(pricingDocumentReceipts.length ? {pricingDocumentReceipts} : {})
   };
   logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey, roomReplyKey, ragSupport });
   return result;
@@ -10932,7 +10981,7 @@ function forceRegisteredInquiryReconciliationSuccess(decision, receipt) {
 }
 
 function isTypedPriceReply(decision = {}) {
-  return Boolean(decision.price_quote) && replySafetyClass(decision) === 'sensitive_commitment'
+  return (Boolean(decision.price_quote) || Array.isArray(decision.document_requests)) && replySafetyClass(decision) === 'sensitive_commitment'
     && replyGrounding(decision) === 'authoritative_sheet';
 }
 
@@ -10973,12 +11022,13 @@ function gatewayDecisionHasStructuredDocumentClaim(decision = {}, config = {}) {
   // A pending document task is not proof that a separate answer claims delivery.
   // Independent answers still pass their own fresh price/policy/RAG send checks.
   const reply = decision.reply_decision || {};
+  if (documentClarificationConfigured(config, decision)) return false;
   // This is a request for the host to send, not evidence of an earlier send.
   // The host must verify the current price and actual provider delivery before
   // emitting this answer, including when its text mentions the quotation.
   if (verifiedPricingConfigured(config,decision) && reply.replyMode === 'auto_send'
     && reply.alreadyDelivered !== true && !(reply.attachmentKeys || []).length
-    && (decision.follow_up_items || []).some(item=>item.type==='quote_send')) return false;
+    && pricingDocumentRequested(decision)) return false;
   const independentAnswer = ['sensitive_commitment', 'current_policy_answer', 'rag_grounded_answer'].includes(replySafetyClass(decision))
     && (replySafetyClass(decision) !== 'sensitive_commitment' || isTypedPriceReply(decision))
     && reply.alreadyDelivered !== true && !(reply.attachmentKeys || []).length
@@ -11646,7 +11696,7 @@ export async function prepareKakaoGatewayDecision({
     }
     const validation = validateAiDecisionContract(validationDecision, {
       roomRevision,
-      ...(decision.customer_requested_pending_revision ? {roomSnapshot:snapshot} : {})
+      roomSnapshot:snapshot
     });
     if (!validation.valid) safetyFailures.push('invalid_gateway_decision');
     if (decision.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object') {
