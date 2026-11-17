@@ -82,12 +82,18 @@ export function buildOwnedDraftInspectionExpression() {
           if (el.files?.length) hasDraft = true;
         }
         for (const el of root.querySelectorAll('textarea,input[type="text"],[contenteditable="true"]')) {
-          // Autosizing libraries use a noninteractive hidden textarea containing a probe character.
+          // Kakao also mounts an unlabelled body-level autosize probe without aria-hidden.
+          // Its exact single-character value and placement distinguish it from a real draft.
           const style = el.ownerDocument?.defaultView?.getComputedStyle(el);
+          const bodyProbe = Boolean(el.ownerDocument?.body)
+            && el.parentElement === el.ownerDocument.body && el.value === 'x'
+            && ['id', 'name', 'placeholder'].every(name => !el.getAttribute?.(name));
           const measurement = String(el.tagName).toUpperCase() === 'TEXTAREA'
-            && el.getAttribute?.('aria-hidden') === 'true' && el.getAttribute?.('tabindex') === '-1'
+            && (el.getAttribute?.('aria-hidden') === 'true' || bodyProbe)
+            && el.getAttribute?.('tabindex') === '-1'
             && style?.visibility === 'hidden' && style?.position === 'absolute'
-            && el.getBoundingClientRect?.().height === 0 && root.activeElement !== el;
+            && el.getBoundingClientRect?.().height === 0 && root.activeElement !== el
+            && el.ownerDocument?.activeElement !== el;
           if (!measurement && String('value' in el ? el.value : el.textContent || '').trim()) hasDraft = true;
         }
         for (const el of root.querySelectorAll('*')) {

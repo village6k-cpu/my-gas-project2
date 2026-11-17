@@ -52,3 +52,18 @@ test('draft expression ignores only an inaccessible zero-height textarea layout 
  const inspect=()=>vm.runInNewContext(buildOwnedDraftInspectionExpression(),{document:doc,location:{href:'exact'}});
  assert.equal(inspect().hasDraft,false);field.getAttribute=()=>null;assert.equal(inspect().hasDraft,true);
 });
+
+test('the actual Kakao body-level autosize x probe needs no aria-hidden, while real drafts stay protected',async()=>{
+ const {buildOwnedDraftInspectionExpression}=await import('./owned-room-capture.mjs');const {default:vm}=await import('node:vm');
+ const body={},attributes={tabindex:'-1'};
+ const field={tagName:'TEXTAREA',value:'x',parentElement:body,getAttribute:key=>attributes[key]??null,
+  getBoundingClientRect:()=>({height:0})};
+ const document={body,activeElement:null,defaultView:{getComputedStyle:()=>({visibility:'hidden',position:'absolute'})},
+  querySelectorAll:selector=>selector==='*'?[]:[field]};field.ownerDocument=document;
+ const inspect=()=>vm.runInNewContext(buildOwnedDraftInspectionExpression(),{document,location:{href:'exact'}}).hasDraft;
+ assert.equal(inspect(),false);
+ field.value='unsent customer message';assert.equal(inspect(),true);field.value='x';
+ for(const key of ['id','name','placeholder']){attributes[key]='real-composer';assert.equal(inspect(),true);delete attributes[key];}
+ document.activeElement=field;assert.equal(inspect(),true);document.activeElement=null;
+ field.parentElement={};assert.equal(inspect(),true);
+});
