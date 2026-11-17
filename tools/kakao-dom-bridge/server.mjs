@@ -19,6 +19,7 @@ import {
   applyPreparedKakaoDecision,
   buildKakaoGatewayTurn,
   captureKakaoRoomSnapshot,
+  inspectKakaoConversationDraft,
   executeVillageConfirmationRequest,
   fetchExistingConfirmRequestResultForDecision,
   finalizePreparedKakaoDecision,
@@ -2079,6 +2080,7 @@ const state = {
   recoverySweepRunning: false,
   lastRecoverySweep: null,
   closedKakaoTabs: 0,
+  tabCleanupScheduled: false,
   tabCleanupRunning: false,
   lastTabCleanup: null,
   rooms: new Map(),
@@ -6507,6 +6509,15 @@ async function closeDevtoolsTab(tabId) {
   }
 }
 
+export function startKakaoTabCleanupRuntime(config, {
+  cleanup = cleanupIdleKakaoConversationTabs, setTimeoutImpl = setTimeout, setIntervalImpl = setInterval
+} = {}) {
+  if (!config.kakaoTabCleanupEnabled || config.hermesTransport === 'gateway_no_send') return {started:false};
+  setTimeoutImpl(() => cleanup('startup'),10_000)?.unref?.();
+  setIntervalImpl(() => cleanup('interval'),config.kakaoTabCleanupIntervalMs)?.unref?.();
+  return {started:true};
+}
+
 async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueued = false } = {}) {
   if (!CONFIG.kakaoTabCleanupEnabled) return { skipped: true };
   if (state.workerRunning || state.activeWorkerRuns > 0 || (!allowQueued && (state.workerQueueLength > 0 || state.rooms.size > 0))) {
@@ -6561,6 +6572,13 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
       }
       if (!freshTabs.some((page) => page?.type === 'page' && page.id === tab.id && page.url === tab.url)) continue;
       if (!await gatewayIdle()) {
+        result.skipped = true;
+        result.reason = 'gateway_or_worker_active';
+        break;
+      }
+      const draft = await inspectKakaoConversationDraft(tab,{timeoutMs:5000});
+      if (draft?.href !== tab.url || draft.hasDraft !== false) continue;
+      if (!await gatewayIdle() || state.workerRunning || state.activeWorkerRuns > 0 || !isSharedHermesGatewayIdle()) {
         result.skipped = true;
         result.reason = 'gateway_or_worker_active';
         break;
@@ -6865,6 +6883,7 @@ const server = http.createServer(async (req, res) => {
           recoverySweepRunning: state.recoverySweepRunning,
           lastRecoverySweep: state.lastRecoverySweep,
           closedKakaoTabs: state.closedKakaoTabs,
+          tabCleanupScheduled: state.tabCleanupScheduled,
           tabCleanupRunning: state.tabCleanupRunning,
           lastTabCleanup: state.lastTabCleanup,
           openRooms: state.rooms.size,
@@ -6970,6 +6989,9 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     console.info(`[dom-bridge] queue dir: ${CONFIG.queueDir}`);
     console.info(`[dom-bridge] supabase: ${CONFIG.supabaseUrl && CONFIG.supabaseTable ? 'enabled' : 'disabled'}`);
     console.info(`[dom-bridge] worker: ${CONFIG.workerCommand ? CONFIG.workerCommand : 'disabled'}`);
+    // Closing idle read windows does not replay held jobs or contact customers.
+    // Register it before the recovery branch returns; no-send still skips it.
+    state.tabCleanupScheduled = startKakaoTabCleanupRuntime(CONFIG).started;
     // No-send startup must not replay historical applications or emit Slack notifications.
     // Leave durable obligations pending; this is not a blanket guard on explicit HTTP actions.
     if (recoveryHold && CONFIG.hermesTransport !== 'gateway_no_send') {
@@ -7022,10 +7044,6 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     if (CONFIG.p0SlackEscalationEnabled || workOrchestratorP0Runtime.enabled) {
       setTimeout(() => runP0SlackEscalationSweep('startup'), 9000).unref?.();
       setInterval(() => runP0SlackEscalationSweep('interval'), CONFIG.p0SlackEscalationIntervalMs).unref?.();
-    }
-    if (CONFIG.kakaoTabCleanupEnabled) {
-      setTimeout(() => cleanupIdleKakaoConversationTabs('startup'), 10_000).unref?.();
-      setInterval(() => cleanupIdleKakaoConversationTabs('interval'), CONFIG.kakaoTabCleanupIntervalMs).unref?.();
     }
     if (CONFIG.workOrchestrator.digestEnabled) {
       workOrchestratorDigestRuntime.start().catch(() => {});

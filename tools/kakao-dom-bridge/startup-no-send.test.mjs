@@ -9,12 +9,15 @@ const marker = "if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {";
 assert.equal(source.split(marker).length, 2, 'unique startup boundary');
 const startup = source.slice(source.indexOf(marker));
 const healthSource = source.slice(source.indexOf('export function buildHealthConfig('), source.indexOf('\n}\n', source.indexOf('export function buildHealthConfig(')) + 3).replace('export ', '');
+const cleanupStart = source.indexOf('export function startKakaoTabCleanupRuntime(');
+const cleanupSource = source.slice(cleanupStart, source.indexOf('\n}\n',cleanupStart)+3).replace('export ','');
 
 async function boot(transport, { noListen = false, enabled = true, recoveryHold = null } = {}) {
   const calls = [], timers = [], notifications = { application: 'pending', terminal: 'pending' };
   const record = name => () => { calls.push(name); };
   const timer = kind => (fn, delay) => { timers.push({ kind, fn, delay }); return { unref() {} }; };
   const context = {
+    state: {tabCleanupScheduled:false},
     process: { env: { KAKAO_DOM_BRIDGE_NO_LISTEN: noListen ? '1' : '0' } },
     console: { info() {} },
     CONFIG: { hermesTransport: transport, port: 0, queueDir: 'unused', workerCommand: 'unused',
@@ -43,11 +46,11 @@ async function boot(transport, { noListen = false, enabled = true, recoveryHold 
     workOrchestratorDigestRuntime: { start: async () => calls.push('digest') },
     workOrchestratorNoticeCleanupRuntime: { start: async () => calls.push('notice_cleanup') }
   };
-  vm.runInNewContext(startup, context);
+  vm.runInNewContext(cleanupSource+'\n'+startup, context);
   // Flush the actual async recovery chain, then fire every registered background callback once.
   for (let i = 0; i < 8; i++) await Promise.resolve();
   for (const timer of timers) await timer.fn();
-  return { calls, timers, notifications };
+  return { calls, timers, notifications, cleanupScheduled:context.state.tabCleanupScheduled };
 }
 
 test('gateway_no_send startup leaves historical application/notification obligations untouched', async () => {
@@ -83,12 +86,13 @@ test('health identifies startup hold separately from runtime sending readiness',
   assert.equal(build({ hermesTransport: 'gateway' }).startupBackgroundWorkHeld, false);
   assert.equal(build({ hermesTransport: 'cli' }).startupBackgroundWorkHeld, false);
 });
-test('incident startup schedules only coordinator-filtered applications and post-cutoff capture recovery, without notices',async()=>{
- const {calls,timers,notifications}=await boot('gateway',{recoveryHold:{file:'manifest'}});
- assert.deepEqual(calls,['ensure_directory','listen','gateway_coordinator','apply_history','supabase_recovery','gateway_coordinator','apply_history','supabase_recovery']);
- assert.equal(timers.length,1);assert.equal(timers[0].delay,30000);
+test('incident startup retains idle-window cleanup while historical customer actions and notices stay held',async()=>{
+ const {calls,timers,notifications,cleanupScheduled}=await boot('gateway',{recoveryHold:{file:'manifest'}});
+ assert.deepEqual(calls.filter(name=>name!=='tab_cleanup'),['ensure_directory','listen','gateway_coordinator','apply_history','supabase_recovery','gateway_coordinator','apply_history','supabase_recovery']);
+ assert.equal(cleanupScheduled,true);assert.equal(calls.filter(name=>name==='tab_cleanup').length,2);
+ assert.deepEqual(timers.map(timer=>timer.delay),[10000,30000,30000]);
  assert.deepEqual(notifications,{application:'pending',terminal:'pending'});
- for(const blocked of ['application_notifications','terminal_notifications','audit_import','slack_actions','notice_updates','p0_notifications','tab_cleanup','digest','notice_cleanup'])assert.ok(!calls.includes(blocked),blocked);
+ for(const blocked of ['application_notifications','terminal_notifications','audit_import','slack_actions','notice_updates','p0_notifications','digest','notice_cleanup'])assert.ok(!calls.includes(blocked),blocked);
 });
 test('no-send takes precedence over incident recovery and never schedules even the scoped recovery',async()=>{
  const {calls,timers}=await boot('gateway_no_send',{recoveryHold:{file:'manifest'}});

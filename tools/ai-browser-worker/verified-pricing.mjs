@@ -59,9 +59,18 @@ export function quoteNeedsSeparateVerification(decision = {}) {
   if (!tasks.length) return false;
   if (tasks.length > 1) return true;
   const [task] = tasks;
-  const scope = [task.title, task.summary, task.recommended_action, ...(task.evidence || [])].join(' ');
+  const targetKeys = [task.taskKey,task.task_key,task.businessKey,task.business_key].filter(Boolean).join(' ');
+  const boundRefs = new Set(targetKeys.match(/\b(?:RQ-)?\d{6}-\d{3}\b/g) || []);
+  const exactTarget = boundRefs.size === 1 && boundRefs.has(decision.price_quote?.id);
+  const customerRequest = [decision.latest_customer_message_cluster,
+    ...(task.evidence || []).filter(value => typeof value === 'string' && value.startsWith('customer_request:'))];
+  // A related RQ in supporting evidence is not another requested document.
+  // When the task is explicitly bound, inspect its requested scope; retain
+  // conservative evidence checking for legacy tasks without an exact binding.
+  const scope = [targetKeys,task.title,task.summary,task.recommended_action,...customerRequest,
+    ...(!exactTarget ? task.evidence || [] : [])].join(' ');
   const refs = new Set(scope.match(/\b(?:RQ-)?\d{6}-\d{3}\b/g) || []);
-  if (refs.size > 1) return true;
+  if (refs.size > 1 || (refs.size === 1 && decision.price_quote?.id && !refs.has(decision.price_quote.id))) return true;
   const request = [task.title, decision.latest_customer_message_cluster, task.suggested_reply_draft,
     ...(task.evidence || []).filter(value => typeof value === 'string' && value.startsWith('customer_request:'))].join(' ');
   const day = String.raw`\d{1,2}(?:\s*[/.\-]\s*|\s*월\s*)\d{1,2}(?:\s*일)?`;
@@ -141,15 +150,35 @@ export async function sendAutomaticPricingDocument({ config, decision, verificat
   try {
   if (!config.documentApiBaseUrl || !config.documentApiKey) throw new Error('quote_delivery_not_configured');
   await assertFresh?.();
-  const request = () => fetchImpl(config.documentApiBaseUrl, {method:'POST',headers:{'content-type':'application/json'},
-    body:JSON.stringify({...body,key:config.documentApiKey}),signal:AbortSignal.timeout(240000)});
-  let response = await request(), result = await response.json();
+  const serialized = JSON.stringify({...body,key:config.documentApiKey});
+  const deadline = Date.now() + 240000;
+  const request = async () => {
+    for (let attempt = 0; ; attempt++) {
+      if (attempt) { await waitImpl(1000 * 2**(attempt-1)); await assertFresh?.(); }
+      try {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new DOMException('Document transport timed out','TimeoutError');
+        const response = await fetchImpl(config.documentApiBaseUrl, {method:'POST',headers:{'content-type':'application/json'},
+          body:serialized,signal:AbortSignal.timeout(remaining)});
+        return {response,result:await response.json()};
+      } catch (error) {
+        // GAS atomically claims this operation before creating/sending. A
+        // byte-identical retry reads that receipt or claims a never-started
+        // operation; it cannot submit a second provider send. Never retry a
+        // returned OUTCOME_UNKNOWN or any business/validation error.
+        const transportFailure = error instanceof TypeError && /fetch failed|terminated|network/i.test(error.message)
+          || error?.name === 'SyntaxError';
+        if (attempt >= 2 || !transportFailure || Date.now() >= deadline) throw error;
+      }
+    }
+  };
+  let {response,result} = await request();
   // The server persists an accepted operation before returning QUEUED. Reusing
   // that exact operation only reads its provider outcome and cannot resend it.
   for (let attempt=0; !statement && response.ok && result.status==='QUEUED'
     && result.operationId===body.operationId && result.totalVatIncluded===verification.totalVatIncluded && attempt<5; attempt++) {
     await waitImpl(1000 * 2**attempt);
-    response=await request();result=await response.json();
+    ({response,result}=await request());
   }
   if (!response.ok || result.operationId !== body.operationId || (statement ? result.status!=='PREPARED' || result.documentType!=='statement' || result.tradeID!==body.id
       : result.status !== 'OK' || result.deliveryConfirmed !== true)
