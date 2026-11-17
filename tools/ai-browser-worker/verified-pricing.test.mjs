@@ -1,13 +1,49 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {createHash} from 'node:crypto';
 const privatePdf=Buffer.from('%PDF-1.7\n'+'.'.repeat(60));
 const privateAttachment={documentAccess:'private',mimeType:'application/pdf',ownerUrl:'https://docs.google.com/spreadsheets/d/statement-test/edit',pdfBase64:privatePdf.toString('base64'),pdfSha256:createHash('sha256').update(privatePdf).digest('hex')};
-import {automaticQuoteRequest,automaticStatementRequest,verifiedPricingIssue,verifiedPricingFreshJob,sendAutomaticPricingDocument,verifiedPricingConfigured,completeVerifiedPricingWork} from './verified-pricing.mjs';
+import {automaticQuoteRequest,automaticStatementRequest,verifiedPricingIssue,verifiedPricingFreshJob,sendAutomaticPricingDocument,verifiedPricingConfigured,completeVerifiedPricingWork,quoteNeedsSeparateVerification} from './verified-pricing.mjs';
 const quote={source:'catalog',customer_name:'테스트',phone:'01012345678',discount_type:'학생',start_date:'2026-11-03',start_time:'10:00',end_date:'2026-11-04',end_time:'10:00',items:[{name:'렌즈',quantity:1}]};
 const decision={customer:{name:'테스트'},price_quote:quote,reply_decision:{safetyClass:'sensitive_commitment',grounding:'authoritative_sheet',requiresRag:false}};
 const verification={complete:true,totalVatIncluded:7700,unresolved:[],calculations:[{discountType:'학생',customerDiscountSource:'conversation',pricedItems:[{name:'렌즈',price:10000,qty:1}],payment:{days:1}}]};
 const job={jobId:'event-one',roomKey:'room-one',roomRevision:2};
 const statementDecision={...decision,price_quote:{source:'trade',id:'261024-007'},statement_request:{trade_id:'261024-007',booking_customer_name:'테스트'}};
 const statementVerification={...verification,calculations:[{...verification.calculations[0],tradeId:'261024-007',customer:'테스트',phone:'01012345678',period:'2026-11-03 10:00 ~ 2026-11-04 10:00'}]};
+test('one exact quote is not a multi-quote request merely because its evidence mentions a related supply inquiry',()=>{
+ const task={type:'quote_send',taskKey:'quote-send:261024-007',title:'최종 구성 수정 견적서',
+  summary:'확인된 3종 기준의 동일 거래 견적서',recommended_action:'현재 거래의 공식 견적서를 발송',
+  evidence:['261024-007 현재 대여 내역과 최종 구성 일치','RQ-261113-005 추가 장비 미반출 확인으로 공급 검토 종료']};
+ const current={...statementDecision,statement_request:null,follow_up_items:[task]};
+ assert.equal(quoteNeedsSeparateVerification(current),false);
+ assert.equal(automaticQuoteRequest({decision:current,verification:statementVerification,job}).expectedTotal,7700);
+ assert.equal(quoteNeedsSeparateVerification({...current,follow_up_items:[{...task,summary:'261024-007 및 261024-008 견적서 두 건'}]}),true);
+ assert.equal(quoteNeedsSeparateVerification({...current,latest_customer_message_cluster:'11/3과 11/5 견적서 두 건 부탁드립니다'}),true);
+ assert.equal(quoteNeedsSeparateVerification({...current,follow_up_items:[{...task,taskKey:'quote:261024-007:261024-008'}]}),true);
+ assert.equal(quoteNeedsSeparateVerification({...current,follow_up_items:[{...task,taskKey:'quote:261024-008',evidence:[]}]}),true);
+ assert.equal(quoteNeedsSeparateVerification({...current,follow_up_items:[{...task,evidence:['customer_request:거래 261024-007과 261024-008 견적서 부탁드립니다.']}]}),true);
+ assert.equal(quoteNeedsSeparateVerification({...current,latest_customer_message_cluster:'거래 261024-007과 261024-008 견적서 부탁드립니다.'}),true);
+});
+test('lost quote transport responses reuse one durable operation without submitting a second provider send',async()=>{
+ let calls=0,providerSends=0,accepted=null;const waits=[],bodies=[];
+ const receipt=await sendAutomaticPricingDocument({config:{documentApiBaseUrl:'https://example.invalid/exec',documentApiKey:'test'},
+  decision:{...statementDecision,statement_request:null},verification:statementVerification,job,waitImpl:async ms=>waits.push(ms),
+  fetchImpl:async(_url,request)=>{
+   calls++;const body=JSON.parse(request.body);bodies.push(body);
+   if(!accepted){providerSends++;accepted={status:'OK',operationId:body.operationId,deliveryConfirmed:true,
+    totalVatIncluded:7700,pdfUrl:'https://drive.google.com/file/d/test/view'};throw new TypeError('fetch failed',{cause:{code:'UND_ERR_SOCKET'}});}
+   return {ok:true,json:async()=>accepted};
+  }});
+ assert.equal(receipt.deliveryConfirmed,true);assert.equal(calls,2);assert.equal(providerSends,1);
+ assert.deepEqual(bodies[0],bodies[1]);assert.deepEqual(waits,[1000]);
+});
+test('transport recovery stays bounded and a fresh-room failure prevents another request',async()=>{
+ let calls=0;const options={config:{documentApiBaseUrl:'https://example.invalid/exec',documentApiKey:'test'},decision:{...statementDecision,statement_request:null},
+  verification:statementVerification,job,waitImpl:async()=>{},fetchImpl:async()=>{calls++;throw new TypeError('fetch failed');}};
+ await assert.rejects(sendAutomaticPricingDocument(options),error=>error.message==='fetch failed'&&/^[a-f0-9]{64}$/.test(error.operationId));
+ assert.equal(calls,3);
+ calls=0;let checks=0;
+ await assert.rejects(sendAutomaticPricingDocument({...options,assertFresh:async()=>{if(++checks>1)throw Error('superseded');}}),/superseded/);
+ assert.equal(calls,1);
+});
 test('quote and statement recipients accept a mobile number stored numerically in Sheets',()=>{
  const canonicalQuote=automaticQuoteRequest({decision:statementDecision,verification:statementVerification,job});
  const canonicalStatement=automaticStatementRequest({decision:statementDecision,verification:statementVerification,job});

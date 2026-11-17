@@ -6192,6 +6192,10 @@ export function timeoutPromise(ms, message) {
   });
 }
 
+export async function inspectKakaoConversationDraft(target, options = {}) {
+  return devtoolsEvaluateOnTarget(target,buildOwnedDraftInspectionExpression(),options);
+}
+
 async function devtoolsEvaluateOnTarget(target, expression, {
   timeoutMs = 15000,
   WebSocketImpl = globalThis.WebSocket

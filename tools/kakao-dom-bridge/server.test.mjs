@@ -53,6 +53,7 @@ const {
   createGatewayConfirmationValidator,
   createGatewayDocumentExecutor,
   resolveGatewayDocumentConfig,
+  startKakaoTabCleanupRuntime,
   createGatewayApplicationFailureNotifier,
   createGatewayFailureNotificationCoordinator,
   createKakaoAutomationAuditCoordinator,
@@ -6530,7 +6531,7 @@ test('bridge queue replaces pending same-room work and cleans conversation tabs 
   assert.match(source, /cleanupIdleKakaoConversationTabs\('worker_finished', \{ allowQueued: true \}\)/);
 });
 
-async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 0 }, application_counts: {} }], activeWorkerRuns = 0, sharedIdle = [true], tabSnapshots = [tabs], onStatusRead = async () => {} }) {
+async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 0 }, application_counts: {} }], activeWorkerRuns = 0, sharedIdle = [true], tabSnapshots = [tabs], onStatusRead = async () => {}, draftState = false, onDraftRead = () => {} }) {
   const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
   const extract = (name) => {
     const start = source.indexOf(`function ${name}(`);
@@ -6549,13 +6550,14 @@ async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 
     if (value instanceof Error) throw value;
     return value;
   } };
-  const cleanup = new Function('CONFIG', 'state', 'gatewayChannel', 'fetchDevtools', 'closeDevtoolsTab', 'nowIso', 'appendNdjson', 'isSharedHermesGatewayIdle',
+  const cleanup = new Function('CONFIG', 'state', 'gatewayChannel', 'fetchDevtools', 'closeDevtoolsTab', 'nowIso', 'appendNdjson', 'isSharedHermesGatewayIdle', 'inspectKakaoConversationDraft',
     `${extract('isMainKakaoChatListUrl')}\n${extract('isKakaoConversationUrl')}\n${extract('cleanupIdleKakaoConversationTabs')}\nreturn cleanupIdleKakaoConversationTabs;`)(
     { kakaoTabCleanupEnabled: true }, state, channel,
     async () => ({ ok: true, json: async () => tabSnapshots[Math.min(tabReads++, tabSnapshots.length - 1)] }),
     async (id) => { closed.push(id); return true; },
     () => '2026-09-07T13:53:04.000Z', (name, value) => audits.push(compactQueueAuditRecord(name, value)),
-    () => sharedIdle[Math.min(sharedReads++, sharedIdle.length - 1)]
+    () => sharedIdle[Math.min(sharedReads++, sharedIdle.length - 1)],
+    async target => {await onDraftRead(state);return {href:target.url,hasDraft:draftState};}
   );
   const result = await cleanup('interval');
   return { result, closed, statusReads, audits };
@@ -6563,6 +6565,35 @@ async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 
 
 const cleanupMainTab = { type: 'page', id: 'main', url: 'https://business.kakao.com/space/123/channel/_test/chats' };
 const cleanupConversationTab = { type: 'page', id: 'conversation', url: 'https://business.kakao.com/space/123/channel/_test/chats/456' };
+
+test('cleanup scheduling is independent of historical recovery and no-send never closes tabs',async()=>{
+ const callbacks=[],closed=[];
+ const dependencies={cleanup:async reason=>closed.push(reason),
+  setTimeoutImpl:(fn,delay)=>{callbacks.push({fn,delay});return{unref(){}};},
+  setIntervalImpl:(fn,delay)=>{callbacks.push({fn,delay});return{unref(){}};}};
+ assert.equal(startKakaoTabCleanupRuntime({hermesTransport:'gateway',kakaoTabCleanupEnabled:true,kakaoTabCleanupIntervalMs:120000},dependencies).started,true);
+ assert.deepEqual(callbacks.map(c=>c.delay),[10000,120000]);
+ await callbacks[0].fn();await callbacks[1].fn();assert.deepEqual(closed,['startup','interval']);
+ for(const config of [{hermesTransport:'gateway_no_send',kakaoTabCleanupEnabled:true},{hermesTransport:'gateway',kakaoTabCleanupEnabled:false}]){
+  callbacks.length=0;assert.equal(startKakaoTabCleanupRuntime(config,dependencies).started,false);assert.deepEqual(callbacks,[]);
+ }
+});
+
+test('idle cleanup never discards a customer draft or a room whose draft state is unknown',async()=>{
+ for(const draftState of [true,null,undefined]){
+  const {closed}=await syntheticIdleTabCleanup({tabs:[cleanupMainTab,cleanupConversationTab],draftState:draftState===undefined?'unknown':draftState});
+  assert.deepEqual(closed,[]);
+ }
+});
+
+test('cleanup preserves a tab when a worker or Gateway starts during draft inspection',async()=>{
+ const tabs=[cleanupMainTab,cleanupConversationTab];
+ const local=await syntheticIdleTabCleanup({tabs,onDraftRead:state=>{state.workerRunning=true;state.activeWorkerRuns=1;}});
+ assert.deepEqual(local.closed,[]);
+ const statuses=[{counts:{claimed:0},application_counts:{}}];
+ const remote=await syntheticIdleTabCleanup({tabs,statuses,onDraftRead:()=>{statuses[0]={counts:{claimed:1},application_counts:{}};}});
+ assert.deepEqual(remote.closed,[]);
+});
 
 test('idle Kakao cleanup preserves Slack Hermes work even when the Kakao Gateway is idle', async () => {
   for (const sharedIdle of [[false], [true, false], [true, true, false]]) {
