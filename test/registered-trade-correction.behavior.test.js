@@ -327,10 +327,12 @@ function harness({
     calls.reads += 1;
     return calls.reads === 1 ? baseline : (finalState || successState(finalContractStatus));
   };
-  if (!useRealRemovalPreflight) {
+  if (useRealRemovalPreflight) {
+    vm.runInNewContext(section(gas, 'function resolveDashboardRemovalRows_', '\nfunction dashboardRemoveEquipment('), context);
+  } else {
     context.preflightRegisteredTradeRemoval_ = (_state, removals) => {
       calls.preflight.push('remove');
-      return { success: true, scheduleIds: (removals || []).length ? ['260813-005-01'] : [] };
+      return { success: true, scheduleIds: (removals || []).length ? ['260813-005-01'] : [], directRemovals: removals || [] };
     };
   }
   if (!useRealVerification) {
@@ -505,6 +507,29 @@ test('component replacement is typed blocked before add preflight or any write',
   assert.equal(result.code, 'UNSAFE_COMPONENT_READD');
   assert.deepEqual(calls.preflight, []);
   assertNoWriteSideEffects(calls);
+});
+
+test('whole-set replacement validates redundant child fences and submits only the exact parent', () => {
+  const row = (id, name) => ({ scheduleId: '260813-005-' + id, setName: 'Cinema Set',
+    name, qty: 1, isComponent: name !== 'Cinema Set' });
+  const rows = [row('01', 'Cinema Set'), row('02', 'Battery'), row('03', 'Cable'),
+    row('04', 'Cinema Set'), row('05', 'Battery')];
+  const remove = (index) => ({ scheduleId: rows[index].scheduleId, expectedName: rows[index].name, expectedQty: 1 });
+  function run(removals) {
+    const h = harness({ baselineRows: rows, useRealRemovalPreflight: true,
+      expectedExcludeScheduleIds: [rows[1].scheduleId, rows[0].scheduleId, rows[2].scheduleId] });
+    return { result: h.context.correct({ tradeId: input.tradeId, operationId: input.operationId,
+      remove: removals, add: [{ name: 'New Set', qty: 1 }] }), calls: h.calls };
+  }
+  const ok = run([remove(1), remove(0)]);
+  assert.equal(ok.result.success, true, ok.result.error);
+  assert.deepEqual(Array.from(ok.calls.removeEntries, entry => entry.scheduleId), [rows[0].scheduleId]);
+  const stale = run([{ ...remove(1), expectedQty: 2 }, remove(0)]);
+  assert.match(stale.result.error, /수량/);
+  assertNoWriteSideEffects(stale.calls);
+  const unrelated = run([remove(1), remove(0), remove(4)]);
+  assert.equal(unrelated.result.code, 'UNSAFE_COMPONENT_READD');
+  assertNoWriteSideEffects(unrelated.calls);
 });
 
 test('component removal-only keeps the surrounding set and removes only the exact component row', () => {

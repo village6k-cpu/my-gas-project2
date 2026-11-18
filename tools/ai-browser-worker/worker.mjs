@@ -10849,10 +10849,30 @@ function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
   if (!sameGatewayDecisionValue(before.contract, expectedPeriod)
     || !sameGatewayDecisionValue(after.contract, desiredPeriod)) return false;
 
+  const removedIds = new Set();
+  const coveredByHeader = new Set();
+  for (const expected of mutation.expected_before) {
+    const scheduleId = text(expected?.schedule_id).trim();
+    const current = before.rowsById.get(scheduleId);
+    if (!current || current.name !== text(expected?.name).trim()
+      || current.qty !== Number(expected?.quantity)) return false;
+    const targetIndex = before.rows.indexOf(current);
+    removedIds.add(scheduleId);
+    if (!current.isComponent) {
+      const setKey = current.setName || current.name;
+      for (let index = targetIndex + 1; index < before.rows.length; index += 1) {
+        const following = before.rows[index];
+        if (!following.isComponent || following.setName !== setKey) break;
+        removedIds.add(following.scheduleId);
+        coveredByHeader.add(following.scheduleId);
+      }
+    }
+  }
+
   if (Array.isArray(mutation?.desired_after) && mutation.desired_after.length > 0) {
     const componentRewriteRequested = (mutation.expected_before || []).some((expected) => {
       const current = before.rowsById.get(text(expected?.schedule_id).trim());
-      return current?.isComponent === true;
+      return current?.isComponent === true && !coveredByHeader.has(current.scheduleId);
     });
     if (componentRewriteRequested) {
       if (mutation.kind !== 'equipment_replace' || mutation.date_change !== null ||
@@ -10877,23 +10897,6 @@ function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
   const additionDelta = registeredMutationDeltaQuantities(mutation?.desired_after);
   if (!additionDelta) return false;
   const projectedTopLevel = { ...before.topLevel };
-  const removedIds = new Set();
-  for (const expected of mutation.expected_before) {
-    const scheduleId = text(expected?.schedule_id).trim();
-    const current = before.rowsById.get(scheduleId);
-    if (!current || current.name !== text(expected?.name).trim()
-      || current.qty !== Number(expected?.quantity)) return false;
-    const targetIndex = before.rows.indexOf(current);
-    removedIds.add(scheduleId);
-    if (!current.isComponent) {
-      const setKey = current.setName || current.name;
-      for (let index = targetIndex + 1; index < before.rows.length; index += 1) {
-        const following = before.rows[index];
-        if (!following.isComponent || following.setName !== setKey) break;
-        removedIds.add(following.scheduleId);
-      }
-    }
-  }
   for (const scheduleId of removedIds) {
     const row = before.rowsById.get(scheduleId);
     if (row.isComponent) continue;

@@ -29,3 +29,37 @@ test('real runner posts the existing status route and requires cancelled readbac
   assert.equal(calls,1);
  }
 });
+
+test('real runner retries only operation-bound pre-write contention and reuses the exact cancellation', async () => {
+  const {runRegisteredTradeCorrection} = await import('../../scripts/windows/village-registered-trade-correction.js');
+  const input = buildRegisteredTradeCorrectionInput(mutation, '11111111-2222-4333-8444-555555555555');
+  const busy = {
+    success: false, error: 'busy', code: 'BUSY', retryable: true, tradeId: input.tradeId, operationId: input.operationId,
+    noMutationPerformed: true, outcomeUnknown: false, attemptedStage: 'preflight', attemptedStageState: 'not_started', appliedStages: []
+  };
+  const before = {contract: {...input.expectedPeriod,status:'예약'},schedule:{rows:[{scheduleId:'260901-003-01',name:'카메라',qty:1}],periods:[],topLevelQuantities:{'카메라':1}}};
+  const after = {contract:{...before.contract,status:'취소'},schedule:{rows:[],periods:[],topLevelQuantities:{}}};
+  const success = {success:true,tradeId:input.tradeId,operationId:input.operationId,customerNotificationSent:false,readback:after,authoritativeReadback:{before,after}};
+  const config = {VILLAGE2_API_URL:'https://script.google.com/macros/s/test/exec',VILLAGE2_API_KEY:'test'};
+  async function simulate(replies, expectedCalls, shouldSucceed) {
+    const requests = [], delays = [];
+    const run = runRegisteredTradeCorrection({config,input,waitForRetry:async ms=>{delays.push(ms);},fetchImpl:async(url,opts)=>{
+      requests.push(opts.body);
+      const result = replies[Math.min(requests.length-1,replies.length-1)];
+      if (result instanceof Error) throw result;
+      return {ok:true,json:async()=>result};
+    }});
+    if (shouldSucceed) assert.equal((await run).verified,true); else await assert.rejects(run);
+    assert.equal(requests.length,expectedCalls);
+    assert.equal(new Set(requests).size,1);
+    assert.equal(delays.length,expectedCalls-1);
+  }
+  await simulate([busy,busy,success],3,true);
+  await simulate([busy],6,false);
+  await simulate([busy,{error:'취소 대상 스케줄이 변경되었습니다'}],2,false);
+  for (const override of [{operationId:'different'}, {tradeId:'260901-004'}, {retryable:false},
+    {noMutationPerformed:false}, {outcomeUnknown:true}, {attemptedStageState:'unknown'}, {appliedStages:['status']}]) {
+    await simulate([{...busy,...override}],1,false);
+  }
+  await simulate([new Error('disconnected after request')],1,false);
+});

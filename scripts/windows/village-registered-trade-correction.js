@@ -419,13 +419,24 @@ async function postAction({ config, fetchImpl, timeoutMs, stage, body, appliedSt
     const serverAppliedStages = Array.isArray(payload?.appliedStages)
       ? payload.appliedStages.map((value) => String(value || '').trim()).filter(Boolean)
       : [];
+    const details = correctionFailureDetails(payload);
+    // Only the locked cancellation route can attest that this exact attempt never started.
+    if (body.action === 'updateContractStatus' && body.status === '취소' && body.expectedCancellation
+        && payload?.code === 'BUSY' && payload.retryable === true && payload.success === false
+        && payload.tradeId === body.tid && payload.operationId === body.expectedCancellation.operationId
+        && payload.outcomeUnknown === false && payload.noMutationPerformed === true
+        && payload.attemptedStage === 'preflight' && payload.attemptedStageState === 'not_started'
+        && Array.isArray(payload.appliedStages) && payload.appliedStages.length === 0 && !appliedStages.length) {
+      details.retryableCancellation = true;
+      details.attemptedStageState = 'not_started';
+    }
     throw new CorrectionStageError(
       stage,
       `${stage} ${explicitFailure ? 'failed' : 'outcome is unknown'}: ${String(payload?.error || payload?.message || payload?.status || 'no explicit success')}`,
       {
         outcomeUnknown: payload?.outcomeUnknown === true || !explicitFailure,
         appliedStages: serverAppliedStages.length ? serverAppliedStages : appliedStages,
-        details: correctionFailureDetails(payload),
+        details,
       }
     );
   }
@@ -536,18 +547,36 @@ function verifyCustomSetAddReadback(normalized, payload) {
   return true;
 }
 
+async function postConfirmedCancellation(options, waitForRetry) {
+  const deadline = Date.now() + options.timeoutMs;
+  const delays = [1000, 3000, 7000, 15000, 30000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await postAction({ ...options, timeoutMs: Math.max(1, deadline - Date.now()) });
+    } catch (error) {
+      const delay = delays[attempt];
+      // Resubmit the same approval and operation ID. The server checks status, checkout,
+      // period and every schedule row again under its lock before each write.
+      if (!error.details?.retryableCancellation || delay === undefined ||
+          deadline - Date.now() <= delay + 30000) throw error;
+      await waitForRetry(delay);
+    }
+  }
+}
+
 async function runRegisteredTradeCorrection({
   config,
   input,
   fetchImpl = globalThis.fetch,
-  timeoutMs = 240_000
+  timeoutMs = 240_000,
+  waitForRetry = ms => new Promise(resolve => setTimeout(resolve, ms))
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
   const normalized = normalizeCorrectionInput(input);
   const appliedStages = [];
   if (normalized.cancel) {
-    const payload = await postAction({config, fetchImpl, timeoutMs, stage:'updateContractStatus', appliedStages,
-      body:{action:'updateContractStatus',tid:normalized.tradeId,status:'취소',expectedCancellation:{operationId:normalized.operationId,expectedPeriod:normalized.expectedPeriod,expectedRows:normalized.remove,staffApproval:normalized.staffApproval}}});
+    const payload = await postConfirmedCancellation({config, fetchImpl, timeoutMs, stage:'updateContractStatus', appliedStages,
+      body:{action:'updateContractStatus',tid:normalized.tradeId,status:'취소',expectedCancellation:{operationId:normalized.operationId,expectedPeriod:normalized.expectedPeriod,expectedRows:normalized.remove,staffApproval:normalized.staffApproval}}}, waitForRetry);
     const {exactRegisteredCancellationReadback}=await import('../../tools/ai-browser-worker/reservation-cancellation-readback.mjs');
     const expected={trade_id:normalized.tradeId,expected_period:{start_date:normalized.expectedPeriod.startDate,start_time:normalized.expectedPeriod.startTime,end_date:normalized.expectedPeriod.endDate,end_time:normalized.expectedPeriod.endTime},expected_before:normalized.remove.map(r=>({schedule_id:r.scheduleId,name:r.expectedName,quantity:r.expectedQty}))};
     if(payload.tradeId!==normalized.tradeId || payload.operationId!==normalized.operationId || payload.customerNotificationSent!==false
