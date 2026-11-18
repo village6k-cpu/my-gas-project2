@@ -7,7 +7,7 @@ import { templateFor, registeredPart } from "@/lib/domain/packingCatalog";
 import { savePacking, savePackingCheck, syncPackingPreparation } from "@/lib/data/store";
 import { packingDeviceName, packingDeviceReplacements, packingReplacementEntries } from "@/lib/domain/packing";
 
-type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
+type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; pendingEntries: ReadonlyMap<string, Partial<PackingEntry>>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
 const PackingContext = createContext<PackingContextValue | null>(null);
 const button = "tap rounded-lg px-3 py-2 text-sm font-bold ring-1 ring-line disabled:opacity-40";
 
@@ -15,6 +15,8 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const trade = packingPreparationTrade(savedTrade, phase);
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(0);
+  const [pendingEntries, setPendingEntries] = useState<ReadonlyMap<string, Partial<PackingEntry>>>(new Map());
+  const pendingIds = useRef(new Set<string>());
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<PackingEntry | null>(null);
   const [editingBase, setEditingBase] = useState<PackingManifest>();
@@ -59,7 +61,28 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   };
   const save = (entries: PackingEntry[], base?: PackingManifest) => run({ action: "save", entries, note: p?.note ?? "" }, base?.version ?? p?.version ?? 0, base);
   const openEditor = (entry: PackingEntry) => { setEditing(entry); setEditingBase(p); };
-  const update = (e: PackingEntry, patch: Partial<PackingEntry>) => save(p!.entries.map(row => row.id === e.id ? { ...row, ...patch } : row));
+  const update = async (entry: PackingEntry, patch: Partial<PackingEntry>) => {
+    if (!p || busy || pendingIds.current.has(entry.id)) return false;
+    const entries = p.entries.map(row => row.id === entry.id ? { ...row, ...patch } : row);
+    if (onCommand) return save(entries, p);
+    pendingIds.current.add(entry.id);
+    setPendingEntries(current => new Map(current).set(entry.id, patch));
+    setError("");
+    try {
+      await savePacking(trade.tradeId, p.version, { action: "save", entries, note: p.note }, p);
+      return true;
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "구성품 변경을 저장하지 못했습니다");
+      return false;
+    } finally {
+      pendingIds.current.delete(entry.id);
+      setPendingEntries(current => {
+        const remaining = new Map(current);
+        remaining.delete(entry.id);
+        return remaining;
+      });
+    }
+  };
   if (!p && (phase === "checkin" || packingStarted(trade) || !packingAvailable(trade))) return <>{children}</>;
   const groups = packingGroups(p);
   const unresolvedQty = p?.entries.filter(e=>e.unresolved).reduce((n,e)=>n+e.qty,0) ?? 0;
@@ -72,7 +95,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
     catch (error) { setError(error instanceof Error ? error.message : "체크 저장 실패. 다시 확인해주세요"); }
     finally { setChecking(n => n - 1); }
   };
-  const context = { trade, devices, entriesByOwner, busy, checkBusy: busy, check, update, open: openEditor, run };
+  const context = { trade, devices, entriesByOwner, pendingEntries, busy, checkBusy: busy, check, update, open: openEditor, run };
   return <PackingContext.Provider value={context}><section aria-label="구성품 검수" className="mb-3">
     <div className="flex flex-wrap items-center justify-between gap-2 bg-brand-50 px-3 py-3">
       <div><h3 className="text-sm font-extrabold text-brand-700">구성품 검수</h3>
@@ -80,9 +103,9 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
     </div>
     <div aria-live="polite">{error && <p role="alert" className="m-3 rounded-lg bg-attention-bg p-2 text-sm font-bold text-attention-fg">{error}{autoCommand && <button className={`${button} ml-2 bg-white`} onClick={() => setSyncRetry(n => n + 1)}>다시 시도</button>}</p>}</div>
     {!p && children}
-    {p && <fieldset disabled={busy} className="min-w-0 disabled:opacity-60">
+    {p && <div className="min-w-0">
       {phase === "checkout" ? <>
-        {reservationChanges.length > 0 && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm" role="status"><p className="font-bold">예약 변경을 반영하고 있습니다…</p><p>{reservationChanges.join(" / ")}</p></div>}
+        {reservationChanges.length > 0 && <div className="m-3 rounded-lg bg-warn-bg p-3 text-sm" role="status"><p className="font-bold">{autoCommand ? "구성품 목록에 반영 중" : "예약과 반출 구성품이 다릅니다"}</p><p>{reservationChanges.join(" / ")}</p></div>}
         {packingNeedsUpgrade(p) ? <div className="my-3 rounded-lg bg-warn-bg p-3 text-sm"><p>구성품 목록을 업데이트하고 있습니다…</p></div> : null}
         {children ?? devices.map(device => <div key={device.scheduleId} className="my-3 rounded-xl border border-line p-3"><h4 className="font-extrabold">{packingDeviceName(trade, device)}</h4><PackingDevice ownerId={device.scheduleId} /></div>)}
         {p.entries.some(e => !e.ownerId) && !packingNeedsUpgrade(p) && <PackingDevice />}
@@ -103,16 +126,17 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
         const memo = trade.equipments.find(e => e.scheduleId === s.id)?.memoCheckout;
         return memo ? <p key={s.id} className="rounded-lg bg-warn-bg p-2 text-sm whitespace-pre-wrap"><strong>{s.name} 메모</strong><br />{memo}</p> : null;
       })}</div>}
-    </fieldset>}
+    </div>}
     {phase === "checkin" && children}
     {editing && p && <PackingEditor key={editing.id} entry={editing} entries={p.entries} devices={devices.map(e=>({id:e.scheduleId,name:packingDeviceName(trade, e)}))} busy={busy} error={error} onClose={() => setEditing(null)} onSave={async (entry, add) => {
-      const exists = p.entries.some(e => e.id === entry.id);
+      const original = editingBase?.entries ?? p.entries;
+      const exists = original.some(e => e.id === entry.id);
       let updated = entry;
       if (add && exists) { const id = crypto.randomUUID(); updated = { ...entry, id, partId: entry.custom ? `custom:${id}` : entry.partId, sourceId: undefined }; }
-      const entries = add || !exists ? [...p.entries, updated] : p.entries.map(e => e.id === entry.id ? updated : e);
+      const entries = add || !exists ? [...original, updated] : original.map(e => e.id === entry.id ? updated : e);
       if (await save(entries, editingBase)) setEditing(null);
     }} />}
-    <p className="h-6 px-3 text-xs text-brand-700" role="status">{busy || checking > 0 ? "저장 중…" : ""}</p>
+    <p className="h-6 px-3 text-xs text-brand-700" role="status">{busy || checking > 0 || pendingEntries.size > 0 ? "저장 중…" : ""}</p>
   </section></PackingContext.Provider>;
 }
 
@@ -120,7 +144,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
 export function PackingDevice({ ownerId, common = false }: { ownerId?: string; common?: boolean }) {
   const ctx = useContext(PackingContext);
   if (!ctx?.trade.packing) return null;
-  const { trade, devices, entriesByOwner, busy, checkBusy, check, update, open, run } = ctx;
+  const { trade, devices, entriesByOwner, pendingEntries, busy, checkBusy, check, update, open, run } = ctx;
   const p=trade.packing!;
   if (packingNeedsUpgrade(p)) return null;
   const owner=devices.find(e=>e.scheduleId===ownerId);
@@ -147,16 +171,19 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
     {(!modelNeeded || p.deviceModels?.[ownerId!]) && existingVideo.length>0 && <label className="mb-2 block rounded-lg bg-warn-bg p-2 text-xs font-bold">기존 영상선 연결 (추가 수량 없음)
       <select aria-label="기존 영상선 연결" value="" disabled={busy || p.phase!=="draft"} onChange={event=>{const row=existingVideo.find(e=>e.id===event.target.value);if(row) update(row,{ownerId,device,checked:false});}} className="mt-1 w-full rounded border border-line bg-white p-2 text-sm"><option value="" disabled>이 장비에 연결할 선 선택</option>{existingVideo.map(e=><option key={e.id} value={e.id}>{e.name} ×{e.qty}</option>)}</select>
     </label>}
-    {(!replacement ? entries : []).map(e=><div key={e.id} className="border-b border-line/50 py-2 last:border-0">
+    {(!replacement ? entries : []).map(saved => {
+      const patch = pendingEntries.get(saved.id);
+      const e = patch ? { ...saved, ...patch } : saved;
+      return <fieldset key={e.id} disabled={!!patch} aria-busy={!!patch} className="border-b border-line/50 py-2 last:border-0">
       <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={checkBusy || e.qty === 0 || p.phase !== "draft" || (modelNeeded && !p.deviceModels?.[ownerId!])} aria-haspopup={e.unresolved ? "dialog" : undefined} title={e.unresolved ? "실제로 챙기는 종류를 먼저 선택해주세요" : undefined} onClick={()=>e.unresolved ? open(e) : check(e)} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : e.unresolved && e.qty > 0 ? "?" : ""}</button>
-        <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.custom && <span className="ml-1 text-xs text-ink-mute">직접 입력</span>}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span><strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>
+        <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.custom && <span className="ml-1 text-xs text-ink-mute">직접 입력</span>}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span>{patch && <span className="text-xs text-ink-mute" role="status">저장 중</span>}<strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>
       {p.phase === "draft" && <div className="mt-1 flex flex-wrap gap-1 pl-8"><button disabled={busy} className={`${button} text-brand-700`} onClick={()=>open(e)}>{e.unresolved ? "종류 선택" : "교체·수량"}</button><button disabled={busy} className={`${button} text-ink-mute`} onClick={()=>update(e,{qty:e.qty?0:1,checked:false})}>{e.qty ? "제외" : "포함"}</button></div>}
       {p.phase === "draft" && e.unresolved && e.qty > 0 && <div className="mt-2 rounded-lg bg-warn-bg p-2 text-xs font-bold text-warn-fg"><p>실제로 챙기는 종류를 선택한 뒤 준비 확인해주세요.</p><div className="mt-2 flex flex-wrap gap-2">{["SDI", "HDMI"].map(kind => {
         const name = e.name.replace(/SDI\s*(?:or|\/)\s*HDMI/i, kind);
         const part = name !== e.name ? registeredPart(name) : undefined;
         return part ? <button key={kind} disabled={busy} className={`${button} bg-white`} onClick={()=>update(e,{name:part.name,partId:part.id,checked:false})} aria-label={`${e.device} ${kind} ${e.qty}개 선택`}>{kind} {e.qty}개</button> : null;
       })}</div></div>}
-    </div>)}
+    </fieldset>; })}
     {p.phase === "draft" && <button className="tap mt-2 text-xs font-bold text-brand-700" disabled={busy || (modelNeeded && !p.deviceModels?.[ownerId!])} onClick={()=>{const id=crypto.randomUUID();open({id,ownerId,device,name:"",partId:"",qty:1,checked:false});}}>+ 구성품 추가</button>}
   </div>;
 }

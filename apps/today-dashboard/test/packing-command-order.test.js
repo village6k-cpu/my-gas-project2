@@ -24,8 +24,9 @@ function harness() {
   const mod={exports:{}};
   const queue = load('lib/data/packingCheckQueue.ts').createPackingCheckQueue({read:()=>state.trades[0],show:(_,packing)=>{state.trades[0]={...state.trades[0],packing}},persist:async()=>{throw new Error('unexpected check')},start:()=>()=>{},recover:async()=>{}});
   const ctx={module:mod,exports:mod.exports,state,packingCheckQueue:queue,activeTradeTransitions:new Set(),pendingRemoveEquipmentTrades:new Set(),hasTradePending:()=>true,
+    awaitPendingOnsiteAdds_: async () => {},
     settlePackingDependencies_:async()=>{},rebasePackingCommand:load("lib/data/packingCommand.ts").rebasePackingCommand,packingPreparationTrade:domain.packingPreparationTrade,packingPreparationCommand:domain.packingPreparationCommand,transitionPacking:domain.transitionPacking,optimisticPackingCheck:domain.optimisticPackingCheck,
-    beginTradeTransition:()=>1,finishTradeSave:()=>{},AbortSignal,Date,structuredClone,
+    beginTradeSave:()=>1,beginTradeTransition:()=>1,finishTradeSave:()=>{},AbortSignal,Date,structuredClone,
     mutateTrade:(_,fn)=>{state.trades[0]=fn(state.trades[0])},fetchTradesByIds:async()=>[],mergeTradeChanges:(_,fresh)=>fresh,set:patch=>Object.assign(state,patch),
     authFetch:async(url,options)=>{const body=JSON.parse(options.body);requests.push(body);return {ok:true,json:async()=>({packing:domain.transitionPacking(state.trades[0],body.command,new Date().toISOString())})}}
   };

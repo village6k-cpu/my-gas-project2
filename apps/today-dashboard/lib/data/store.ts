@@ -1794,7 +1794,7 @@ function applyContractMutationResult(tradeId: string, raw: unknown, fallbackRemo
   mutateTrade(tradeId, (t) => ({
     ...t,
     equipments: removedSet.size ? t.equipments.filter((e) => !removedSet.has(e.scheduleId)) : t.equipments,
-    ...(result.packing ? { packing: result.packing } : {}),
+    ...(result.packing && result.packing.version > (t.packing?.version ?? -1) ? { packing: result.packing } : {}),
     amount: amount ?? t.amount,
     contractUrl: url || t.contractUrl || null,
     contractRegenPending: !!result.contractRegenPending && !url,
@@ -2395,6 +2395,7 @@ export function savePackingCheck(tradeId: string, entryId: string, checked: bool
 
 /** 구성품 사실에 영향을 주는 저장만 기다린다. 결제/메모 저장은 검수를 막지 않는다. */
 async function settlePackingDependencies_(tradeId: string, seal = false): Promise<void> {
+  if (seal) await awaitPendingOnsiteAdds_(tradeId);
   while (activeTradeTransitions.has(tradeId)) {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { unsubscribe(); reject(new Error("이전 장비 변경의 서버 응답이 지연되고 있습니다")); }, 60_000);
@@ -2446,14 +2447,17 @@ export async function savePacking(tradeId: string, version: number, command: Pac
 async function persistPackingCommand_(tradeId: string, version: number, command: PackingCommand): Promise<void> {
   const before = state.trades.find(t => t.tradeId === tradeId);
   const preview=before ? optimisticPackingCheck(before,version,command) : undefined;
-  const saveId = beginTradeTransition(tradeId);
+  // 준비 목록의 편집은 자체 버전 큐에서 직렬화한다. 다른 장비의 반출 체크는 계속 받는다.
+  const saveId = command.action === "seal" || command.action === "revise"
+    ? beginTradeTransition(tradeId)
+    : beginTradeSave(tradeId);
   if (preview) mutateTrade(tradeId,t=>({...t,packing:preview}),false);
   try {
     const response = await authFetch("/api/packing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tradeId, version, command }), signal: AbortSignal.timeout(20_000) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "구성품 저장 실패");
     if (!result.packing || result.packing.version !== version + 1 || !Array.isArray(result.packing.entries)) throw new Error("구성품 저장 응답을 확인할 수 없습니다");
-    mutateTrade(tradeId, t => ({ ...t, packing: result.packing }), false);
+    mutateTrade(tradeId, t => (t.packing?.version ?? 0) > result.packing.version ? t : { ...t, packing: result.packing }, false);
     finishTradeSave(tradeId, saveId, "saved", "구성품 저장됨");
   } catch (error) {
     // 조회까지 실패해도 저장되지 않은 체크를 완료처럼 남기지 않는다.
@@ -2488,6 +2492,11 @@ export async function syncPackingPreparation(tradeId: string): Promise<void> {
 }
 
 export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
+  try {
+    await awaitPendingOnsiteAdds_(tradeId);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "현장 추가 저장 상태를 확인해주세요" };
+  }
   // 완료 클릭을 버리지 않는다. 마지막 체크와 제외를 확정한 뒤 최신 버전으로 준비를 확정한다.
   if (!activeTradeTransitions.has(tradeId)) {
     try {
@@ -2555,6 +2564,11 @@ export type ToggleReturnResult =
   | { ok: false; blockers: ReturnCompletionBlocker[]; error: string };
 
 export async function toggleReturn(tradeId: string, opts?: { force?: boolean }): Promise<ToggleReturnResult> {
+  try {
+    await awaitPendingOnsiteAdds_(tradeId);
+  } catch (error) {
+    return { ok: false, blockers: [], error: error instanceof Error ? error.message : "현장 추가 저장 상태를 확인해주세요" };
+  }
   if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
     return {
       ok: false,
@@ -4356,7 +4370,14 @@ function applyGasOnsiteItems_(
   }), false);
 }
 
-export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settlement: Settlement, externalSupplyQty = 0) {
+const onsiteAddsByTrade = new Map<string, Map<string, Promise<void>>>();
+
+async function awaitPendingOnsiteAdds_(tradeId: string): Promise<void> {
+  const pending = onsiteAddsByTrade.get(tradeId);
+  if (pending) await Promise.all([...pending.values()]);
+}
+
+export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settlement: Settlement, externalSupplyQty = 0, onWriting?: () => void) {
   if (!isSupabase) {
     addOnsiteItemsLocal(tradeId, entries, settlement);
     return;
@@ -4367,77 +4388,117 @@ export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], se
 
   // 세트 구성품은 백엔드가 세트마스터로 다시 전개하므로 대표행/단품만 전송(중복 방지)
   const payload = entries.filter((e) => !e.isComponent).map((e) => ({ name: e.name, qty: e.qty }));
-  if (payload.length === 0) return;
-  const onsiteMutation = getOnsiteIdempotencyKey(JSON.stringify({ tradeId, payload, settlement, ...(externalSupplyQty > 0 ? { externalSupplyQty } : {}) }));
-  if (activeTradeTransitions.has(tradeId) || hasTradePending(tradeId)) {
-    throw new Error("이 거래의 다른 변경을 저장 중입니다. 잠시 후 다시 시도해주세요");
-  }
-  const saveId = beginTradeTransition(tradeId);
-
+  if (payload.length === 0) throw new Error("추가할 품목이 없습니다");
+  const signature = JSON.stringify({ tradeId, payload, settlement, ...(externalSupplyQty > 0 ? { externalSupplyQty } : {}) });
+  const pending = onsiteAddsByTrade.get(tradeId) ?? new Map<string, Promise<void>>();
+  const existing = pending.get(signature);
+  if (existing) return existing;
+  const previous = Array.from(pending.values()).at(-1);
+  const save = () => persistOnsiteAdd_(tradeId, entries, payload, settlement, externalSupplyQty, signature, onWriting);
+  // 각 제출은 독립된 추가다. 앞 품목의 가용성 거절이 뒤 품목까지 취소하지 않게 한다.
+  const task = previous ? previous.then(save, save) : save();
+  pending.set(signature, task);
+  onsiteAddsByTrade.set(tradeId, pending);
   try {
+    await task;
+  } finally {
+    pending.delete(signature);
+    if (!pending.size) onsiteAddsByTrade.delete(tradeId);
+  }
+}
+
+async function persistOnsiteAdd_(
+  tradeId: string, entries: OnsiteEntry[], payload: { name: string; qty: number }[],
+  settlement: Settlement, externalSupplyQty: number, signature: string, onWriting?: () => void,
+): Promise<void> {
+  const label = payload.map(item => `${item.name} ×${item.qty}`).join(", ");
+  let saveId: number | undefined;
+  try {
+    const deadline = Date.now() + 60_000;
+    while (activeTradeTransitions.has(tradeId) || hasTradePending(tradeId)) {
+      if (Date.now() >= deadline) throw new Error("앞선 변경의 저장을 확인하지 못했습니다. 다시 시도해주세요");
+      // 일부 입력은 정본 응답 직후 내부 대기 표식을 지운다. 이벤트가 없어도 다시 확인한다.
+      await new Promise<void>(resolve => {
+        const resume = () => { clearTimeout(timer); unsubscribe(); resolve(); };
+        const timer = setTimeout(resume, 250);
+        const unsubscribe = subscribe(resume);
+      });
+    }
+    const trade = state.trades.find(t => t.tradeId === tradeId);
+    if (!trade || trade.returnDone || trade.contractStatus === "반납완료" || trade.contractStatus === "취소") {
+      throw new Error("현재 거래 상태에서는 현장 항목을 추가할 수 없습니다");
+    }
+    const onsiteMutation = getOnsiteIdempotencyKey(signature);
+    // 품목 체크/제외는 계속 받는다. 원장 쓰기는 거래별 순서를 따르고 봉인/반출은 이 제출을 기다린다.
+    saveId = beginTradeSave(tradeId);
+    onWriting?.();
     // 계약서 재생성은 백그라운드 워커에 위임 — 현장추가 응답에서 재생성 시간(수 초~수십 초)을
     // 제거하고 GAS 잠금 점유도 짧게 만든다. 새 링크는 pending 배지 → 폴링 merge로 반영.
     const res = await gasMutation("onsiteAddon", {
-    tid: tradeId,
-    entries: JSON.stringify(payload),
-    rawNames: true,
-    settlement_status: settlement,
-    externalSupplyQty,
-    actorName: "오늘 일정 웹앱",
-    idempotencyKey: onsiteMutation.id,
-    directRegenerate: false,
-  });
+      tid: tradeId,
+      entries: JSON.stringify(payload),
+      rawNames: true,
+      settlement_status: settlement,
+      externalSupplyQty,
+      actorName: "오늘 일정 웹앱",
+      idempotencyKey: onsiteMutation.id,
+      directRegenerate: false,
+    });
 
-  // 실데이터에서 로컬 폴백은 물리 반출 기준선을 만들지 못하므로 실패-폐쇄한다.
-  if (res?.skipped) {
-    throw new Error(`현장 추가 실패: ${writeBackDisabledReason}`);
-  }
-
-  const out = res?.result ?? res ?? {};
-  if (out?.duplicate || res?.duplicate) {
-    const expectedIds = ((out?.addedScheduleIds ?? res?.addedScheduleIds ?? []) as string[])
-      .map((id) => String(id || "").trim()).filter(Boolean);
-    const recoveredItems = mapGasOnsiteItems_(
-      (out?.addedItems ?? res?.addedItems ?? []) as GasOnsiteItem[],
-      entries,
-      settlement,
-    );
-    if (recoveredItems.length > 0 && expectedIds.every((id) => recoveredItems.some((item) => item.scheduleId === id))) {
-      // GAS의 멱등 응답은 원본 시트행을 직접 검증한 결과다. Supabase 구조 투영은 비동기이므로
-      // 여기서 단 한 번 조회해 아직 없다는 이유로 정상 요청을 실패 처리하지 않는다.
-      applyGasOnsiteItems_(tradeId, recoveredItems, { contractRegenPending: true });
-    } else {
-      const [serverTrade] = await fetchTradesByIds([tradeId]);
-      const actualIds = new Set(serverTrade?.equipments.map((item) => item.scheduleId) ?? []);
-      if (!serverTrade || !expectedIds.length || !expectedIds.every((id) => actualIds.has(id))) {
-        throw new Error("현장 추가 중복 요청의 시트 반영 품목을 확인하지 못했습니다");
-      }
-      set({ trades: mergeTradeChanges(state.trades, [serverTrade]) });
+    // 실데이터에서 로컬 폴백은 물리 반출 기준선을 만들지 못하므로 실패-폐쇄한다.
+    if (res?.skipped) {
+      throw new Error(`현장 추가 실패: ${writeBackDisabledReason}`);
     }
-    clearOnsiteIdempotencyKey(onsiteMutation.storageKey);
-    finishTradeSave(tradeId, saveId, "saved", "현장 추가 저장 확인됨");
-    return;
-  }
-  const mutationResult = unwrapContractMutation(res);
-  const url = contractUrlFromMutation(mutationResult);
-  const amount = amountFromMutation(mutationResult);
-  const added = (out.addedItems ?? []) as GasOnsiteItem[];
-  if (added.length === 0) {
-    throw new Error(out.error || "현장 추가가 스케줄상세에 반영되지 않았습니다");
-  }
 
-  // 시트가 발급한 실 scheduleId로 즉시 반영하고, 비동기 구조 투영/계약 재생성 결과는 폴링으로 수렴한다.
-  const newItems = mapGasOnsiteItems_(added, entries, settlement);
-  applyGasOnsiteItems_(tradeId, newItems, {
-    amount,
-    contractUrl: url,
-    contractRegenPending: !!mutationResult.contractRegenPending && !url,
-  });
+    const out = res?.result ?? res ?? {};
+    if (out?.duplicate || res?.duplicate) {
+      const expectedIds = ((out?.addedScheduleIds ?? res?.addedScheduleIds ?? []) as string[])
+        .map((id) => String(id || "").trim()).filter(Boolean);
+      const recoveredItems = mapGasOnsiteItems_(
+        (out?.addedItems ?? res?.addedItems ?? []) as GasOnsiteItem[],
+        entries,
+        settlement,
+      );
+      if (expectedIds.length > 0 && expectedIds.length === recoveredItems.length && expectedIds.every((id) => recoveredItems.some((item) => item.scheduleId === id))) {
+        // GAS의 멱등 응답은 원본 시트행을 직접 검증한 결과다. Supabase 구조 투영은 비동기이므로
+        // 여기서 단 한 번 조회해 아직 없다는 이유로 정상 요청을 실패 처리하지 않는다.
+        applyGasOnsiteItems_(tradeId, recoveredItems, { contractRegenPending: true });
+      } else {
+        const [serverTrade] = await fetchTradesByIds([tradeId]);
+        const actualIds = new Set(serverTrade?.equipments.map((item) => item.scheduleId) ?? []);
+        if (!serverTrade || !expectedIds.length || !expectedIds.every((id) => actualIds.has(id))) {
+          throw new Error("현장 추가 중복 요청의 시트 반영 품목을 확인하지 못했습니다");
+        }
+        set({ trades: mergeTradeChanges(state.trades, [serverTrade]) });
+      }
+      clearOnsiteIdempotencyKey(onsiteMutation.storageKey);
+      finishTradeSave(tradeId, saveId, "saved", `현장 추가 저장 확인됨 · ${label}`);
+      return;
+    }
+    const mutationResult = unwrapContractMutation(res);
+    const url = contractUrlFromMutation(mutationResult);
+    const amount = amountFromMutation(mutationResult);
+    const added = (out.addedItems ?? []) as GasOnsiteItem[];
+    if (added.length === 0) {
+      throw new Error(out.error || "현장 추가가 스케줄상세에 반영되지 않았습니다");
+    }
+
+    // 시트가 발급한 실 scheduleId로 즉시 반영하고, 비동기 구조 투영/계약 재생성 결과는 폴링으로 수렴한다.
+    const newItems = mapGasOnsiteItems_(added, entries, settlement);
+    if (newItems.length !== added.length) throw new Error("원장의 현장 추가 품목 번호를 확인하지 못했습니다");
+    applyGasOnsiteItems_(tradeId, newItems, {
+      amount,
+      contractUrl: url,
+      contractRegenPending: !!mutationResult.contractRegenPending && !url,
+    });
     clearOnsiteIdempotencyKey(onsiteMutation.storageKey);
-    finishTradeSave(tradeId, saveId, "saved", "현장 추가 저장됨");
+    finishTradeSave(tradeId, saveId, "saved", `현장 추가 저장됨 · ${label}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    finishTradeSave(tradeId, saveId, "error", `⚠️ 현장 추가 실패 — ${message}`);
+    const status = isGasOutcomeUnknownError(error) ? "현장 추가 확인 필요" : "현장 추가 실패";
+    const detail = `${status} · ${label} — ${message}`;
+    if (saveId !== undefined) finishTradeSave(tradeId, saveId, "error", detail);
+    else showTransientError(detail);
     throw error;
   }
 }

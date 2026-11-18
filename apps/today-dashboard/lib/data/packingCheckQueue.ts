@@ -1,5 +1,5 @@
 import type { Trade } from "../domain/types";
-import { optimisticPackingCheck, type PackingCommand, type PackingManifest } from "../domain/packing";
+import { optimisticPackingCheck, packingStarted, type PackingCommand, type PackingManifest } from "../domain/packing";
 
 type Intent = { id: string; checked: boolean; resolve: () => void; reject: (error: unknown) => void };
 type Queue = { confirmed: PackingManifest; pending: Intent[]; failing: boolean; done?: Promise<void> };
@@ -58,8 +58,29 @@ export function createPackingCheckQueue(io: {
     if (!trade?.packing) return Promise.reject(new Error("구성품을 먼저 불러와주세요"));
     const q = queues.get(id);
     if (q?.failing) return Promise.reject(new Error("저장 상태를 확인 중입니다"));
-    const entries = trade.packing.entries.map(e => e.id === entryId ? { ...e, checked } : e);
-    if (!entries.some(e => e.id === entryId) || !optimisticPackingCheck(trade, trade.packing.version, { action: "save", entries, note: trade.packing.note })) return Promise.reject(new Error("현재 구성품은 체크할 수 없습니다"));
+    const manifest = trade.packing;
+    const entry = manifest.entries.find(e => e.id === entryId);
+    if (!entry) return Promise.reject(new Error("현재 구성품은 체크할 수 없습니다"));
+    const entries = manifest.entries.map(e => e.id === entryId ? { ...e, checked } : e);
+    try {
+      if (!optimisticPackingCheck(trade, manifest.version, { action: "save", entries, note: manifest.note }))
+        return Promise.reject(new Error("현재 구성품은 체크할 수 없습니다"));
+    } catch (error) {
+      // No request has left the browser. An obsolete dispatch flag can prevent
+      // even the first check, so compare with the server once before rejecting.
+      if (q || commands.has(id) || manifest.phase !== "draft" || !packingStarted(trade)) return Promise.reject(error);
+      return command(id, async () => {
+        await io.recover(id);
+        const fresh = io.read(id);
+        if (!fresh?.packing || packingStarted(fresh)) throw error;
+        const current = fresh.packing.entries.find(e => e.id === entryId);
+        const fields = Object.keys({ ...entry, ...current }) as (keyof typeof entry)[];
+        if (fresh.packing.phase !== "draft" || fresh.packing.version !== manifest.version || !current ||
+            fields.some(key => current[key] !== entry[key]))
+          throw new Error("구성품이 변경되었습니다. 최신 항목을 다시 확인해주세요");
+        await checkNow(id, entryId, checked);
+      });
+    }
     const queue: Queue = q ?? { confirmed: trade.packing, pending: [], failing: false };
     const promise = new Promise<void>((resolve, reject) => queue.pending.push({ id: entryId, checked, resolve, reject }));
     if (!q) queues.set(id, queue);

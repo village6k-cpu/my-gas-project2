@@ -30,6 +30,7 @@ function toggleHarness() {
     );
   const trade = { tradeId: "T-1", setupDone: false, setupDoneAt: null };
   const context = {
+    awaitPendingOnsiteAdds_: async () => {},
     packingPreparationTrade: t => t,
     packingCheckQueue: { flush: async () => {} },
     flushItemCheckWritesForTrade: async () => {},
