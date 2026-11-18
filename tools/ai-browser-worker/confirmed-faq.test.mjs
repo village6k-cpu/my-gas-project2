@@ -24,7 +24,7 @@ test('confirmed location FAQ ignores irrelevant old discount conversation', () =
 
 test('every confirmed FAQ has provenance, reaches prompt, and passes both existing gates', async () => {
   const config = loadCurrentConfirmedPolicyConfig();
-  assert.equal(config.faq_answers?.length, 12);
+  assert.ok(config.faq_answers.some(faq => faq.key === "referral_discount_faq"));
   const prompt = buildHermesPrompt({ job_id: 'confirmed-faq-test' }, { gatewayConfirmationToolAvailable: true });
   for (const faq of config.faq_answers) {
     assert.ok(faq.source && faq.question && faq.answer);
@@ -69,4 +69,15 @@ test('student proof asks for either document and quick first-use exception is no
   const quick = faqs.find(x => x.key === 'quick_pickup_faq');
   assert.match(quick.answer, /법인도 최초 거래는/);
   assert.equal(currentConfirmedPolicyAutoReplySupport(decision('법인 첫 거래인데 퀵 수령 되나요?'), '법인은 첫 거래부터 퀵 수령 가능합니다.').allowed, false);
+});
+
+test('referral FAQ names the first rental and a fresh reward for each new person', async () => {
+  const faq = loadCurrentConfirmedPolicyConfig().faq_answers.find(item => item.key === 'referral_discount_faq');
+  const d = decision('친구를 소개하면 소개할인 받을 수 있나요?');
+  assert.match(faq.answer, /첫 대여에 한해 5%/);
+  assert.match(faq.answer, /새 고객 한 분마다 5%/);
+  d.reply_decision.text = faq.answer;
+  assert.equal((await evaluateAutoReplyRagSupport({decision:d})).allowed,true);
+  d.reply_decision.text = '한 번 소개받으시면 앞으로 계속 5% 할인됩니다.';
+  assert.equal((await evaluateAutoReplyRagSupport({decision:d})).allowed,false);
 });

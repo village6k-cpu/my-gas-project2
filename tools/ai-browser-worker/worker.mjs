@@ -2848,10 +2848,11 @@ function discountRatesForType(discountType = '') {
   return [];
 }
 
-function calculateVillagePayment(baseAmount, days, discountType = '') {
+function calculateVillagePayment(baseAmount, days, discountType = '', referralRate = 0) {
   const base = Math.max(0, Number(baseAmount) || 0);
   const discountRates = [
     ...discountRatesForType(discountType),
+    ...(referralRate ? [{ label: '소개할인', rate: referralRate }] : []),
     ...(longTermDiscountRate(days) ? [{ label: '장기', rate: longTermDiscountRate(days) }] : [])
   ];
   const multiplier = discountRates.reduce((acc, item) => acc * Math.max(0, 1 - (item.rate / 100)), 1);
@@ -2865,6 +2866,7 @@ function calculateVillagePayment(baseAmount, days, discountType = '') {
     days: Number(days) || 1,
     discountType: text(discountType).trim() || '일반',
     discountRates,
+    ...(referralRate ? { referralRate } : {}),
     discountMultiplier: multiplier,
     discountedAmount,
     finalVatIncluded
@@ -2958,6 +2960,15 @@ async function fetchSetMasterPrice(config = {}, name = '') {
   };
 }
 
+async function fetchVerifiedReferralRate(config, id, phone) {
+  if (!text(phone).trim()) return 0;
+  const result = await fetchReadOnlyJson(buildGasReadUrl(config.gasApiUrl || DEFAULT_GAS_API_URL,
+    config.sheetApiKey || DEFAULT_SHEET_API_KEY, {action:'getVerifiedReferralDiscount', id, phone}),
+  {fetchImpl:config.fetchImpl || fetch, timeoutMs:30000});
+  if (result?.success !== true || ![0, 5].includes(result.rate)) throw new Error('referral_discount_lookup_failed');
+  return result.rate;
+}
+
 async function buildContractCalculation(config = {}, tradeId = '') {
   const [contractRows, scheduleRows] = await Promise.all([
     fetchGasSearch(config, '계약마스터', 1, tradeId),
@@ -2994,7 +3005,8 @@ async function buildContractCalculation(config = {}, tradeId = '') {
     unresolvedItems,
     error: 'priced_schedule_rows_not_found'
   };
-  const payment = calculateVillagePayment(baseAmount, days, contract[10] || '일반');
+  const referralRate = await fetchVerifiedReferralRate(config, tradeId, contract[2]);
+  const payment = calculateVillagePayment(baseAmount, days, contract[10] || '일반', referralRate);
   return {
     kind: 'contract',
     tradeId,
@@ -3063,7 +3075,8 @@ async function buildConfirmRequestCalculation(config = {}, reqID = '') {
     if (customer.ambiguous) throw new Error('ambiguous_customer');
     discountType = customer.discountType || '일반';
   }
-  const payment = calculateVillagePayment(baseAmount, days, discountType);
+  const referralRate = await fetchVerifiedReferralRate(config, reqID, first['연락처']);
+  const payment = calculateVillagePayment(baseAmount, days, discountType, referralRate);
   return {
     kind: 'confirm_request',
     reqID,
@@ -3278,18 +3291,31 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
   return { sources, inventory_context };
 }
 
+function enforceRequestedReferralDiscount(decision, result) {
+  const evidence = (decision.follow_up_items || []).filter(task => task.type === 'quote_send')
+    .flatMap(task => (task.evidence || []).filter(item => typeof item === 'string' && item.startsWith('customer_request:')));
+  const request = [latestCustomerMessageForRag(decision), ...evidence].join('\n').normalize('NFKC');
+  const explicitApplication = /(?:소개\s*할인|추천\s*할인).{0,24}(?:적용|반영|포함|받[은아서]|빼[서주])|(?:적용|반영|포함).{0,16}(?:소개\s*할인|추천\s*할인)/.test(request);
+  if (!explicitApplication || !result.complete) return result;
+  const sets = result.documents?.map(item => item.verification.calculations) || [result.calculations];
+  if (sets.every(calculations => calculations?.some(item => item.payment?.referralRate === 5))) return result;
+  return {...result, complete:false, reason:'requested_referral_discount_unverified',totalVatIncluded:null};
+}
+
 export async function buildAuthoritativePriceVerification(config = {}, decision = {}) {
   if (replySafetyClass(decision) !== 'sensitive_commitment') {
     return { required: false, complete: true, reason: 'not_numeric_price_commitment' };
   }
   if (decision.document_requests != null) {
     try {
-      return await verifyDocumentPlan(decision, quote => executeVillageReadOnlyLookup(config, {kind:'quote', quote}));
+      const plan = await verifyDocumentPlan(decision, quote => executeVillageReadOnlyLookup(config, {kind:'quote', quote}));
+      return enforceRequestedReferralDiscount(decision, plan);
     } catch { return {required:true,complete:false,reason:'document_plan_lookup_failed',totalVatIncluded:null}; }
   }
   if (decision.price_quote) {
     try {
-      return { required: true, ...await executeVillageReadOnlyLookup(config, { kind: 'quote', quote: decision.price_quote }) };
+      const result = await executeVillageReadOnlyLookup(config, {kind:'quote', quote:decision.price_quote});
+      return enforceRequestedReferralDiscount(decision, {required:true, ...result});
     } catch {
       return { required: true, complete: false, reason: 'price_quote_lookup_failed', totalVatIncluded: null };
     }
@@ -8090,6 +8116,11 @@ export function currentConfirmedPolicyAutoReplySupport(decision = {}, replyText 
   }
   const faqSupport = confirmedFaqReplySupport(policyConfig, decision, reply);
   if (faqSupport) return faqSupport;
+  const referralFaq = (policyConfig.faq_answers || []).find(faq => faq.key === 'referral_discount_faq');
+  if (referralFaq && new RegExp(referralFaq.question_pattern, 'i').test(latestCustomerMessageForRag(decision))) {
+    return {applicable:true, allowed:false, reason:'current_policy_reply_mismatch',
+      topics:[referralFaq.key], failedTopics:[referralFaq.key]};
+  }
   const checks = [];
   for (const topic of policyConfig.topics) {
     const trigger = new RegExp(topic.trigger, topic.trigger_flags || '');

@@ -130,6 +130,7 @@ export function automaticQuoteRequest({ decision, verification, job }) {
   if (!Number.isFinite(days) || days <= 0 || days > 366) throw new Error('quote_days_invalid');
   const manualData = {
     고객명: customerName.trim(), 연락처: phone, 할인유형: calculation.discountType,
+    ...(calculation.payment.referralRate ? {referralRate:calculation.payment.referralRate} : {}),
     대여기간: period,
     items: calculation.pricedItems.map(item => ({품목:item.name, 수량:item.qty, 일수:days, 단가:item.price}))
   };

@@ -12,6 +12,7 @@ function context() {
   const ctx = vm.createContext({ console });
   const file = path.join(root, 'approvedBillingRounds.js');
   if (fs.existsSync(file)) load(ctx, 'approvedBillingRounds.js');
+  load(ctx, 'ReferralDiscount.js');
   return ctx;
 }
 function registration() {

@@ -212,6 +212,7 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   var fixedQuote = contract.비고.indexOf('[기간확정견적') === -1 ? null : readFixedTermQuote_(contract.비고, {
     startDate: contract.반출일, startTime: contract.반출시간, endDate: contract.반납일, endTime: contract.반납시간
   }, items);
+  var referralRate = fixedQuote ? 0 : verifiedReferralDiscountRate_(ss, 거래ID, contract.연락처);
   if (fixedQuote && approvedRounds !== null) throw new Error('기간확정견적과 승인회차를 함께 적용할 수 없습니다');
   if (fixedQuote) items.forEach(function(item) {
     item.단가 = item.세트명 && item.세트명 !== item.장비명 ? 0 : fixedQuote.prices[item.장비명];
@@ -417,7 +418,9 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   ws.getRange(paymentRefs.preDiscountCell).setNumberFormat("@").setValue(사전할인);
   ws.getRange(paymentRefs.addDiscountCell).setNumberFormat("@").setValue(추가할인);
   ws.getRange(paymentRefs.longDiscountCell).setNumberFormat("@").setValue("해당없음");
-  ws.getRange(paymentRefs.couponDiscountCell).setNumberFormat("@").setValue("해당없음");
+  var couponCell = ws.getRange(paymentRefs.couponDiscountCell).setNumberFormat("@");
+  if (referralRate) couponCell.clearDataValidations();
+  couponCell.setValue(referralRate ? "소개할인" + referralRate + "%" : "해당없음");
 
   // ── 장기할인 — 일수 기반 직접 setValue + 드롭다운 적용 ──
   var ltRate = fixedQuote ? 0 : getLongTermDiscountRate(일수 || 1);
@@ -433,6 +436,7 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   // 빌리지 견적 기준은 할인 곱셈이다. 예: 학생30% + 장기20% => 0.7 * 0.8 = 56% 결제.
   // 계약서 템플릿도 같은 정책을 쓰도록 생성 시 수식을 명시적으로 보정한다.
   applyContractTotalFormula_(ws, rows, paymentRefs);
+  if (referralRate) paymentRefs.referralRate = referralRate;
   applyContractPaymentFormula_(ws, paymentRefs);
 
   // ── 계약일자 ──
@@ -801,7 +805,9 @@ function applyContractPaymentFormula_(ws, refs) {
   refs = refs || findContractPaymentRefs_(ws, findTemplateRows(ws));
   var discountMultiplier = getDiscountMultiplierFormula_(refs);
   ws.getRange(refs.discountedAmountCell).setFormula("=" + refs.totalBeforeDiscountCell + "*(" + discountMultiplier + ")");
-  ws.getRange(refs.finalAmountCell).setFormula("=IFERROR(CEILING(" + refs.discountedAmountCell + "*1.1,10),\"\")");
+  var gross = refs.discountedAmountCell + "*1.1";
+  if (refs.referralRate) gross = "ROUND(" + gross + ",8)";
+  ws.getRange(refs.finalAmountCell).setFormula("=IFERROR(CEILING(" + gross + ",10),\"\")");
 }
 
 function applyContractTotalFormula_(ws, rows, refs) {
