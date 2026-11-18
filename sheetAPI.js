@@ -1353,7 +1353,7 @@ function doScanAll() {
 
     if (registerVal === "등록" && registerStatus !== "등록완료") {
       // 멈춘 큐 행 재처리면 복구 모드(중복 시 기존 거래로 완료), 신규면 중복 경고 유지
-      registerByReqID(sheet, row, { fromQueue: isRegisterQueueStatus_(registerStatus) });
+      registerByReqID(sheet, row, { fromQueue: isRegisterQueueStatus_(registerStatus), expectedReqID: String(data[i][0]) });
       processed++;
     }
   }
@@ -1404,10 +1404,15 @@ function doScheduleAction(action, reqID) {
     case "등록":
       try {
         var preRegisterStatus = String(sheet.getRange(targetRow, 15).getDisplayValue() || "");
-        registerByReqID(sheet, targetRow, { fromQueue: isRegisterQueueStatus_(preRegisterStatus) });
+        var registration = registerByReqID(sheet, targetRow, { fromQueue: isRegisterQueueStatus_(preRegisterStatus), expectedReqID:reqID });
+        if (registration && registration.success === false) return jsonResponse({
+          status:"ERROR", action:"등록", reqID:reqID, code:registration.code, message:registration.error
+        });
+        if (registration && registration.alreadyRegistered) return confirmActionResponse_("등록", {
+          alreadyRegistered:true, tradeId:registration.tradeId, message:registration.message
+        });
+        if (registration && registration.queued) return confirmActionResponse_("등록", {queued:true, message:"등록대기"});
       } catch (regErr) {
-        sheet.getRange(targetRow, 15).setValue("❌ 등록 실패: " + regErr.message);
-        sheet.getRange(targetRow, 14).clearContent();
         invalidateConfirmListCache_();
         return jsonResponse({ status: "ERROR", action: "등록", reqID: reqID, message: regErr.message });
       }

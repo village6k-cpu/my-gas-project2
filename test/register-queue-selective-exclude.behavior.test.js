@@ -63,7 +63,7 @@ test('직원확정 자동등록의 operation marker는 legacy 등록 큐가 재�
 });
 
 test('자동등록 no-replay 상태는 동시 수동 등록 큐가 등록대기로 덮어쓰지 못한다', () => {
-  const ctx = loadContext(['isConfirmedRegistrationNoReplayStatus_', 'markRegisterQueued_']);
+  const ctx = loadContext(['isConfirmedRegistrationNoReplayStatus_', 'isRegisterCompletedStatus_', 'markRegisterQueued_']);
   const writes = [];
   let current = '⚠️ 자동등록 처리중(재실행 금지) [11111111-2222-4333-8444-555555555555]';
   const sheet = {
@@ -88,8 +88,8 @@ test('자동등록 no-replay 상태는 동시 수동 등록 큐가 등록대기�
   const registerBody = extractFunction(backend, 'registerByReqID');
   assert.match(
     registerBody,
-    /if\s*\(\s*!markRegisterQueued_\(sheet,\s*triggerRow\)\s*\)\s*return;/,
-    'lock timeout must not enqueue a confirmed no-replay request after the marker rejects the overwrite'
+    /deferRegistrationIntent_\(pendingReqID, false\);\s*return \{success:true, queued:true,/,
+    'lock timeout must defer the request without touching its sheet status'
   );
 });
 
@@ -111,7 +111,7 @@ test('락 대기 중 생긴 자동등록 marker는 legacy 큐가 락 획득 후 
     'the owning confirmed operation must be allowed to continue');
 
   const registerBody = extractFunction(backend, 'registerByReqID');
-  const freshRead = registerBody.indexOf('const reqID = allData[triggerIdx][0]');
+  const freshRead = registerBody.indexOf('reqID = allData[triggerIdx][0]');
   const postLockGuard = registerBody.indexOf('shouldSkipLegacyRegistrationAfterLock_(');
   const firstBusinessStep = registerBody.indexOf('_processByReqID(sheet, triggerRow)');
   assert.ok(freshRead >= 0 && postLockGuard > freshRead && postLockGuard < firstBusinessStep,
@@ -154,7 +154,7 @@ test('자동등록 후처리 실패도 operation id를 유지하고 legacy 큐�
 test('scheduleRegister는 제외 행을 등록대기로 덮어쓰지 않는다', () => {
   const body = extractFunction(backend, 'scheduleRegister');
   // O열(15열)까지 읽어 제외 행을 건너뛰고 대상 행을 골라야 한다
-  assert.match(body, /getRange\(2,\s*1,\s*lastRow - 1,\s*15\)/, 'A~O열을 함께 읽어야 한다');
+  assert.match(body, /getRange\(2,\s*1,\s*lastRow - 1,\s*16\)/, 'A~P열을 함께 읽어야 한다');
   assert.match(body, /제외/, '제외 행 스킵 로직 필요');
 });
 
@@ -185,6 +185,66 @@ test('등록 복구 모드는 O열 추론이 아니라 명시 fromQueue 플래�
   assert.doesNotMatch(registerBody, /startedFromRegisterQueue = requestHasRecoverableRegisterStatus_/,
     '옛 O열 추론이 부활하면 안 된다');
   // 큐 드레인 경로는 복구 모드를 명시한다
-  assert.match(backend, /registerByReqID\(sheet, qRow, \{ fromQueue: true \}\)/);
-  assert.match(backend, /registerByReqID\(sheet, pendingRow, \{ fromQueue: true \}\)/);
+  assert.match(backend, /registerByReqID\(sheet, qRow, \{ fromQueue: true, expectedReqID: pendingReqID \}\)/);
+  assert.match(backend, /registerByReqID\(sheet, pendingRow, \{ fromQueue: true, expectedReqID: pendingReqID \}\)/);
+});
+
+test('이미 연결된 요청은 완료 수신증을 반환하며 부분·충돌·제외 행을 구분한다', () => {
+  const id = 'RQ-261118-1000', trade = '261118-1000';
+  const make = (status, tid, request=id) => {
+    const row=Array(16).fill('');row[0]=request;row[14]=status;row[15]=tid;return row;
+  };
+  const ctx=loadContext(['registrationQueueBinding_', 'isRegisterCompletedStatus_', 'isConfirmedRegistrationNoReplayStatus_', 'scheduleRegister']);
+  const done=[make('제외',''),make('등록완료(합침)',trade),make('등록완료',trade),make('등록대기','','RQ-261118-007')];
+  const sheet={getLastRow:()=>done.length+1,getRange:()=>({getValues:()=>done})};
+  const lock={waitLock(){},tryLock:()=>true,releaseLock(){}};
+  ctx.LockService={getUserLock:()=>lock,getScriptLock:()=>lock};
+  ctx.SpreadsheetApp={getActiveSpreadsheet:()=>({getSheetByName:()=>sheet})};
+  for(const acquired of [false,true]){
+    lock.tryLock=()=>acquired;
+    const result=ctx.scheduleRegister(id);
+    assert.equal(result.tradeId,trade);assert.equal(result.alreadyRegistered,true);
+    assert.equal(result.status,'등록완료');
+  }
+  assert.equal(ctx.registrationQueueBinding_([make('등록대기',trade),make('등록완료',trade)],id).code,'PARTIAL_STATE');
+  assert.equal(ctx.registrationQueueBinding_([make('등록완료',trade),make('등록완료','261118-002')],id).code,'CONFLICTING_REGISTRATION');
+  assert.equal(ctx.registrationQueueBinding_([make('등록완료','')],id).success,false);
+  assert.equal(ctx.registrationQueueBinding_([make('제외',''),make('등록대기','')],id),null);
+});
+
+test('잠금을 놓친 등록 요청은 시트에 쓰지 않고 요청ID로 재시도를 보존한다', () => {
+  const id='RQ-261118-1001', calls=[];
+  const ctx=loadContext(['registerByReqID','deferRegistrationIntent_','readPendingRegisterQueue_']);
+  const store=new Map(), props={setProperty:(k,v)=>store.set(k,v),getKeys:()=>[...store.keys()],getProperty:k=>store.get(k)};
+  ctx.PropertiesService={getScriptProperties:()=>props};
+  ctx.LockService={getScriptLock:()=>({tryLock:()=>false})};ctx.CONFIRMED_RESERVATION_LOCK_CAPABILITY_={};
+  ctx.ensurePendingRegisterTrigger_=delay=>calls.push(delay);
+  const sheet={getRange(){throw new Error('시트 접근 금지');}};
+  ctx.registerByReqID(sheet,2,{fromQueue:true,expectedReqID:id});
+  ctx.deferRegistrationIntent_(id,true);
+  assert.deepEqual([...ctx.readPendingRegisterQueue_(props)],[id]);
+  assert.equal(store.get('registerDirectIntent_'+id),'1');
+  assert.deepEqual(calls,[30000,30000]);
+});
+
+test('연결된 부분 등록을 처리하는 워커는 같은 거래만 복구하고 새 예약을 만들지 않는다', () => {
+  const id='RQ-261118-016', trade='261118-015';
+  const row=Array(18).fill('');row[0]=id;row[14]='등록대기';row[15]=trade;
+  const sheet={getLastRow:()=>2,getRange:()=>({getValues:()=>[row.slice()],getDisplayValues:()=>[row.slice()]})};
+  const recovered=[];
+  const ctx=loadContext(['registerByReqID','registrationQueueBinding_','isConfirmedRegistrationNoReplayStatus_','isRegisterCompletedStatus_']);
+  Object.assign(ctx,{
+    CONFIRMED_RESERVATION_LOCK_CAPABILITY_:{},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock(){}})},
+    SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:()=>sheet})},
+    PropertiesService:{getScriptProperties:()=>({getProperty:()=>null})},
+    findConfirmRequestRowByReqID_:()=>2,processRegistrationQueue_(){},perfLog_(){},
+    finalizeQueuedRequestFromExistingTrade_:(_sheet,_data,request,linked)=>{recovered.push([request,linked]);return true;},
+    _processByReqID(){throw new Error('새로운 등록 절차로 진입했습니다');}
+  });
+  const result=ctx.registerByReqID(sheet,2,{expectedReqID:id,fromQueue:true});
+  assert.equal(result.alreadyRegistered,true);assert.equal(result.tradeId,trade);
+  assert.deepEqual(recovered,[[id,trade]]);
+  row[14]='등록완료';
+  assert.equal(ctx.registerByReqID(sheet,2,{expectedReqID:id,fromQueue:true}).tradeId,trade);
+  assert.equal(recovered.length,1);
 });

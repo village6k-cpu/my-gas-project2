@@ -28,7 +28,7 @@ function extractFunction(name) {
 const editFn = extractFunction('handleScheduleEdit');
 assert(/invalidateConfirmListCache_/.test(editFn),
   '시트 직접 편집(H/N열)도 확인요청 목록 캐시를 무효화해야 한다');
-assert(/if \(!markRegisterQueued_\(sheet, row\)\) return;[\s\S]{0,300}registerByReqID\(sheet, row, \{ fromQueue: false \}\)/.test(editFn),
+assert(/!markRegisterQueued_\(sheet, row\)\) return;[\s\S]{0,300}registerByReqID\(sheet, row, \{ fromQueue: false, expectedReqID: manualReqID \}\)/.test(editFn),
   'onEdit 등록도 실행 전 내구 마커를 남기되 자동등록 no-replay 상태는 덮어쓰지 않아야 한다');
 assert(/enqueuePendingRegister_/.test(editFn),
   'onEdit 등록은 백업 트리거를 함께 예약해야 한다');

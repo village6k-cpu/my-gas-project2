@@ -40,7 +40,7 @@ assert(
   'registration queue status must be normalized and must have reusable enqueue/completion paths'
 );
 assert(
-  /if \(!hasTransferredConfirmedLock && !regLock\.tryLock\(30000\)\) \{[\s\S]{0,700}if \(!markRegisterQueued_\(sheet, triggerRow\)\) return;[\s\S]{0,220}enqueuePendingRegister_\(pendingReqID, 30000\);[\s\S]{0,80}return;[\s\S]{0,40}\}/.test(backend),
+  /if \(!hasTransferredConfirmedLock && !regLock\.tryLock\(30000\)\) \{[\s\S]{0,700}deferRegistrationIntent_\(pendingReqID, false\);[\s\S]{0,80}return \{success:true, queued:true, reqID:pendingReqID\};[\s\S]{0,40}\}/.test(backend),
   'registerByReqID lock contention must queue ordinary registrations but preserve confirmed no-replay states'
 );
 assert(
@@ -56,7 +56,7 @@ const pendingRunnerBody = backend.slice(
 );
 const pendingWatchdogAt = pendingRunnerBody.indexOf('ensurePendingRegisterTrigger_(60000)');
 const pendingQueueDeleteAt = pendingRunnerBody.indexOf("props.deleteProperty(\"_pendingRegisterQueue\")");
-const pendingRegisterAt = pendingRunnerBody.indexOf('registerByReqID(sheet, qRow, { fromQueue: true })');
+const pendingRegisterAt = pendingRunnerBody.indexOf('registerByReqID(sheet, qRow, { fromQueue: true, expectedReqID: pendingReqID })');
 const pendingReadUnlockAt = pendingRunnerBody.indexOf('drainLock.releaseLock()');
 const pendingClaimLockAt = pendingRunnerBody.indexOf('var claimLock = LockService.getScriptLock()');
 assert(
@@ -74,7 +74,7 @@ assert(
 );
 assert(
   /if \(REGISTER_QUEUE_PROCESSING_\) return;/.test(backend) &&
-    /try \{\s*registerByReqID\(sheet, pendingRow, \{ fromQueue: true \}\);[\s\S]{0,260}catch \(e\) \{[\s\S]{0,160}등록 실패/.test(backend),
+    /try \{\s*registerByReqID\(sheet, pendingRow, \{ fromQueue: true, expectedReqID: pendingReqID \}\);[\s\S]{0,260}catch \(e\) \{[\s\S]{0,160}등록대기 처리 실패/.test(backend),
   'processRegistrationQueue_ must prevent nested drains and isolate each reqID failure so later registrations keep moving'
 );
 const registerQueueStart = backend.indexOf('function registerByReqID(');
