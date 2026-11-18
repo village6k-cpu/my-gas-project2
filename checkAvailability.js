@@ -21867,6 +21867,8 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
   var scheduleRaw = scheduleLast >= 2 ? scheduleSheet.getRange(2, 1, scheduleLast - 1, 13).getValues() : [];
   var scheduleDisplay = scheduleLast >= 2 ? scheduleSheet.getRange(2, 1, scheduleLast - 1, 13).getDisplayValues() : [];
   var rows = [];
+  // Keep physical positions for the locked deletion plan. JSON serializes only array elements.
+  rows.sheetRowNumbers = [];
   var periods = {};
   var topLevelQuantities = {};
   for (var si = 0; si < scheduleRaw.length; si++) {
@@ -21876,6 +21878,7 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
     var qty = Number(scheduleRaw[si][4] || scheduleDisplay[si][4] || 1) || 1;
     var isComponent = !!setName && setName !== name;
     var scheduleId = String(scheduleDisplay[si][0] || scheduleRaw[si][0] || '').trim();
+    rows.sheetRowNumbers.push(si + 2);
     rows.push({
       scheduleId: scheduleId,
       setName: setName,
@@ -21961,7 +21964,10 @@ function preflightRegisteredTradeRemoval_(state, removals) {
     }
     var tradeId = String(removal.scheduleId || '').split('-').slice(0, 2).join('-');
     var expandedRows = resolveDashboardRemovalRows_(removalData, tradeId, removal.scheduleId, '');
-    expandedRows.forEach(function(rowNumber) {
+    expandedRows.forEach(function(rowNumber, offset) {
+      if (rows.sheetRowNumbers && rows.sheetRowNumbers[rowNumber - 2] !== rows.sheetRowNumbers[expandedRows[0] - 2] + offset) {
+        throw new Error('removal preflight: 다른 거래가 세트 구성행 사이에 있습니다: ' + removal.scheduleId);
+      }
       var expandedRow = rows[rowNumber - 2];
       if (!expandedRow || !expandedRow.scheduleId) return;
       expanded[expandedRow.scheduleId] = true;

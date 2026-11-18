@@ -530,6 +530,10 @@ test('whole-set replacement validates redundant child fences and submits only th
   const unrelated = run([remove(1), remove(0), remove(4)]);
   assert.equal(unrelated.result.code, 'UNSAFE_COMPONENT_READD');
   assertNoWriteSideEffects(unrelated.calls);
+  rows.sheetRowNumbers = [1487, 1488, 1515, 1516, 1517];
+  const interleaved = run([remove(2), remove(0)]);
+  assert.match(interleaved.result.error, /다른 거래가 세트 구성행 사이/);
+  assertNoWriteSideEffects(interleaved.calls);
 });
 
 test('component removal-only keeps the surrounding set and removes only the exact component row', () => {
