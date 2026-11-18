@@ -144,3 +144,26 @@ test('prospective quote exposes exact period inventory evidence independently of
  const result=await worker.executeVillageReadOnlyLookup(c,{kind:'quote',quote});
  assert.equal(result.complete,true);assert.deepEqual(result.inventory_context.evaluation.shortages,[]);
 });
+
+test('quote keeps the price and scoped stock outcome readable when the shop inventory is huge', async () => {
+  const c = config();
+  const fetchBase = c.fetchImpl;
+  c.fetchImpl = async (url, options) => {
+    if (new URL(url).searchParams.get('action') !== 'run') return fetchBase(url, options);
+    return {ok: true, text: async () => JSON.stringify({
+      success: true,
+      result: {
+        mode: 'read_only',
+        equipment: Array.from({length: 3000}, (_, i) => ({name: '무관한 장비 ' + i, note: 'x'.repeat(100)})),
+        sets: [{name: '무관한 세트'}],
+        evaluation: {shortages: [{equipment: '카메라 세트', available: 0, bookings: [{customer: '다른 고객'}]}]}
+      }
+    })};
+  };
+  const result = await worker.executeVillageReadOnlyLookup(c, {kind: 'quote', quote});
+  const serialized = JSON.stringify(result);
+  assert.match(serialized.slice(0, 200), /"totalVatIncluded":79200/);
+  assert.ok(serialized.length < 1500);
+  assert.deepEqual(result.inventory_context.evaluation.shortages, [{equipment: '카메라 세트', available: 0}]);
+  assert.doesNotMatch(serialized, /무관한 장비|다른 고객/);
+});

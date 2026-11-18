@@ -3214,9 +3214,17 @@ export async function executeVillageReadOnlyLookup(config = {}, request = {}) {
     const unresolved = (calculation?.unresolvedItems || []).map(item => item.name + ' x' + item.qty);
     const complete = Boolean(calculation && !calculation.error && calculation.payment
       && !unresolved.length && calculation.payment.finalVatIncluded > 0);
-    return {complete,...(inventory_context?{inventory_context}:{}),reason:complete ? 'authoritative_price_verified' : 'authoritative_price_incomplete',
-      calculations:calculation ? [calculation] : [],unresolved,
-      totalVatIncluded:complete ? calculation.payment.finalVatIncluded : null};
+    // Keep the verified amount and its basis before variable-length details.
+    // Availability needs only the evaluated plan, not the entire shop catalog.
+    return {
+      complete,
+      totalVatIncluded: complete ? calculation.payment.finalVatIncluded : null,
+      reason: complete ? 'authoritative_price_verified' : 'authoritative_price_incomplete',
+      ...(complete ? {payment: calculation.payment} : {}),
+      unresolved,
+      calculations: calculation ? [calculation] : [],
+      ...(inventory_context ? {inventory_context: scopeNativeRequestInventory(inventory_context)} : {})
+    };
   }
   if (request.kind === 'customer') {
     requireReadKeys(request,['kind','name','phone'],['kind','name']);

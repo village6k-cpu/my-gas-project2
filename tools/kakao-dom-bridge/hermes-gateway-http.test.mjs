@@ -339,6 +339,24 @@ test('native read tool works in no-send mode without consuming a mutation lease 
   } finally { await app.close(); }
 });
 
+test('native quote puts its verified total before even a long echoed quote request', async () => {
+  const channel = makeChannel();
+  const app = await start(createHermesGatewayHttpHandler({token, channel, transport: 'gateway_no_send',
+    executeRead: async () => ({complete: true, totalVatIncluded: 79200})}));
+  const request = {kind: 'quote', quote: {source: 'catalog',
+    items: Array.from({length: 40}, (_, i) => ({name: '긴 카탈로그 품목 이름 ' + i, quantity: 1}))}};
+  const body = {schema: 'village-read-request/v1', job_id: 'job-1', room_key: 'room-1',
+    room_revision: 3, lease_id: leaseId, request};
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/read', {method: 'POST', body: JSON.stringify(body)});
+    assert.equal(response.status, 200);
+    const wire = await response.text();
+    assert.match(wire.slice(0, 400), /"totalVatIncluded":79200/);
+    assert.deepEqual(JSON.parse(wire).request, request);
+    assert.equal(channel.calls.reservation.length, 0);
+  } finally { await app.close(); }
+});
+
 async function withRealGatewayChannel(run) {
   const directory = await mkdtemp(path.join(tmpdir(), 'hermes-gateway-http-'));
   const clock = { now: Date.parse('2026-08-21T00:00:00.000Z') };
