@@ -6699,11 +6699,16 @@ export async function handleEvent(req, res, dependencies = {}) {
   const durableRoomRevision = gatewayChannel && typeof gatewayChannel.latestRoomRevision === 'function'
     ? await gatewayChannel.latestRoomRevision(acceptedRoomKey)
     : 0;
+  // A restart can strand a newer accepted message between intake and gateway.
+  const intakeForRevision = dependencies.durableIntake || (typeof getDurableIntakeCoordinator === 'function'
+    ? getDurableIntakeCoordinator() : null);
+  const pending = !state.roomVersions.has(acceptedRoomKey) && intakeForRevision?.pendingRoomObservation?.(acceptedRoomKey);
+  const revisionFloor = Math.max(durableRoomRevision, Number(pending?.roomRevision) || 0);
   const roomVersion = registerAcceptedRoomEvent(
     state.roomVersions,
     acceptedRoomKey,
     acceptedIdentity,
-    durableRoomRevision,
+    revisionFloor,
     event.eventHash
   );
   event.roomRevision = roomVersion.revision;

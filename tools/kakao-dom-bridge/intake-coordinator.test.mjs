@@ -28,3 +28,23 @@ test('restart coalesces historical observation duplicates without dispatching an
 test('a locally queued recovery is visible until durable gateway handoff and does not hide a changed request',async t=>{const f=fixture();t.after(()=>fs.rmSync(f.directory,{recursive:true}));let allow=false;const event={eventHash:'retry',previewText:'request',recoveryOf:'failed'};const c=createIntakeCoordinator({...f,gateway:{get:async()=>null},canDispatch:()=>allow,dispatch:async()=>({durable:true})});await c.submit({...job,events:[event]});assert.equal(c.pendingRoomObservation(job.roomKey).event.eventHash,'retry');allow=true;await c.replay();assert.equal(c.pendingRoomObservation(job.roomKey),null);});
 
 test('equal event IDs never merge different business values or a later room revision',async t=>{const f=fixture();t.after(()=>fs.rmSync(f.directory,{recursive:true}));const c=createIntakeCoordinator({...f,gateway:{get:async()=>null},canDispatch:()=>false});for(const [revision,qty]of [[3,1],[3,2],[4,2]])await c.submit({...job,roomRevision:revision,events:[{eventHash:'same',raw:{qty,returnDate:'2026-11-07'}}]});assert.equal(f.journal.pending().filter(r=>r.event.kind==='job').length,3);});
+
+test('fresh room approval reaches dispatch ahead of a long historical queue', async t => {
+ const f=fixture(); t.after(()=>fs.rmSync(f.directory,{recursive:true}));
+ for(let i=0;i<110;i++) f.journal.accept({kind:'job',job:{...job,roomKey:'old',jobId:'old-'+i,roomRevision:i+1}});
+ const newest={...job,roomKey:'new',jobId:'approval',roomRevision:7};
+ f.journal.accept({kind:'job',job:newest});
+ const calls=[];
+ const c=createIntakeCoordinator({...f,gateway:{get:async()=>null,latestRoomRevision:async()=>0},
+   canDispatch:j=>j.roomKey==='new',dispatch:async j=>{calls.push(j.jobId);return {durable:true,job_id:j.jobId};}});
+ await c.replay(1);
+ assert.deepEqual(calls,['approval']);
+});
+
+test('another job with the same revision cannot supply a handoff receipt',async t=>{
+ const f=fixture();t.after(()=>fs.rmSync(f.directory,{recursive:true}));
+ const c=createIntakeCoordinator({...f,gateway:{get:async()=>null,latestRoomRevision:async()=>job.roomRevision},
+   dispatch:()=>assert.fail('stale capture')});
+ assert.equal((await c.submit(job)).blocked,true);
+ assert.equal(f.journal.pending()[0].event.kind,'review_required');
+});

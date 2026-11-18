@@ -13,7 +13,7 @@ function workKey(job){
 }
 // This queue hands off data, never guesses whether a financial/reservation write succeeded.
 export function createIntakeCoordinator({journal,gateway,dispatch,schedule,now=Date.now,canDispatch=()=>true,maxConcurrentDispatches=1,sameSource=null}={}){
- const running=new Set(),next=new Map(),attempted=new Map();let sequence=0,replaying=null,activeDispatches=0,reviewCursor=0;
+ const running=new Set(),next=new Map(),attempted=new Map();let sequence=0,replaying=null,activeDispatches=0,reviewCursor=0,replayPass=0;
  const canonical=new Map(),roomPending=new Map();let seeded=false;
  function remember(row){
   const key=workKey(row.event.job),leader=canonical.get(key);
@@ -68,7 +68,14 @@ export function createIntakeCoordinator({journal,gateway,dispatch,schedule,now=D
     result={durable:true,job_id:existing.job_id};
    }else if(blocked){
     return hold('supabase_duplicate_without_gateway_receipt');
-   }else result=await dispatch(clean,dispatchContext);
+   }else {
+    const latest = await gateway.latestRoomRevision?.(clean.roomKey);
+    if (latest >= clean.roomRevision) return hold('durable_intake_revision_needs_reconciliation');
+    result = await dispatch(clean,dispatchContext);
+    if (result?.durable && result.job_id && result.job_id !== clean.jobId) {
+     return hold('durable_intake_correlation_conflict');
+    }
+   }
    if(result?.durable===true){journal.mark(row.id,{durable:true,destination:'gateway',job_id:clean.jobId});return result;}
    next.set(row.id,now()+60000);return result;
   }finally{running.delete(row.id);if(ownsSlot)activeDispatches--;}
@@ -103,16 +110,38 @@ export function createIntakeCoordinator({journal,gateway,dispatch,schedule,now=D
   }
   // Rotate failures behind never-attempted jobs. Reusing an existing durable
   // gateway receipt needs no browser capture and does not spend the retry budget.
-  const jobs=pending.filter(r=>r.event.kind==='job'&&canonical.get(workKey(r.event.job))===r.id&&!running.has(r.id)&&(next.get(r.id)||0)<=now())
-   .sort((a,b)=>{const recovery=r=>{const e=r.event.job.events;return Array.isArray(e)&&e.length>0&&e.every(x=>x.recoveryOnly===true)?(e.some(x=>x.recoveryOf)?1:2):0;};return recovery(a)-recovery(b)||(attempted.get(a.id)||0)-(attempted.get(b.id)||0);});
+  const jobs = pending.filter(row => row.event.kind === 'job'
+   && canonical.get(workKey(row.event.job)) === row.id && !running.has(row.id)
+   && (next.get(row.id) || 0) <= now());
+  function recoveryRank(row) {
+   const events = row.event.job.events || [];
+   if (!events.length || events.some(event => !event.recoveryOnly)) return 0;
+   return events.some(event => event.recoveryOf) ? 1 : 2;
+  }
+  // Reserve capacity for both the latest customer conversations and the oldest
+  // unfinished observations. A paused or failing prefix must not hide live work.
+  const fair = [...jobs].sort((a,b) => recoveryRank(a) - recoveryRank(b)
+   || (attempted.get(a.id)||0) - (attempted.get(b.id)||0));
+  const latestByRoom = new Map();
+  for (const row of jobs) {
+   if (attempted.has(row.id)) continue;
+   const job = row.event.job, previous = latestByRoom.get(job.roomKey);
+   if (!previous || job.roomRevision >= previous.event.job.roomRevision) latestByRoom.set(job.roomKey,row);
+  }
+  const recent = [...latestByRoom.values()].sort((a,b) => recoveryRank(a) - recoveryRank(b)
+   || (attempted.get(a.id)||0) - (attempted.get(b.id)||0)
+   || b.acceptedAt.localeCompare(a.acceptedAt));
+  const priority = replayPass++ % 3 === 2 ? fair : recent;
+  const candidates = [...new Set([...priority.slice(0,Math.max(1,limit-1)), ...fair, ...recent])];
   let dispatched=0;
-  for(const row of jobs.slice(0,100)){
+  for(const row of candidates){
+   if(dispatched>=limit || activeDispatches>=maxConcurrentDispatches)break;
    try{
     const receipt=await submit({...row.event.job,intakeIds:row.event.sourceIds||[]},{allowDispatch:false});
     if(!receipt.deferred){reconciled++;continue;}
     if(dispatched>=limit)continue;
     const result=await submit({...row.event.job,intakeIds:row.event.sourceIds||[]},{dispatchContext:{origin:'durable_intake_replay'}});
-    if(result?.deferred)continue;
+    if(result?.deferred){attempted.set(row.id,++sequence);continue;}
     attempted.set(row.id,++sequence);dispatched++;replayed++;
    }catch{attempted.set(row.id,++sequence);next.set(row.id,now()+60000);dispatched++;replayed++;}
   }
