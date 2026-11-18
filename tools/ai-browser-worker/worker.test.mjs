@@ -2636,10 +2636,13 @@ const registeredComponentProjectionCases = [
     }),
     afterRows: REGISTERED_SET_ROWS.slice(3)
   },
-  {
-    name: 'set-header replace preserves a later same-set instance and verifies the new set group',
+  ...[false, true].map(includeChild => ({
+    name: `set-header replace preserves a later same-set instance (explicit child ${includeChild})`,
     mutation: registeredMutationFixture('equipment_replace', {
-      expected_before: [{ schedule_id: '260824-008-01', name: '어퓨쳐 600X 세트', quantity: 1 }],
+      expected_before: [
+        ...(includeChild ? [{ schedule_id: '260824-008-02', name: '소프트박스', quantity: 1 }] : []),
+        { schedule_id: '260824-008-01', name: '어퓨쳐 600X 세트', quantity: 1 }
+      ],
       desired_after: [{ name: '어퓨쳐 1200D 세트', quantity: 1 }]
     }),
     afterRows: [
@@ -2647,7 +2650,7 @@ const registeredComponentProjectionCases = [
       { scheduleId: '260824-008-100', setName: '어퓨쳐 1200D 세트', name: '어퓨쳐 1200D 세트', qty: 1, isComponent: false },
       { scheduleId: '260824-008-101', setName: '어퓨쳐 1200D 세트', name: '헤드 케이블', qty: 1, isComponent: true }
     ]
-  }
+  }))
 ];
 
 for (const scenario of registeredComponentProjectionCases) {
@@ -2673,6 +2676,18 @@ for (const scenario of registeredComponentProjectionCases) {
 }
 
 const registeredImpossibleComponentRewriteCases = [
+  {
+    name: 'set replacement includes a component from a separately retained copy of the same set',
+    mutation: registeredMutationFixture('equipment_replace', {
+      expected_before: [{ schedule_id: '260824-008-01', name: '어퓨쳐 600X 세트', quantity: 1 },
+        { schedule_id: '260824-008-11', name: '소프트박스', quantity: 1 }],
+      desired_after: [{ name: '새 세트', quantity: 1 }]
+    }),
+    afterRows: [
+      ...REGISTERED_SET_ROWS.slice(3).filter(row => row.scheduleId !== '260824-008-11'),
+      { scheduleId: '260824-008-100', setName: '새 세트', name: '새 세트', qty: 1, isComponent: false }
+    ]
+  },
   {
     name: 'component replacement cannot approve a detached top-level replacement',
     mutation: registeredMutationFixture('equipment_replace', {
