@@ -2,6 +2,13 @@
 var REFERRAL_DISCOUNT_SHEET_ = '소개할인';
 var REFERRAL_DISCOUNT_HEADERS_ = ['소개받은 고객 연락처', '소개한 고객 연락처', '소개받은 고객 적용 건', '소개한 고객 적용 건'];
 var REFERRAL_DISCOUNT_RATE_ = 5;
+var REFERRAL_DISCOUNT_NAME_HEADER_ = '승인된 소개자 성함';
+
+function referralName_(value) {
+  var name = String(value || '').normalize('NFKC').trim();
+  return /^[가-힣]{2,8}$/.test(name) ? name : '';
+}
+
 
 function referralPhone_(value) {
   var digits = String(value == null ? '' : value).replace(/[^0-9]/g, '');
@@ -22,8 +29,9 @@ function referralDiscountRows_(ss) {
     throw new Error('소개할인 시트의 헤더를 확인해주세요');
   }
   if (sheet.getLastRow() === 1) return [];
-  return sheet.getRange(2, 1, sheet.getLastRow() - 1, 4).getDisplayValues().map(function (row) {
-    return [referralPhone_(row[0]), referralPhone_(row[1]), referralBookingId_(row[2]), referralBookingId_(row[3])];
+  var hasName = sheet.getRange(1, 5, 1, 1).getDisplayValues()[0][0] === REFERRAL_DISCOUNT_NAME_HEADER_;
+  return sheet.getRange(2, 1, sheet.getLastRow() - 1, hasName ? 5 : 4).getDisplayValues().map(function (row) {
+    return [referralPhone_(row[0]), referralPhone_(row[1]), referralBookingId_(row[2]), referralBookingId_(row[3]), referralName_(row[4])];
   });
 }
 
@@ -71,7 +79,7 @@ function verifiedReferralDiscountRate_(ss, bookingId, customerPhone) {
     if (phone !== referred && phone !== referrer) return;
     var binding = phone === referred ? row[2] : row[3];
     if (!binding || (id.indexOf('RQ-') === 0 && binding !== id && binding.indexOf('RQ-') === 0)) return;
-    if (!referred || !referrer || referred === referrer || !row[2]) throw new Error('소개할인 확인 기록이 올바르지 않습니다');
+    if (!referred || (!referrer && (!row[4] || row[3])) || referred === referrer || !row[2]) throw new Error('소개할인 확인 기록이 올바르지 않습니다');
     if (target === undefined) target = referralActiveBooking_(ss, id, phone);
     if (!target || referralBookingUsesFixedQuote_(ss, target)) return;
     if (binding === id || binding === target || referralActiveBooking_(ss, binding, phone) === target) {

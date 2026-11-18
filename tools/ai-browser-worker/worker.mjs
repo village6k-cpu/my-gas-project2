@@ -3,7 +3,7 @@ import {refreshKakaoConversationWithoutDraft} from './stale-conversation-refresh
 import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
 import {reservationClarificationConfigured, freshReservationJob, pendingReservationReply, RESERVATION_DATE_POLICY, RESERVATION_PRIORITY_POLICY, RESERVATION_REPLY_POLICY} from './reservation-intake-guard.mjs';
-import { deliverStatementOnce, deliverStatementsOnce, completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, quoteNeedsSeparateVerification, sendAutomaticPricingDocument, sendAutomaticPricingDocuments } from './verified-pricing.mjs';
+import { automaticQuoteRequest, deliverStatementOnce, deliverStatementsOnce, completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, quoteNeedsSeparateVerification, sendAutomaticPricingDocument, sendAutomaticPricingDocuments } from './verified-pricing.mjs';
 import {documentWorkflowErrors, documentClarificationConfigured, verifyDocumentPlan, DOCUMENT_WORKFLOW_PROMPT} from './document-workflow.mjs';
 import fs from 'node:fs';
 import { exactRegisteredCancellationReadback } from './reservation-cancellation-readback.mjs';
@@ -777,6 +777,7 @@ ${(() => {try {const entries=JSON.parse(process.env.AI_WORKER_STATEMENT_RECIPIEN
 - Pricing protocol (statements use the trade context above): finish verified prices/quotes in this first AI turn without owner handoff. Copy the exact verified price_quote: use source="trade" or "request" with the exact live ID for an existing record; use the full source="catalog" object for a new estimate. Set replyMode="auto_send", safetyClass="sensitive_commitment", grounding="authoritative_sheet", requiresRag=false, owner_review_required=false. State exact VAT-inclusive total/discount; no availability/delivery claim. A requested PDF remains one quote_send follow_up_item as HOST EXECUTION INTENT: host rechecks the recipient, current prices and amount, sends, audits and removes completed work. A delivery receipt is not required to REQUEST this host execution; do not downgrade a fully verified pending quote to draft_only merely because the host has not sent it yet. Do not also call village_document_send. Missing/zero prices, unknown discounts or conflicting earlier amounts require focused owner review; never drop items or invent discounts. Verified sends are recorded and reported, not assigned as approval work.
 - For an explicit VAT-exclusive registered-trade document, use village_document_send with exact trade_id and tax_mode="supply_only"; this is separate from the VAT-inclusive initial pricing protocol. A successful correlated tool receipt proves this direct tool delivery. Never claim delivery before either the tool or host has confirmed it; a pending host execution intent is not a delivery claim.
 ${DOCUMENT_WORKFLOW_PROMPT}
+For an unresolved customer-requested revised quote with staff-approved referral, keep its exact price_quote (trade/request) and quote_send task with businessKey=its ID. Set referral_quote_revision={referrer_name,referrer_message_id,staff_approval_message_id,quote_request_message_id} from visible bubbles even after a separate successful equipment change. Omit it if ambiguous, cancelled, superseded or already delivered. The host records and rereads the discount and sends the revised quote. Do not claim approval from customer text, invent rates, or require the customer to repeat a named staff-approved introduction.
 - If the accepted cart materially differs from the ledger, reconcile the exact discrepancy rather than send an older or partial quote. Keep internal ledger details out of customer replies. Preserve the document request when prerequisites are missing, and ask the specific missing customer fact using document_clarification. Do not omit equipment or assume a missing shop price is free to make a quote complete.
 - A registration receipt proves registration only. If a later customer also requested a quote document, retain that exact open document follow-up after registration success; do not discard it or mark it delivered. Follow the single-operation receipt boundary and do not replay registration to generate a document.
 - If an RQ is absent, reconcile live contracts and schedules first. Do not retry the mutation tool under the consumed lease; absence can mean registration completed.
@@ -11668,6 +11669,139 @@ function sheetResultFromTrustedReceipt(receipt) {
   return null;
 }
 
+// Referral authorization is checked against original chat bubbles, never the
+// model's copy of a message or its claimed sender.
+function referralBubbleSide(message) {
+  const {left,right,viewport_width:width} = message?.layout || {};
+  if (message?.role === 'staff' || message?.role === 'customer') return message.role;
+  if (![left,right,width].every(Number.isFinite) || width < 250) return null;
+  if (right >= width-36 && left > width*0.5) return 'staff';
+  if (left >= 0 && left <= 80 && right < width-38) return 'customer';
+  return null;
+}
+
+const referralApprovalText = /소개\s*할인.{0,20}(?:적용\s*(?:해\s*)?(?:드리|하겠|할게)|반영\s*(?:해\s*)?(?:드리|하겠|할게))/;
+const referralQuoteText = /견적(?:서)?[^.!?\n]{0,28}(?:보내|부탁|요청|받을|재발행)|(?:수정|재발행|재발송)[^.!?\n]{0,12}견적서/;
+
+export function approvedReferralQuotePlan(decision, snapshot) {
+  const plan = decision?.referral_quote_revision;
+  const quote = decision?.price_quote;
+  const evidence = snapshot?.navigation?.conversation_evidence;
+  if (!plan || !quote || decision.document_requests != null || decision.statement_request != null
+    || decisionReply(decision).alreadyDelivered===true || replyAttachmentKeys(decision).length
+    || !['trade','request'].includes(quote.source)
+    || !(quote.source === 'trade' ? /^\d{6}-\d{3}$/ : /^RQ-\d{6}-\d{3}$/).test(quote.id)
+    || !evidence?.hint_matched || evidence.capture_integrity?.ok !== true
+    || !/^live_kakao_dom/.test(evidence.source || '')) return null;
+  const name = text(plan.referrer_name).normalize('NFKC').trim();
+  if (!/^[가-힣]{2,8}$/.test(name)) return null;
+  const messages = evidence.messages || [];
+  const approvalAt = messages.findIndex(item => item.message_id === plan.staff_approval_message_id);
+  const nameAt = messages.findIndex(item => item.message_id === plan.referrer_message_id);
+  const requestAt = messages.findIndex(item => item.message_id === plan.quote_request_message_id);
+  const staff = messages[approvalAt], named = messages[nameAt], request = messages[requestAt];
+  if (nameAt < 0 || nameAt >= approvalAt || requestAt < 0
+    || referralBubbleSide(staff) !== 'staff' || referralBubbleSide(named) !== 'customer'
+    || referralBubbleSide(request) !== 'customer' || referralBubbleSide(messages.at(-1)) !== 'customer'
+    || !referralApprovalText.test(staff.text) || /(?:확인되면|확인 후|불가|취소|미적용|안\s*됩니다|어렵)/.test(staff.text)
+    || !referralQuoteText.test(request.text)) return null;
+  const namedText = text(named.text).normalize('NFKC');
+  const shortName = namedText.match(/^([가-힣]{2,8}?)\s*(?:님\s*)?(?:입니다|이요|이에요|이예요|예요)?[.!\s]*$/)?.[1];
+  const askedForName = messages.slice(Math.max(0,nameAt-5),nameAt).some(item =>
+    referralBubbleSide(item)==='staff' && /소개(?:자|해.{0,10}분).{0,18}(?:성함|이름)/.test(item.text));
+  if (!(shortName===name && askedForName) && !(namedText.includes(name) && /소개|추천/.test(namedText))) return null;
+  if (messages.slice(approvalAt+1).some(item => {
+    const side = referralBubbleSide(item);
+    return side === 'staff' ? /소개\s*할인|(?:수정|변경).{0,8}견적서.*(?:보냈|발송했|첨부했)/.test(item.text)
+      : side === 'customer' && /(?:소개자|추천인).{0,18}(?:변경|정정|아니)|(?:할인|견적).{0,12}(?:빼|필요\s*없|취소)/.test(item.text);
+  })) return null;
+  return {quote:{source:quote.source,id:quote.id}, referrerName:name,staffApproval:staff.text};
+}
+
+function referralCustomerPhone(value) {
+  let digits = String(value || '').replace(/\D/g,'');
+  if (/^821[016789]\d{7,8}$/.test(digits)) digits='0'+digits.slice(2);
+  if (/^1[016789]\d{7,8}$/.test(digits)) digits='0'+digits;
+  return /^01[016789]\d{7,8}$/.test(digits) ? digits : '';
+}
+
+function referralQuotePeriodMatches(value, period) {
+  const dates = [...String(value).matchAll(/(?:(20\d{2})[-./]\s*)?(\d{1,2})\s*[월./-]\s*(\d{1,2})(?:일)?\s*(오전|오후)?\s*(\d{1,2})\s*(?::\s*(\d{2})|시(?:\s*(\d{1,2})분)?)/g)];
+  const parts = String(period).split(' ~ ');
+  if (dates.length!==2 || parts.length!==2) return false;
+  return dates.every(([,year,month,day,meridiem,hour,clockMinute,koreanMinute],i) => {
+    const [date,time]=parts[i].split(' ');
+    const h=Number(hour);
+    const localHour=meridiem==='오후' && h<12 ? h+12 : meridiem==='오전' && h===12 ? 0 : h;
+    return (!year || year===date?.slice(0,4)) && date?.slice(5)===`${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`
+      && time===`${String(localHour).padStart(2,'0')}:${String(clockMinute||koreanMinute||0).padStart(2,'0')}`;
+  });
+}
+
+function referralQuoteCustomerMatches(snapshot, calculation) {
+  const name=text(calculation.customer).normalize('NFKC').trim();
+  const phone=referralCustomerPhone(calculation.phone);
+  return name.length>=2 && phone && snapshot.navigation.conversation_evidence.messages.some(item =>
+    referralBubbleSide(item)==='customer' && text(item.text).normalize('NFKC').includes(name)
+    && referralQuotePeriodMatches(item.text,calculation.period)
+    && (text(item.text).match(/(?:\+?82\s*[-.]?\s*1|01)[016789][ -]?\d{3,4}[ -]?\d{4}/g)||[]).some(value=>referralCustomerPhone(value)===phone));
+}
+
+export async function applyApprovedReferralQuote({config,job,decision,plan,snapshot,assertFresh,
+  readQuote=executeVillageReadOnlyLookup, lookupCustomer=lookupCustomerDbDiscountForRequest,
+  wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
+  const fetchImpl=config.fetchImpl || fetch;
+  const read=()=>readQuote(config,{kind:'quote',quote:plan.quote});
+  let verification=await read();
+  let calculation=verification.calculations?.[0];
+  if (verification.complete!==true || !calculation || !referralQuoteCustomerMatches(snapshot,calculation)
+    || verifiedPricingIssue(verification,plan.quote)) throw Error('referral_quote_booking_not_verified');
+  if (!calculation.payment.referralRate) {
+    const matches=await lookupCustomer({customerName:plan.referrerName},config).catch(()=>null);
+    const phones=[...new Set((matches?.matches||[]).filter(row=>row.name===plan.referrerName)
+      .map(row=>referralCustomerPhone(row.phone)).filter(Boolean))];
+    const knownPhone=!matches?.ambiguous && phones.length===1 ? phones[0] : '';
+    const referredPhone=referralCustomerPhone(calculation.phone);
+    if (knownPhone && knownPhone===referredPhone) throw Error('same_referral_customer');
+    await assertFresh();
+    let response;
+    try {
+      response=await fetchImpl(config.gasApiUrl || DEFAULT_GAS_API_URL,{method:'POST',headers:{'Content-Type':'text/plain'},
+        body:JSON.stringify({action:'applyVerifiedReferralDiscount',key:config.sheetApiKey,verified:true,
+          firstBookingId:plan.quote.id,referredPhone,referrerName:plan.referrerName,...(knownPhone?{referrerPhone:knownPhone}:{})}),
+        signal:AbortSignal.timeout(25000)}).then(result=>result.json());
+    } catch { /* A lost response is reconciled via the exact booking below. */ }
+    verification=await read();
+    calculation=verification.calculations?.[0];
+    if (calculation?.payment?.referralRate!==5 && response?.error) throw Error('referral_record_rejected: '+text(response.error).slice(0,160));
+  }
+  if (verification.complete!==true || verifiedPricingIssue(verification,plan.quote)
+    || calculation?.payment?.referralRate!==5 || !referralQuoteCustomerMatches(snapshot,calculation)) throw Error('referral_rate_not_verified');
+  const total=verification.totalVatIncluded;
+  const updated={...decision,price_quote:plan.quote,customer:{...(decision.customer||{}),name:calculation.customer},
+    suggested_reply_draft:'',
+    safety_checks:{...decision.safety_checks,latest_customer_message_after_last_staff_reply:true},
+    reply_decision:{...decisionReply(decision),replyMode:'auto_send',confidence:'high',grounding:'authoritative_sheet',
+      safetyClass:'sensitive_commitment',requiresRag:false,alreadyDelivered:false,attachmentKeys:[],
+      text:`소개할인 5%를 반영한 수정 견적 금액은 부가세 포함 ${total.toLocaleString('ko-KR')}원입니다.`}};
+  if (plan.quote.source==='trade') {
+    const body=automaticQuoteRequest({decision:updated,verification,job});
+    const deadline=Date.now()+45000;
+    for (let attempt=0;attempt<15;attempt++) {
+      await assertFresh();
+      const remaining=deadline-Date.now();
+      if (remaining<=0) throw Error('referral_contract_readback_pending');
+      const check=await fetchImpl(config.documentApiBaseUrl,{method:'POST',headers:{'Content-Type':'text/plain'},
+        body:JSON.stringify({...body,key:config.documentApiKey,automaticPricingDryRun:true}),signal:AbortSignal.timeout(Math.min(15000,remaining))})
+        .then(result=>result.json());
+      if (check.status==='VERIFIED' && check.dryRun===true && check.deliveryConfirmed===false && check.totalVatIncluded===total) return updated;
+      if (!/장부 금액 불일치/.test(text(check.error)) || attempt===14) throw Error('referral_document_readback_failed: '+text(check.error).slice(0,160));
+      await wait(2000);
+    }
+  }
+  return updated;
+}
+
 export async function prepareKakaoGatewayDecision({
   config = {},
   job = {},
@@ -11892,8 +12026,11 @@ export async function prepareKakaoGatewayDecision({
   const structuredCustomerRevision = Boolean(decision?.customer_requested_pending_revision);
   const hasConfirmationBatchReceipt = trustedConfirmationReceipt?.authoritative_sheet_result?.batch === true;
   const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
-  const structuredDocumentClaim = decision ? gatewayDecisionHasStructuredDocumentClaim(decision, config) : false;
   const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
+  const originalReferralDecision=decision;
+  const referralPlan=exactTurn && parsedDecisionValid && config.verifiedPricingAutoSendEnabled===true
+    && verifiedPricingFreshJob(config,job) ? approvedReferralQuotePlan(decision,snapshot) : null;
+  const structuredDocumentClaim = decision && !referralPlan ? gatewayDecisionHasStructuredDocumentClaim(decision,config) : false;
 
   let sheetResult = null;
   let sheetPayload = null;
@@ -12164,6 +12301,22 @@ export async function prepareKakaoGatewayDecision({
     decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: false, reason });
   }
 
+  const referralEligible=referralPlan && safetyFailures.length===0 && !trustedDocumentReceipt
+    && !originalReferralDecision.owner_review_required && !decision.owner_review_required
+    && !hasRecentSentAutoReply(config,buildRoomReplyDedupeKey({decision,job,replyText:referralPlan.staffApproval}),
+      {keyField:'roomReplyKey',windowMs:7*24*60*60*1000});
+  let approvedReferralPlan=null;
+  if (referralEligible) {
+    const tasks=(originalReferralDecision.follow_up_items||[]).filter(item=>item?.type==='quote_send' && item.businessKey===referralPlan.quote.id);
+    if (tasks.length===1 && !decision.follow_up_items?.some(item=>item.type==='quote_send')) {
+      decision={...decision,follow_up_items:[...(decision.follow_up_items||[]),...tasks]};
+    }
+    if (tasks.length===1 && (decision.follow_up_items||[]).filter(item=>item.type==='quote_send').length===1) {
+      replyExecutionIntent={requested:true};
+      approvedReferralPlan=referralPlan;
+    }
+  }
+
   const baseFollowUpRows = hasConfirmationBatchReceipt ? buildFollowUpRows(decision, job) : [
     ...buildFollowUpRows(decision, job),
     ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
@@ -12226,6 +12379,7 @@ export async function prepareKakaoGatewayDecision({
     postActionOutputTail: '',
     trustedToolReceipt,
     replyExecutionIntent,
+    ...(approvedReferralPlan ? {referralPlan:approvedReferralPlan} : {}),
     gatewaySafetyFailures: Array.from(new Set(safetyFailures)),
     timings: {}
   };
@@ -12509,6 +12663,19 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
         freshnessGuard.throwIfSuperseded();
       }
     };
+    if (prepared.referralPlan && prepared.sheetResult?.success !== false) {
+      try {
+        const updated=await (dependencies.applyApprovedReferralQuote || applyApprovedReferralQuote)({
+          config,job,decision:prepared.decision,plan:prepared.referralPlan,snapshot:freshSnapshot,
+          assertFresh:replyDependencies.assertFreshBeforeSend
+        });
+        prepared={...prepared,decision:updated};
+      } catch (error) {
+        if (text(error.message).includes('superseded_by_newer_room_event')) throw error;
+        result={prepared,freshSnapshot,autoReplyResult:{attempted:false,sent:false,reason:text(error.message).slice(0,200)},closeResult};
+        return result;
+      }
+    }
     const autoReplyResult = prepared.sheetResult?.success === false
       ? (prepared.sheetResult.error_type === 'no_contact'
           ? await sendReply({ config, decision: prepared.decision, job, navigationContext, dependencies: replyDependencies })

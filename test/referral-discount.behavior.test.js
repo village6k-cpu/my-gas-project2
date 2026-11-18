@@ -51,7 +51,10 @@ function fixture() {
   const approve = (customer, first, use) => code.applyVerifiedReferralDiscount_({
     verified:true,referredPhone:customer,referrerPhone:referrer,firstBookingId:first,referrerBookingId:use,
   });
-  return {approve,rate:(id,phone)=>code.verifiedReferralDiscountRate_(API,id,phone),
+  const approveName = (customer, first, name, phone, use) => code.applyVerifiedReferralDiscount_({
+    verified:true,referredPhone:customer,referrerName:name,referrerPhone:phone,firstBookingId:first,referrerBookingId:use,
+  });
+  return {approve,approveName,rate:(id,phone)=>code.verifiedReferralDiscountRate_(API,id,phone),
     promote:()=>code.promoteRegisteredReferralDiscount_(API,"RQ-261118-001","261118-001"),data,queued};
 }
 
@@ -89,4 +92,14 @@ test('an active earlier rental prevents enrolling a repeat customer as a first r
   const {approve,rate} = fixture();
   assert.throws(()=>approve(referred,'261118-002'),/이전 대여 이력/);
   assert.equal(rate('261118-002',referred),0);
+});
+
+test('a verified introduction can apply to the first renter while the referrer identity is pending', () => {
+  const {approveName,rate,data}=fixture();
+  approveName(referred,'261118-001','소개자');
+  assert.equal(rate('261118-001',referred),5);
+  assert.equal(rate('261118-003',referrer),0);
+  approveName(referred,'261118-001','소개자',referrer,'261118-003');
+  assert.equal(rate('261118-003',referrer),5);
+  assert.equal(data.소개할인.length,2);
 });

@@ -6190,7 +6190,7 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
   // Includes the sourced FAQ answers; raw job payload stays excluded.
-  assert.ok(prompt.length < 31200, `prompt too large: ${prompt.length}`);
+  assert.ok(prompt.length < 31800, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {

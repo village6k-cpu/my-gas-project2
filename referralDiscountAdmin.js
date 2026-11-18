@@ -39,8 +39,10 @@ function applyVerifiedReferralDiscount_(args) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var referred = referralPhone_(args.referredPhone), referrer = referralPhone_(args.referrerPhone);
   var first = referralBookingId_(args.firstBookingId), use = referralBookingId_(args.referrerBookingId);
-  if (!referred || !referrer || referred === referrer || !first || (args.referrerBookingId && !use) || args.verified !== true) {
-    throw new Error('확인된 소개의 두 연락처와 첫 대여 건을 입력해주세요');
+  var referrerName = referralName_(args.referrerName);
+  if (!referred || (!referrer && !referrerName) || referred === referrer || !first ||
+      (args.referrerBookingId && (!use || !referrer)) || args.verified !== true) {
+    throw new Error('확인된 소개자와 첫 대여 예약자 연락처를 입력해주세요');
   }
   var lock = LockService.getScriptLock();
   lock.waitLock(10000);
@@ -61,7 +63,9 @@ function applyVerifiedReferralDiscount_(args) {
     if (indexes.length > 1) throw new Error('소개받은 고객의 할인 기록이 중복됩니다');
     var index = indexes.length ? indexes[0] : -1;
     var saved = rows[index];
-    if (saved && (saved[1] !== referrer || saved[2] !== first || (saved[3] && use && saved[3] !== use))) {
+    if (saved && (saved[2] !== first || (saved[1] && referrer && saved[1] !== referrer) ||
+        (saved[4] && saved[4] !== referrerName && (!saved[1] || saved[1] !== referrer)) ||
+        (saved[3] && use && saved[3] !== use))) {
       throw new Error('이 고객의 소개 기록이 이미 다른 대여 건에 연결되어 있습니다');
     }
     if (use && (!saved || !saved[3]) && verifiedReferralDiscountRate_(ss, use, referrer)) {
@@ -75,7 +79,8 @@ function applyVerifiedReferralDiscount_(args) {
     if (!saved && verifiedReferralDiscountRate_(ss, first, referred)) {
       throw new Error('이 첫 대여 건에 이미 소개할인이 연결되어 있습니다');
     }
-    var stored = [referred, referrer, first, use || (saved && saved[3]) || ''];
+    var stored = [referred, referrer || (saved && saved[1]) || '', first, use || (saved && saved[3]) || '',
+      referrerName || (saved && saved[4]) || ''];
     if (saved && JSON.stringify(saved) === JSON.stringify(stored)) return {success:true, firstBookingId:first, referrerBookingId:stored[3], rate:REFERRAL_DISCOUNT_RATE_};
     // Enqueue under the same lock before saving the binding so a queue failure
     // leaves the booker's current amount intact. The worker reads after unlock.
@@ -89,8 +94,12 @@ function applyVerifiedReferralDiscount_(args) {
       sheet.getRange(1, 1, 1, 4).setValues([REFERRAL_DISCOUNT_HEADERS_]);
       sheet.setFrozenRows(1);
     }
+    var nameHeader = sheet.getRange(1, 5, 1, 1);
+    var currentHeader = nameHeader.getDisplayValues()[0][0] || '';
+    if (currentHeader && currentHeader !== REFERRAL_DISCOUNT_NAME_HEADER_) throw new Error('소개할인 확인 열을 점검해주세요');
+    if (!currentHeader) nameHeader.setValue(REFERRAL_DISCOUNT_NAME_HEADER_);
     var row = index < 0 ? sheet.getLastRow() + 1 : index + 2;
-    sheet.getRange(row, 1, 1, 4).setNumberFormat('@').setValues([stored]);
+    sheet.getRange(row, 1, 1, 5).setNumberFormat('@').setValues([stored]);
     SpreadsheetApp.flush();
     if (verifiedReferralDiscountRate_(ss, first, referred) !== REFERRAL_DISCOUNT_RATE_ ||
         (stored[3] && verifiedReferralDiscountRate_(ss, stored[3], referrer) !== REFERRAL_DISCOUNT_RATE_)) {

@@ -136,8 +136,10 @@ export function automaticQuoteRequest({ decision, verification, job }) {
   };
   const pricingSource = {source:quote.source, ...(quote.id ? {id:quote.id} : {})};
   const operationId = createHash('sha256').update(JSON.stringify({
-    event:job.sourceEventKey || job.eventHash || job.jobId || job.id,
-    room:job.roomKey || job.room_key, revision:job.roomRevision || job.room_revision,
+    ...(manualData.referralRate === 5 ? {kind:'verified-referral-quote',room:job.roomKey || job.room_key} : {
+      event:job.sourceEventKey || job.eventHash || job.jobId || job.id,
+      room:job.roomKey || job.room_key, revision:job.roomRevision || job.room_revision
+    }),
     manualData, total:verification.totalVatIncluded, pricingSource
   })).digest('hex');
   return {action:'sendEstimateManual', automaticPricing:true, operationId,
