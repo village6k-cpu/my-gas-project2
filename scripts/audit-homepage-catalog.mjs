@@ -73,7 +73,9 @@ const audit = records.map(([, id, quotedName, numericPrice]) => {
   const mapping = keys.get(Number(id));
   const product = { id: Number(id), name, price };
   if (!mapping || mapping[1] !== name) return { ...product, status: 'review_identity' };
-  const [, , canonical, reason] = mapping;
+  const [, , mappedName, reason] = mapping;
+  // The four-radio product is sold as two existing two-radio inventory kits.
+  const canonical = Number(id) === 89 ? name : mappedName;
   const options = (variants.get(Number(id)) || []).map(item => comparePrice(item, price));
   if (!options.length) return canonical
     ? { ...product, ...comparePrice(canonical, price) }
