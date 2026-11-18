@@ -36,6 +36,8 @@ import {
 } from './staff-confirmed-mutation.mjs';
 import {
   confirmedReservationCommitRequestDigest,
+  confirmedRegistrationTarget,
+  independentConfirmedRegistrationTargets,
   validateStaffConfirmedRegistration
 } from './staff-confirmed-registration.mjs';
 export {
@@ -752,13 +754,14 @@ ${RESERVATION_PRIORITY_POLICY}
     '같은 대화 snapshot에서 직원이 장비와 대여 일시 변경을 함께 승인했다면 kind=equipment_and_date_change로 한 번의 village_registered_reservation_change 호출에 묶는다. expected_before에는 제거·교체할 정확한 스케줄 행만, desired_after에는 추가·교체할 수량만, date_change에는 승인된 변경 기간을 담는다. 일시만 먼저 적용한 뒤 장비를 두 번째 mutation으로 남기지 않는다.',
     '세트 구성품 하나만 같은 수량의 다른 품목으로 교체하도록 승인되었으면 equipment_replace의 expected_before에 선택한 구성품 스케줄ID·현재 이름·수량 한 행, desired_after에 대체 품목·동일 수량 한 행만 담는다. 이 경로는 기존 스케줄ID와 세트 소속을 유지한다. 다른 장비 추가나 수량 변경을 함께 섞지 않는다.',
 - Read the full same-room conversation. Native Hermes—not code or keywords—semantically decides whether a Village staff reply clearly and unconditionally authorizes the exact customer request; wording is open-ended.
+- One staff approval can cover several distinct rental periods. List each approved booking first, then commit each exact period separately in this same turn, waiting for its verified receipt before the next. Stop on uncertain writes and keep every unresolved period as its own follow-up. Same-period corrections are one booking.
 - Before choosing pending registration, compare the customer and period with active registered trades. An existing RQ can represent additions to that trade; in that case use village_registered_reservation_change with the exact missing delta and matching RQ, not a second pending registration. Only an independent rental should become a separate trade.
 ${INVENTORY_JUDGMENT}
 
 - Before registration, use village_read(kind=request,query=exact RQ). Its sources contain the current RQ rows, including every component and its quantity; in A:R, Q beginning with [세트] identifies a component and its parent set. Use these rows for the registration baseline. Its inventory_context contains this booking's evaluation and period-specific modelChoices. Use a separate targeted catalog query for equipment identity if needed. For a new inquiry, use catalog query="*" for identity, then village_read(kind=quote,quote.source=catalog) with the proposed period and full items before deciding availability. Interpret the evidence yourself: do not stop at a raw name mismatch, do not treat an included cable/packing manifest as an independent unavailable rental, and do not call a catalog-only stock record a matching failure or a shortage. Resolve real model choices from the full conversation and shop defaults, compare available choices, and put every choice in set_component_selections. If a material customer preference remains, prepare one specific customer question naming the viable choices through the existing reply authorization policy; preserve approved demand and ask that concrete question; do not turn a supply or catalog warning into a registration block. Never invent a stock count, conflate different filter types, or drop a tracked demand. Data/transport failures remain evidence gaps.
-- For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit once before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
+- For one exact mutable pending RQ with clear staff authorization, call village_confirmed_reservation_commit before FINAL_JSON; it takes priority over RQ maintenance. Pass current/desired full plan/period and current revision. Do not call village_confirmation_request first.
 - After a successful village_confirmed_reservation_commit receipt, FINAL_JSON may omit staff_confirmed_registration instead of copying the full input and set components again. The host retains the sealed authorization and exact readback. Report remaining questions with their reply_decision, price_quote and grounding context; do not re-read or re-register a verified successful operation just to restate it in FINAL_JSON.
-- Fast/coalesced turn: if this same snapshot contains the inquiry and clear staff authorization but no RQ exists, call village_confirmed_reservation_commit once with request_id=null. pending_request_candidate contains exactly customer_name, phone, discount_type, memo and extra_request. Put set_component_selections at registration top level, never inside pending_request_candidate. This atomic operation creates/reuses and verifies the RQ, applies exact choices and registers it. Never invent an RQ ID or split intake and registration into two calls.
+- Fast/coalesced turn: if this same snapshot contains the inquiry and clear staff authorization but no RQ exists, call village_confirmed_reservation_commit with request_id=null. pending_request_candidate contains exactly customer_name, phone, discount_type, memo and extra_request. Put set_component_selections at registration top level, never inside pending_request_candidate. This atomic operation creates/reuses and verifies the RQ, applies exact choices and registers it. Never invent an RQ ID or split intake and registration into two calls.
 - Bind source_evidence to the immutable room snapshot: copy conversation_evidence_hash exactly, cite the exact customer_message_ids and staff_message_ids in DOM order, and copy those selected message texts verbatim (joined by real newline characters, not literal backslash-n) into customer_request and staff_confirmation. Never invent or summarize message evidence.
 - You own sender and authorization interpretation from the complete conversation. A DOM role of unknown means the extractor lacks explicit sender metadata; it does not mean the message is unusable. Use the visible conversation, adjacent turns, known sender roles and supplied bubble layout together to identify who spoke. Cite the existing message IDs under the roles you determined; never modify the snapshot or contradict a known opposing sender. If the actual speaker remains ambiguous after that review, do not claim authorization.
 - Evaluate the customer's current plan and whether staff authorization still applies across ALL subsequent turns. Quote requests, thanks and administrative replies can leave an earlier approval valid; cancellation, replacement requests, new conditions or withdrawn approval can invalidate it. Choose the applicable staff evidence semantically, even when it is not the last staff message or the final message. confirmed=true asserts your review of the current full conversation; no separate post_confirmation_review object is required. Do not register cancelled or not-yet-approved changes.
@@ -11113,6 +11116,7 @@ function stripAgentSuppliedReceiptFields(decision = {}) {
     confirmed_reservation_commit_receipt: _confirmedReservationCommitReceipt,
     trusted_confirmed_reservation_commit_receipt: _trustedConfirmedReservationCommitReceipt,
     confirmed_registration_readback: _confirmedRegistrationReadback,
+    confirmed_registration_readbacks: _confirmedRegistrationReadbacks,
     registered_mutation_review: _registeredMutationReview,
     registered_mutation_readback: _registeredMutationReadback,
     customer_pending_revision_readback: _customerPendingRevisionReadback,
@@ -11545,6 +11549,66 @@ function forceConfirmedRegistrationSuccess(decision = {}, receipt) {
   return reconciled;
 }
 
+function confirmedRegistrationGroup(receipts, roomRevision) {
+  if (receipts.length < 2 || !independentConfirmedRegistrationTargets(
+    receipts.map(receipt => confirmedRegistrationTarget(receipt.authorized_registration)))) return null;
+  if (new Set(receipts.map(receipt => receipt.lease_id)).size !== 1 || !receipts[0].lease_id
+    || ['receipt_id', 'operation_id', 'request_digest'].some(field =>
+      receipts.some(receipt => !receipt[field]) || new Set(receipts.map(receipt => receipt[field])).size !== receipts.length)) return null;
+  const reports = receipts.map(receipt => {
+    const registration = trustedAuthorizedConfirmedRegistration(receipt, { roomRevision });
+    if (!registration) return null;
+    const ok = receipt.status === 'ok' && receipt.error === null
+      && exactConfirmedRegistrationAuthoritativeReadback(receipt,registration);
+    return { receipt, registration, ok };
+  });
+  if (reports.some(report => !report) || reports.slice(0, -1).some(report => !report.ok)) return null;
+  const successful = reports.filter(report => report.ok).map(report => report.receipt);
+  if (['trade_id', 'effective_request_id'].some(field =>
+    new Set(successful.map(receipt => receipt[field])).size !== successful.length)) return null;
+  return reports;
+}
+
+function reconcileConfirmedRegistrationGroup(decision, group, job, parsedDecisionValid) {
+  const final = group.at(-1);
+  const complete = final.ok;
+  const validDecision = parsedDecisionValid ? decision : {};
+  const registered = new Set(group.filter(report => report.ok)
+    .flatMap(({ receipt }) => [receipt.trade_id, receipt.effective_request_id, receipt.request_id].filter(Boolean)));
+  const remaining = (validDecision.follow_up_items || []).filter(item => item.requiresHumanAction === true
+    && !['done', 'completed', 'resolved', 'cancelled', 'dismissed'].includes(item.status)
+    && (item.route !== 'schedule' || !registered.has(item.businessKey || item.business_key)));
+  if (!complete) {
+    const { start_date, start_time, end_date, end_time } = final.registration.desired_period;
+    const scope = `${start_date} ${start_time} ~ ${end_date} ${end_time}`;
+    const review = gatewayReviewFollowUpItem({ decision: validDecision, job, schedule: true, receipt: final.receipt,
+      reason: `별도 대여 ${scope}의 등록을 원장으로 확인하지 못했습니다. 앞서 확인된 거래는 유지하고 이 기간만 확인하세요.` });
+    remaining.push({
+      ...review,
+      taskKey: `${review.taskKey}:${final.receipt.operation_id}`,
+      businessKey: final.receipt.effective_request_id || final.registration.request_id || `${review.businessKey}:${scope}`
+    });
+  }
+  const lastVerified = complete ? final : group.at(-2);
+  const reconciled = {
+    ...forceConfirmedRegistrationSuccess(validDecision, lastVerified.receipt),
+    staff_confirmed_registration: final.registration,
+    confirmed_registration_readbacks: group.map(({ receipt, registration, ok }) => ({
+      trade_id: receipt.trade_id, request_id: receipt.effective_request_id, period: registration.desired_period,
+      status: ok ? 'ok' : receipt.status === 'ok' ? 'readback_mismatch' : receipt.status
+    })),
+    owner_review_required: !complete || remaining.some(item => item.route === 'schedule'),
+    post_action_reconciled: complete,
+    follow_up_items: remaining,
+    reply_decision: !complete || !parsedDecisionValid || !hasIndependentCustomerReply(decision)
+      ? { replyMode: 'no_reply', text: '', confidence: 'high', safetyClass: 'no_send', grounding: 'authoritative_sheet',
+        requiresRag: false, shouldCreateTask: remaining.length > 0 }
+      : { ...decisionReply(decision), shouldCreateTask: remaining.length > 0 }
+  };
+  if (complete) verifiedRegistrationReplies.add(reconciled);
+  return reconciled;
+}
+
 function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, reason, receipt = null }) {
   const customerName = text(
     decision?.customer?.name
@@ -11950,7 +12014,9 @@ export async function prepareKakaoGatewayDecision({
     && Boolean(confirmationStage.operation_id) && Boolean(registeredStage.operation_id)
     && confirmationStage.operation_id !== registeredStage.operation_id
     && Date.parse(confirmationStage.created_at) <= Date.parse(registeredStage.created_at);
-  if (!linkedRegisteredChange && exactReceipts.length > 1
+  const registrationGroup = suppliedReceipts.length === exactConfirmedRegistrationReceipts.length
+    ? confirmedRegistrationGroup(exactConfirmedRegistrationReceipts, roomRevision) : null;
+  if (!registrationGroup && !linkedRegisteredChange && exactReceipts.length > 1
     && exactReceipts.some((receipt) => !sameGatewayDecisionValue(receipt, exactReceipts[0]))) {
     safetyFailures.push('conflicting_trusted_receipts');
   }
@@ -12035,7 +12101,11 @@ export async function prepareKakaoGatewayDecision({
   let sheetResult = null;
   let sheetPayload = null;
   let reason = '';
-  if (hasConfirmationBatchReceipt) {
+  if (registrationGroup) {
+    decision = reconcileConfirmedRegistrationGroup(decision, registrationGroup, job, parsedDecisionValid);
+    if (!decision.post_action_reconciled) safetyFailures.push('confirmed_registration_group_incomplete');
+    if (decision.reply_decision.replyMode === 'no_reply') replyExecutionIntent = { requested: false };
+  } else if (hasConfirmationBatchReceipt) {
     const exactReceiptSet = suppliedReceipts.length === 1 && exactConfirmationReceipts.length === 1 &&
       !safetyFailures.includes('invalid_trusted_receipt') && !safetyFailures.includes('conflicting_trusted_receipts');
     const batch = reconcileConfirmationBatchReceipt({receipt:trustedConfirmationReceipt,decision,job,

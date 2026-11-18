@@ -6,6 +6,31 @@ const { isApprovedBillingRounds_ } = require('../../approvedBillingRounds.js');
 const { normalizePendingCustomerIdentity, normalizePendingBaselinePeriod, normalizeRoomMemoEvidence } = require('../../scripts/windows/pending-customer-identity.js');
 const { commitConfirmedReservation: defaultCommitConfirmedReservation } = require('../../scripts/windows/village-confirm-request.js');
 
+export const MAX_INDEPENDENT_CONFIRMED_REGISTRATIONS = 8;
+
+// The persisted scope is only the booking coordinates. The approved request,
+// identity and schedule readback remain in the sealed receipt.
+export function confirmedRegistrationTarget(registration) {
+  const { request_id, desired_period } = registration || {};
+  const requestId = request_id === null ? null : normalizedText(request_id).toUpperCase();
+  if (requestId !== null && !REQUEST_ID.test(requestId)) return null;
+  if (periodErrors(desired_period, 'desired_period').length) return null;
+  const { start_date, start_time, end_date, end_time } = desired_period;
+  return { request_id: requestId, desired_period: {
+    start_date: normalizedText(start_date), start_time: normalizedText(start_time),
+    end_date: normalizedText(end_date), end_time: normalizedText(end_time)
+  } };
+}
+
+export function independentConfirmedRegistrationTargets(targets) {
+  if (!Array.isArray(targets) || targets.length < 1 || targets.length > MAX_INDEPENDENT_CONFIRMED_REGISTRATIONS) return false;
+  const scopes = targets.map(confirmedRegistrationTarget);
+  if (scopes.some(scope => !scope)) return false;
+  const periods = scopes.map(scope => JSON.stringify(scope.desired_period));
+  const requests = scopes.map(scope => scope.request_id).filter(Boolean);
+  return new Set(periods).size === periods.length && new Set(requests).size === requests.length;
+}
+
 const REGISTRATION_FIELDS = new Set([
   'confirmed', 'target_scope', 'request_id', 'source_evidence',
   'expected_before', 'expected_period', 'desired_after', 'desired_period',
@@ -512,6 +537,26 @@ function exactComponentReadback(result, registration) {
   return sameCanonicalValue(finalRows, canonicalComponentRows(projected));
 }
 
+export function verifiedConfirmedRegistrationResult(result, registration) {
+  return result?.schema === 'village-confirmed-reservation-commit-result/v1'
+    && result.success === true
+    && result.status === 'ok'
+    && normalizedText(result.request_id).toUpperCase() === normalizedText(registration.request_id).toUpperCase()
+    && REQUEST_ID.test(normalizedText(result.effective_request_id).toUpperCase())
+    && /^\d{6}-\d{3}$/.test(normalizedText(result.trade_id))
+    && sameCanonicalValue(result.final_plan, registration.desired_after)
+    && sameCanonicalValue(result.final_period, registration.desired_period)
+    && (registration.billing_rounds === undefined ||
+      (result.authoritative?.registered_trade?.contract?.rounds === registration.billing_rounds &&
+       result.authoritative?.registered_trade?.contract?.billingRounds === registration.billing_rounds))
+    && exactComponentReadback(result, registration)
+    && exactAuthoritativeRequestReadback(result, registration)
+    && typeof result.customerNotificationAttempted === 'boolean'
+    && typeof result.customerNotificationSent === 'boolean'
+    && (!result.customerNotificationSent || result.customerNotificationAttempted)
+    && result.authoritative && typeof result.authoritative === 'object' && !Array.isArray(result.authoritative);
+}
+
 function executionError(type, message, details = null) {
   return { type, message: String(message || type).slice(0, 1000), ...(details === null ? {} : { details }) };
 }
@@ -593,24 +638,7 @@ export async function executeVillageConfirmedReservationCommit(request = {}, opt
       ...(replacedIds.length ? ['pending_request_replacement'] : []),
       ...(result?.success === true ? ['registration', 'authoritative_readback'] : [])
     ])];
-    const exactSuccess = result?.schema === 'village-confirmed-reservation-commit-result/v1'
-      && result.success === true
-      && result.status === 'ok'
-      && normalizedText(result.request_id).toUpperCase() === normalizedText(registration.request_id).toUpperCase()
-      && REQUEST_ID.test(normalizedText(result.effective_request_id).toUpperCase())
-      && /^\d{6}-\d{3}$/.test(normalizedText(result.trade_id))
-      && sameCanonicalValue(result.final_plan, registration.desired_after)
-      && sameCanonicalValue(result.final_period, registration.desired_period)
-      && (registration.billing_rounds === undefined ||
-        (result.authoritative?.registered_trade?.contract?.rounds === registration.billing_rounds &&
-         result.authoritative?.registered_trade?.contract?.billingRounds === registration.billing_rounds))
-      && exactComponentReadback(result, registration)
-      && exactAuthoritativeRequestReadback(result, registration)
-      && typeof result.customerNotificationAttempted === 'boolean'
-      && typeof result.customerNotificationSent === 'boolean'
-      && (!result.customerNotificationSent || result.customerNotificationAttempted)
-      && result.authoritative && typeof result.authoritative === 'object' && !Array.isArray(result.authoritative);
-    if (exactSuccess) {
+    if (verifiedConfirmedRegistrationResult(result, registration)) {
       return buildReceipt({ status: 'ok', authoritativeResult: result, appliedStages });
     }
     const status = result?.success === true || result?.status === 'partial_success' || replacedIds.length

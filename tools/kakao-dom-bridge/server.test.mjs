@@ -7526,6 +7526,24 @@ async function applyRecoveryReceiptJob(durableJob) {
   return observed;
 }
 
+test('Gateway finalizes a room with two separately fenced reservation receipts', async () => {
+  const job = recoveryApplicationJob('ok', 1);
+  for (const operation of [...job.tool_operation_history, job.tool_operation]) {
+    operation.tool = 'confirmed_reservation_commit';
+  }
+  for (const [index, receipt] of job.tool_receipts.entries()) {
+    receipt.schema = 'village-confirmed-reservation-commit-receipt/v1';
+    receipt.receipt_id = [ ...job.tool_operation_history, job.tool_operation ][index].receipt_id;
+    receipt.trade_id = `260914-00${index + 1}`;
+    receipt.status = 'ok';
+    receipt.error = null;
+  }
+  const observed = await applyRecoveryReceiptJob(job);
+  assert.equal(observed.failure, null);
+  assert.equal(observed.finalized, true);
+  assert.deepEqual(observed.preparedReceipts, job.tool_receipts);
+});
+
 for (const finalStatus of ['blocked', 'ok']) {
   for (const priorCount of [1, 2]) {
     test('Gateway finalizes ' + finalStatus + ' after ' + priorCount + ' proven no-write registered input corrections', async () => {

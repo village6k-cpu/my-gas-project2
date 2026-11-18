@@ -6,6 +6,7 @@ import {
 } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
 import {
   confirmedReservationCommitRequestDigest,
+  confirmedRegistrationTarget,
   validateStaffConfirmedRegistration
 } from '../ai-browser-worker/staff-confirmed-registration.mjs';
 
@@ -211,14 +212,14 @@ function durableDocumentOperationForRequest(job, body, leaseId, requestDigest) {
   return { reservation, receipt, conflict: false };
 }
 
-function durableTypedOperationForRequest(job, body, leaseId, requestDigest, { tool, receiptSchema }) {
+function durableTypedOperationForRequest(job, body, leaseId, requestDigest, { tool, receiptSchema, registrationTarget = null }) {
   if (!job
     || String(job.job_id || '') !== String(body?.job_id || '')
     || String(job.room_key || '') !== String(body?.room_key || '')
     || Number(job.room_revision) !== Number(body?.room_revision)) {
     return { reservation: null, receipt: null, conflict: false };
   }
-  const reservation = toolOperationForRequest(job, tool, requestDigest);
+  const reservation = toolOperationForRequest(job, tool, requestDigest, registrationTarget);
   if (!reservation) return { reservation: null, receipt: null, conflict: false };
   const matches = reservation.schema === 'village-tool-operation-reservation/v1'
     && reservation.tool === tool
@@ -251,7 +252,8 @@ function durableRegisteredReservationChangeForRequest(job, body, leaseId, reques
 function durableConfirmedReservationCommitForRequest(job, body, leaseId, requestDigest) {
   return durableTypedOperationForRequest(job, body, leaseId, requestDigest, {
     tool: 'confirmed_reservation_commit',
-    receiptSchema: 'village-confirmed-reservation-commit-receipt/v1'
+    receiptSchema: 'village-confirmed-reservation-commit-receipt/v1',
+    registrationTarget:confirmedRegistrationTarget(body.registration)
   });
 }
 
@@ -823,6 +825,7 @@ export function createHermesGatewayHttpHandler({
           try {
             reserved = await channel.reserveToolOperation({
               tool: 'confirmed_reservation_commit',
+              registration_target:confirmedRegistrationTarget(authorizedRegistration),
               job_id: request.job_id,
               room_key: request.room_key,
               room_revision: request.room_revision,

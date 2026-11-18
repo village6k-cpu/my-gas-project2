@@ -9,6 +9,9 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 
+import {
+  confirmedRegistrationTarget, independentConfirmedRegistrationTargets, verifiedConfirmedRegistrationResult
+} from '../ai-browser-worker/staff-confirmed-registration.mjs';
 import { normalizeKakaoAutomationAuditEvent } from './kakao-automation-audit.mjs';
 import { MAX_REGISTERED_INPUT_CORRECTIONS, isProvenUnappliedRegisteredReceipt } from '../ai-browser-worker/registered-operation-recovery.mjs';
 import { unrecordedReservationInquiry, INTAKE_REPAIR_INSTRUCTION } from '../ai-browser-worker/reservation-intake-guard.mjs';
@@ -176,6 +179,29 @@ function normalizeToolOperationAuditTarget(value, operation) {
   return { ...value };
 }
 
+function normalizeRegistrationTarget(value, operation) {
+  if (value == null) return null;
+  const normalized = confirmedRegistrationTarget(value);
+  if (operation.tool !== 'confirmed_reservation_commit' || !normalized || !sameResult(normalized,value)) {
+    throw channelError('invalid_tool_operation','registration target is invalid');
+  }
+  return normalized;
+}
+
+function independentRegistrationOperations(job, operations, nextTarget) {
+  if (!operations.length || operations.some(op => op?.tool !== 'confirmed_reservation_commit')
+    || !independentConfirmedRegistrationTargets([...operations.map(op => op.registration_target), nextTarget])) return false;
+  const receipts = operations.map(op => exactReceiptForToolOperation(job, op));
+  return receipts.every((receipt, index) => receipt?.status === 'ok' && receipt.error === null
+    && sameResult(confirmedRegistrationTarget(receipt.authorized_registration), operations[index].registration_target)
+    && verifiedConfirmedRegistrationResult(receipt.authoritative_result, receipt.authorized_registration)
+    && receipt.applied_stages?.includes('registration') && receipt.applied_stages?.includes('authoritative_readback')
+    && receipt.trade_id === receipt.authoritative_result.trade_id
+    && receipt.effective_request_id === receipt.authoritative_result.effective_request_id)
+    && new Set(receipts.map(receipt => receipt.trade_id)).size === receipts.length
+    && new Set(receipts.map(receipt => receipt.effective_request_id)).size === receipts.length;
+}
+
 function sameToolOperationEnvelope(reservation, operation) {
   return reservation?.tool === operation.tool
     && reservation?.job_id === operation.job_id
@@ -207,20 +233,24 @@ function isProvenUnappliedRegisteredOperation(job, operation) {
 
 // Exact payloads always replay their durable receipt, including failed attempts.
 // Only a server-proven zero-write rejection lets the AI revise its input in this lease.
-export function toolOperationForRequest(job, tool, requestDigest) {
+export function toolOperationForRequest(job, tool, requestDigest, registrationTarget = null) {
   const operations = [...(job?.tool_operation_history || []), job?.tool_operation].filter(Boolean);
   const matching = operations.filter((operation) => operation.tool === tool);
   const exact = matching.find((operation) => operation.request_digest === requestDigest);
   if (exact) return exact;
   const existing = matching.at(-1);
   if (existing) {
+    if (tool==='confirmed_reservation_commit' && requestDigest && registrationTarget && existing===job?.tool_operation
+      && independentRegistrationOperations(job,operations,registrationTarget)) return null;
     if (requestDigest && existing === job?.tool_operation
       && matching.length <= MAX_REGISTERED_INPUT_CORRECTIONS
       && matching.every((operation) => isProvenUnappliedRegisteredOperation(job, operation))) return null;
     return existing;
   }
   const current = job?.tool_operation;
-  return current && exactReceiptForToolOperation(job)?.status !== 'ok' ? current : null;
+  // A group of committed rentals is kept as a homogeneous audit/receipt set.
+  return current && (operations.filter(op=>op.tool==='confirmed_reservation_commit').length>1
+    || exactReceiptForToolOperation(job)?.status !== 'ok') ? current : null;
 }
 
 function unresolvedToolOperationForAudit(job) {
@@ -229,7 +259,7 @@ function unresolvedToolOperationForAudit(job) {
     || !['failed', 'superseded'].includes(job?.state)
     || job?.error?.type !== 'confirmation_operation_unresolved'
     || job.error.operation_id !== operation.operation_id
-    || (Array.isArray(job?.tool_receipts) && job.tool_receipts.length > 0)) {
+    || (Array.isArray(job?.tool_receipts) && job.tool_receipts.some(receipt=>receipt.operation_id===operation.operation_id))) {
     return null;
   }
   const normalized = normalizeToolOperation(operation);
@@ -239,8 +269,12 @@ function unresolvedToolOperationForAudit(job) {
 
 function validatePersistedToolOperation(job) {
   if (job.tool_operation_history !== undefined) {
-    if (!Array.isArray(job.tool_operation_history)
-      || job.tool_operation_history.length >= TOOL_RECEIPT_SCHEMAS.size + MAX_REGISTERED_INPUT_CORRECTIONS) {
+    if (!Array.isArray(job.tool_operation_history)) {
+      throw channelError('invalid_persisted_job', 'persisted tool operation history is invalid');
+    }
+    const registrations = job.tool_operation?.tool==='confirmed_reservation_commit'
+      && independentRegistrationOperations(job,job.tool_operation_history,job.tool_operation.registration_target);
+    if (!registrations && job.tool_operation_history.length >= TOOL_RECEIPT_SCHEMAS.size + MAX_REGISTERED_INPUT_CORRECTIONS) {
       throw channelError('invalid_persisted_job', 'persisted tool operation history is invalid');
     }
     const seenIds = new Set(job.tool_operation ? [job.tool_operation.operation_id] : []);
@@ -248,7 +282,7 @@ function validatePersistedToolOperation(job) {
     const digests = new Set();
     const attempts = new Map();
     for (const previous of job.tool_operation_history) {
-      if (!previous || seenIds.has(previous.operation_id) || closedTools.has(previous.tool)) {
+      if (!previous || seenIds.has(previous.operation_id) || (!registrations && closedTools.has(previous.tool))) {
         throw channelError('invalid_persisted_job', 'duplicate or invalid historical tool operation');
       }
       seenIds.add(previous.operation_id);
@@ -263,9 +297,9 @@ function validatePersistedToolOperation(job) {
       digests.add(digest);
       attempts.set(previous.tool, (attempts.get(previous.tool) || 0) + 1);
     }
-    if (job.tool_operation && (closedTools.has(job.tool_operation.tool)
+    if (job.tool_operation && ((!registrations && closedTools.has(job.tool_operation.tool))
       || digests.has(`${job.tool_operation.tool}:${job.tool_operation.request_digest}`)
-      || (attempts.get(job.tool_operation.tool) || 0) > MAX_REGISTERED_INPUT_CORRECTIONS)) {
+      || (!registrations && (attempts.get(job.tool_operation.tool) || 0) > MAX_REGISTERED_INPUT_CORRECTIONS))) {
       throw channelError('invalid_persisted_job', 'invalid corrected tool operation history');
     }
   }
@@ -279,6 +313,7 @@ function validatePersistedToolOperation(job) {
   }
   const normalized = normalizeToolOperation(reservation);
   normalizeToolOperationAuditTarget(reservation.audit_target, normalized);
+  normalizeRegistrationTarget(reservation.registration_target, normalized);
   if (normalized.job_id !== job.job_id
     || normalized.room_key !== job.room_key
     || normalized.room_revision !== job.room_revision
@@ -314,8 +349,9 @@ function validatePersistedFailureNotification(job) {
 }
 
 function normalizeAuditProjectionEvents(events, job) {
-  if (!Array.isArray(events) || events.length < 1 || events.length > 4) {
-    throw channelError('invalid_audit_projection', 'audit projection must contain one to four events');
+  const priorRegistrations = (job.tool_operation_history || []).filter(op => op.tool === 'confirmed_reservation_commit').length;
+  if (!Array.isArray(events) || events.length < 1 || events.length > 4 + priorRegistrations) {
+    throw channelError('invalid_audit_projection', 'audit projection event count is invalid');
   }
   let normalized;
   try {
@@ -840,14 +876,16 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const normalized = normalizeToolOperation(operation);
         const auditTarget = normalizeToolOperationAuditTarget(operation?.audit_target, normalized);
+        const registrationTarget = normalizeRegistrationTarget(operation?.registration_target, normalized);
         const job = jobs.get(normalized.job_id);
         if (!job) throw channelError('unknown_job', 'job does not exist');
         assertNotHeld(job);
         assertEnvelope(job, normalized);
-        const existing = toolOperationForRequest(job, normalized.tool, normalized.request_digest);
+        const existing = toolOperationForRequest(job, normalized.tool, normalized.request_digest, registrationTarget);
         if (existing) {
           if (!sameToolOperationEnvelope(existing, normalized)
-            || !sameResult(existing.audit_target ?? null, auditTarget)) {
+            || !sameResult(existing.audit_target ?? null, auditTarget)
+            || !sameResult(existing.registration_target ?? null, registrationTarget)) {
             throw channelError('confirmation_operation_conflict', 'job already has another confirmation operation');
           }
           return { created: false, reservation: clone(existing) };
@@ -858,6 +896,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           operation_id: randomUUID(),
           ...normalized,
           ...(auditTarget ? { audit_target: auditTarget } : {}),
+          ...(registrationTarget ? { registration_target: registrationTarget } : {}),
           state: 'reserved',
           created_at: iso(currentTime()),
           receipt_id: null,

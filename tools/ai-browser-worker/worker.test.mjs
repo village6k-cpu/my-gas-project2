@@ -1756,6 +1756,40 @@ test('exact confirmed registration receipt finalizes no-reply and removes duplic
   assert.deepEqual(prepared.gatewaySafetyFailures, []);
 });
 
+test('confirmed registration reconciles each period and preserves a separate quote or incomplete booking', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const first = confirmedRegistrationReceiptFixture(job);
+  const period = { ...first.authorized_registration.desired_period, start_time: '06:00' };
+  const registration = confirmedRegistrationFixture({ request_id: 'RQ-260907-002', expected_period: period, desired_period: period });
+  const second = confirmedRegistrationReceiptFixture(job, {
+    authorized_registration: registration, receipt_id: 'confirmed-registration-receipt-2',
+    operation_id: '22222222-aaaa-4bbb-8ccc-222222222222', trade_id: '260907-002'
+  });
+  second.authoritative_result.trade_id = second.trade_id;
+  second.authoritative_result.authoritative.request.tradeIds = [second.trade_id];
+  const quote = documentDecisionFixture().follow_up_items[0];
+  const decision = confirmedRegistrationDecisionFixture({ follow_up_items: [quote] });
+  const prepare = (receipts) => workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: JSON.stringify(decision), trustedToolReceipts: receipts
+  });
+  const complete = await prepare([first, second]);
+  assert.deepEqual(complete.gatewaySafetyFailures, []);
+  assert.equal(complete.decision.post_action_reconciled, true);
+  assert.deepEqual(complete.decision.confirmed_registration_readbacks.map(row => [row.trade_id, row.status]), [
+    [first.trade_id, 'ok'], [second.trade_id, 'ok']
+  ]);
+  assert.equal(complete.decision.follow_up_items[0].route, 'document');
+
+  const partial = await prepare([first, {
+    ...second, status: 'partial_success', authoritative_result: null, error: { type: 'outcome_unknown', message: 'write timeout' }
+  }]);
+  assert.equal(partial.decision.post_action_reconciled, false);
+  assert.equal(partial.decision.owner_review_required, true);
+  assert.equal(partial.decision.reply_decision.replyMode, 'no_reply');
+  assert.deepEqual(partial.decision.confirmed_registration_readbacks.map(row => row.status), ['ok', 'partial_success']);
+  assert.ok(partial.decision.follow_up_items.some(item => item.businessKey === second.request_id && item.summary.includes('06:00')));
+});
+
 test('successful registration retains the separate requested quote document until delivery is verified', async () => {
   const {job,turn}=gatewayTurnFixture();
   const quote=documentDecisionFixture().follow_up_items[0];
