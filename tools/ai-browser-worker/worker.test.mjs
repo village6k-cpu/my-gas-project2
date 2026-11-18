@@ -1786,8 +1786,10 @@ test('confirmed registration reconciles each period and preserves a separate quo
   assert.equal(partial.decision.post_action_reconciled, false);
   assert.equal(partial.decision.owner_review_required, true);
   assert.equal(partial.decision.reply_decision.replyMode, 'no_reply');
+  assert.equal(partial.postActionResult.status, 'partial_success');
   assert.deepEqual(partial.decision.confirmed_registration_readbacks.map(row => row.status), ['ok', 'partial_success']);
   assert.ok(partial.decision.follow_up_items.some(item => item.businessKey === second.request_id && item.summary.includes('06:00')));
+  assert.ok(partial.availabilityAwareRows.some(row => row.payload.business_key === second.request_id));
 });
 
 test('successful registration retains the separate requested quote document until delivery is verified', async () => {
