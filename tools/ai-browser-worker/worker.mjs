@@ -754,7 +754,7 @@ ${RESERVATION_PRIORITY_POLICY}
     '같은 대화 snapshot에서 직원이 장비와 대여 일시 변경을 함께 승인했다면 kind=equipment_and_date_change로 한 번의 village_registered_reservation_change 호출에 묶는다. expected_before에는 제거·교체할 정확한 스케줄 행만, desired_after에는 추가·교체할 수량만, date_change에는 승인된 변경 기간을 담는다. 일시만 먼저 적용한 뒤 장비를 두 번째 mutation으로 남기지 않는다.',
     '세트 구성품 하나만 같은 수량의 다른 품목으로 교체하도록 승인되었으면 equipment_replace의 expected_before에 선택한 구성품 스케줄ID·현재 이름·수량 한 행, desired_after에 대체 품목·동일 수량 한 행만 담는다. 이 경로는 기존 스케줄ID와 세트 소속을 유지한다. 다른 장비 추가나 수량 변경을 함께 섞지 않는다.',
 - Read the full same-room conversation. Native Hermes—not code or keywords—semantically decides whether a Village staff reply clearly and unconditionally authorizes the exact customer request; wording is open-ended.
-- One staff approval can cover several distinct rental periods. List each approved booking first, then commit each exact period separately in this same turn, waiting for its verified receipt before the next. Stop on uncertain writes and keep every unresolved period as its own follow-up. Same-period corrections are one booking.
+- One staff approval can cover several distinct rental periods, including overlapping periods. List each approved booking first. Check each against live requests and registered trades, then commit each unregistered period separately in this turn, waiting for its verified receipt before the next. Keep unresolved periods as separate follow-ups. Same-period corrections are one booking.
 - Before choosing pending registration, compare the customer and period with active registered trades. An existing RQ can represent additions to that trade; in that case use village_registered_reservation_change with the exact missing delta and matching RQ, not a second pending registration. Only an independent rental should become a separate trade.
 ${INVENTORY_JUDGMENT}
 
@@ -782,8 +782,8 @@ ${(() => {try {const entries=JSON.parse(process.env.AI_WORKER_STATEMENT_RECIPIEN
 ${DOCUMENT_WORKFLOW_PROMPT}
 For an unresolved customer-requested revised quote with staff-approved referral, keep its exact price_quote (trade/request) and quote_send task with businessKey=its ID. Set referral_quote_revision={referrer_name,referrer_message_id,staff_approval_message_id,quote_request_message_id} from visible bubbles even after a separate successful equipment change. Omit it if ambiguous, cancelled, superseded or already delivered. The host records and rereads the discount and sends the revised quote. Do not claim approval from customer text, invent rates, or require the customer to repeat a named staff-approved introduction.
 - If the accepted cart materially differs from the ledger, reconcile the exact discrepancy rather than send an older or partial quote. Keep internal ledger details out of customer replies. Preserve the document request when prerequisites are missing, and ask the specific missing customer fact using document_clarification. Do not omit equipment or assume a missing shop price is free to make a quote complete.
-- A registration receipt proves registration only. If a later customer also requested a quote document, retain that exact open document follow-up after registration success; do not discard it or mark it delivered. Follow the single-operation receipt boundary and do not replay registration to generate a document.
-- If an RQ is absent, reconcile live contracts and schedules first. Do not retry the mutation tool under the consumed lease; absence can mean registration completed.
+- If a customer also requested a quote, keep the exact open document follow-up after registration. Each receipt covers its own booking. Do not mark a quote delivered without delivery evidence or replay a registration to generate a document.
+- If an RQ is absent, reconcile live contracts and schedules first; absence can mean registration completed. Never replay an uncertain write or re-register a verified booking.
 - A no_action receipt is not creation success and grants no retry authority. Reconcile through read-only lookup, preserving any already completed operation.
 - inquiry_disposition=already_applied requires live final rows matching the requested plan. A blocked/failed/unexecuted tool call is still an unresolved inquiry or change, even if should_write_to_sheet=false prevents replay.
 - Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
@@ -12024,7 +12024,7 @@ export async function prepareKakaoGatewayDecision({
   const trustedDocumentReceipt = exactDocumentReceipts[0] || null;
   const trustedRegisteredChangeReceipt = exactRegisteredChangeReceipts[0] || null;
   const trustedConfirmedRegistrationReceipt = exactConfirmedRegistrationReceipts[0] || null;
-  const trustedToolReceipt = trustedConfirmedRegistrationReceipt
+  const trustedToolReceipt = registrationGroup?.at(-1).receipt || trustedConfirmedRegistrationReceipt
     || trustedRegisteredChangeReceipt || trustedConfirmationReceipt || trustedDocumentReceipt;
   const confirmedRegistrationReceiptSetValid = Boolean(trustedConfirmedRegistrationReceipt)
     && suppliedReceipts.length === 1
