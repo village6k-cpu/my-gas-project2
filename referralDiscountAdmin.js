@@ -12,7 +12,12 @@ function assertReferralIsFirstRental_(ss, id, phone) {
   var foundEarlier = sheet.getRange(2, 1, sheet.getLastRow() - 1, 10).getDisplayValues().some(function (row) {
     if (row[0] === id || referralPhone_(row[2]) !== phone || /^(?:예약취소|취소|폐기)/.test(String(row[9] || '').trim())) return false;
     var previous = parseDT(row[4], row[5]);
-    return !previous || previous <= start;
+    if (!previous || previous < start) return true;
+    if (previous > start) return false;
+    // 동일 반출 시각의 확정 거래는 먼저 발급된 거래번호 한 건만 최초 대여로 인정한다.
+    // 아직 발급 전인 요청이나 순서를 증명할 수 없는 기존 거래는 임의로 앞세우지 않는다.
+    var otherId = String(row[0] || '').trim();
+    return isRequest || !/^\d{6}-\d{3}$/.test(otherId) || otherId < id;
   });
   if (foundEarlier) throw new Error('소개받은 고객의 이전 대여 이력을 확인해주세요');
 }
