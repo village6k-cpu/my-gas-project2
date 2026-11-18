@@ -11619,9 +11619,19 @@ function handleScheduleEdit(e) {
       if (String(oVal).indexOf("등록완료") >= 0) return;
       // 다중 시트 쓰기 도중 하드킬돼도 복구 스윕이 집을 수 있게, 실행 전에
       // 내구 마커(등록대기)와 백업 트리거를 먼저 남긴다 (scheduleRegister와 동일 원칙).
-      if (!markRegisterQueued_(sheet, row)) return;
+      var manualQueueLock = LockService.getScriptLock();
+      var manualReqID = String(sheet.getRange(row, 1).getValue() || '').trim();
+      if (!manualQueueLock.tryLock(1000)) {
+        deferRegistrationIntent_(manualReqID, false);
+        return;
+      }
+      try {
+        var manualRows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 16).getValues();
+        if (!manualRows[row - 2] || manualRows[row - 2][0] !== manualReqID ||
+            registrationQueueBinding_(manualRows, manualReqID) || !markRegisterQueued_(sheet, row)) return;
+      } finally { manualQueueLock.releaseLock(); }
       try { enqueuePendingRegister_(String(sheet.getRange(row, 1).getValue() || "").trim(), 30000); } catch (queueErr) {}
-      registerByReqID(sheet, row, { fromQueue: false });
+      registerByReqID(sheet, row, { fromQueue: false, expectedReqID: manualReqID });
     } else if (val === "추가") {
       addEquipmentToContract(sheet, row);
     } else if (val === "삭제") {
@@ -15917,17 +15927,15 @@ function recoverPartiallyRegisteredRequests_(sheet) {
   if (lastRow < 2) return { fixed: 0, reqIDs: [] };
   var data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
   var pendingReqs = {};
-  var reqTradeIDs = {};
   for (var i = 0; i < data.length; i++) {
     var reqID = String(data[i][0] || "").trim();
     if (!reqID) continue;
     if (isRecoverableRegisterStatus_(data[i][14])) pendingReqs[reqID] = true;
-    var tradeID = String(data[i][15] || "").trim();
-    if (tradeID) reqTradeIDs[reqID] = tradeID;
   }
   for (var rid in pendingReqs) {
-    var tid = reqTradeIDs[rid] || getRequestExistingTradeID_(data, rid);
-    if (!tid) continue;
+    var binding = registrationQueueBinding_(data, rid);
+    if (!binding || binding.code !== 'PARTIAL_STATE') continue;
+    var tid = binding.tradeId;
     if (finalizeQueuedRequestFromExistingTrade_(sheet, data, rid, tid)) fixed.push(rid);
     else failures.push({ reqID: rid, tradeId: tid, error: "거래내역 확인 실패 — 등록대기 유지" });
   }
@@ -15982,9 +15990,39 @@ function markRequestRegisterFailed_(sheet, allData, reqID, message) {
 
 var REGISTER_QUEUE_PROCESSING_ = false;
 
+// A completed request can contain set components and explicitly excluded lines.
+function registrationQueueBinding_(rows, reqID) {
+  var active = rows.filter(function(row) {
+    return String(row[0] || '').trim() === reqID && !/^(거절|보류|제외)$/.test(String(row[14] || '').trim());
+  });
+  if (active.some(function(row) { return isConfirmedRegistrationNoReplayStatus_(row[14]); })) {
+    return {success:false, reqID:reqID, error:'직원확정 등록 처리 중 — 기존 작업의 결과를 확인하세요.'};
+  }
+  var linked = active.filter(function(row) { return row[15] || isRegisterCompletedStatus_(row[14]); });
+  if (!linked.length) return null;
+  var tradeID = String(linked[0][15] || '').trim();
+  var validTradeId = /^\d{6}-\d{3,}$/.test(tradeID);
+  if (validTradeId && active.every(function(row) {
+    return String(row[15] || '').trim() === tradeID && isRegisterCompletedStatus_(row[14]);
+  })) return {success:true, reqID:reqID, tradeId:tradeID, status:'등록완료', alreadyRegistered:true, message:'등록완료'};
+  var compatible = validTradeId && active.every(function(row) {
+    return !row[15] || String(row[15]).trim() === tradeID;
+  });
+  return {success:false, reqID:reqID, tradeId:compatible ? tradeID : '', code:compatible ? 'PARTIAL_STATE' : 'CONFLICTING_REGISTRATION',
+    error:'기존 등록 연결을 확인 중입니다.'};
+}
+
+function deferRegistrationIntent_(reqID, direct) {
+  if (!reqID) return;
+  // One key per request and approval level: simultaneous writers cannot lose
+  // another request or downgrade a direct approval. A worker owns sheet writes.
+  PropertiesService.getScriptProperties().setProperty((direct ? 'registerDirectIntent_' : 'registerRetryIntent_') + reqID, '1');
+  ensurePendingRegisterTrigger_(30000);
+}
+
 function markRegisterQueued_(sheet, row) {
   var currentStatus = sheet.getRange(row, 15).getDisplayValue();
-  if (isConfirmedRegistrationNoReplayStatus_(currentStatus)) return false;
+  if (isConfirmedRegistrationNoReplayStatus_(currentStatus) || isRegisterCompletedStatus_(currentStatus)) return false;
   sheet.getRange(row, 15).setValue("등록대기");
   sheet.getRange(row, 15).setBackground("#E8F0FE");
   return true;
@@ -16018,6 +16056,10 @@ function readPendingRegisterQueue_(props) {
     } catch (le) {}
   }
 
+  props.getKeys().forEach(function(key) {
+    var intent = /^(?:registerDirectIntent_|registerRetryIntent_)(RQ-\d{6}-\d{3,})$/.exec(key);
+    if (intent) queue.push(intent[1]);
+  });
   var unique = [];
   for (var i = 0; i < queue.length; i++) {
     var reqID = String(queue[i] || "").trim();
@@ -16082,14 +16124,6 @@ function recoverPendingRegistrations() {
     };
   }
 
-  var lastRow = sheet.getLastRow();
-  var data = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
-  for (var i = 0; i < data.length; i++) {
-    var rid = String(data[i][0] || "").trim();
-    if (reqIDs.indexOf(rid) >= 0 && isRecoverableRegisterStatus_(data[i][14])) {
-      markRegisterQueued_(sheet, i + 2);
-    }
-  }
   for (var qi = 0; qi < reqIDs.length; qi++) {
     enqueuePendingRegister_(reqIDs[qi], 1000);
   }
@@ -16119,6 +16153,7 @@ function recoverPendingRegistrations() {
  * @param {string} reqID - 요청 ID (RQ-YYMMDD-NNN)
  */
 function scheduleRegister(reqID) {
+  var registerLock = LockService.getScriptLock(), registerLocked = false;
   var confirmLock = LockService.getUserLock();
   var confirmLocked = false;
   try {
@@ -16133,7 +16168,10 @@ function scheduleRegister(reqID) {
 
   // O열(15열)까지 함께 읽는다 — 선택 등록에서 '제외'된 첫 행에 등록대기 마커를
   // 덮어쓰면 사장이 명시적으로 뺀 품목이 그대로 등록되는 사고가 난다.
-  var allData = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
+  registerLocked = registerLock.tryLock(1000);
+  var allData = sheet.getRange(2, 1, lastRow - 1, 16).getValues();
+  var binding = registrationQueueBinding_(allData, reqID);
+  if (binding) return binding;
   var targetRow = -1;
   var excludedOnlyRow = -1;
   for (var i = 0; i < allData.length; i++) {
@@ -16151,6 +16189,11 @@ function scheduleRegister(reqID) {
   }
   if (targetRow < 0) return { success: false, error: "요청ID를 찾을 수 없음: " + reqID };
 
+  if (!registerLocked) {
+    deferRegistrationIntent_(reqID, true);
+    return {success:true, reqID:reqID, status:'등록대기', message:'등록 대기열에 저장했습니다.'};
+  }
+
   // 헤이빌리의 '바로 등록'은 모델/재고 경고까지 확인한 최종 승인이다.
   // 비동기 트리거가 실행될 때도 승인이 남도록 N열에 임시 마커를 기록한다.
   // 등록 성공 시 registerByReqID가 기존 값인 '등록'으로 확정한다.
@@ -16161,6 +16204,7 @@ function scheduleRegister(reqID) {
     return { success: false, error: "직원확정 자동등록 처리 중이어서 수동 큐에 추가하지 않았습니다: " + reqID };
   }
   } finally {
+    if (registerLocked) registerLock.releaseLock();
     if (confirmLocked) confirmLock.releaseLock();
   }
 
@@ -16238,12 +16282,15 @@ function _runPendingRegister() {
     var pendingReqID = queue[qi];
     // 실행 시점에 행을 새로 찾는다 (앞 건 등록의 세트 전개로 행이 밀렸을 수 있음)
     var qRow = findConfirmRequestRowByReqID_(sheet, pendingReqID);
-    if (qRow < 0) continue;
-    if (isConfirmedRegistrationNoReplayStatus_(sheet.getRange(qRow, 15).getDisplayValue())) continue;
+    if (qRow < 0 || isConfirmedRegistrationNoReplayStatus_(sheet.getRange(qRow, 15).getDisplayValue())) {
+      props.deleteProperty('registerDirectIntent_' + pendingReqID);
+      props.deleteProperty('registerRetryIntent_' + pendingReqID);
+      continue;
+    }
     try {
-      registerByReqID(sheet, qRow, { fromQueue: true });
+      registerByReqID(sheet, qRow, { fromQueue: true, expectedReqID: pendingReqID });
     } catch (e) {
-      sheet.getRange(qRow, 15).setValue("❌ 등록 실패: " + e.message);
+      Logger.log("등록대기 처리 실패(" + pendingReqID + "): " + e.message);
     }
   }
 
@@ -17278,11 +17325,11 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     if (registerOptions.failIfBusy === true) {
       throw new Error("다른 등록 작업이 진행 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.");
     }
-    var pendingReqID = String(sheet.getRange(triggerRow, 1).getValue() || "").trim();
-    if (!markRegisterQueued_(sheet, triggerRow)) return;
-    enqueuePendingRegister_(pendingReqID, 30000);
-    return;
+    var pendingReqID = registerOptions.expectedReqID || String(sheet.getRange(triggerRow, 1).getValue() || "").trim();
+    deferRegistrationIntent_(pendingReqID, false);
+    return {success:true, queued:true, reqID:pendingReqID};
   }
+  var reqID = "";
   var _postRegisterAlimtalk = null; // 락 해제 후 보낼 알림톡 payload (외부 HTTP를 락 밖으로)
   var _postRegisterScheduleFormat = false; // 9천+ 행 전체 서식은 등록 락 밖의 별도 워커로
   var _deferRegistrationDrain = false;
@@ -17301,8 +17348,43 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   // 시간 컬럼은 displayValue로 대체 (1899 timezone 이슈 방지)
   let regDisplayData = sheet.getRange(2, 1, lastRow - 1, 18).getDisplayValues();
   for (var di = 0; di < allData.length; di++) { allData[di][2] = regDisplayData[di][2]; allData[di][4] = regDisplayData[di][4]; allData[di][11] = regDisplayData[di][11]; }
+  if (registerOptions.expectedReqID) {
+    var requested = allData[triggerRow - 2];
+    if (!requested || requested[0] !== registerOptions.expectedReqID) {
+      triggerRow = allData.findIndex(function(row) { return row[0] === registerOptions.expectedReqID; }) + 2;
+      if (triggerRow < 2) return;
+    }
+  }
   const triggerIdx = triggerRow - 2;
-  const reqID = allData[triggerIdx][0];
+  reqID = allData[triggerIdx][0];
+  if (!hasTransferredConfirmedLock && reqID) {
+    var intentProps = PropertiesService.getScriptProperties();
+    var directIntent = intentProps.getProperty('registerDirectIntent_' + reqID);
+    var retryIntent = intentProps.getProperty('registerRetryIntent_' + reqID);
+    var registered = registrationQueueBinding_(allData, reqID);
+    if (!registered && (directIntent || retryIntent)) {
+      var activeIndex = allData.findIndex(function(row) {
+        return row[0] === reqID && !/^(거절|보류|제외)$/.test(String(row[14] || '').trim());
+      });
+      if (activeIndex >= 0) {
+        if (directIntent) {
+          sheet.getRange(activeIndex + 2, 14).setValue('바로등록');
+          allData[activeIndex][13] = '바로등록';
+        }
+        markRegisterQueued_(sheet, activeIndex + 2);
+        allData[activeIndex][14] = '등록대기';
+        SpreadsheetApp.flush();
+      }
+    }
+    if (registered && registered.code === 'PARTIAL_STATE' && registerOptions.fromQueue === true) {
+      if (!finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, registered.tradeId)) return registered;
+      registered = {success:true, reqID:reqID, tradeId:registered.tradeId, status:'등록완료', alreadyRegistered:true, message:'등록완료'};
+    }
+    if (directIntent) intentProps.deleteProperty('registerDirectIntent_' + reqID);
+    if (retryIntent) intentProps.deleteProperty('registerRetryIntent_' + reqID);
+    if (registered) return registered;
+    if ((directIntent || retryIntent) && activeIndex < 0) return;
+  }
   // 복구 모드는 큐 드레인 재진입(fromQueue) 여부로만 판정한다. O열 '등록대기'로 추론하면
   // onEdit 직전의 내구 pre-mark 때문에 모든 수동 등록이 복구로 오인되어, 신규 요청의
   // 진짜 중복이 '⚠️ 중복' 경고 없이 기존 거래로 조용히 완료 처리된다. 직접 호출 경로는
@@ -17995,6 +18077,18 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   try { invalidateDashboardCache([반출일, 반납일]); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 
+  } catch (registrationError) {
+    if (!hasTransferredConfirmedLock && reqID) {
+      var failedRows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 16).getValues();
+      if (!registrationQueueBinding_(failedRows, reqID)) {
+        var failedRow = findConfirmRequestRowByReqID_(sheet, reqID);
+        if (failedRow >= 2) {
+          sheet.getRange(failedRow, 15).setValue("❌ 등록 실패: " + registrationError.message).setBackground("#FFC7CE");
+          sheet.getRange(failedRow, 14).clearContent();
+        }
+      }
+    }
+    throw registrationError;
   } finally {
     regLock.releaseLock();
     _regPerf.lockHeldMs = Date.now() - _regPerfT0 - _regPerf.lockWaitMs;
@@ -18072,17 +18166,10 @@ function processRegistrationQueue_(sheet) {
       var pendingRow = findConfirmRequestRowByReqID_(sheet, pendingReqID);
       if (pendingRow < 0) continue;
 
-      // 대기 상태 표시 업데이트
-      sheet.getRange(pendingRow, 15).setValue("⏳ 등록 처리 중...");
-      SpreadsheetApp.flush();
-
       // 등록 실행. 한 건 실패가 뒤 요청 등록을 막지 않도록 reqID 단위로 격리한다.
       try {
-        registerByReqID(sheet, pendingRow, { fromQueue: true });
+        registerByReqID(sheet, pendingRow, { fromQueue: true, expectedReqID: pendingReqID });
       } catch (e) {
-        sheet.getRange(pendingRow, 15).setValue("❌ 등록 실패: " + e.message);
-        sheet.getRange(pendingRow, 14).clearContent();
-        sheet.getRange(pendingRow, 15).setBackground("#FFC7CE");
         Logger.log("등록대기 처리 실패(" + pendingReqID + "): " + e.message);
       }
     }
