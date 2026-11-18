@@ -27,6 +27,41 @@ function started() { const t=trade(); t.packing=step(t,{action:"start"},now); re
 function save(t, entries) { t.packing=step(t,{action:"save",entries,note:t.packing.note},now); }
 function seal(t) { save(t,t.packing.entries.map(e=>({...e,checked:true}))); t.packing=step(t,{action:"seal"},now); }
 
+test("a partial pickup preserves the picked line and still checks, edits and seals the other draft lines",()=>{
+  const t=started();
+  t.equipments[0].takenQty=1;
+  const first=t.packing.entries.find(e=>e.sourceId==="s1");
+  const edit=(id,patch)=>save(t,t.packing.entries.map(e=>e.id===id?{...e,...patch}:e));
+  edit("s2",{qty:3});
+  edit("s2",{checked:true});
+  assert.deepEqual(t.packing.entries.find(e=>e.id===first.id),first);
+  assert.throws(()=>edit(first.id,{qty:0}),/이미 반출/);
+  edit(first.id,{checked:true});
+  assert.throws(()=>edit(first.id,{checked:false}),/이미 반출/);
+  seal(t);
+  assert.equal(t.packing.phase,"sealed");
+  assert.equal(t.equipments[0].takenQty,1);
+  assert.throws(()=>step(t,{action:"revise"},now),/반출/);
+});
+
+test("a draft can begin beside an unrelated picked item, but can't reconstruct physical kit history",()=>{
+  const t=trade();
+  t.equipments.push({scheduleId:"tripod",name:"삼각대",qty:1,takenQty:1,checkoutState:"taken"});
+  t.packing=step(t,{action:"start"},now);
+  save(t,t.packing.entries.map(e=>({...e,checked:true})));
+  assert.ok(t.packing.entries.every(e=>e.checked));
+  const old=trade();old.equipments[0].takenQty=1;
+  assert.throws(()=>step(old,{action:"start"},now),/반출/);
+});
+
+test("draft edits never reduce a return count or reassign the recorded part",()=>{
+  const t=started(),entry=t.packing.entries.find(e=>e.sourceId==="s1");
+  t.packing.counts[entry.partId]={good:1,damaged:0,lost:0};
+  t.packing=step(t,{action:"refresh"},now);
+  assert.equal(t.packing.counts[entry.partId].good,1);
+  assert.throws(()=>save(t,t.packing.entries.map(e=>e.id===entry.id?{...e,qty:0}:e)),/검수/);
+});
+
 test("용도별 동일 SDI는 3개로 합산하고 D탭은 별도로 센다",()=>{
   const t=started(); assert.equal(groups(t.packing).find(g=>g.id==="CBL-003").expected,3);
   assert.equal(aggregateReturns(t).filter(g=>g.name==="SDI 연선").length,1);

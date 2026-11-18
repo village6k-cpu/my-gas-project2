@@ -6,6 +6,25 @@ function harness(){let trade={tradeId:'261019-009',contractStatus:'예약',setup
 const q=createPackingCheckQueue({read:()=>trade,show:(_,packing)=>{trade={...trade,packing};},start:()=>error=>finished.push(error),recover:async()=>{if(fresh)trade=fresh;},persist:(id,version,command)=>new Promise((resolve,reject)=>requests.push({version,command,resolve,reject}))});
 return {q,requests,finished,get trade(){return trade;},set fresh(t){fresh=t;},confirm(i){const r=requests[i];r.resolve(transitionPacking({...trade,packing:{...trade.packing,version:r.version}},r.command,'2026-10-28T12:01:00Z'));}};}
 const tick=()=>new Promise(r=>setImmediate(r));
+test('a stale local dispatch flag reloads the same draft and checks the same entry once', async()=>{
+  const h=harness(),id=h.trade.packing.entries[0].id;
+  h.fresh=structuredClone(h.trade);h.trade.setupDone=true;
+  const saving=h.q.check('t',id,true);
+  await tick();assert.equal(h.requests.length,1);h.confirm(0);
+  await saving;assert.equal(h.trade.packing.entries[0].checked,true);
+});
+test('refreshing a locally locked draft never checks a dispatched or replaced entry', async()=>{
+  for(const different of ['dispatched','version','entry']){
+    const h=harness(),id=h.trade.packing.entries[0].id, fresh=structuredClone(h.trade);
+    h.trade.setupDone=true;
+    if(different==='dispatched')fresh.setupDone=true;
+    if(different==='version')fresh.packing.version++;
+    if(different==='entry')fresh.packing.entries[0].partId='different';
+    h.fresh=fresh;
+    await assert.rejects(h.q.check('t',id,true));
+    assert.equal(h.requests.length,0,different);
+  }
+});
 test('rapid checks display immediately while delayed saves serialize; older response preserves later intent',async()=>{const h=harness(),id=h.trade.packing.entries[0].id,version=h.trade.packing.version;
 const a=h.q.check('t',id,true),b=h.q.check('t','second',true),c=h.q.check('t',id,false);
 assert.equal(h.requests.length,1);assert.equal(h.trade.packing.entries[0].checked,false);assert.equal(h.trade.packing.entries[1].checked,true);

@@ -120,8 +120,26 @@ export function packingDeviceName(t: Trade, e: EquipmentItem): string {
   return name === "7인치 모니터" ? t.packing?.deviceModels?.[e.scheduleId] || name : name;
 }
 export function packingAvailable(t: Trade) { return packingCandidates(t).length > 0 || packingDevices(t).some(e => needsDeviceModel(e) || templateFor(e.name).some(r => ACCESSORY.test(r.name))); }
+function takenScheduleIds(t: Trade) {
+  return new Set(t.equipments.filter(e => (e.takenQty ?? 0) > 0 || (e.actualTakenQty ?? 0) > 0).map(e => e.scheduleId));
+}
+function entryIsTaken(e: PackingEntry, ids: Set<string>) {
+  return ids.has(e.id) || !!e.sourceId && ids.has(e.sourceId) || !!e.ownerId && ids.has(e.ownerId);
+}
 export function packingStarted(t: Trade): boolean {
-  return !!t.packingDispatchedAt || t.setupDone || t.returnDone || t.contractStatus !== "예약" || t.equipments.some(e => (e.takenQty ?? 0) > 0);
+  if (t.packingDispatchedAt || t.setupDone || t.returnDone || t.contractStatus !== "예약") return true;
+  const ids = takenScheduleIds(t);
+  if (!ids.size) return false;
+  if (t.packing) return t.packing.phase !== "draft" || t.packing.schemaVersion !== 2;
+  return initialManifest(t, 0).entries.some(entry => entryIsTaken(entry, ids));
+}
+
+// PostgreSQL jsonb does not retain object key order. Compare persisted row values
+// by key so a draft save that reconstructs an unchanged row remains valid.
+function samePackingRows(before: object[], after: object[]) {
+  const stable = (rows: object[]) => JSON.stringify(rows.map(row => Object.entries(row)
+    .filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b))));
+  return stable(before) === stable(after);
 }
 /** 본체의 이름/수량 변경은 확정된 준비 목록에서도 놓치지 않는다. */
 export function packingDeviceReplacements(t: Trade) {
@@ -297,6 +315,26 @@ function validText(value: unknown, label: string, max = 160): string {
   return value.trim();
 }
 export function transitionPacking(t: Trade, command: PackingCommand, now: string): PackingManifest {
+  const next = buildPackingTransition(t, command, now);
+  const prev = t.packing;
+  if (!prev || prev.phase !== "draft" || command.action === "receive") return next;
+  const ids = takenScheduleIds(t);
+  const frozen = (entry: PackingEntry) => entryIsTaken(entry, ids) || Object.hasOwn(prev.counts, entry.partId);
+  const beforeEntries = prev.entries.filter(frozen).map(entry => {
+    // Staff may confirm preparation of an already picked line. Its physical
+    // identity and quantity, and a check already recorded, remain immutable.
+    const newCheck = next.entries.find(row => row.id === entry.id)?.checked;
+    return !Object.hasOwn(prev.counts, entry.partId) && newCheck ? { ...entry, checked: true } : entry;
+  });
+  if (!samePackingRows(beforeEntries, next.entries.filter(frozen)) ||
+      !samePackingRows(prev.sources.filter(s => ids.has(s.id)), next.sources.filter(s => ids.has(s.id))) ||
+      [...ids].some(id => prev.deviceModels?.[id] !== next.deviceModels?.[id])) {
+    throw new Error("이미 반출하거나 반납 검수한 구성품의 기록은 변경할 수 없습니다");
+  }
+  return next;
+}
+
+function buildPackingTransition(t: Trade, command: PackingCommand, now: string): PackingManifest {
   const prev = t.packing;
   if (t.returnDone || t.contractStatus === "반납완료" || t.contractStatus === "취소") throw new Error("마감·취소 거래의 구성품은 수정할 수 없습니다");
   if (command.action === "start") {
@@ -317,7 +355,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
     const old = prev.entries.filter(e => e.ownerId === owner.scheduleId);
     if (old.some(e => { const c = prev.counts[e.partId]; return c && c.good + c.damaged + c.lost > 0; })) throw new Error("교체 전 구성품의 반납 기록을 먼저 확인해주세요");
     const entries = packingReplacementEntries(t, owner.scheduleId);
-    if (packingStarted(t)) {
+    if (packingStarted(t) || takenScheduleIds(t).has(owner.scheduleId)) {
       if (!command.confirmed) throw new Error("교체 구성품의 실제 반출 여부를 확인해주세요");
       if (prev.phase !== "sealed" || entries.some(e => e.qty > 0 && e.unresolved)) throw new Error("반출한 구성품의 실제 종류를 먼저 확인해주세요");
       entries.forEach(e => { e.checked = e.qty > 0; });
@@ -353,6 +391,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
   if (prev.phase !== "draft") throw new Error("구성 다시 준비를 누른 뒤 변경해주세요");
   if (command.action === "refresh") {
     const fresh = initialManifest(t,next.version,prev.note);
+    fresh.counts = next.counts;
     const currentOwners = new Set(packingDevices(t).map(e => e.scheduleId));
     // 첫 버전의 묶음/자유입력을 표준 목록으로 바꿀 때 변경분은 무단 폐기하지 않는다.
     if (prev.schemaVersion !== 2) {
@@ -443,6 +482,7 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
   if (command.action === "save") {
     if (!Array.isArray(command.entries) || !command.entries.length || command.entries.length > 200) throw new Error("구성품은 1~200줄로 입력해주세요");
     const seen = new Set<string>();
+    const picked = takenScheduleIds(t);
     next.entries = command.entries.map(raw => {
       const id = validText(raw.id, "구성품 ID");
       const old = prev.entries.find(e => e.id === id);
@@ -451,6 +491,11 @@ export function transitionPacking(t: Trade, command: PackingCommand, now: string
       const legacyId = !!old && id.startsWith("replacement:") && /^[\p{L}\p{N}_:-]+$/u.test(id);
       if ((!/^[\w:-]+$/.test(id) && !legacyId) || seen.has(id)) throw new Error("구성품 ID가 중복되거나 올바르지 않습니다");
       seen.add(id);
+      if (old && (entryIsTaken(old, picked) || Object.hasOwn(prev.counts, old.partId)) &&
+          typeof raw.checked === "boolean" && samePackingRows([{ ...old, checked: raw.checked }], [raw])) {
+        if (raw.checked && !old.checked && old.qty > 0 && old.unresolved) throw new Error("등록된 실제 종류를 선택한 뒤 확인해주세요");
+        return { ...old, checked: raw.checked };
+      }
       if (!Number.isSafeInteger(raw.qty) || raw.qty < 0 || raw.qty > 99) throw new Error("수량은 0~99개로 입력해주세요");
       const direct = raw.custom === true;
       const directName = direct ? validText(raw.name, "구성품 이름", 100) : "";

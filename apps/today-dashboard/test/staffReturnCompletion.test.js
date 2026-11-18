@@ -14,7 +14,7 @@ function harness() {
   const trade = { tradeId: '261031-006', returnDone: false, contractStatus: '예약', packing, returnCounts: {} };
   const module = { exports: {} };
   const outbox = [];
-  const context = { module, exports: module.exports, state: { trades: [trade] }, activeTradeTransitions: new Set(), pendingRemoveEquipmentTrades: new Set(),
+  const context = { module, exports: module.exports, awaitPendingOnsiteAdds_: async () => {}, state: { trades: [trade] }, activeTradeTransitions: new Set(), pendingRemoveEquipmentTrades: new Set(),
     packingBlockers: () => [{ scheduleId: 'packing:cable', missing: 2, over: 0 }],
     returnCompletionBlockers: () => [{ scheduleId: 'packing:cable', missing: 2, over: 0 }],
     isSupabase: true, writeBackEnabled: true, writeBackDisabledReason: '',

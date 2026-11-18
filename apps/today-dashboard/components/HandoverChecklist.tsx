@@ -19,6 +19,7 @@ import {
   setOnsiteSettlement,
   type OnsiteEntry,
 } from "@/lib/data/store";
+import { isGasOutcomeUnknownError } from "@/lib/data/writeback";
 import { Check, Plus } from "./icons";
 import { MemoTag, itemMemoEntries } from "./MemoTag";
 import { equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
@@ -138,7 +139,7 @@ export function HandoverChecklist({ trade: savedTrade, phase, onPackingCommand, 
               </div>
             )}
             {!preview && (adding ? (
-              <OnsiteCombobox tradeId={trade.tradeId} onClose={() => setAdding(false)} />
+              <OnsiteCombobox key={trade.tradeId} tradeId={trade.tradeId} onClose={() => setAdding(false)} />
             ) : (
               <button onClick={() => setAdding(true)} className="tap mt-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand-300 bg-white py-2 text-[13px] font-semibold text-brand-700">
                 <Plus className="h-4 w-4" /> 현장 항목 추가
@@ -262,6 +263,16 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false, 
   );
 }
 
+type OnsiteSubmission = {
+  key: string;
+  label: string;
+  entries: OnsiteEntry[];
+  settlement: Settlement;
+  externalSupplyQty: number;
+  status: "저장 대기" | "저장 중" | "저장 완료" | "저장 실패" | "저장 확인 필요";
+  error?: string;
+};
+
 function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => void }) {
   const catalog = useEquipmentCatalog();
   const [q, setQ] = useState("");
@@ -269,8 +280,9 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
   const [qty, setQty] = useState(1);
   const [settlement, setSettlement] = useState<Settlement>("무상");
   const [externalSupplyQty, setExternalSupplyQty] = useState(0);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [submissions, setSubmissions] = useState<OnsiteSubmission[]>([]);
+  const inFlight = useRef(new Set<string>());
+  const searchInput = useRef<HTMLInputElement>(null);
 
   const matches = searchEquipmentCatalog(catalog.items, q);
   const exact = matches.some((m) => m.name === q.trim());
@@ -278,9 +290,25 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
   const isSet = !!picked?.components?.length;
   const catalogByName = new Map(catalog.items.map((item) => [item.name, item]));
 
+  const save = async (request: OnsiteSubmission) => {
+    if (inFlight.current.has(request.key)) return;
+    inFlight.current.add(request.key);
+    setSubmissions(rows => [...rows.filter(row => row.key !== request.key && row.status !== "저장 완료"), request]);
+    const update = (status: OnsiteSubmission["status"], error?: string) =>
+      setSubmissions(rows => rows.map(row => row.key === request.key ? { ...row, status, error } : row));
+    try {
+      await addOnsiteItems(tradeId, request.entries, request.settlement, request.externalSupplyQty, () => update("저장 중"));
+      update("저장 완료");
+    } catch (error) {
+      update(isGasOutcomeUnknownError(error) ? "저장 확인 필요" : "저장 실패", error instanceof Error ? error.message : "현장 추가 실패");
+    } finally {
+      inFlight.current.delete(request.key);
+    }
+  };
+
   const submit = async () => {
     const name = picked ? picked.name : q.trim();
-    if (!name || submitting) return;
+    if (!name) return;
     clearToast();
     let entries: OnsiteEntry[];
     if (isSet && picked) {
@@ -298,23 +326,24 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
     } else {
       entries = [{ name, qty, category: picked?.category ?? "소품·기타", offCatalog: !picked, emphasize: MEDIA_RE.test(name) }];
     }
-    setSubmitting(true);
-    setError(null);
-    try {
-      // 무상/유상 모두 원장에 기록하고, 외부 지원 수량만 자체 재고 검사에서 제외한다.
-      await addOnsiteItems(tradeId, entries, settlement, Math.min(externalSupplyQty, isSet ? 1 : qty));
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "현장 추가 실패");
-    } finally {
-      setSubmitting(false);
-    }
+    const external = Math.min(externalSupplyQty, isSet ? 1 : qty);
+    const key = JSON.stringify([name, isSet ? 1 : qty, settlement, external]);
+    if (inFlight.current.has(key)) return;
+    const pending = save({ key, label: `${name} ×${isSet ? 1 : qty} · ${settlement}`, entries, settlement, externalSupplyQty: external, status: "저장 대기" });
+    setQ("");
+    setPicked(null);
+    setQty(1);
+    setExternalSupplyQty(0);
+    setSettlement("무상");
+    searchInput.current?.focus();
+    await pending;
   };
 
   return (
     <div className="mt-1.5 space-y-2 rounded-lg border border-brand-300 bg-white p-2.5">
       <div>
         <input
+          ref={searchInput}
           autoFocus
           value={picked ? picked.name : q}
           onChange={(e) => { setPicked(null); setQ(e.target.value); setExternalSupplyQty(0); }}
@@ -337,7 +366,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
               </button>
             ))}
             {!exact && (
-              <button onClick={submit} disabled={submitting} className="tap flex w-full items-center gap-2 border-t border-line/60 bg-paper/70 px-2.5 py-1.5 text-left disabled:opacity-50">
+              <button onClick={submit} className="tap flex w-full items-center gap-2 border-t border-line/60 bg-paper/70 px-2.5 py-1.5 text-left disabled:opacity-50">
                 <Plus className="h-3.5 w-3.5 text-ink-mute" />
                 <span className="text-[13px] text-ink-soft">‘{q.trim()}’ 자유입력 추가</span>
                 <span className="ml-auto rounded bg-line/40 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
@@ -349,8 +378,8 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
 
       <div className="space-y-1.5 rounded-lg bg-paper p-2 text-[12px]">
         <label className="flex items-center gap-2 font-semibold text-ink-soft">
-          <input type="checkbox" checked={externalSupplyQty > 0} disabled={submitting}
-            onChange={(e) => { setExternalSupplyQty(e.target.checked ? 1 : 0); setError(null); }} />
+          <input type="checkbox" checked={externalSupplyQty > 0}
+            onChange={(e) => { setExternalSupplyQty(e.target.checked ? 1 : 0); }} />
           외부 지원 포함
         </label>
         {externalSupplyQty > 0 && <>
@@ -363,11 +392,14 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
         </>}
       </div>
 
-      {error && (
-        <div className="rounded-lg bg-attention-bg px-2.5 py-1.5 text-[12px] font-semibold leading-snug text-attention-fg ring-1 ring-attention-ring">
-          {error}
-        </div>
-      )}
+      <div role="status" aria-live="polite" className="space-y-1 text-[12px]">
+        {submissions.map(row => (
+          <div key={row.key} className={row.error ? "text-attention-fg" : "text-ink-soft"}>
+            <strong>{row.label}</strong> · {row.status}
+            {row.error && <> · {row.error} <button onClick={() => save({ ...row, status: "저장 대기", error: undefined })} className="font-semibold underline">다시 시도</button></>}
+          </div>
+        ))}
+      </div>
 
       <div className="flex items-center gap-2">
         {!isSet && <Stepper value={qty} min={1} onChange={(v) => { setQty(v); setExternalSupplyQty((n) => Math.min(n, v)); }} />}
@@ -377,9 +409,9 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
           ))}
         </div>
         <div className="ml-auto flex gap-1.5">
-          <button onClick={onClose} className="tap rounded-lg px-2.5 py-1.5 text-[12.5px] font-semibold text-ink-mute">취소</button>
-          <button onClick={submit} disabled={submitting || !(picked || q.trim())} className="tap rounded-lg bg-brand-600 px-3 py-1.5 text-[12.5px] font-bold text-white disabled:opacity-40">
-            {submitting ? "추가 중…" : "추가"}
+          <button onClick={onClose} className="tap rounded-lg px-2.5 py-1.5 text-[12.5px] font-semibold text-ink-mute">닫기</button>
+          <button onClick={submit} disabled={!(picked || q.trim())} className="tap rounded-lg bg-brand-600 px-3 py-1.5 text-[12.5px] font-bold text-white disabled:opacity-40">
+            추가
           </button>
         </div>
       </div>
