@@ -8916,6 +8916,7 @@ function getDashboardEquipNameList_(ss) {
 function getDashboardEquipmentCatalog_(ss) {
   var names = getDashboardEquipNameList_(ss);
   var setLookup = buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
+  var salesAliases = getSetMasterProductAliases_();
   var stocks = {};
   try { stocks = getTimelineStockMap_(ss) || {}; } catch (stockErr) {} // 장비마스터 실재고 — 앱 재고충돌 표시용
   return {
@@ -8925,8 +8926,8 @@ function getDashboardEquipmentCatalog_(ss) {
     items: setLookup.items || {},
     stocks: stocks,
     // 검색·선택·등록이 같은 검증된 판매상품 별칭을 공유한다.
-    aliases: getSetMasterProductAliases_().filter(function(entry) {
-      return resolveSetMasterProduct_(entry.alias, setLookup).canonicalName === entry.canonicalName;
+    aliases: salesAliases.filter(function(entry) {
+      return resolveSetMasterProduct_(entry.alias, setLookup, salesAliases).canonicalName === entry.canonicalName;
     })
   };
 }
@@ -9010,6 +9011,7 @@ function getSetMasterProductAliases_() {
     { alias: '사진 속 핸들그립', canonicalName: '핸들그립' },
     { alias: 'FX3 핸들그립', canonicalName: '핸들그립' }
   ];
+  if (typeof homepageSetMasterAliases_ === 'function') aliases = aliases.concat(homepageSetMasterAliases_());
   // 운영자가 확인한 판매상품 별칭만 저장. 시트 구조와 실물 재고 별칭을 변경하지 않는다.
   // [{alias, canonicalName}] 형식이며 가격은 저장하지 않고 매번 세트마스터 G열을 읽는다.
   var raw = typeof PropertiesService === 'undefined' ? '' :
@@ -9025,7 +9027,7 @@ function getSetMasterProductAliases_() {
   return aliases.concat(configured);
 }
 
-function resolveSetMasterProduct_(name, lookup) {
+function resolveSetMasterProduct_(name, lookup, salesAliases) {
   name = String(name || '').trim();
   var items = lookup.items || {};
   if (Object.prototype.hasOwnProperty.call(items, name)) return { canonicalName: name, candidates: [name], match: 'exact' };
@@ -9033,7 +9035,7 @@ function resolveSetMasterProduct_(name, lookup) {
   if (!key) return { canonicalName: '', candidates: [], match: 'unknown' };
   var candidates = Object.keys(items).filter(function(item) { return setMasterProductKey_(item) === key; });
   var staleAlias = false;
-  getSetMasterProductAliases_().forEach(function(entry) {
+  (salesAliases || getSetMasterProductAliases_()).forEach(function(entry) {
     if (setMasterProductKey_(entry.alias) !== key) return;
     // 대상 상품이 사라지면 다른 유사 이름으로 재연결하지 않는다.
     if (!Object.prototype.hasOwnProperty.call(items, entry.canonicalName)) { staleAlias = true; return; }
@@ -12862,7 +12864,7 @@ function _assertPendingCustomerIdentityUpdate_(group, update, req, evidence) {
       !update.name.trim() || update.name.trim().length > 120 || phone.length < 8 || phone.length > 15 ||
       !/^[\d\s()+.\-]+$/.test(update.phone) || update.name.trim() !== String(req.예약자명 || "").trim() ||
       phone !== _confirmRequestPhoneKey_(req.연락처) || (currentPhone && currentPhone !== phone && source.replace(/[\s()+.\-]/g, "").indexOf(phone) < 0) ||
-      source.indexOf(update.name.trim()) < 0 || contactSource.replace(/[\s()+.\-]/g, "").indexOf(phone) < 0) {
+      (update.name.trim() !== group.name && source.indexOf(update.name.trim()) < 0) || contactSource.replace(/[\s()+.\-]/g, "").indexOf(phone) < 0) {
     throw new Error("고객 정보 보완의 baseline 또는 대화 근거가 일치하지 않습니다.");
   }
 }

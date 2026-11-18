@@ -113,3 +113,16 @@ test('sheet dropdown product replacement resolves its new master rate while comp
   context.syncScheduleEditedProductPrice_({},sheet,2,'이전 구성품');
   assert.equal(writes.length,0);
 });
+
+test('homepage C1 Pro aliases preserve the specified model and headset count', () => {
+  const { homepageSetMasterAliases_ } = require('../homepageSetMasterCatalog.js');
+  const h = harness([
+    ['홀리랜드 솔리드컴 4S', '', '', '', '', '', 50000],
+    ['홀리랜드 솔리드컴 6S', '', '', '', '', '', 70000],
+    ['솔리드컴 SE 5구', '', '', '', '', '', 50000]
+  ]);
+  h.context.homepageSetMasterAliases_ = homepageSetMasterAliases_;
+  assert.equal(h.context.findSetPrice('홀리랜드 솔리드컴 C1 PRO 인터컴 - 6S', h.sheet), 70000);
+  assert.equal(h.context.findSetPrice('솔리드컴 C1 프로 4구', h.sheet), 50000);
+  assert.throws(() => h.context.findSetPrice('솔리드컴 C1 프로 5구', h.sheet), /세트마스터/);
+});

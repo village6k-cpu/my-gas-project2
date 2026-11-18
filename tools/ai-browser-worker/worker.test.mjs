@@ -6239,6 +6239,14 @@ test('buildHermesPrompt uses navigation hints without letting code judge busines
   assert.match(prompt, /never type into the message compose box/);
 });
 
+test('native booking prompt carries the approved replacement model into a later configuration and preserves unpriced demand', () => {
+  const prompt = buildHermesPrompt({ id: 'model-confirmation', preview_text: '클라이언트용 5구 준비' },
+    { gasApiUrl: 'https://example.test/exec', gatewayConfirmationToolAvailable: true });
+  assert.match(prompt, /대체 모델을 명시하고 고객이 이어 구수·수량만 정하면 승인 모델을 유지/);
+  assert.match(prompt, /다른 모델을 명시해 충돌하면 확인/);
+  assert.match(prompt, /정식 단가가 없으면 승인된 전체 품명을 desired_after에 그대로/);
+});
+
 test('buildHermesPrompt exposes village-ai RAG only as optional read-only reference memory', () => {
   const ragContext = buildReadOnlyRagContext({ villageAiUrl: 'https://village-ai.example', askApiSecret: 'secret-value' });
   assert.equal(ragContext.enabled, true);
