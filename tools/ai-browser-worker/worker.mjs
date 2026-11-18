@@ -2,7 +2,7 @@
 import {refreshKakaoConversationWithoutDraft} from './stale-conversation-refresh.mjs';
 import {exactExternalSupplyReadback} from './external-supply-allocation.mjs';
 import { validateConfirmationBatchDecision, executeConfirmationBatch } from './confirmation-batch.mjs';
-import {reservationClarificationConfigured, freshReservationJob, RESERVATION_DATE_POLICY, RESERVATION_PRIORITY_POLICY} from './reservation-intake-guard.mjs';
+import {reservationClarificationConfigured, freshReservationJob, pendingReservationReply, RESERVATION_DATE_POLICY, RESERVATION_PRIORITY_POLICY, RESERVATION_REPLY_POLICY} from './reservation-intake-guard.mjs';
 import { deliverStatementOnce, deliverStatementsOnce, completeVerifiedPricingWork, verifiedPricingConfigured, verifiedPricingFreshJob, verifiedPricingIssue, pricingDocumentRequested, quoteNeedsSeparateVerification, sendAutomaticPricingDocument, sendAutomaticPricingDocuments } from './verified-pricing.mjs';
 import {documentWorkflowErrors, documentClarificationConfigured, verifyDocumentPlan, DOCUMENT_WORKFLOW_PROMPT} from './document-workflow.mjs';
 import fs from 'node:fs';
@@ -791,16 +791,17 @@ ${DOCUMENT_WORKFLOW_PROMPT}
 
 CRITICAL RULES:
 ${INQUIRY_LIFECYCLE_PROMPT}
+${RESERVATION_REPLY_POLICY}
 - This is AI-first. 코드의 역할은 queue/claim/API 호출 같은 plumbing뿐이다.
 - 코드가 고객 의도, 예약 여부, 날짜/시간/장비를 최종 판단하면 안 된다. 코드 판단 금지: AI가 화면과 맥락을 보고 판단하고, 코드는 queue/claim/API write만 수행한다.
-- Outer code will validate your typed decision but will never infer names/dates/equipment, merge a different equipment list, synthesize reply prose, choose attachments, bypass RAG, or reroute follow-ups from keywords. Never fabricate missing schedule data: capture a new equipment inquiry with blank unknown date/time fields.
+- 호스트는 typed 결정을 검증하고 발송 시 예약 미확정 상태를 명시한다. 이름·날짜·장비·고객 사실·약속을 만들거나 장비목록·첨부·후속조치를 키워드로 바꾸거나 RAG를 우회하지 않는다. 신규 장비 문의의 모르는 일정은 공란으로 접수한다.
 - 카카오 Channel Manager의 실제 대화 맥락은 outer worker가 제공한 live DevTools/CDP DOM 및 bridge API evidence로 확인하고, 화면에서 확인된 맥락을 우선한다.
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
 - Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
 - 신규 문의, 미등록 요청 수정, 이미 등록된 내용, 미반영 등록변경을 INQUIRY LIFECYCLE대로 구분한다. 현재 등록 여부와 최종 장비를 확인한 뒤 해당 경로를 사용한다.
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때 근거가 확보된 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
-- 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 일반 가격·환불정책·파손규정·세금 안내는 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
+- 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 일반 가격·환불정책·파손규정·세금 안내는 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객이 수락했어도 실제 예약 등록과 정확한 결과 검증 전에는 예약완료 안내 금지.
 - 예외(항상 사장 확인): 고객이 현재 대여/수령 장비의 기스·흠집·스크래치·파손·고장·작동이상·분실을 알린 실제 사고, 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의는 근거가 있어도 auto_send 금지. 계속 사용/그대로 수령/교체/배상 여부를 임의로 승인하지 말고 draft_only + owner_review_required=true + urgent damage_repair로 올린다.
 - follow_up_items의 alertLevel은 네 판단이다. 사장을 깨워야 하거나 즉시 확인하지 않으면 고객·금전·장비 피해가 커지는 사건만 "p0"로 하고 구체적인 alertReason을 쓴다. 단순히 priority가 urgent이거나 특정 단어가 있다는 이유만으로 p0로 올리지 않는다. 나머지는 "none"이다.
 - 모든 신규 고객 장비 문의는 일정·연락처 완성도나 직원 답변 여부와 무관하게 should_write_to_sheet=true로 확인요청에 먼저 남긴다. 모르는 일정은 빈칸이며 재고 가능은 단정하지 않는다.
@@ -7813,11 +7814,19 @@ function currencyAmountsInReply(value = '') {
 
 // Validate the AI's reply plan. Live operator control belongs exclusively to
 // maybeAutoSendReply at the effect boundary, for text and document delivery alike.
+// Only exact host reconciliation can grant this authority. JSON fields copied
+// into a later model result or replayed for another room cannot grant it.
+const verifiedRegistrationReplies = new WeakSet();
+
 export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = {}) {
   if (!config.autoSendEnabled && !verifiedPricingConfigured(config, decision)
     && !reservationClarificationConfigured(config, decision)
     && !documentClarificationConfigured(config, decision)) return { allowed: false, reason: 'auto_send_disabled' };
   const typedPriceReply = isTypedPriceReply(decision);
+  if (replySafetyClass(decision) === 'staff_confirmed_reservation_acceptance'
+    && !verifiedRegistrationReplies.has(decision)) {
+    return {allowed:false, reason:'reservation_registration_not_verified'};
+  }
   if (!hasIndependentCustomerReply(decision) && (decision?.post_action_reconciled === true
     || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object'))) {
     return { allowed: false, reason: 'schedule_result_requires_owner_review' };
@@ -7829,6 +7838,8 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
   const mode = String(reply.replyMode || reply.reply_mode || '').trim();
   const confidence = String(reply.confidence || decision.confidence || '').trim();
   const textValue = text(reply.text || decision.suggested_reply_draft).trim();
+  const pendingReply = verifiedRegistrationReplies.has(decision) ? null : pendingReservationReply(decision, textValue);
+  const commitmentText = pendingReply?.commitmentText ?? textValue;
   const safetyClass = replySafetyClass(decision);
   const grounding = replyGrounding(decision);
   const requiresRag = replyRequiresRag(decision);
@@ -7861,7 +7872,7 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
     return { allowed: false, reason: 'sensitive_commitment_grounding_mismatch' };
   }
   if (!textValue || textValue.length < 5) return { allowed: false, reason: 'reply_text_too_short' };
-  if (textValue.length > 1000) return { allowed: false, reason: 'reply_text_too_long' };
+  if ((pendingReply?.text || textValue).length > 1000) return { allowed: false, reason: 'reply_text_too_long' };
   if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
   if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
   if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
@@ -7870,7 +7881,7 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
     return { allowed: false, reason: 'price_reply_contains_unverified_availability' };
   }
   const sensitiveCommitmentPattern = /(refund|환불|분실|파손|손상|결제\s*취소|예약\s*확정|재고\s*가능|가능\s*확정|(?:대여|예약)?\s*가능(?:합니다|하세요|하십니다|해요|함)?|확정|[0-9,]+\s*(?:원|만원)|입금|계좌|금액)/i;
-  if (sensitiveCommitmentPattern.test(textValue)) {
+  if (sensitiveCommitmentPattern.test(commitmentText)) {
     const explicitSensitiveAllowance = new Set([
       'payment_receipt_ack',
       'authoritative_availability_answer',
@@ -7919,7 +7930,7 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
       return { allowed: false, reason: 'authoritative_price_total_mismatch' };
     }
   }
-  return { allowed: true, reason: safetyClass, text: textValue, replyMode: mode, confidence, safetyClass, grounding };
+  return { allowed: true, reason: safetyClass, text: pendingReply?.text || textValue, replyMode: mode, confidence, safetyClass, grounding };
 }
 
 // 직원 개인 이름은 코드에 고정하지 않고 env로 관리한다. 하드코딩 시 신입 직원의
@@ -11000,6 +11011,8 @@ function hasIndependentCustomerReply(decision = {}) {
   const safety = replySafetyClass(decision);
   const grounding = replyGrounding(decision);
   return (isTypedPriceReply(decision) && replyRequiresRag(decision) === false)
+    || (safety === 'staff_confirmed_reservation_acceptance' && verifiedRegistrationReplies.has(decision)
+      && grounding === 'staff_confirmation' && replyRequiresRag(decision) === false)
     || (safety === 'simple_ack' && grounding === 'visible_conversation' && replyRequiresRag(decision) === false)
     // Asking for missing intake details is not a claim that a schedule write ran.
     // The ordinary send gate still rejects unverified commitments in the text.
@@ -11467,7 +11480,7 @@ function forceConfirmedRegistrationSuccess(decision = {}, receipt) {
     .filter(item => text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done'
       || item?.requiresHumanAction === true && ['document', 'inventory'].includes(text(item?.route).trim())
       && !['done', 'completed', 'resolved', 'cancelled', 'dismissed'].includes(text(item?.status).trim()));
-  return {
+  const reconciled = {
     ...decision,
     should_write_to_sheet: false,
     owner_review_required: false,
@@ -11488,6 +11501,8 @@ function forceConfirmedRegistrationSuccess(decision = {}, receipt) {
       shouldCreateTask: followUps.some(item => item.requiresHumanAction === true)
     }
   };
+  verifiedRegistrationReplies.add(reconciled);
+  return reconciled;
 }
 
 function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, reason, receipt = null }) {

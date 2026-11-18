@@ -27,7 +27,38 @@ export const RESERVATION_PRIORITY_POLICY = `RESERVATION PRIORITY AND ALTERNATIVE
 - Before allocating scarce equipment, check all existing overlapping registered schedules (including rentals starting earlier), pending inquiries and relevant original Kakao request timestamps. Respect existing confirmed allocations. Compare first relevant request times for this rental, not queue creation, form correction or latest thanks; explain missing evidence rather than manufacture priority.
 - Evaluate actual shared body/lens/component inventory across sets. Two pending RQs can each appear available without reserving stock. A lens substitution cannot solve a shared camera-body shortage. Check exact compatibility and availability, offer alternatives only within authorization, and record an offer as awaiting customer acceptance until accepted. Never silently replace equipment or promise unconfirmed external supply.`;
 
-export const INTAKE_REPAIR_INSTRUCTION = '\nINTAKE COMPLETION GUARD: Your final decision identified a new unresolved equipment inquiry, but no native intake receipt exists. Before FINAL_JSON, call village_confirmation_request with should_write_to_sheet=true. Preserve known fields. A validation rejection before operation reservation is an input correction, not a failed write: first reconcile current RQ and receipts; only when no operation was reserved or applied, fix the explicit validation error and submit corrected input. For a conflict between selected set components and top-level extras, preserve the full requested quantities as raw demand and memo while leaving unresolved component mapping for follow-up; do not drop an item or invent a catalog match. Apply the date interpretation policy below; leave genuinely unknown or still contradictory schedule fields blank and plan_complete=false. A staff approval, later thanks/arrival message, or invalid period does not erase the inquiry. If already applied/declined, verify live records and correct inquiry_disposition instead. A failed/partial receipt or unknown write requires owner review, never blind replay.\n' + RESERVATION_DATE_POLICY + '\n' + RESERVATION_PRIORITY_POLICY + '\n';
+export const RESERVATION_PENDING_NOTICE = '아직 예약이 확정되지 않았습니다.';
+export const RESERVATION_REPLY_POLICY = `RESERVATION CUSTOMER EXPECTATIONS:
+- 고객은 "접수했습니다/확인했습니다/잡아드릴게요"와 방문 안내를 예약 확정으로 받아들인다. 접수 성공·scheduleComplete=true·재고 가용·직원 승인·감사 인사는 등록 완료가 아니다.
+- 미등록 안내(reservation_intake_ack)와 필수 질문(contact_request)은 "${RESERVATION_PENDING_NOTICE}"로 시작한다. 발송 직전 호스트도 이 상태를 강제한다. 기존 예약의 변경은 기존 예약이 아니라 요청한 변경이 미확정이라고 안내한다.
+- staff_confirmed_reservation_acceptance는 정확한 등록 영수증과 실제 결과를 호스트가 검증한 뒤에만 허용한다. 승인된 등록은 native 도구로 실행·검증하고 답한다. 답장을 위해 승인을 만들지 않는다. 안내 발송·고객 감사 뒤에도 미확정 업무를 유지한다. 가격·정책·반납·서류는 각 근거 규칙을 따른다.`;
+
+// The model chooses the business intent. The host renders the known pending
+// state, so calling the same receipt a simple_ack cannot hide that state.
+export function pendingReservationReply(decision = {}, replyText = '') {
+  const reply = decision.reply_decision || {};
+  const safety = reply.safetyClass || reply.safety_class;
+  if (!['simple_ack', 'reservation_intake_ack', 'contact_request'].includes(safety)) return null;
+  const inquiry = decision.reservation_inquiry || {};
+  const disposition = decision.inquiry_disposition;
+  if (['declined', 'inventory_only', 'already_applied'].includes(disposition)) return null;
+  const change = disposition === 'registered_change_inquiry';
+  const pending = change || safety === 'reservation_intake_ack'
+    || inquiry.is_reservation_inquiry === true && inquiry.already_registered !== true
+    || decision.classification === 'reservation' && inquiry.already_registered !== true;
+  if (!pending) return null;
+  const notice = change ? '아직 요청하신 예약 변경이 확정되지 않았습니다.' : RESERVATION_PENDING_NOTICE;
+  const acknowledgement = `${notice} ${change ? '변경 내용을' : '장비와 일정을'} 확인한 뒤 확정 여부를 안내드리겠습니다.`;
+  const original = String(replyText).trim();
+  const content = original === acknowledgement ? ''
+    : original.startsWith(notice) ? original.slice(notice.length).trim() : original;
+  return {text:safety === 'contact_request' && content ? `${notice}\n${content}` : acknowledgement,
+    // ACK wording after the exact pending notice is replaced in full. Validate
+    // retained questions strictly, without rejecting discarded explanatory prose.
+    commitmentText:safety !== 'contact_request' && original.startsWith(notice) ? '' : content};
+}
+
+export const INTAKE_REPAIR_INSTRUCTION = '\nINTAKE COMPLETION GUARD: Your final decision identified a new unresolved equipment inquiry, but no native intake receipt exists. Before FINAL_JSON, call village_confirmation_request with should_write_to_sheet=true. Preserve known fields. A validation rejection before operation reservation is an input correction, not a failed write: first reconcile current RQ and receipts; only when no operation was reserved or applied, fix the explicit validation error and submit corrected input. For a conflict between selected set components and top-level extras, preserve the full requested quantities as raw demand and memo while leaving unresolved component mapping for follow-up; do not drop an item or invent a catalog match. Apply the date interpretation policy below; leave genuinely unknown or still contradictory schedule fields blank and plan_complete=false. A staff approval, later thanks/arrival message, or invalid period does not erase the inquiry. If already applied/declined, verify live records and correct inquiry_disposition instead. A failed/partial receipt or unknown write requires owner review, never blind replay.\n' + RESERVATION_DATE_POLICY + '\n' + RESERVATION_PRIORITY_POLICY + '\n' + RESERVATION_REPLY_POLICY + '\n';
 
 
 export function freshReservationJob(config = {}, job = {}) {
