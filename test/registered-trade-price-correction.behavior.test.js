@@ -47,7 +47,10 @@ function harness(options = {}) {
     SpreadsheetApp: {
       getActiveSpreadsheet: () => ({ getSheetByName: name => ({ '스케줄상세': schedule, '계약마스터': contract })[name] }),
       openByUrl: () => ({ getSheetByName: name => name === '거래내역' ? ledger : null }),
-      openById(id) { assert.equal(id,'price-contract'); return { getSheets: () => [generated] }; },
+      openById(id) {
+        if (id === 'old-pending' && options.pendingContract) return options.pendingContract;
+        assert.equal(id,'price-contract'); return { getSheets: () => [generated] };
+      },
       flush() { calls.flushes++; }
     },
     isDashboardTradeCheckoutStarted_: () => options.checkoutStarted === true,
@@ -56,7 +59,7 @@ function harness(options = {}) {
     activeDashboardReturnProjectionLease_: () => null,
     invalidateContractSheetScan_() {},
     findTemplateRows: () => ({ itemStart: 10, itemRows: 2 }),
-    findContractPaymentRefs_: () => ({ finalAmountCell: 'H47' }),
+    findContractPaymentRefs_: () => ({ totalBeforeDiscountCell: 'J42', discountedAmountCell: 'H46', finalAmountCell: 'H47' }),
     readContractAmount_: (ws,ref) => ws.getRange(ref).getValue(),
     registeredTradeCorrectionDate_: (raw) => String(raw),
     registeredTradeCorrectionTime_: (raw) => String(raw),
@@ -304,6 +307,33 @@ test('blank ledger is not accepted for an established contract or unresolved rem
     if(mode==='remaining-pending'){h.schedule.data[3][10]='[단가확인필요]';h.schedule.data[3][11]='';}
     const result=h.run(value);
     assert.equal(result.noMutationPerformed,true,mode);assert.equal(h.calls.writes.length,0);
+  }
+});
+
+test('a linked pending contract can finalize all prices only for the same trade, customer and three pending amount cells', () => {
+  const fileName = '계약서_' + input.tradeId + '_테스트 예약자';
+  for (const failure of ['', 'trade', 'customer', 'J42', 'H46', 'H47', 'remaining', 'foreign-url']) {
+    const pendingContract = {
+      getName: () => failure === 'trade' ? fileName.replace(input.tradeId, '260914-003')
+        : failure === 'customer' ? fileName + '2' : fileName,
+      getSheets: () => [{ getRange: ref => ({ getValue: () => failure === ref ? 528000 : '단가 미확정' }) }]
+    };
+    const h = harness({pendingContract}), value = copy(input);
+    h.schedule.data[1][10] = '[단가확인필요]'; h.schedule.data[1][11] = '';
+    h.ledger.data[1][2] = failure === 'foreign-url' ? 'https://other.example/old-pending'
+      : 'https://docs.google.com/spreadsheets/d/old-pending/edit?usp=drivesdk';
+    h.ledger.data[1][8] = '';
+    if (failure === 'remaining') { h.schedule.data[3][10] = '[단가확인필요]'; h.schedule.data[3][11] = ''; }
+    value.priceChanges[0].expectedUnitPrice = 0;
+    const result = h.run(value);
+    if (failure) {
+      assert.equal(result.noMutationPerformed, true, failure);
+      assert.equal(h.calls.writes.length, 0, failure);
+      assert.equal(h.calls.regenerations, 0, failure);
+    } else {
+      assert.equal(result.success, true, result.error);
+      assert.equal(result.priceReadback.ledgerAmount, result.priceReadback.contractAmount);
+    }
   }
 });
 
