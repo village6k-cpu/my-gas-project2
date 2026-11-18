@@ -218,6 +218,9 @@ function homepageSetMasterAliases_() {
       });
     });
   });
+  ['캐논 R6 Mark 2 + 100-400', '캐논 R6 Mark II + 100-400', '캐논 R6 Mark 2 + EF 100-400mm II'].forEach(function(name) {
+    aliases.push({ alias: name, canonicalName: '캐논 R6 Mark 2 + EF 100-400mm II (EF-EOS R 어댑터 포함)' });
+  });
   return aliases;
 }
 
