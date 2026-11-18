@@ -44,6 +44,7 @@ const variants = new Map([
   [17, ['캐논 R6 Mark 2 + EF 100-400mm II (EF-EOS R 어댑터 포함)']],
   [42, ['TVLogic F-7HS']],
   [62, ['탑 클램프 M11-095', '탑 클램프 MB-55']],
+  [129, ['테라덱 볼트 1000XT (1:1)', '테라덱 볼트 1000 XT (1:1)']],
   [130, ['테라덱 볼트 500 LT (1:1)']],
   [132, ['포트키 BM5', '5인치 모니터 BM5', 'VFM-055A', '티비로직 VFM-055A']],
   [148, ['석자 플로피', '넉자 플로피']],
@@ -77,6 +78,11 @@ const audit = records.map(([, id, quotedName, numericPrice]) => {
   // The four-radio product is sold as two existing two-radio inventory kits.
   const canonical = Number(id) === 89 ? name : mappedName;
   const options = (variants.get(Number(id)) || []).map(item => comparePrice(item, price));
+  if (Number(id) === 129) {
+    // 홈페이지 기본가는 1:1 구성. 수신기 두 대 구성은 별도로 승인된 1일 단가를 사용한다.
+    const approvedDailyPrice = 50000;
+    options.push({ ...comparePrice('테라덱 볼트 1000XT (1:2)', approvedDailyPrice), approvedDailyPrice });
+  }
   if (!options.length) return canonical
     ? { ...product, ...comparePrice(canonical, price) }
     : { ...product, status: 'separate_options_or_service', reason };
