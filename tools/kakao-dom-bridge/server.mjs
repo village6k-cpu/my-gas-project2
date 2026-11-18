@@ -2067,6 +2067,7 @@ const state = {
   failedWorkerRuns: 0,
   workerRunning: false,
   activeWorkerRuns: 0,
+  activeGatewayDispatches: 0,
   workerQueueLength: 0,
   currentJobId: null,
   workerStartedAt: null,
@@ -6113,6 +6114,9 @@ async function recordGatewayDispatchFailure(job, error, context = {}) {
 }
 
 async function dispatchAiJob(job, context = {}) {
+  // Capture starts before a durable Gateway claim exists. Keep idle cleanup out
+  // of this entire gap, including lookup/build and enqueue failures.
+  if (gatewayTransportEnabled) state.activeGatewayDispatches += 1;
   try {
     const result = await getAiJobDispatcher()(job, context);
     if (gatewayTransportEnabled && !recoveryHold && await recoverFailedGatewayDispatch({
@@ -6143,6 +6147,8 @@ async function dispatchAiJob(job, context = {}) {
   } catch (error) {
     if (!gatewayTransportSelected) throw error;
     return recordGatewayDispatchFailure(job, error, context);
+  } finally {
+    if (gatewayTransportEnabled) state.activeGatewayDispatches = Math.max(0, state.activeGatewayDispatches - 1);
   }
 }
 
@@ -6520,7 +6526,7 @@ export function startKakaoTabCleanupRuntime(config, {
 
 async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueued = false } = {}) {
   if (!CONFIG.kakaoTabCleanupEnabled) return { skipped: true };
-  if (state.workerRunning || state.activeWorkerRuns > 0 || (!allowQueued && (state.workerQueueLength > 0 || state.rooms.size > 0))) {
+  if (state.workerRunning || state.activeWorkerRuns > 0 || state.activeGatewayDispatches > 0 || (!allowQueued && (state.workerQueueLength > 0 || state.rooms.size > 0))) {
     return { skipped: true, reason: 'worker_or_debounce_active' };
   }
   if (state.tabCleanupRunning) return { skipped: true, reason: 'already_running' };
@@ -6528,7 +6534,7 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
   const result = { at: nowIso(), reason, closed: 0, closedTargetIds: [], targets: [], errors: [] };
   try {
     const gatewayIdle = async () => {
-      if (state.workerRunning || state.activeWorkerRuns > 0 || !isSharedHermesGatewayIdle()) return false;
+      if (state.workerRunning || state.activeWorkerRuns > 0 || state.activeGatewayDispatches > 0 || !isSharedHermesGatewayIdle()) return false;
       if (!gatewayChannel) return true;
       // Read local execution state, independently of remote/history health checks.
       const status = await gatewayChannel.status();
@@ -6537,7 +6543,7 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
         || Array.isArray(status.application_counts)) {
         throw new Error('Gateway tab cleanup status unavailable');
       }
-      return !state.workerRunning && state.activeWorkerRuns === 0 && isSharedHermesGatewayIdle()
+      return !state.workerRunning && state.activeWorkerRuns === 0 && !(state.activeGatewayDispatches > 0) && isSharedHermesGatewayIdle()
         && status.counts.claimed === 0 && ['pending', 'claimed', 'applying', 'applied']
         .every((key) => !Object.hasOwn(status.application_counts, key) || status.application_counts[key] === 0);
     };
@@ -6578,7 +6584,7 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
       }
       const draft = await inspectKakaoConversationDraft(tab,{timeoutMs:5000});
       if (draft?.href !== tab.url || draft.hasDraft !== false) continue;
-      if (!await gatewayIdle() || state.workerRunning || state.activeWorkerRuns > 0 || !isSharedHermesGatewayIdle()) {
+      if (!await gatewayIdle() || state.workerRunning || state.activeWorkerRuns > 0 || state.activeGatewayDispatches > 0 || !isSharedHermesGatewayIdle()) {
         result.skipped = true;
         result.reason = 'gateway_or_worker_active';
         break;
@@ -6869,6 +6875,7 @@ const server = http.createServer(async (req, res) => {
           failedWorkerRuns: state.failedWorkerRuns,
           workerRunning: state.workerRunning,
           activeWorkerRuns: state.activeWorkerRuns,
+          activeGatewayDispatches: state.activeGatewayDispatches,
           workerQueueLength: state.workerQueueLength,
           currentJobId: state.currentJobId,
           workerStartedAt: state.workerStartedAt,

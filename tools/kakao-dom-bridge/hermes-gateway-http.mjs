@@ -449,6 +449,11 @@ export function createHermesGatewayHttpHandler({
       if (req.method === 'POST' && url.pathname === '/hermes/v1/results') {
         const body = await readJsonBody(req);
         requiredLeaseId(body);
+        // Hermes may emit this transport notice after a rejected FINAL_JSON.
+        // It is not a new decision and must leave the lease for no_final recovery.
+        if (String(body.content || '').trim() === '⚠️ Message delivery failed after multiple attempts. Please try again — your request was processed but the response could not be sent.') {
+          throw requestError(422, 'non_decision_delivery_notice');
+        }
         const completed = await channel.complete(body);
         if (transport !== 'gateway_no_send' && typeof enqueueResultApplication === 'function') {
           try {
@@ -506,6 +511,7 @@ export function createHermesGatewayHttpHandler({
               .map((entry) => String(entry || '').trim().slice(0, 300))
               .filter(Boolean)
               .slice(0, 20);
+            validationErrors.push('This call was rejected before reserving or writing. Reconcile current RQ and receipts; if no operation was reserved or applied, correct the input and retry. Earlier timeouts or partial receipts still require reconciliation, never blind replay.');
             throw requestError(422, 'invalid_confirmation_request', { validationErrors });
           }
         }
@@ -564,7 +570,8 @@ export function createHermesGatewayHttpHandler({
         if (typeof validateConfirmation === 'function') {
           const validation = await validateConfirmation(body, { roomSnapshot });
           if (!validation?.valid) throw requestError(422, 'invalid_confirmation_request', {
-            validationErrors: (validation?.errors || []).slice(0, 20)
+            validationErrors: [...(validation?.errors || []).slice(0, 19),
+              'This call was rejected before reserving or writing. Reconcile current RQ and receipts before correcting this input; never replay an unresolved operation.']
           });
         }
         if (typeof executeConfirmation !== 'function') throw requestError(503, 'confirmation_unavailable');
