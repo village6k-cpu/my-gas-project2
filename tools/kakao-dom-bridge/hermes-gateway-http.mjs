@@ -495,8 +495,8 @@ export function createHermesGatewayHttpHandler({
         await assertCurrentRead();
         // Reads never reserve/consume the one mutation operation for this turn.
         sendJson(res,200,{schema:'village-read-result/v1',job_id:body.job_id,room_key:body.room_key,
-          room_revision:body.room_revision,lease_id:leaseId,request:body.request,
-          read_at:new Date(Number(now())).toISOString(),result});
+          room_revision:body.room_revision,lease_id:leaseId,result,request:body.request,
+          read_at:new Date(Number(now())).toISOString()});
         return true;
       }
 
