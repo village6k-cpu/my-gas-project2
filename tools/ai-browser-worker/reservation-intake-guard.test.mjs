@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {unrecordedReservationInquiry, reservationClarificationConfigured, freshReservationJob, reservationOwnerNotice,reservationFailureOwnerNotice,INTAKE_REPAIR_INSTRUCTION,RESERVATION_DATE_POLICY,RESERVATION_PRIORITY_POLICY} from './reservation-intake-guard.mjs';
+import {unrecordedReservationInquiry, reservationClarificationConfigured, freshReservationJob, reservationOwnerNotice,reservationFailureOwnerNotice,INTAKE_REPAIR_INSTRUCTION,RESERVATION_DATE_POLICY,RESERVATION_PRIORITY_POLICY,RESERVATION_REPLY_POLICY} from './reservation-intake-guard.mjs';
 
 const decision = {should_write_to_sheet:false, inquiry_disposition:'new_inquiry', classification:'already_answered',
   reservation_inquiry:{is_reservation_inquiry:true,already_registered:false,equipment_requested:[{quantity:1}]}};
@@ -56,4 +56,14 @@ test('native initial and repair turns share typo interpretation, direct clarific
   assert.doesNotMatch(INTAKE_REPAIR_INSTRUCTION,/Never guess a return date/);
   assert.match(RESERVATION_PRIORITY_POLICY,/rentals starting earlier/);
   assert.match(RESERVATION_PRIORITY_POLICY,/lens substitution cannot solve a shared camera-body shortage/);
+});
+
+test('native, legacy and repair prompts distinguish intake success from reservation confirmation',async()=>{
+  const {buildHermesPrompt}=await import('./worker.mjs');
+  for(const gatewayConfirmationToolAvailable of [true,false]) {
+    const prompt=buildHermesPrompt({jobId:'reservation-expectations'},{gatewayConfirmationToolAvailable});
+    assert.ok(prompt.includes(RESERVATION_REPLY_POLICY));
+    assert.doesNotMatch(prompt,/직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능/);
+  }
+  assert.ok(INTAKE_REPAIR_INSTRUCTION.includes(RESERVATION_REPLY_POLICY));
 });

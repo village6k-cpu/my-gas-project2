@@ -7,16 +7,16 @@ import { createHash } from 'node:crypto';
 import { maybeAutoSendReply, finalizePreparedKakaoDecision } from './worker.mjs';
 import { canExecuteCustomerReply } from './worker.mjs';
 
-// Same decision shape as the registered pickup-time incident: the AI has an
-// authoritative answer and asks to send it, but echoes not_checked for control.
+// Operator control is independent of booking authority. Use a safe question;
+// reservation acceptance separately requires an exact host-verified receipt.
 function pickupDecision(observed = 'not_checked') {
   return {
     classification: 'faq', confidence: 'high', kill_switch_observed: observed,
     customer: { name: '픽업 문의 고객' }, follow_up_items: [],
-    latest_customer_message_cluster: '11일 22시에 대여하러 가면 될까요?',
+    latest_customer_message_cluster: '방문 시간을 변경하려고 합니다.',
     reply_decision: {
-      replyMode: 'auto_send', text: '네 11일 22시에 맞춰 오시면 됩니다', confidence: 'high',
-      safetyClass: 'staff_confirmed_reservation_acceptance', grounding: 'authoritative_sheet',
+      replyMode: 'auto_send', text: '변경하실 방문 시간을 알려주시겠어요?', confidence: 'high',
+      safetyClass: 'contact_request', grounding: 'visible_conversation',
       requiresRag: false, shouldCreateTask: false
     },
     safety_checks: {
@@ -70,6 +70,17 @@ test('reply execution uses current host control instead of the model echo', asyn
   }
 });
 
+test('active operator control cannot authorize an unverified reservation acceptance', async t => {
+  const f=fixture(t,'active');
+  const decision=pickupDecision();
+  Object.assign(decision.reply_decision,{text:'네 11일 22시에 맞춰 오시면 됩니다',
+    safetyClass:'staff_confirmed_reservation_acceptance',grounding:'authoritative_sheet'});
+  const result=await maybeAutoSendReply({...f,decision});
+  assert.equal(result.sent,false);
+  assert.equal(result.gate.reason,'reservation_registration_not_verified');
+  assert.equal(f.calls.includes('send'),false);
+});
+
 test('reply execution cannot use model active to bypass paused or unreadable host control', async t => {
   for (const [status, reason] of [
     ['paused', 'kill_switch_paused'], ['', 'kill_switch_not_checked'],
@@ -94,6 +105,7 @@ test('reply execution permits pickup guidance under price pause but does not exe
   const mixed=pickupDecision();
   mixed.classification='reservation'; mixed.price_quote={source:'trade',id:'260901-001'};
   mixed.reply_decision.safetyClass='sensitive_commitment';
+  mixed.reply_decision.grounding='authoritative_sheet';
   assert.equal(canExecuteCustomerReply(mixed,{status:'price_paused'}).reason,'kill_switch_price_paused');
 });
 

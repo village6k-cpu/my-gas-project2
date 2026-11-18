@@ -1527,6 +1527,110 @@ test('intake clarification grounded in a read does not require a write receipt',
   }
 });
 
+test('unregistered rental acknowledgement cannot tell a customer only that the request was received', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=completeSheetDecision({...gatewayDecisionFixture(),should_write_to_sheet:false,
+    classification:'reservation',inquiry_disposition:'new_inquiry',
+    sheet_row_candidate:{start_date:'2026-11-18',pickup_time:'09:00',end_date:'2026-11-18',return_time:'22:00',
+      equipment:[{item:'소니 A7S3 바디세트',quantity:1}]},
+    follow_up_items:[{type:'reservation_review',route:'schedule',status:'open',requiresHumanAction:true,
+      taskKey:'pending-rental',title:'당일 대여 확정 여부 확인',summary:'오늘 09:00~22:00 A7S3 1대',priority:'high',
+      customer_name:'테스트 고객',actionFamily:'reservation_change',businessKey:'pending-rental'}],
+    reply_decision:{replyMode:'auto_send',text:'오늘 09:00~22:00 A7S3 1대 대여 요청 접수했습니다.',
+      confidence:'high',safetyClass:'reservation_intake_ack',grounding:'authoritative_sheet',requiresRag:false,
+      attachmentKeys:[],alreadyDelivered:false,shouldCreateTask:true}});
+  const validation=workerModule.validateAiDecisionContract(decision);
+  assert.equal(validation.valid,true,JSON.stringify(validation.errors));
+  const prepared=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision),
+    trustedToolReceipts:[confirmationReceiptFixture(job,{authoritative_sheet_result:{success:true,
+      reqID:'RQ-260907-001',scheduleComplete:true}})]});
+  assert.deepEqual(prepared.gatewaySafetyFailures,[]);
+  const gate=canAutoSendCustomerAnswer(prepared.decision,{autoSendEnabled:true});
+  assert.equal(gate.allowed,true,gate.reason);
+  assert.equal(gate.text,'아직 예약이 확정되지 않았습니다. 장비와 일정을 확인한 뒤 확정 여부를 안내드리겠습니다.');
+  assert.ok(prepared.availabilityAwareRows.some(row=>JSON.stringify(row).includes('schedule')));
+  for(const safetyClass of ['simple_ack','reservation_intake_ack']) {
+    const relabelled={...prepared.decision,reply_decision:{...prepared.decision.reply_decision,
+      safetyClass,grounding:'visible_conversation',text:'네, 말씀하신 내용 확인했습니다.'}};
+    assert.equal(canAutoSendCustomerAnswer(relabelled,{autoSendEnabled:true}).text,gate.text);
+  }
+});
+
+test('pending reservation questions explicitly state pending status without blocking a useful question', () => {
+  const decision=gatewayDecisionFixture({classification:'reservation',inquiry_disposition:'new_inquiry',
+    reservation_inquiry:{is_reservation_inquiry:true,already_registered:false},
+    reply_decision:{replyMode:'auto_send',confidence:'high',safetyClass:'contact_request',
+      grounding:'visible_conversation',requiresRag:false,text:'반납 날짜와 시간을 알려주시겠어요?'}});
+  const gate=canAutoSendCustomerAnswer(decision,{autoSendEnabled:true});
+  assert.equal(gate.allowed,true,gate.reason);
+  assert.equal(gate.text,'아직 예약이 확정되지 않았습니다.\n반납 날짜와 시간을 알려주시겠어요?');
+  const repeated={...decision,reply_decision:{...decision.reply_decision,text:gate.text}};
+  assert.equal(canAutoSendCustomerAnswer(repeated,{autoSendEnabled:true}).text,gate.text);
+  for(const classification of ['faq','return']) {
+    const unrelated=gatewayDecisionFixture({classification,
+      reply_decision:{replyMode:'auto_send',confidence:'high',safetyClass:'simple_ack',
+        grounding:'visible_conversation',requiresRag:false,text:'네, 감사합니다!'}});
+    assert.equal(canAutoSendCustomerAnswer(unrelated,{autoSendEnabled:true}).text,'네, 감사합니다!');
+  }
+});
+
+test('reservation acceptance requires host-verified exact registration, not staff wording or copied receipts', async () => {
+  const {job,turn}=gatewayTurnFixture();
+  const decision=confirmedRegistrationDecisionFixture({reply_decision:{replyMode:'auto_send',
+    text:'요청하신 예약이 확정되었습니다.',confidence:'high',safetyClass:'staff_confirmed_reservation_acceptance',
+    grounding:'staff_confirmation',requiresRag:false,attachmentKeys:[],alreadyDelivered:false,shouldCreateTask:false}});
+  decision.safety_checks.latest_customer_message_after_last_staff_reply=true;
+  assert.equal(canAutoSendCustomerAnswer(decision,{autoSendEnabled:true}).allowed,false);
+  const receipt=confirmedRegistrationReceiptFixture(job);
+  const good=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision),trustedToolReceipts:[receipt]});
+  assert.deepEqual(good.gatewaySafetyFailures,[]);
+  assert.equal(canAutoSendCustomerAnswer(good.decision,{autoSendEnabled:true}).allowed,true);
+  const forged=JSON.parse(JSON.stringify(good.decision));
+  assert.equal(canAutoSendCustomerAnswer(forged,{autoSendEnabled:true}).allowed,false);
+  for(const patch of [{room_key:'chat:other'},{room_revision:job.roomRevision-1},
+    {status:'failed',error:{type:'failed'}},
+    {authoritative_result:{...receipt.authoritative_result,final_plan:[]}}]) {
+    const bad=await workerModule.prepareKakaoGatewayDecision({job,turn,finalText:JSON.stringify(decision),
+      trustedToolReceipts:[{...receipt,...patch}]});
+    assert.equal(canAutoSendCustomerAnswer(bad.decision,{autoSendEnabled:true}).allowed,false);
+  }
+});
+
+test('pending notice reaches the transport and readback while schedule work remains unresolved', async t => {
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'pending-reservation-reply-'));
+  t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+  const decision=gatewayDecisionFixture({classification:'reservation',inquiry_disposition:'new_inquiry',
+    reservation_inquiry:{is_reservation_inquiry:true,already_registered:false},
+    follow_up_items:[{type:'reservation_review',route:'schedule',status:'open',requiresHumanAction:true}],
+    reply_decision:{replyMode:'auto_send',confidence:'high',text:'대여 요청 접수했습니다.',
+      safetyClass:'reservation_intake_ack',grounding:'visible_conversation',requiresRag:false}});
+  let transmitted;
+  const result=await workerModule.maybeAutoSendReply({
+    config:{autoSendEnabled:true,autoSendLogPath:path.join(directory,'replies.ndjson'),
+      fetchImpl:async()=>({ok:true,text:async()=>JSON.stringify({data:[['active']]})})},
+    decision,job:{id:'pending-transport',sourceEventKey:'pending-event',room_key:'chat:pending',
+      unread_count:1,events:[{reason:'top_rows_backstop',unread_count:1}]},navigationContext:{},
+    dependencies:{sendKakaoMessage:async text=>{transmitted=text;return {sent:true,readback_confirmed:true,
+      observed_reply_hash:workerModule.autoReplyTextHash(text)};}}});
+  assert.equal(transmitted,'아직 예약이 확정되지 않았습니다. 장비와 일정을 확인한 뒤 확정 여부를 안내드리겠습니다.');
+  assert.equal(result.text,transmitted);
+  assert.ok(result.readbackReceipt);
+  const {deriveAutomationResolution}=await import('../work-orchestrator-v2/automation-resolution.mjs');
+  assert.equal(deriveAutomationResolution({decision,autoReplyResult:result}).state,'needs_human');
+  const changed={...decision,inquiry_disposition:'registered_change_inquiry',
+    reservation_inquiry:{is_reservation_inquiry:true,already_registered:true}};
+  assert.equal(canAutoSendCustomerAnswer(changed,{autoSendEnabled:true}).text,
+    '아직 요청하신 예약 변경이 확정되지 않았습니다. 변경 내용을 확인한 뒤 확정 여부를 안내드리겠습니다.');
+  for(const safetyClass of ['simple_ack','contact_request']) {
+    const reply={...changed,reply_decision:{...changed.reply_decision,safetyClass,
+      text:safetyClass==='contact_request'?'변경하실 반납 시간을 알려주세요.':'변경 요청 접수했습니다.'}};
+    assert.ok(canAutoSendCustomerAnswer(reply,{autoSendEnabled:true}).text.startsWith('아직 요청하신 예약 변경이 확정되지 않았습니다.'));
+  }
+  const compliant={...decision,reply_decision:{...decision.reply_decision,
+    text:'아직 예약이 확정되지 않았습니다. 확인 후 예약 확정 여부를 안내드릴게요.'}};
+  assert.equal(canAutoSendCustomerAnswer(compliant,{autoSendEnabled:true}).text,transmitted);
+});
+
 test('incomplete durable intake permits only a safe clarification under scoped recovery', () => {
   const decision=gatewayDecisionFixture({classification:'reservation',
     reservation_inquiry:{is_reservation_inquiry:true},
@@ -12388,13 +12492,8 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
       grounding: 'staff_confirmation'
     }
   }, { autoSendEnabled: true }), {
-    allowed: true,
-    reason: 'staff_confirmed_reservation_acceptance',
-    text: '네 감독님, 말씀 주신 구성으로 예약 확정해드렸습니다.',
-    replyMode: 'auto_send',
-    confidence: 'high',
-    safetyClass: 'staff_confirmed_reservation_acceptance',
-    grounding: 'staff_confirmation'
+    allowed: false,
+    reason: 'reservation_registration_not_verified'
   });
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'faq', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).allowed, true);
   assert.equal(workerModule.canExecuteCustomerReply({ ...baseDecision, classification: 'price' }, { status: 'price_paused' }).reason, 'kill_switch_price_paused');
@@ -12963,7 +13062,7 @@ test('reply prose cannot grant auto-send without an explicit Hermes safety and g
   }, { autoSendEnabled: true }), {
     allowed: true,
     reason: 'simple_ack',
-    text: '네, 문의 내용 확인 후 안내드리겠습니다.',
+    text: '아직 예약이 확정되지 않았습니다. 장비와 일정을 확인한 뒤 확정 여부를 안내드리겠습니다.',
     replyMode: 'auto_send',
     confidence: 'high',
     safetyClass: 'simple_ack',
@@ -13014,7 +13113,7 @@ test('safe payment receipt acknowledgements can auto-send without confirming pay
   }, { autoSendEnabled: true }).allowed, false);
 });
 
-test('staff-confirmed reservation acceptance skips mutable-policy RAG gate', () => {
+test('staff wording needs registration verification even when mutable-policy RAG is unnecessary', () => {
   const decision = {
     classification: 'reservation',
     confidence: 'high',
@@ -13041,7 +13140,7 @@ test('staff-confirmed reservation acceptance skips mutable-policy RAG gate', () 
     }
   };
 
-  assert.equal(canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }).reason, 'staff_confirmed_reservation_acceptance');
+  assert.equal(canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }).reason, 'reservation_registration_not_verified');
   assert.deepEqual(autoReplyRequiresRagSupport(decision, decision.reply_decision.text), {
     required: false,
     reason: 'staff_confirmed_reservation_acceptance'
