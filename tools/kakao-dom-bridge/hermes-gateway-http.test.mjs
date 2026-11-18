@@ -1228,6 +1228,45 @@ test('Gateway HTTP hands the durably completed result to the local application e
   }
 });
 
+test('a delivery-failure notice cannot replace a rejected intake decision or consume its repair retry', async () => {
+  await withRealGatewayChannel(async ({channel,clock}) => {
+    await channel.enqueue({job_id:'intake-repair',room_key:'intake-room',room_revision:1,prompt:'immutable booking evidence'});
+    const claim=await channel.claim({consumerId:'gateway',waitMs:0});
+    const enqueued=[];
+    const app=await start(createHermesGatewayHttpHandler({token,channel,transport:'gateway',now:()=>clock.now,
+      enqueueResultApplication:async job=>enqueued.push(job)}));
+    const post=(route,body)=>gatewayFetch(app.url,route,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const envelope=job=>({job_id:job.job_id,room_key:job.room_key,room_revision:job.room_revision,lease_id:job.lease_id});
+    const decision={inquiry_disposition:'new_inquiry',reservation_inquiry:{is_reservation_inquiry:true,
+      already_registered:false,equipment_requested:[{quantity:2}]},existing_confirm_request_ids:[]};
+    const content='FINAL_JSON\n'+JSON.stringify(decision);
+    try {
+      const rejected=await post('/hermes/v1/results',{...envelope(claim),content});
+      assert.equal(rejected.status,409);
+      assert.equal((await rejected.json()).error,'unrecorded_reservation_inquiry');
+      const notice=await post('/hermes/v1/results',{...envelope(claim),content:
+        '⚠️ Message delivery failed after multiple attempts. Please try again — your request was processed but the response could not be sent.'});
+      assert.equal(notice.status,422);
+      assert.equal((await notice.json()).error,'non_decision_delivery_notice');
+      assert.equal((await channel.get(claim.job_id)).state,'claimed');
+      assert.equal(enqueued.length,0);
+      assert.equal((await post('/hermes/v1/outcomes',{...envelope(claim),outcome:'no_final'})).status,200);
+      const retry=await channel.claim({consumerId:'gateway',waitMs:0});
+      assert.equal(retry.job_id,claim.job_id);
+      assert.notEqual(retry.lease_id,claim.lease_id);
+      assert.match(retry.event.prompt,/INTAKE COMPLETION GUARD/);
+      assert.match(retry.event.prompt,/validation rejection/i);
+      const reserved=await channel.reserveToolOperation({tool:'confirmation_request',...envelope(retry),request_digest:'corrected-input'});
+      await channel.recordToolReceipt({schema:'village-confirmation-receipt/v1',receipt_id:'corrected-intake',
+        ...envelope(retry),operation_id:reserved.reservation.operation_id,request_digest:'corrected-input',status:'ok',
+        availability_report:[],authoritative_sheet_result:null,created_at:new Date(clock.now).toISOString(),error:null});
+      assert.equal((await post('/hermes/v1/results',{...envelope(retry),content})).status,200);
+      assert.equal(enqueued.length,1);
+      assert.equal(enqueued[0].result.content,content);
+    } finally {await app.close();}
+  });
+});
+
 test('Gateway HTTP rejects a result submitted before its reserved confirmation receipt and persists human review', async () => {
   await withRealGatewayChannel(async ({ channel, clock }) => {
     await channel.enqueue({ job_id: 'job-result-http', room_key: 'room-result-http', room_revision: 1 });
@@ -1819,10 +1858,11 @@ test('Gateway HTTP preflight rejection does not reserve the lease and a correcte
       })
     });
     assert.equal(invalid.status, 422);
-    assert.deepEqual(await invalid.json(), {
-      error: 'invalid_confirmation_request',
-      validation_errors: ['sheet_row_candidate.discount_type must be an explicit allowed value']
-    });
+    const rejectedBody=await invalid.json();
+    assert.equal(rejectedBody.error,'invalid_confirmation_request');
+    assert.equal(rejectedBody.validation_errors[0],'sheet_row_candidate.discount_type must be an explicit allowed value');
+    assert.match(rejectedBody.validation_errors[1],/before reserving or writing/);
+    assert.match(rejectedBody.validation_errors[1],/Earlier timeouts or partial receipts/);
     assert.equal(channel.calls.reservation.length, 0, 'invalid input must not consume the durable operation fence');
     assert.equal(executionCalls, 0);
 

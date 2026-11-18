@@ -6531,7 +6531,7 @@ test('bridge queue replaces pending same-room work and cleans conversation tabs 
   assert.match(source, /cleanupIdleKakaoConversationTabs\('worker_finished', \{ allowQueued: true \}\)/);
 });
 
-async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 0 }, application_counts: {} }], activeWorkerRuns = 0, sharedIdle = [true], tabSnapshots = [tabs], onStatusRead = async () => {}, draftState = false, onDraftRead = () => {} }) {
+async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 0 }, application_counts: {} }], activeWorkerRuns = 0, activeGatewayDispatches = 0, sharedIdle = [true], tabSnapshots = [tabs], onStatusRead = async () => {}, draftState = false, onDraftRead = () => {} }) {
   const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
   const extract = (name) => {
     const start = source.indexOf(`function ${name}(`);
@@ -6543,7 +6543,7 @@ async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 
   let sharedReads = 0;
   let tabReads = 0;
   const audits = [];
-  const state = { workerRunning: false, activeWorkerRuns, workerQueueLength: 0, rooms: new Map(), tabCleanupRunning: false, closedKakaoTabs: 0 };
+  const state = { workerRunning: false, activeWorkerRuns, activeGatewayDispatches, workerQueueLength: 0, rooms: new Map(), tabCleanupRunning: false, closedKakaoTabs: 0 };
   const channel = { status: async () => {
     const value = statuses[Math.min(statusReads++, statuses.length - 1)];
     await onStatusRead(statusReads);
@@ -6565,6 +6565,30 @@ async function syntheticIdleTabCleanup({ tabs, statuses = [{ counts: { claimed: 
 
 const cleanupMainTab = { type: 'page', id: 'main', url: 'https://business.kakao.com/space/123/channel/_test/chats' };
 const cleanupConversationTab = { type: 'page', id: 'conversation', url: 'https://business.kakao.com/space/123/channel/_test/chats/456' };
+
+test('cleanup protects captures before Gateway enqueue and captures starting during draft inspection',async()=>{
+  for(const options of [{activeGatewayDispatches:1},{onDraftRead:state=>{state.activeGatewayDispatches=1;}}]){
+    const result=await syntheticIdleTabCleanup({tabs:[cleanupMainTab,cleanupConversationTab],...options});
+    assert.deepEqual(result.closed,[]);
+    assert.equal(result.result.skipped,true);
+  }
+});
+
+test('gateway dispatch activity spans capture through enqueue and releases after success or failure',async()=>{
+  const source=await readFile(new URL('./server.mjs',import.meta.url),'utf8');
+  const start=source.indexOf('async function dispatchAiJob('),end=source.indexOf('\n}\n',start)+2;
+  const state={activeGatewayDispatches:0};let release,fail=false;
+  const pendingCapture=new Promise(resolve=>{release=resolve;});
+  const dispatch=new Function('state','getAiJobDispatcher','recordGatewayDispatchFailure',
+    `const gatewayTransportEnabled=true,gatewayTransportSelected=true,recoveryHold=true;${source.slice(start,end)};return dispatchAiJob;`)(state,
+    ()=>async()=>{assert.equal(state.activeGatewayDispatches,1);if(fail)throw Error('capture failed');await pendingCapture;return{queued:false};},
+    async()=>({ok:false}));
+  const pending=dispatch({jobId:'capture-job'});await Promise.resolve();
+  assert.equal(state.activeGatewayDispatches,1);
+  release();await pending;assert.equal(state.activeGatewayDispatches,0);
+  fail=true;assert.equal((await dispatch({jobId:'failed-capture'})).ok,false);
+  assert.equal(state.activeGatewayDispatches,0);
+});
 
 test('cleanup scheduling is independent of historical recovery and no-send never closes tabs',async()=>{
  const callbacks=[],closed=[];
