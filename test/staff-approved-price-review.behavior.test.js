@@ -47,8 +47,9 @@ test('unresolved prices reach contract generation instead of blocking Drive temp
   const context = {PropertiesService: {getScriptProperties: () => ({getProperty: name => name === 'CONTRACT_TEMPLATE_ID' ? 'test-template' : ''})},
     DriveApp: {getFileById: () => {driveCopies++; throw new Error('unexpected Drive template access');}}};
   vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../ReferralDiscount.js'), 'utf8'), context);
   vm.runInContext(fn('hasPendingSchedulePrice_') + '\n' + source.slice(start, end), context);
-  const ss = {getSheetByName: name => sheet(name === '계약마스터' ? contract : schedule)};
+  const ss = {getSheetByName: name => name === '소개할인' ? null : sheet(name === '계약마스터' ? contract : schedule)};
   assert.throws(() => context.generateContractFile(ss, '261013-099'), /unexpected Drive template access/);
   assert.equal(driveCopies, 1);
 });
