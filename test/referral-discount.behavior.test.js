@@ -94,6 +94,22 @@ test('an active earlier rental prevents enrolling a repeat customer as a first r
   assert.equal(rate('261118-002',referred),0);
 });
 
+test('simultaneous first rentals earn one credit on the earliest issued trade', () => {
+  const {approveName,rate,data,queued} = fixture();
+  const first = '261118-001', later = '261118-002';
+  data.계약마스터[2][4] = data.계약마스터[1][4];
+  data.계약마스터 = [data.계약마스터[0], ...data.계약마스터.slice(1).reverse()];
+  assert.throws(() => approveName(referred, later, '소개자'), /이전 대여 이력/);
+  assert.throws(() => approveName(referred, 'RQ-261118-001', '소개자'), /이전 대여 이력/);
+  approveName(referred, first, '소개자');
+  approveName(referred, first, '소개자');
+  assert.throws(() => approveName(referred, later, '소개자'), /이미 다른 대여/);
+  assert.equal(rate(first, referred), 5);
+  assert.equal(rate(later, referred), 0);
+  assert.equal(data.소개할인.length, 2);
+  assert.deepEqual(queued, [first]);
+});
+
 test('a verified introduction can apply to the first renter while the referrer identity is pending', () => {
   const {approveName,rate,data}=fixture();
   approveName(referred,'261118-001','소개자');
