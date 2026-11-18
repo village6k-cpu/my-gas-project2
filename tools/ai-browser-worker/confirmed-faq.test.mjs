@@ -75,7 +75,9 @@ test('referral FAQ names the first rental and a fresh reward for each new person
   const faq = loadCurrentConfirmedPolicyConfig().faq_answers.find(item => item.key === 'referral_discount_faq');
   const d = decision('친구를 소개하면 소개할인 받을 수 있나요?');
   assert.match(faq.answer, /첫 대여에 한해 5%/);
+  assert.match(faq.answer, /첫 대여가 확정되면/);
   assert.match(faq.answer, /새 고객 한 분마다 5%/);
+  assert.match(faq.answer, /대여 한 건당 5%씩 한 번/);
   d.reply_decision.text = faq.answer;
   assert.equal((await evaluateAutoReplyRagSupport({decision:d})).allowed,true);
   d.reply_decision.text = '한 번 소개받으시면 앞으로 계속 5% 할인됩니다.';

@@ -239,8 +239,8 @@
       "key": "referral_discount_faq",
       "question": "소개받거나 새 고객을 소개하면 어떤 할인을 받나요?",
       "question_pattern": "소개\\s*(?:할인|받|받으|해|하|자|인|로|를|통해|혜택)|(?:지인|친구|동료|고객)\\s*(?:을|를|이|가)?\\s*(?:소개|추천)|추천\\s*(?:인|할인|혜택)",
-      "answer": "소개받으신 분은 첫 대여에 한해 5% 할인을 받으실 수 있습니다. 직접 새 고객을 소개해 주시면, 소개하신 분도 새 고객 한 분마다 5% 할인 혜택을 받으실 수 있습니다.",
-      "source": "owner instruction 2026-11-18; existing introductory rate 5%"
+      "answer": "소개받으신 분은 첫 대여에 한해 5% 할인을 받으실 수 있습니다. 소개하신 새 고객의 첫 대여가 확정되면, 소개하신 분도 새 고객 한 분마다 5% 할인 혜택을 받으실 수 있습니다. 소개 혜택은 대여 한 건당 5%씩 한 번 사용하실 수 있습니다.",
+      "source": "owner instruction 2026-11-18; referrer credit unlocks at confirmed first rental; one 5% credit per booking"
     }
   ]
 }

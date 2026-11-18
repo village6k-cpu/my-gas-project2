@@ -75,7 +75,13 @@ function applyVerifiedReferralDiscount_(args) {
       assertReferralIsFirstRental_(ss, first, referred);
       assertReferralUsesStandardPricing_(ss, first);
     }
-    if (use && (!saved || !saved[3])) assertReferralUsesStandardPricing_(ss, use);
+    if (use && (!saved || !saved[3])) {
+      var confirmed = first.indexOf('RQ-') !== 0 && referralBookingRows_(ss, first).some(function (row) {
+        return referralPhone_(row[2]) === referred && /^(?:예약|반출|반납완료)$/.test(String(row[9] || '').trim());
+      });
+      if (!confirmed) throw new Error('새 고객의 첫 대여가 확정된 뒤 소개한 고객의 5%를 사용할 수 있습니다');
+      assertReferralUsesStandardPricing_(ss, use);
+    }
     if (!saved && verifiedReferralDiscountRate_(ss, first, referred)) {
       throw new Error('이 첫 대여 건에 이미 소개할인이 연결되어 있습니다');
     }
