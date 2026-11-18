@@ -103,3 +103,19 @@ test('a verified introduction can apply to the first renter while the referrer i
   assert.equal(rate('261118-003',referrer),5);
   assert.equal(data.소개할인.length,2);
 });
+
+test('the referrer can use a credit only after the first rental is registered', () => {
+  const {approve,rate,promote,data} = fixture();
+  const firstTrade = data.계약마스터.splice(1,1)[0];
+  approve(referred,'RQ-261118-001');
+  assert.equal(rate('RQ-261118-001',referred),5);
+  assert.throws(()=>approve(referred,'RQ-261118-001','261118-003'),/첫 대여가 확정된 뒤/);
+  assert.equal(rate('261118-003',referrer),0);
+
+  data.계약마스터.push(firstTrade);
+  data.확인요청[1][14]='등록완료';
+  data.확인요청[1][15]='261118-001';
+  promote();
+  approve(referred,'261118-001','261118-003');
+  assert.equal(rate('261118-003',referrer),5);
+});
