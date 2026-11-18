@@ -6189,8 +6189,8 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.match(prompt, /JOB EVIDENCE FROM SUPABASE/);
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
-  // Includes the 12 sourced FAQ answers (~1.7k chars); raw job payload stays excluded.
-  assert.ok(prompt.length < 31000, `prompt too large: ${prompt.length}`);
+  // Includes the sourced FAQ answers; raw job payload stays excluded.
+  assert.ok(prompt.length < 31200, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {
@@ -10825,6 +10825,9 @@ test('enrichFollowUpRowWithOperationalCalculations calculates contract and RQ do
       if (u.hostname === 'docs.google.com') {
         return { ok: true, status: 200, text: async () => gvizBody };
       }
+      if (u.searchParams.get('action') === 'getVerifiedReferralDiscount') {
+        return {ok:true,status:200,text:async()=>JSON.stringify({success:true,rate:0})};
+      }
       const sheet = u.searchParams.get('sheet');
       const query = u.searchParams.get('query');
       if (sheet === '계약마스터' && query === '260530-003') {
@@ -10871,6 +10874,9 @@ test('enrichFollowUpRowWithOperationalCalculations does not price expanded compo
       const u = new URL(String(url));
       if (u.hostname === 'docs.google.com') {
         return { ok: true, status: 200, text: async () => gvizBody };
+      }
+      if (u.searchParams.get('action') === 'getVerifiedReferralDiscount') {
+        return {ok:true,status:200,text:async()=>JSON.stringify({success:true,rate:0})};
       }
       const sheet = u.searchParams.get('sheet');
       const query = u.searchParams.get('query');

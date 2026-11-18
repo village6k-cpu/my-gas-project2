@@ -167,3 +167,41 @@ test('quote keeps the price and scoped stock outcome readable when the shop inve
   assert.deepEqual(result.inventory_context.evaluation.shortages, [{equipment: '카메라 세트', available: 0}]);
   assert.doesNotMatch(serialized, /무관한 장비|다른 고객/);
 });
+
+test('only a verified referral tied to the exact request enters quote math and the document payload',async()=>{
+  const c=config();
+  const fetchBase=c.fetchImpl;
+  const id='RQ-260909-005';
+  const phone='01011112222';
+  let referralRate=5;
+  c.fetchImpl=async(url,options)=>{
+    const u=new URL(url);
+    if(u.hostname==='docs.google.com'){
+      const cols=['장비or세트명','수량','반출일','반출시간','반납일','반납시간','할인유형','예약자명','연락처','비고'];
+      const vals=['카메라 세트',1,'2026-09-09','08:00','2026-09-10','08:00','개인사업자/프리랜서','테스트 고객',phone,''];
+      return {ok:true,text:async()=>JSON.stringify({table:{cols:cols.map(label=>({label})),rows:[{c:vals.map(v=>({v}))}]}})};
+    }
+    if(u.searchParams.get('action')==='getVerifiedReferralDiscount'){
+      assert.equal(u.searchParams.get('id'),id);
+      assert.equal(u.searchParams.get('phone'),phone);
+      return {ok:true,text:async()=>JSON.stringify({success:true,rate:referralRate})};
+    }
+    return fetchBase(url,options);
+  };
+  const decision={
+    price_quote:{source:'request',id},
+    latest_customer_message_cluster:'소개할인 적용해서 견적서 부탁드립니다.',
+    customer:{name:'테스트 고객'},
+    reply_decision:{safetyClass:'sensitive_commitment',grounding:'authoritative_sheet'}
+  };
+  const verification=await worker.buildAuthoritativePriceVerification(c,decision);
+  assert.equal(verification.complete,true);
+  assert.equal(verification.totalVatIncluded,50160);
+  assert.equal(verification.payment.referralRate,5);
+  const {automaticQuoteRequest}=await import('./verified-pricing.mjs');
+  assert.equal(automaticQuoteRequest({decision,verification,job:{jobId:'test'}}).manualData.referralRate,5);
+  referralRate=0;
+  const unverified=await worker.buildAuthoritativePriceVerification(c,decision);
+  assert.equal(unverified.reason,'requested_referral_discount_unverified');
+  assert.equal(unverified.totalVatIncluded,null);
+});

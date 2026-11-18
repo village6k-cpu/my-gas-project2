@@ -45,6 +45,7 @@ for (const stored of ['', '일반']) {
   const c={...quoteConfig('학생'),villageOpsSheetId:'configured-ops-sheet'},base=c.fetchImpl;
   c.fetchImpl=async url=>{
    const u=new URL(url);
+   if(u.searchParams.get('action')==='getVerifiedReferralDiscount') return {ok:true,text:async()=>JSON.stringify({success:true,rate:0})};
    if(u.hostname==='docs.google.com' && u.searchParams.get('sheet')==='확인요청'){
     const labels=['예약자명','연락처','할인유형','장비or세트명','수량','반출일','반출시간','반납일','반납시간'];
     const values=['현재고객',phone,stored,'카메라',1,'2026-10-14','10:00','2026-10-15','10:00'];

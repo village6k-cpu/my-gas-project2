@@ -15627,6 +15627,7 @@ function markRequestRegistered_(sheet, allData, reqID, tradeID, statusLabel) {
     sheet.getRange(row, 16).setValue(tradeID);
     sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
   }
+  promoteRegisteredReferralDiscount_(sheet.getParent(), reqID, tradeID);
 }
 
 function getRequestExistingTradeID_(data, reqID) {
@@ -19208,12 +19209,16 @@ function autoClearRequests() {
     }
   }
 
+  // Keep an approved request available if the exact trade binding has not been saved yet.
+  var referralRequests = new Set(referralDiscountRows_(ss).flatMap(function (row) { return [row[2], row[3]]; }));
+  referralRequests.forEach(function (id) { doneReqIDs.delete(id); });
+
   // 2) 해당 요청의 모든 행 클리어 (아래에서 위로 — L열 수식이 있으면 수식만 복원)
   let cleared = 0;
   for (let i = data.length - 1; i >= 0; i--) {
     const rid = String(data[i][0] || "").trim();
     const rowDone = isRegisterCompletedStatus_(data[i][14]);
-    if (!rowDone && !(rid && doneReqIDs.has(rid))) continue;
+    if (referralRequests.has(rid) || (!rowDone && !(rid && doneReqIDs.has(rid)))) continue;
     const row = i + 2;
     clearConfirmRequestRowPreservingFormulas_(sheet, row);
     cleared++;

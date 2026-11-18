@@ -768,6 +768,20 @@ function handleRequestCore_(e) {
           { drainPending: repairDrainRequested }
         ));
 
+      case "getVerifiedReferralDiscount": {
+        var bookingId = referralBookingId_(params.id);
+        if (!bookingId) return jsonResponse({error:"소개할인 예약 식별자 확인 필요"}, 400);
+        return jsonResponse({success:true, rate:verifiedReferralDiscountRate_(
+          SpreadsheetApp.getActiveSpreadsheet(), bookingId, params.phone
+        )});
+      }
+
+      case "applyVerifiedReferralDiscount": {
+        var referralMethodError = requireVillagePost_(e, action);
+        if (referralMethodError) return referralMethodError;
+        return jsonResponse(applyVerifiedReferralDiscount_(postBody));
+      }
+
       case "getTradeDiscountState":
         return jsonResponse(getTradeDiscountState(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
