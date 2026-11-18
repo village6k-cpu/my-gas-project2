@@ -436,7 +436,8 @@ function generateContractFile(ss, 거래ID, 추가요청, options) {
   // 빌리지 견적 기준은 할인 곱셈이다. 예: 학생30% + 장기20% => 0.7 * 0.8 = 56% 결제.
   // 계약서 템플릿도 같은 정책을 쓰도록 생성 시 수식을 명시적으로 보정한다.
   applyContractTotalFormula_(ws, rows, paymentRefs);
-  applyContractPaymentFormula_(ws, paymentRefs, referralRate);
+  if (referralRate) paymentRefs.referralRate = referralRate;
+  applyContractPaymentFormula_(ws, paymentRefs);
 
   // ── 계약일자 ──
   const today = new Date();
@@ -800,12 +801,12 @@ function getDiscountMultiplierFormula_(refs) {
   ].join("*");
 }
 
-function applyContractPaymentFormula_(ws, refs, referralRate) {
+function applyContractPaymentFormula_(ws, refs) {
   refs = refs || findContractPaymentRefs_(ws, findTemplateRows(ws));
   var discountMultiplier = getDiscountMultiplierFormula_(refs);
   ws.getRange(refs.discountedAmountCell).setFormula("=" + refs.totalBeforeDiscountCell + "*(" + discountMultiplier + ")");
   var gross = refs.discountedAmountCell + "*1.1";
-  if (referralRate) gross = "ROUND(" + gross + ",8)";
+  if (refs.referralRate) gross = "ROUND(" + gross + ",8)";
   ws.getRange(refs.finalAmountCell).setFormula("=IFERROR(CEILING(" + gross + ",10),\"\")");
 }
 
