@@ -267,9 +267,7 @@ function sourceMessageAt(durableJob) {
   }
 }
 
-function exactToolReceipt(durableJob) {
-  const operation = durableJob?.tool_operation;
-  const receipts = durableJob?.tool_receipts;
+function exactToolReceipt(durableJob, operation = durableJob?.tool_operation, receipts = durableJob?.tool_receipts) {
   if (operation === null || operation === undefined) {
     if (Array.isArray(receipts) && receipts.length > 0) throw new TypeError('trusted tool receipt set is invalid');
     return null;
@@ -295,14 +293,26 @@ function exactToolReceipt(durableJob) {
   }
   return { operation, receipt };
 }
+function confirmedRegistrationAuditTools(durableJob, unresolved) {
+  const previous=durableJob.tool_operation_history || [];
+  const current=durableJob.tool_operation;
+  if (!previous.length || current?.tool!=='confirmed_reservation_commit'
+    || previous.some(operation=>operation.tool!=='confirmed_reservation_commit')) return null;
+  const operations=unresolved && current.state==='reserved'?[...previous]:[...previous,current];
+  const receipts=durableJob.tool_receipts || [];
+  if (operations.length!==receipts.length) throw new TypeError('trusted tool receipt set is invalid');
+  return operations.map(operation=>exactToolReceipt(durableJob,operation,receipts.filter(receipt=>receipt.operation_id===operation.operation_id)));
+}
+
 
 function unresolvedConfirmedRegistrationOperation(durableJob) {
   const operation = durableJob?.tool_operation;
   const target = operation?.audit_target;
   const receipts = durableJob?.tool_receipts;
-  const lateReceipt = Array.isArray(receipts) && receipts.length === 1 ? receipts[0] : null;
+  const currentReceipts=Array.isArray(receipts)?receipts.filter(receipt=>receipt.operation_id===operation?.operation_id):null;
+  const lateReceipt = currentReceipts?.length === 1 ? currentReceipts[0] : null;
   const unresolvedEvidenceState = operation?.state === 'reserved'
-    ? Array.isArray(receipts) && receipts.length === 0
+    ? currentReceipts?.length === 0
     : operation?.state === 'completed'
       && isRecord(lateReceipt)
       && lateReceipt.receipt_id === operation.receipt_id
@@ -931,8 +941,10 @@ export function buildKakaoAutomationAuditEvents({
   if (!customerLabel) return [];
 
   const events = [];
-  const tool = unresolvedRegistration ? null : exactToolReceipt(durableJob);
-  if (tool) {
+  const registrations=confirmedRegistrationAuditTools(durableJob,unresolvedRegistration);
+  const tools=registrations || (unresolvedRegistration?[]:[exactToolReceipt(durableJob)].filter(Boolean));
+  for (const tool of tools) {
+    if (unresolvedRegistration && tool.operation.operation_id===unresolvedRegistration.operation.operation_id) continue;
     const args = { durableJob, ...tool, customerLabel, historicalImport };
     if (tool.operation.tool === 'confirmation_request') events.push(...buildConfirmationEvents(args));
     else if (tool.operation.tool === 'confirmed_reservation_commit') events.push(buildConfirmedRegistrationEvent(args));

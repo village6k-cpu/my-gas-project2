@@ -8,6 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
+import { buildKakaoAutomationAuditEvents } from './kakao-automation-audit.mjs';
 import {
   confirmedReservationCommitRequestDigest,
   createHermesGatewayHttpHandler,
@@ -205,7 +206,13 @@ function confirmedRegistrationReceipt(request, overrides = {}) {
       final_set_components: components,
       final_period: request.registration.desired_period,
       authoritative: {
-        request: {},
+        request: {
+          reqID: request.registration.request_id, tradeIds: ['260907-001'],
+          topLevelEquipItems: request.registration.desired_after.map(({ name, quantity }) => ({ name, qty: quantity })),
+          setComponentItems: components,
+          startDate: request.registration.desired_period.start_date, startTime: request.registration.desired_period.start_time,
+          endDate: request.registration.desired_period.end_date, endTime: request.registration.desired_period.end_time
+        },
         registered_trade: { schedule: { rows: components.map((entry) => ({
           setName: entry.set_item, name: entry.component_item, qty: entry.quantity, isComponent: true
         })) } }
@@ -767,6 +774,7 @@ test('Gateway HTTP executes and persists one immutable exact fenced confirmed re
     assert.deepEqual(channel.calls.reservation, [{
       tool: 'confirmed_reservation_commit', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
       lease_id: leaseId, request_digest: requestDigest,
+      registration_target: { request_id: request.registration.request_id, desired_period: request.registration.desired_period },
       audit_target: {
         schema: 'village-kakao-tool-audit-target/v1', effect_type: 'reservation_registration',
         action_type: 'create', target_type: 'request', target_id: 'RQ-260907-001'
@@ -779,6 +787,90 @@ test('Gateway HTTP executes and persists one immutable exact fenced confirmed re
   } finally {
     await app.close();
   }
+});
+
+test('Gateway registers overlapping periods in one room, replays both around restart, and audits an unresolved third separately', async () => {
+  await withRealGatewayChannel(async ({ channel, clock, directory }) => {
+    await channel.enqueue({ job_id: 'job-1', room_key: 'room-1', room_revision: 3 }, {
+      localContext: { turn_internal: { snapshot: roomSnapshotFixture() } }
+    });
+    const claim = await channel.claim({ consumerId: 'native-test', waitMs: 0 });
+    const first = confirmedRegistrationBody({ lease_id: claim.lease_id });
+    const secondPeriod = { ...first.registration.desired_period, start_time: '06:00' };
+    const second = confirmedRegistrationBody({
+      lease_id: claim.lease_id,
+      registration: confirmedRegistration({ request_id: 'RQ-260907-002', expected_period: secondPeriod, desired_period: secondPeriod })
+    });
+    const writes = [];
+    const handlers = {
+      token, transport: 'gateway', now: () => clock.now,
+      executeConfirmedReservationCommit: async (body, { assertCurrentClaim }) => {
+        await assertCurrentClaim();
+        writes.push(body.registration.request_id);
+        const receipt = confirmedRegistrationReceipt(body, {
+          receipt_id: `receipt-${body.registration.request_id}`,
+          trade_id: body.registration.request_id.slice(3)
+        });
+        receipt.authoritative_result.trade_id = receipt.trade_id;
+        receipt.authoritative_result.authoritative.request.tradeIds = [receipt.trade_id];
+        return receipt;
+      }
+    };
+    let gateway = channel;
+    let app = await start(createHermesGatewayHttpHandler({ ...handlers, channel: gateway }));
+    const post = (body) => gatewayFetch(app.url, '/hermes/v1/tools/confirmed-reservation-commit',
+      { method: 'POST', body: JSON.stringify(body) });
+    try {
+      const one = await post(first);
+      assert.equal(one.status, 200);
+      const oneReceipt = await one.json();
+      assert.equal((await post({ ...second, registration: { ...second.registration, desired_period: first.registration.desired_period } })).status, 409);
+      assert.equal((await post({ ...second, registration: { ...second.registration, request_id: first.registration.request_id } })).status, 409);
+      const two = await post(second);
+      const twoReceipt = await two.json();
+      assert.equal(two.status, 200, JSON.stringify(twoReceipt));
+      assert.notEqual(oneReceipt.operation_id, twoReceipt.operation_id);
+      assert.deepEqual(writes, ['RQ-260907-001', 'RQ-260907-002']);
+      await app.close();
+      gateway = createHermesGatewayChannel({ directory, leaseMs: 1000, now: () => clock.now });
+      app = await start(createHermesGatewayHttpHandler({ ...handlers, channel: gateway }));
+      assert.deepEqual(await (await post(first)).json(), oneReceipt);
+      assert.deepEqual(await (await post(second)).json(), twoReceipt);
+      assert.equal(writes.length, 2);
+      const completed = await gateway.get('job-1');
+      const prepared = { customerLabel: '테스트 고객' };
+      const events = buildKakaoAutomationAuditEvents({ durableJob: completed, prepared });
+      assert.equal(events.length, 2);
+      assert.equal(new Set(events.map(event => event.event_key)).size, 2);
+
+      const third = confirmedRegistrationBody({ lease_id: claim.lease_id, registration: confirmedRegistration({
+        request_id: 'RQ-260907-003', desired_period: { ...secondPeriod, start_time: '05:00' }
+      }) });
+      await gateway.reserveToolOperation({
+        tool: 'confirmed_reservation_commit', job_id: claim.job_id, room_key: claim.room_key,
+        room_revision: claim.room_revision, lease_id: claim.lease_id,
+        request_digest: confirmedReservationCommitRequestDigest(third),
+        registration_target: { request_id: third.registration.request_id, desired_period: third.registration.desired_period },
+        audit_target: {
+          schema: 'village-kakao-tool-audit-target/v1', effect_type: 'reservation_registration',
+          action_type: 'create', target_type: 'request', target_id: third.registration.request_id
+        }
+      });
+      await app.close();
+      gateway = createHermesGatewayChannel({ directory, leaseMs: 1000, now: () => clock.now });
+      app = await start(createHermesGatewayHttpHandler({ ...handlers, channel: gateway }));
+      const interrupted = await gateway.get('job-1');
+      assert.equal(interrupted.error.type, 'confirmation_operation_unresolved');
+      assert.equal(interrupted.human_review_required, true);
+      assert.equal((await post(third)).status, 409);
+      assert.equal(writes.length, 2);
+      const recovered = buildKakaoAutomationAuditEvents({ durableJob: interrupted, prepared });
+      assert.equal(recovered.length, 3);
+      assert.deepEqual(recovered.slice(0, 2).map(event => event.event_key), events.map(event => event.event_key));
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 test('Gateway HTTP rejects confirmed registration evidence that is not bound to durable DOM roles and hash before reservation', async () => {

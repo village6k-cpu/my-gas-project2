@@ -2657,7 +2657,7 @@ export function createGatewayResultApplicationCoordinator({
       && receipt.room_revision === durableJob.room_revision
     );
     let effectiveReceipts = receipts;
-    if (receipts.length > 1 && operation.tool === 'registered_reservation_change') {
+    if (receipts.length > 1 && ['registered_reservation_change', 'confirmed_reservation_commit'].includes(operation.tool)) {
       const history = Array.isArray(durableJob.tool_operation_history) ? durableJob.tool_operation_history : [];
       const operations = [...history, operation];
       const exactHistory = operations.length === receipts.length && operations.every((reserved) => (
@@ -2665,13 +2665,21 @@ export function createGatewayResultApplicationCoordinator({
         && reserved.state === 'completed' && reserved.tool === operation.tool
         && reserved.job_id === durableJob.job_id && reserved.room_key === durableJob.room_key
         && reserved.room_revision === durableJob.room_revision
+        && reserved.lease_id === operation.lease_id
         && receipts.filter((receipt) => matchesOperation(receipt, reserved)).length === 1
       ));
       if (exactHistory) {
+        if (operation.tool === 'confirmed_reservation_commit') {
+          const ordered = operations.map(reserved => receipts.find(receipt => matchesOperation(receipt, reserved)));
+          if (new Set(ordered.map(receipt => receipt.operation_id)).size === ordered.length
+            && new Set(ordered.map(receipt => receipt.request_digest)).size === ordered.length) return ordered;
+        }
         // Native preflight proof can exclude earlier zero-write attempts from result
         // reconciliation. Persisted history and the one committed mutation fence remain intact.
-        effectiveReceipts = effectiveRegisteredOperationReceipts(receipts,
-          (receipt) => operations.filter((reserved) => matchesOperation(receipt, reserved)).length === 1);
+        if (operation.tool === 'registered_reservation_change') {
+          effectiveReceipts = effectiveRegisteredOperationReceipts(receipts,
+            (receipt) => operations.filter((reserved) => matchesOperation(receipt, reserved)).length === 1);
+        }
       }
     }
     const exact = effectiveReceipts.filter((receipt) => matchesOperation(receipt, operation));
