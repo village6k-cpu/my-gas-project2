@@ -89,3 +89,21 @@ test('pending inquiry contact completion uses the same bound memo evidence', asy
   };
   assert.deepEqual(validatePendingInquiryRevision(decision, { roomRevision: 7, roomSnapshot: snapshot }), []);
 });
+
+test('a named pending request accepts a phone-only customer reply and still rejects unquoted renames', () => {
+  const { normalizePendingCustomerIdentity } = require('../scripts/windows/pending-customer-identity.js');
+  const gas = {};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../checkAvailability.js'), 'utf8'), gas);
+  const baseline = {name: '예약자', phone: ''};
+  const identity = {expected_name: baseline.name, expected_phone: '', name: baseline.name, phone: '01000009999', discount_type: '학생'};
+  const source = '학생이고 연락처는 01000009999입니다';
+  const verify = (value, evidence, stored = baseline) => gas._assertPendingCustomerIdentityUpdate_(stored, value,
+    {예약자명: value.name, 연락처: value.phone}, {customer_request: evidence});
+  assert.deepEqual(normalizePendingCustomerIdentity(identity, source), identity);
+  assert.doesNotThrow(() => verify(identity, source));
+  for (const update of [{...identity, name: '소개자'}, {...identity, phone: '01000001234'}]) {
+    assert.throws(() => normalizePendingCustomerIdentity(update, source));
+    assert.throws(() => verify(update, source));
+  }
+  assert.throws(() => verify(identity, source, {name: '다른 고객', phone: ''}));
+});
