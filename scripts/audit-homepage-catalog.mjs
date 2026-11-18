@@ -39,6 +39,34 @@ for (const [index, row] of data.data.entries()) {
   rows.push({ sheetRow: index + 2, value: row[6] });
   rowsByName.set(row[0], rows);
 }
+// Each listed SKU has the same advertised base rate, including legacy spellings.
+const variants = new Map([
+  [17, ['캐논 R6 Mark 2 + EF 100-400mm II (EF-EOS R 어댑터 포함)']],
+  [42, ['TVLogic F-7HS']],
+  [62, ['탑 클램프 M11-095', '탑 클램프 MB-55']],
+  [130, ['테라덱 볼트 500 LT (1:1)']],
+  [132, ['포트키 BM5', '5인치 모니터 BM5', 'VFM-055A', '티비로직 VFM-055A']],
+  [148, ['석자 플로피', '넉자 플로피']],
+  [156, ['틸타 MB-T15(미니)', '스몰리그 매트박스 미니', '미니 매트박스']],
+  [158, ['사각', '원형'].flatMap(shape => ['1/2', '1/4', '1/8'].map(density => 'Black Pro-Mist ' + density + ' ' + shape))],
+  [159, ['1/2 사각', '1/4 사각', '1/8 사각', '1/4 원형', '1/8 원형'].map(size => 'Hollywood Blackmagic ' + size)],
+  [171, ['석자 그리드', '넉자 그리드']],
+  [173, [
+    ...['0.3', '0.6', '0.9'].map(density => 'NiSi IR ND 사각(' + density + ')'),
+    ...['0.3', '0.6', '0.9', '1.2'].map(density => 'VAXIS IRND 원형(' + density + ')')
+  ]]
+]);
+
+function comparePrice(canonical, price) {
+  const rows = rowsByName.get(canonical);
+  if (!rows) return { canonical, status: 'missing' };
+  const prices = rows.filter(row => String(row.value ?? '').trim() !== '');
+  if (prices.length !== 1 || !/^\d+$/.test(String(prices[0].value).replace(/,/g, '')))
+    return { canonical, status: 'review_sheet_price' };
+  const sheetPrice = Number(String(prices[0].value).replace(/,/g, ''));
+  return { canonical, sheetPrice, sheetRow: prices[0].sheetRow, status: sheetPrice === price ? 'matched' : 'price_difference' };
+}
+
 const audit = records.map(([, id, quotedName, numericPrice]) => {
   const name = JSON.parse(quotedName);
   const price = Number(numericPrice);
@@ -46,13 +74,15 @@ const audit = records.map(([, id, quotedName, numericPrice]) => {
   const product = { id: Number(id), name, price };
   if (!mapping || mapping[1] !== name) return { ...product, status: 'review_identity' };
   const [, , canonical, reason] = mapping;
-  if (!canonical) return { ...product, status: 'separate_options_or_service', reason };
-  const rows = rowsByName.get(canonical);
-  if (!rows) return { ...product, canonical, status: 'missing' };
-  const prices = rows.filter(row => String(row.value ?? '').trim() !== '');
-  if (prices.length !== 1 || !/^\d+$/.test(String(prices[0].value).replace(/,/g, '')))
-    return { ...product, canonical, status: 'review_sheet_price' };
-  const sheetPrice = Number(String(prices[0].value).replace(/,/g, ''));
-  return { ...product, canonical, sheetPrice, sheetRow: prices[0].sheetRow, status: sheetPrice === price ? 'matched' : 'price_difference' };
+  const options = (variants.get(Number(id)) || []).map(item => comparePrice(item, price));
+  if (!options.length) return canonical
+    ? { ...product, ...comparePrice(canonical, price) }
+    : { ...product, status: 'separate_options_or_service', reason };
+  const primary = canonical ? comparePrice(canonical, price) : null;
+  const issues = [primary, ...options].filter(Boolean).filter(row => row.status !== 'matched');
+  return {
+    ...product, ...primary, options,
+    status: issues.length ? 'review_options' : (primary ? 'matched' : 'matched_options')
+  };
 });
 console.log(JSON.stringify(audit, null, 2));
