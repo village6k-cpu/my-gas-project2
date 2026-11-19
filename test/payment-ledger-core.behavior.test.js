@@ -111,6 +111,14 @@ test('unique bank payer can automatically allocate on first receipt revision', a
   const allocation = h.calls.rpc.find(call => call.name === 'payment_set_allocations');
   assert.deepEqual(allocation.args.p_allocations, [{ trade_id: '261020-001', amount: 100000 }]);
 });
+test('a smaller or larger bank transfer stays unallocated for reconciliation', async () => {
+  for (const amount of [95000, 105000]) {
+    const h = harness({ receipts: [receipt({ amount, remaining_amount: amount })] });
+    const result = await h.api.ingestPayment({ ...inputFor('bank'), amount }, 'bank_bridge', { refresh: false, project: false });
+    assert.equal(result.status, 'unmatched');
+    assert.equal(h.calls.rpc.some(call => call.name === 'payment_set_allocations'), false);
+  }
+});
 test('bank sender with multiple reservations matches the unique exact balance using the sender field', async () => {
   const h = harness({
     accounts: [account(), account({ trade_id: '261020-002', balance: 60000 })],

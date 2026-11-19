@@ -115,7 +115,7 @@ export function receiptCandidates(receipt: Row, accounts: Row[]) {
 export function selectAutomaticBankAccount(receipt: Row, accounts: Row[]) {
   const candidates = receiptCandidates(receipt, accounts);
   if (candidates.length === 1) {
-    return receipt.remaining_amount <= candidates[0].balance ? candidates[0] : undefined;
+    return receipt.remaining_amount === candidates[0].balance ? candidates[0] : undefined;
   }
   // Compare the actual sender display, separate from bank channel and transfer-type remarks.
   const sender = String(receipt.raw?.remark1 ?? "").trim();
