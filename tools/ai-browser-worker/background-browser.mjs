@@ -37,21 +37,31 @@ export function boundsWithin(actual, expected) {
     && actual.top + actual.height <= expected.top + expected.height + 2;
 }
 
-// This creates a task-owned window. It never changes the current/user window.
-// Unsupported background creation fails rather than retrying in the foreground.
-export async function createBackgroundTarget({ url, send, readDisplay = readAutomationDisplay, knownTargetIds = [] }) {
+// Keep task pages in the dedicated Chrome window. On macOS, repeatedly
+// opening and closing a CDP background window can leave native windows alive
+// even after the corresponding DevTools target is gone.
+export async function createBackgroundTarget({ url, send, readDisplay = readAutomationDisplay, knownTargetIds = [], anchorTargetId }) {
   const bounds = await readDisplay();
   const before = await send('Target.getTargets', {});
   if (!Array.isArray(before.targetInfos)) throw Error('Background target ownership inventory is unavailable');
   const existing = new Set([...knownTargetIds, ...before.targetInfos.map(t => t.targetId)]);
+  const pages = before.targetInfos.filter(target => target.type === 'page');
+  const anchor = anchorTargetId
+    ? pages.find(target => target.targetId === anchorTargetId)
+    : pages.find(target => /^https:\/\/business\.kakao\.com\/[^?#]+\/chats\/?(?:[?#]|$)/.test(target.url)) || pages[0];
+  if (!anchor) throw Error('The dedicated automation Chrome window is unavailable');
+  const window = await send('Browser.getWindowForTarget', { targetId: anchor.targetId });
+  if (!Number.isInteger(window.windowId) || !boundsWithin(window.bounds, bounds))
+    throw Error('The dedicated automation Chrome window is outside 16MR70');
   const created = await send('Target.createTarget', {
-    url, newWindow: true, background: true, focus: false, windowState: 'normal', ...bounds
+    url, newWindow: false, background: true, focus: false
   });
   const targetId = created?.targetId;
   if (!targetId || existing.has(targetId)) throw Error('Background target ownership response is invalid or names an existing target');
   try {
-    const window = await send('Browser.getWindowForTarget', { targetId });
-    if (!boundsWithin(window.bounds, bounds)) throw Error('Created background window is outside 16MR70');
+    const targetWindow = await send('Browser.getWindowForTarget', { targetId });
+    if (targetWindow.windowId !== window.windowId || !boundsWithin(targetWindow.bounds, bounds))
+      throw Error('Background tab did not open in the dedicated automation Chrome window on 16MR70');
     return { targetId, windowId: window.windowId, bounds };
   } catch (error) {
     await send('Target.closeTarget', { targetId }).catch(() => {});

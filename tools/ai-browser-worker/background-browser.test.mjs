@@ -9,7 +9,7 @@ function fixture(overrides = {}) {
   const send = async (method, params) => {
     calls.push({ method, params });
     if (overrides[method]) return overrides[method](params);
-    if (method === 'Target.getTargets') return { targetInfos: [{ targetId: 'user-tab' }] };
+    if (method === 'Target.getTargets') return { targetInfos: [{ targetId: 'user-tab', type: 'page', url: 'about:blank' }] };
     if (method === 'Target.createTarget') return { targetId: 'owned' };
     if (method === 'Browser.getWindowForTarget') return { windowId: 8, bounds: { ...bounds, windowState: 'normal' } };
     if (method === 'Target.closeTarget') return { success: true };
@@ -30,7 +30,8 @@ test('creation is background-only at verified bounds, with no activation or chan
   assert.deepEqual(await createBackgroundTarget({ ...f, url: 'about:blank' }), { targetId: 'owned', windowId: 8, bounds });
   assert.deepEqual(f.calls, [
     { method: 'Target.getTargets', params: {} },
-    { method: 'Target.createTarget', params: { url: 'about:blank', newWindow: true, background: true, focus: false, windowState: 'normal', ...bounds } },
+    { method: 'Browser.getWindowForTarget', params: { targetId: 'user-tab' } },
+    { method: 'Target.createTarget', params: { url: 'about:blank', newWindow: false, background: true, focus: false } },
     { method: 'Browser.getWindowForTarget', params: { targetId: 'owned' } }
   ]);
 });
@@ -44,14 +45,24 @@ test('missing display and unsupported background mode never fall back to foregro
   assert.equal(unsupported.calls.filter(c => c.method === 'Target.createTarget').length, 1);
 });
 
-test('wrong display readback closes only the newly acknowledged owned target', async () => {
-  const f = fixture({ 'Browser.getWindowForTarget': () => ({ windowId: 4, bounds: { ...bounds, left: -1080, top: 0, windowState: 'normal' } }) });
-  await assert.rejects(createBackgroundTarget({ ...f, url: 'about:blank' }), /outside 16MR70/);
+test('placement in a different window closes only the newly acknowledged tab', async () => {
+  const f = fixture({ 'Browser.getWindowForTarget': ({ targetId }) => ({ windowId: targetId === 'owned' ? 4 : 8, bounds: { ...bounds, windowState: 'normal' } }) });
+  await assert.rejects(createBackgroundTarget({ ...f, url: 'about:blank' }), /did not open in the dedicated/);
   assert.deepEqual(f.calls.at(-1), { method: 'Target.closeTarget', params: { targetId: 'owned' } });
 });
 
+test('a misplaced existing automation window is rejected before opening a tab', async () => {
+  const f = fixture({
+    'Browser.getWindowForTarget': () => ({
+      windowId: 8, bounds: { ...bounds, left: -1080, top: 0, windowState: 'normal' }
+    })
+  });
+  await assert.rejects(createBackgroundTarget({ ...f, url: 'about:blank' }), /outside 16MR70/);
+  assert.ok(!f.calls.some(c => c.method === 'Target.createTarget'));
+});
+
 test('a response naming an existing user target never permits closing it', async () => {
-  const f = fixture({ 'Target.createTarget': () => ({ targetId: 'user-tab' }) });
+  const f = fixture({ 'Target.createTarget': () => ({ targetId: 'user-tab', type: 'page', url: 'about:blank' }) });
   await assert.rejects(createBackgroundTarget({ ...f, url: 'about:blank' }), /ownership/);
   assert.ok(!f.calls.some(c => c.method === 'Target.closeTarget'));
 });

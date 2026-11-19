@@ -6989,7 +6989,7 @@ test('ensureKakaoChannelManagerTabViaDevtools reuses automation profile tab with
   assert.deepEqual(requests.map((request) => request.method), ['GET']);
 });
 
-test('missing Kakao list is created in a background portable window without activating Chrome', async () => {
+test('missing Kakao list is created as a background tab in the existing portable window without activating Chrome', async () => {
   const commands = [];
   const bounds = { left: 640, top: 1080, width: 1280, height: 800 };
   const result = await ensureKakaoChannelManagerTabViaDevtools({
@@ -6997,13 +6997,14 @@ test('missing Kakao list is created in a background portable window without acti
     fetchImpl: async url => new Response(JSON.stringify(url.endsWith('/json/list') ? [] : { webSocketDebuggerUrl: 'ws://127.0.0.1:9223/devtools/browser/fixture' })),
     cdpCallImpl: async (_target, method, params) => {
       commands.push({ method, params });
-      if (method === 'Target.getTargets') return { targetInfos: [] };
+      if (method === 'Target.getTargets') return { targetInfos: [{ targetId: 'startup', type: 'page', url: 'about:blank' }] };
       if (method === 'Target.createTarget') return { targetId: 'new-list' };
       if (method === 'Browser.getWindowForTarget') return { windowId: 1, bounds: { windowState: 'normal', ...bounds } };
       assert.fail('Unexpected CDP command ' + method);
     }
   });
   assert.equal(result.targetId, 'new-list');
+  assert.equal(commands.find(c => c.method === 'Target.createTarget').params.newWindow, false);
   assert.equal(commands.find(c => c.method === 'Target.createTarget').params.background, true);
   assert.equal(commands.find(c => c.method === 'Target.createTarget').params.focus, false);
   assert.ok(!commands.some(c => /activate|focus/i.test(c.method)));
