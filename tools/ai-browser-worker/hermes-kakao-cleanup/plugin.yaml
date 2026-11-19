@@ -1,0 +1,3 @@
+name: village-kakao-cleanup
+version: 1.0.0
+description: Close this turn's owned Kakao tabs when the turn finishes.

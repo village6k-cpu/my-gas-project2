@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { openBackgroundPage } from './background-browser.mjs';
+import { buildOwnedDraftInspectionExpression } from './owned-room-capture.mjs';
 
 const config = JSON.parse(fs.readFileSync(fileURLToPath(new URL('./hermes-browser.json', import.meta.url)), 'utf8'));
 const require = createRequire(import.meta.url);
@@ -18,6 +19,19 @@ const parents = new Map();
 const KAKAO_CHAT_LIST = "https://business.kakao.com/space/353491/channel/_xhPMls/chats";
 class BrowserTargetError extends Error {}
 let browser;
+
+async function closeTaskPage(handle, page, kakaoOnly = false) {
+  const url = page.url();
+  const kakao = /^https:\/\/business\.kakao\.com\//.test(url);
+  if (kakaoOnly && !kakao) return { closed: false, handle, reason: 'not_kakao' };
+  if (kakao) {
+    const draft = await page.evaluate(buildOwnedDraftInspectionExpression()).catch(() => null);
+    if (draft?.href !== url || draft.hasDraft !== false || page.url() !== url)
+      return { closed: false, handle, reason: 'draft_or_unverified_page' };
+  }
+  await page.close();
+  return { closed: true, handle };
+}
 
 function own(page, parent) {
   const handle = randomUUID();
@@ -92,10 +106,11 @@ const server = new McpServer({ name: 'village-owned-chrome', version: '1.0.0' },
 });
 
 server.registerTool('browser', {
-  description: 'Operate one explicitly owned Chrome tab through Playwright. No implicit current-tab selection. Open returns a handle; every other action requires that exact handle. For a named Village Kakao conversation, use kakao_open_room with name; it verifies the full title and returns the owned room handle. Actions return fresh page state. Closing a handle closes only that task tab. Observe unknown or changed UI before acting.',
+  description: 'Operate one explicitly owned Chrome tab through Playwright. Open returns a handle; every other action requires that exact handle. For a named Village Kakao conversation, use kakao_open_room with name. After verifying the result or finishing the lookup, close the Kakao handle before replying to Slack. Closing preserves unsent drafts. Observe unknown or changed UI before acting.',
   inputSchema: {
     action: z.enum(['open', 'kakao_open_room', 'observe', 'navigate', 'click', 'fill', 'press', 'select', 'scroll', 'back', 'screenshot', 'close']),
     handle: z.string().optional(), url: z.string().optional(),
+    kakao_only: z.boolean().optional(),
     role: z.string().optional(), name: z.string().optional(), selector: z.string().optional(), frame: z.string().optional(),
     text: z.string().optional(), key: z.string().optional(), value: z.string().optional(),
     x: z.number().optional(), y: z.number().optional(), scroll_y: z.number().optional(),
@@ -124,8 +139,7 @@ server.registerTool('browser', {
       if (!page || page.isClosed()) throw new BrowserTargetError('Unknown or closed task handle; no other tab was selected');
       mayHaveActedOnTarget = !['observe', 'screenshot'].includes(args.action);
       if (args.action === 'close') {
-        await page.close(); pages.delete(handle);
-        return { content: [{ type: 'text', text: JSON.stringify({ closed: true, handle }) }] };
+        return { content: [{ type: 'text', text: JSON.stringify(await closeTaskPage(handle, page, args.kakao_only)) }] };
       }
       if (args.action === 'navigate') await page.goto(allowedUrl(args.url), { waitUntil: 'domcontentloaded', timeout: 30_000 });
       if (args.action === 'back') await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 });
@@ -160,7 +174,7 @@ let closing = false;
 async function cleanup() {
   if (closing) return;
   closing = true;
-  await Promise.allSettled([...pages.values()].map(page => page.close()));
+  await Promise.allSettled([...pages.entries()].map(([handle, page]) => closeTaskPage(handle, page)));
   // Do not close the borrowed Chrome or any pre-existing tab.
   process.exit(0);
 }
