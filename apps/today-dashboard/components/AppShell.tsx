@@ -30,6 +30,8 @@ const FollowUpView = dynamic(() => import("@/components/FollowUpView").then((mod
   loading: () => <PaneLoading label="후속조치" />,
 });
 
+const IncidentView = dynamic(() => import("@/components/IncidentView").then(mod => mod.IncidentView), {ssr:false,loading:()=> <PaneLoading label="사건·주의" />});
+
 const OperationsView = dynamic(() => import("@/components/OperationsView").then((mod) => mod.OperationsView), {
   ssr: false,
   loading: () => <PaneLoading label="운영판" />,
@@ -122,6 +124,7 @@ export function AppShell({ initial = "today" }: { initial?: NavKey }) {
         {!isLg && pane("today", TodayView)}
         {pane("schedule", ScheduleView)}
         {pane("follow", FollowUpView, true)}
+        {pane("incidents", IncidentView, true)}
         {pane("operations", OperationsView, true)}
         {pane("payments", PaymentsView, true)}
         {pane("confirm", ConfirmView)}
