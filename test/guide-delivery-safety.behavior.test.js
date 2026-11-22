@@ -17,7 +17,7 @@ function load(){
     Logger:{log:()=>{}},
   };
   const code=fs.existsSync('guideDeliverySafety.js')?fs.readFileSync('guideDeliverySafety.js','utf8'):'';
-  vm.runInNewContext(code,ctx);
+  vm.runInNewContext(fs.readFileSync('operationalPropertyStorage.js','utf8') + '\n' + code,ctx);
   // 발송 로직 단위 테스트만 격리해서 검사한다. 운영 코드의 긴급 중단 기본값은 별도 검증한다.
   ctx.GUIDE_DELIVERY_INCIDENT_SUSPENDED_=false;
   ctx.sendGuideSafetyAlert_=issue=>alerts.push(issue);

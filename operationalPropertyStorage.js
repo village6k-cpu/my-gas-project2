@@ -2,12 +2,13 @@
 var OPERATIONAL_PROPERTY_STORE_KEY_ = 'OPERATIONS_RECORDS_STORE_V1';
 var OPERATIONAL_PROPERTY_GROUPS_ = ['inventory', 'photos', 'receipts'];
 var OPERATIONAL_PROPERTY_HEADER_ = ['key', 'encoded_value'];
-var OPERATIONAL_PROPERTY_BUILD_ = 'sheet-records-v1';
+var OPERATIONAL_PROPERTY_BUILD_ = 'sheet-records-v2-guide-delivery';
 
 function operationalPropertyGroup_(key) {
   if (/^preRegStock_v1_(?:dirty|checked|state|registering|registered|predecessor)_RQ-\d{6}-\d{3}$/.test(key) ||
       /^inventoryStock(?:Question|Retired)_[A-Za-z0-9-]{8,80}$/.test(key)) return 'inventory';
   if (/^dashboardPhotoUpload_v2_[A-Za-z0-9_-]{1,80}$/.test(key)) return 'photos';
+  if (/^GUIDE_DELIVERY_V3_(?:out|in)_\d{6}_\d{3}$/.test(key)) return 'receipts';
   if (/^(?:historicalDiscountRestore|bookingConfirmationAlimtalk)_v1_\d{6}-\d{3}$/.test(key)) return 'receipts';
   return null;
 }
@@ -17,10 +18,19 @@ function operationalPropertyConfig_(base) {
   if (!text) return null;
   var config = JSON.parse(text);
   if (config.version !== 1 || !/^[A-Za-z0-9_-]{20,100}$/.test(config.fileId || '') ||
-      !Number.isSafeInteger(config.readyAt) || config.readyAt <= 0) {
+      !Number.isSafeInteger(config.readyAt) || config.readyAt <= 0 ||
+      (config.guideDeliveryReadyAt !== undefined &&
+        (!Number.isSafeInteger(config.guideDeliveryReadyAt) || config.guideDeliveryReadyAt <= 0))) {
     throw new Error('Operational record storage configuration is invalid');
   }
   return config;
+}
+
+function operationalPropertyReady_(config, key) {
+  if (!config || Date.now() < config.readyAt) return false;
+  // Existing groups are already live. Stage only the newly routed guide readers/writers.
+  return !/^GUIDE_DELIVERY_V3_/.test(key) ||
+    !!config.guideDeliveryReadyAt && Date.now() >= config.guideDeliveryReadyAt;
 }
 
 function operationalPropertySheet_(config, group) {
@@ -99,7 +109,7 @@ function operationalPropertyStore_(group, base) {
     }
     return operationalPropertyWithLock_(function() {
       var config = operationalPropertyConfig_(base);
-      if (!config || Date.now() < config.readyAt) {
+      if (!operationalPropertyReady_(config, key)) {
         return value === null ? base.deleteProperty(key) : base.setProperty(key, value);
       }
       // A legacy value stays authoritative until its exact copy has been verified.
@@ -115,7 +125,7 @@ function operationalPropertyStore_(group, base) {
       var legacy = base.getProperty(key);
       if (legacy !== null || operationalPropertyGroup_(key) !== group) return legacy;
       var config = operationalPropertyConfig_(base);
-      if (!config || Date.now() < config.readyAt) return null;
+      if (!operationalPropertyReady_(config, key)) return null;
       var sheet = sheetFor(config);
       var row = operationalPropertyRow_(sheet, key);
       if (!row) return null;
@@ -135,7 +145,8 @@ function operationalPropertyStore_(group, base) {
       if (!config || Date.now() < config.readyAt) return legacy;
       var records = operationalPropertySheetRows_(sheetFor(config), group);
       Object.keys(records).forEach(function(key) {
-        if (!Object.prototype.hasOwnProperty.call(legacy, key) && records[key].value !== null) {
+        if (operationalPropertyReady_(config, key) &&
+            !Object.prototype.hasOwnProperty.call(legacy, key) && records[key].value !== null) {
           legacy[key] = records[key].value;
         }
       });
@@ -171,6 +182,9 @@ function getOperationalPropertyStorageStatus() {
   var base = PropertiesService.getScriptProperties();
   var config = operationalPropertyConfig_(base), snapshot = operationalPropertyLegacySnapshot_(base);
   return { build: OPERATIONAL_PROPERTY_BUILD_, mode: !config ? 'legacy' : Date.now() < config.readyAt ? 'staged' : 'sheet',
+    guideDeliveryMode: !config || !config.guideDeliveryReadyAt ? 'legacy'
+      : operationalPropertyReady_(config, 'GUIDE_DELIVERY_V3_') ? 'sheet' : 'staged',
+    guideDeliveryReadyAt: config && config.guideDeliveryReadyAt ? new Date(config.guideDeliveryReadyAt).toISOString() : null,
     readyAt: config && new Date(config.readyAt).toISOString(), legacyCount: snapshot.entries.length,
     legacyBytesByGroup: snapshot.bytesByGroup, snapshotHash: snapshot.snapshotHash };
 }
@@ -179,7 +193,16 @@ function getOperationalPropertyStorageStatus() {
 function prepareOperationalPropertyStorage() {
   var base = PropertiesService.getScriptProperties();
   return operationalPropertyWithLock_(function() {
-    if (operationalPropertyConfig_(base)) return getOperationalPropertyStorageStatus();
+    var existing = operationalPropertyConfig_(base);
+    if (existing) {
+      if (!existing.guideDeliveryReadyAt) {
+        existing.guideDeliveryReadyAt = Date.now() + 7 * 60000;
+        var staged = JSON.stringify(existing);
+        base.setProperty(OPERATIONAL_PROPERTY_STORE_KEY_, staged);
+        if (base.getProperty(OPERATIONAL_PROPERTY_STORE_KEY_) !== staged) throw new Error('Guide record storage activation was not verified');
+      }
+      return getOperationalPropertyStorageStatus();
+    }
     var book = SpreadsheetApp.create('VILLAGE private operational records v1');
     var file = DriveApp.getFileById(book.getId());
     file.setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE);
@@ -193,6 +216,7 @@ function prepareOperationalPropertyStorage() {
     });
     SpreadsheetApp.flush();
     var config = { version: 1, fileId: book.getId(), readyAt: Date.now() + 7 * 60000 };
+    config.guideDeliveryReadyAt = config.readyAt;
     OPERATIONAL_PROPERTY_GROUPS_.forEach(function(group) { operationalPropertySheet_(config, group); });
     var encoded = JSON.stringify(config);
     base.setProperty(OPERATIONAL_PROPERTY_STORE_KEY_, encoded);
@@ -211,6 +235,9 @@ function migrateOperationalProperties(input) {
       var config = operationalPropertyConfig_(base);
       if (!config || Date.now() < config.readyAt) throw new Error('Operational record storage is not ready');
       var snapshot = operationalPropertyLegacySnapshot_(base);
+      if (snapshot.entries.some(function(entry) { return !operationalPropertyReady_(config, entry[0]); })) {
+        throw new Error('Operational record storage is not ready');
+      }
       if (snapshot.snapshotHash !== input.expectedSnapshotHash) throw new Error('Operational record migration snapshot changed');
       var batch = snapshot.entries.slice(0, 150), moved = 0;
       OPERATIONAL_PROPERTY_GROUPS_.forEach(function(group) {

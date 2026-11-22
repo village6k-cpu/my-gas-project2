@@ -70,11 +70,11 @@ function manageGuideAlimtalk(args) {
 function resumeGuideAlimtalk() { return manageGuideAlimtalk({action:'resume'}); }
 function guideSafetyKey_(prefix, tid) { return prefix + String(tid).replace(/-/g, '_'); }
 function guideSafetyRead_(key) {
-  var raw = PropertiesService.getScriptProperties().getProperty(key);
+  var raw = operationalPropertyStore_('receipts', PropertiesService.getScriptProperties()).getProperty(key);
   return raw ? JSON.parse(raw) : null; // 기록 파손 시 조용히 지워 재발송하지 않는다.
 }
 function guideSafetyWrite_(key, value) {
-  PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(value));
+  operationalPropertyStore_('receipts', PropertiesService.getScriptProperties()).setProperty(key, JSON.stringify(value));
 }
 function guideRecordKey_(tid, kind) {
   return guideSafetyKey_('GUIDE_DELIVERY_V3_' + (kind === 'checkout' ? 'out_' : 'in_'), tid);

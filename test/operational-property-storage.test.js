@@ -15,16 +15,21 @@ const receiptKey = 'historicalDiscountRestore_v1_261107-001';
 function fixture() {
   const now = Date.parse('2026-11-07T06:00:00Z');
   const values = new Map([
-    [pointer, JSON.stringify({ version: 1, fileId, readyAt: now })],
+    [pointer, JSON.stringify({ version: 1, fileId, readyAt: now, guideDeliveryReadyAt: now })],
     ['preRegStock_v1_enabled', 'true'],
     ['CONTRACT_TEMPLATE_ID', 'fixture-template']
   ]);
-  const flags = { full: true, failSheet: false, failDelete: false };
+  const flags = { full: true, failSheet: false, failDelete: false, capacityBytes: Infinity };
+  const usedBytes = () => [...values].reduce((n, [key, value]) => n + Buffer.byteLength(key + value), 0);
   const base = {
     getProperty: key => values.get(key) ?? null,
     getProperties: () => Object.fromEntries(values),
     setProperty(key, value) {
       if (flags.full && !values.has(key)) throw Error('Property storage quota exceeded');
+      const previousBytes = values.has(key) ? Buffer.byteLength(key + values.get(key)) : 0;
+      if (usedBytes() - previousBytes + Buffer.byteLength(key + value) > flags.capacityBytes) {
+        throw Error('Property storage quota exceeded');
+      }
       values.set(key, String(value));
     },
     deleteProperty(key) {
@@ -93,15 +98,91 @@ function fixture() {
       Charset: { UTF_8: 'utf8' }
     }
   });
-  for (const filename of ['dashboardPhotoClaimStorage.js', 'operationalPropertyStorage.js', 'preRegistrationStockAlerts.js']) {
+  for (const filename of ['dashboardPhotoClaimStorage.js', 'operationalPropertyStorage.js', 'preRegistrationStockAlerts.js', 'guideDeliverySafety.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', filename), 'utf8'), ctx);
   }
   const store = group => ctx.operationalPropertyStore_(group);
   const migrate = () => ctx.migrateOperationalProperties({
     expectedSnapshotHash: ctx.getOperationalPropertyStorageStatus().snapshotHash
   });
-  return { ctx, values, flags, sheets, now, store, migrate };
+  return { ctx, values, flags, sheets, now, store, migrate, base, usedBytes };
 }
+
+test('guide receipt migration frees the shared quota for equipment removal without losing delivery proof', () => {
+  const f = fixture();
+  f.flags.full = false;
+  const source = fs.readFileSync(path.join(__dirname, '..', 'checkAvailability.js'), 'utf8');
+  f.ctx.DASHBOARD_MUTATION_LOG_PREFIX_ = 'dashboardMutationLog_v2_';
+  f.ctx.DASHBOARD_MUTATION_LOG_TTL_MS_ = 86400000;
+  vm.runInContext(source.slice(source.indexOf('function normalizeDashboardMutationId_('),
+    source.indexOf('function dashboardCompletionRevisionKey_(')), f.ctx);
+  const expected = new Map();
+  for (let i = 1; i <= 732; i++) {
+    const key = 'GUIDE_DELIVERY_V3_out_261123_' + String(i).padStart(3, '0');
+    const raw = JSON.stringify({ state: i % 2 ? 'pending' : 'delivered', requestNum: 'request-' + i, receiptNum: 'receipt-' + i });
+    expected.set(key, raw);
+    f.values.set(key, raw);
+  }
+  f.flags.capacityBytes = f.usedBytes();
+  const beginRemoval = () => f.ctx.beginDashboardMutation_(f.base, '261123-001', 'remove-1', 'equipmentRemoveBatch:schedule:261123-001-01', 'exact-target');
+  assert.throws(beginRemoval, /storage quota/);
+  let moved = 0;
+  for (let i = 0; i < 5; i++) moved += f.migrate().moved;
+  assert.equal(moved, 732);
+  assert.equal(f.ctx.getOperationalPropertyStorageStatus().legacyCount, 0);
+  for (const [key, raw] of expected) {
+    assert.equal(f.values.has(key), false);
+    assert.equal(JSON.stringify(f.ctx.guideSafetyRead_(key)), raw);
+  }
+  assert.equal(beginRemoval().skip, false);
+  f.ctx.commitDashboardMutation_(f.base, '261123-001', 'remove-1', 'equipmentRemoveBatch:schedule:261123-001-01');
+  assert.equal(beginRemoval().skip, true, 'equipment removal retries must retain their durable deduplication');
+  const bytes = f.usedBytes();
+  f.ctx.guideSafetyWrite_('GUIDE_DELIVERY_V3_in_261123_001', { state: 'unknown', requestNum: 'keep-on-retry' });
+  assert.equal(f.usedBytes(), bytes, 'new guide records must not fill Script Properties again');
+  assert.equal(f.ctx.guideSafetyRead_('GUIDE_DELIVERY_V3_in_261123_001').requestNum, 'keep-on-retry');
+});
+
+test('guide storage activation waits out executions of the old guide reader', () => {
+  const f = fixture();
+  f.flags.full = false;
+  f.values.set(pointer, JSON.stringify({ version: 1, fileId, readyAt: f.now - 86400000 }));
+  const key = 'GUIDE_DELIVERY_V3_out_261123_001';
+  f.ctx.guideSafetyWrite_(key, { state: 'pending', requestNum: 'original' });
+  assert.equal(f.values.has(key), true);
+  assert.throws(f.migrate, /not ready/);
+  const staged = f.ctx.prepareOperationalPropertyStorage();
+  assert.equal(staged.guideDeliveryMode, 'staged');
+  const config = JSON.parse(f.values.get(pointer));
+  assert.equal(config.readyAt, f.now - 86400000, 'existing record groups must stay readable');
+  assert.equal(config.guideDeliveryReadyAt, f.now + 420000);
+  f.ctx.prepareOperationalPropertyStorage();
+  assert.equal(JSON.parse(f.values.get(pointer)).guideDeliveryReadyAt, config.guideDeliveryReadyAt);
+  assert.throws(f.migrate, /not ready/);
+  f.values.set(pointer, JSON.stringify({ ...config, guideDeliveryReadyAt: f.now }));
+  assert.equal(f.migrate().moved, 1);
+  f.flags.full = true;
+  assert.equal(f.ctx.guideSafetyRead_(key).requestNum, 'original');
+  f.ctx.guideSafetyWrite_(key, { state: 'delivered', requestNum: 'original' });
+  assert.equal(f.ctx.guideSafetyRead_(key).state, 'delivered');
+});
+
+test('migrated pending and delivered guide receipts prevent duplicate customer sends', () => {
+  for (const state of ['pending', 'unknown', 'delivered', 'rejected']) {
+    const f = fixture(), key = 'GUIDE_DELIVERY_V3_out_261123_001';
+    const operationAt = new Date(f.now + 3600000), cust = { name: '테스트', tel: '01012345678' };
+    f.values.set(key, JSON.stringify({ state, requestNum: 'original', binding: cust.tel + '|' + cust.name + '|' + operationAt.getTime() }));
+    assert.equal(f.migrate().moved, 1);
+    f.ctx.GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = false;
+    f.ctx.normalizeAlimtalkReceiver_ = phone => phone;
+    f.ctx.verifyGuideRecord_ = record => record;
+    f.ctx.sendAlimtalk = () => assert.fail('migration must never authorize another customer send');
+    const result = f.ctx.sendGuideSafely_('261123-001', 'checkout', cust, operationAt);
+    assert.equal(result.sent, false);
+    assert.equal(result.state, state);
+    assert.equal(f.ctx.guideSafetyRead_(key).requestNum, 'original');
+  }
+});
 
 test('reservation queues still save when Script Properties rejects a new property', () => {
   const f = fixture();
