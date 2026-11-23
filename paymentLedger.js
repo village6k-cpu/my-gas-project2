@@ -10,6 +10,27 @@ function paymentLedgerDate_(value) {
   return !isNaN(date.getTime()) && date.toISOString().slice(0, 10) === day ? day : null;
 }
 
+/** 승인된 카드 수납의 증빙 기본값만 보완한다. 입금 상태는 수납 잔액 투영이 결정한다. */
+function fillPaymentLedgerCardProof_(sheet, row, item, paymentMethod) {
+  if (item.method !== '카드결제' || !Number.isSafeInteger(item.paidAmount) || item.paidAmount <= 0 ||
+      ['', '카드결제'].indexOf(String(paymentMethod || '').trim()) < 0) return { changed: false };
+  var range = sheet.getRange(row, 11, 1, 2);
+  var values = range.getValues()[0], formulas = range.getFormulas()[0];
+  var proof = String(values[0] || '').trim(), issue = String(values[1] || '').trim();
+  // 직원이 지정한 세금계산서/현금영수증, 발행 지시와 수식은 카드 기본값으로 덮지 않는다.
+  if (formulas[0] || formulas[1] || ['', '미발행'].indexOf(proof) < 0 ||
+      ['', '미발행', '발행완료'].indexOf(issue) < 0) return { changed: false };
+  var changes = [];
+  if (!proof) changes.push({ col: 11, value: '미발행' });
+  if (issue !== '발행완료') changes.push({ col: 12, value: '발행완료' });
+  for (var i = 0; i < changes.length; i++) {
+    var options = paymentOptionsFromRule_(sheet.getRange(row, changes[i].col).getDataValidation());
+    if (options.length && options.indexOf(changes[i].value) < 0) return { changed: false, error: 'card_proof_validation' };
+  }
+  changes.forEach(function(change) { sheet.getRange(row, change.col).setValue(change.value); });
+  return { changed: changes.length > 0 };
+}
+
 function getPaymentLedgerSnapshot_(tradeIds) {
   if (typeof tradeIds === 'string') tradeIds = JSON.parse(tradeIds);
   if (tradeIds != null && (!Array.isArray(tradeIds) || tradeIds.length > 5000)) throw new Error('거래ID 목록 오류');
@@ -54,7 +75,7 @@ function getPaymentLedgerSnapshot_(tradeIds) {
   return { success: true, accounts: accounts, observedAt: observedAt, duplicateTradeIds: Object.keys(duplicateIds) };
 }
 
-/** 최신 청구액과 단조 revision이 모두 일치할 때만 M열을 투영한다. */
+/** 최신 청구액과 단조 revision이 일치할 때 수납 상태와 카드 증빙 기본값을 투영한다. */
 function applyPaymentLedgerProjection_(items) {
   if (!Array.isArray(items) || items.length > 5000) throw new Error('수납 반영 목록 오류');
   var lock = LockService.getScriptLock();
@@ -82,8 +103,11 @@ function applyPaymentLedgerProjection_(items) {
       if (['입금완료', '부분입금', '미입금', '환불'].indexOf(item.status) < 0 || item.reviewRequired || amount == null) {
         rejected.push({ tradeId: id, reason: 'review_required' }); return;
       }
-      var cell = ledger.getRange(target.row, 13), changed = String(target.values[12] || '').trim() !== item.status;
-      if (changed) {
+      var proof = fillPaymentLedgerCardProof_(ledger, target.row, item, target.values[9]);
+      if (proof.error) { rejected.push({ tradeId: id, reason: proof.error }); return; }
+      var cell = ledger.getRange(target.row, 13), statusChanged = String(target.values[12] || '').trim() !== item.status;
+      var changed = statusChanged || proof.changed;
+      if (statusChanged) {
         var options = paymentOptionsFromRule_(cell.getDataValidation());
         if (options.length && options.indexOf(item.status) < 0) {
           // 기존 선택지를 보존하면서 새 수납 상태만 추가한다. 열/시트 구조는 변경하지 않는다.
