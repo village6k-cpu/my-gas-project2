@@ -1,5 +1,6 @@
 /** Settings are an explicit, bounded set. Every other key is an operational record. */
-var VILLAGE_PROPERTY_SETTINGS_ = [
+function villagePropertySettings_() {
+  return [
   'OPERATIONS_RECORDS_STORE_V1', 'inventorySemanticStore_v1_manifest',
   'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY', 'CONTRACT_FOLDER_ID', 'CONTRAT_FOLDER_ID',
   'CONTRACT_TEMPLATE_ID', 'DASHBOARD_PHOTO_APPSHEET_FOLDER_ID', 'DASHBOARD_PHOTO_FOLDER_ID',
@@ -22,14 +23,15 @@ var VILLAGE_PROPERTY_SETTINGS_ = [
   'inventoryRisk_v1_enabled', 'inventoryRisk_v1_channel', 'inventoryRisk_v1_slackToken',
   'inventoryRisk_v1_turnaroundMinutes', 'inventoryRisk_v1_notificationHour',
   'preRegStock_v1_enabled', 'preRegStock_v1_channel', 'preRegStock_v1_externalRelay'
-];
+  ];
+}
 var VILLAGE_SCRIPT_PROPERTIES_FACADE_ = null;
 
 /** Only this adapter and explicit storage diagnostics may access the physical settings store. */
 function villageRawProperties_() { return PropertiesService.getScriptProperties(); }
 
 function villagePropertyIsSetting_(key) {
-  return VILLAGE_PROPERTY_SETTINGS_.indexOf(String(key)) >= 0;
+  return villagePropertySettings_().indexOf(String(key)) >= 0;
 }
 
 function villagePropertyRuntimeReady_(config) {
@@ -39,6 +41,9 @@ function villagePropertyRuntimeReady_(config) {
 /** Snapshot values stay fresh; only immutable sheet handles and row locations are cached. */
 function villagePropertyReadAll_(base, config) {
   var result = base.getProperties();
+  if (config.runtimeLegacyClearedAt) {
+    Object.keys(result).forEach(function(key) { if (!villagePropertyIsSetting_(key)) delete result[key]; });
+  }
   OPERATIONAL_PROPERTY_GROUPS_.forEach(function(group) {
     if (group === 'runtime' && !villagePropertyRuntimeReady_(config)) return;
     if (Date.now() < config.readyAt) return;

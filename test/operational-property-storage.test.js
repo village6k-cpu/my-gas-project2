@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('./helpers/gas-storage-vm');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
+const nativeVm = require('node:vm');
 
 const pointer = 'OPERATIONS_RECORDS_STORE_V1';
 const fileId = 'private_operational_records_v1';
@@ -146,6 +147,24 @@ function activateRuntime(f) {
   config.runtimeReadyAt = f.now;
   f.values.set(pointer, JSON.stringify(config));
 }
+
+test('settings initialization is independent of GAS file order and preserves the explicit guide safety flag', () => {
+  const names = ['guideDeliverySafety.js', 'operationalPropertyStorage.js', 'villagePropertyStore.js'];
+  const source = names.map(name => fs.readFileSync(path.join(__dirname, '..', name), 'utf8')).join('\n');
+  const context = { PropertiesService: { getScriptProperties: () => ({
+    getProperty: key => key === 'GUIDE_ALIMTALK_SUSPENDED' ? 'false' : null
+  }) } };
+  nativeVm.runInNewContext(source, context);
+  assert.equal(context.GUIDE_DELIVERY_INCIDENT_SUSPENDED_, false);
+  assert.equal(context.villageScriptProperties_().getProperty('GUIDE_ALIMTALK_SUSPENDED'), 'false');
+});
+
+test('setting reads remain available to authenticate diagnostics even when a storage pointer is damaged', () => {
+  const f = fixture(); f.values.set(pointer, '{broken');
+  const p = f.ctx.villageScriptProperties_();
+  assert.equal(p.getProperty('CONTRACT_TEMPLATE_ID'), 'fixture-template');
+  assert.throws(() => p.getProperty('PAYMENT_REV_261126-001'));
+});
 
 test('every growing operational family is classified outside settings, including future record names', () => {
   const f = fixture();
@@ -302,7 +321,12 @@ test('all-operation migration uses bounded batches and leaves no dynamic setting
   const key = 'futureReceipt_0'; f.values.set(key, 'stale old deployment');
   assert.throws(f.migrate, /Unexpected legacy writer/);
   f.ctx.VILLAGE_SCRIPT_PROPERTIES_FACADE_ = null;
-  assert.equal(f.ctx.villageScriptProperties_().getProperty(key), '0');
+  const routed = f.ctx.villageScriptProperties_();
+  assert.equal(routed.getProperty(key), '0');
+  assert.equal(routed.getProperties()[key], '0');
+  f.values.set('unknownOldWriter_261126-001', 'stale');
+  assert.equal(routed.getProperty('unknownOldWriter_261126-001'), null);
+  assert.equal(routed.getKeys().includes('unknownOldWriter_261126-001'), false);
   assert.equal(f.values.get(key), 'stale old deployment');
 });
 
