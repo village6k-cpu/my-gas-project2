@@ -10,7 +10,7 @@ function inventorySemanticScopes_(snapshot) {
 function inventorySemanticKey_(scope){return INVENTORY_SEMANTIC_PREFIX_+inventoryRiskDigest_([scope.setName,scope.componentName]);}
 
 function inventorySemanticLegacyRecords_() {
- var values=PropertiesService.getScriptProperties().getProperties();
+ var values=villageScriptProperties_().getProperties();
  var documentStore=typeof PropertiesService.getDocumentProperties==='function'?PropertiesService.getDocumentProperties():null;
  if(values.inventorySemanticStore_v1_manifest || documentStore?.getProperty('inventorySemanticStore_v1_manifest'))throw new Error('AI 판단 저장소 reader 확인 필요');
  return values;
@@ -18,7 +18,7 @@ function inventorySemanticLegacyRecords_() {
 
 /** Internal metadata audit only. Stale AI evidence remains durable; nothing here expires or rewrites it. */
 function auditInventorySemanticStorage() {
- var props=PropertiesService.getScriptProperties(),before=props.getProperties(),snapshot=null,sourceComplete=false;
+ var props=villageScriptProperties_(),before=props.getProperties(),snapshot=null,sourceComplete=false;
  var legacyCount=Object.keys(before).filter(function(key){return key.indexOf(INVENTORY_SEMANTIC_PREFIX_)===0;}).length;
  var audited=Object.assign({},before),stored=typeof inventorySemanticStorageRead_==='function'?inventorySemanticStorageRead_():inventorySemanticLegacyRecords_();
  Object.keys(audited).forEach(function(key){if(key.indexOf(INVENTORY_SEMANTIC_PREFIX_)===0)delete audited[key];});
@@ -122,7 +122,7 @@ function applyInventorySemanticReview(input) {
   if(typeof inventorySemanticStorageWrite_==='function')inventorySemanticStorageWrite_(validated);
   else {
    inventorySemanticLegacyRecords_();
-   var props=PropertiesService.getScriptProperties();validated.forEach(function(r){var text=JSON.stringify(r);if(Utilities.newBlob && Utilities.newBlob(text).getBytes().length>8500)throw new Error('재고 판단 근거 크기 초과');props.setProperty(inventorySemanticKey_(r),text);});
+   var props=villageScriptProperties_();validated.forEach(function(r){var text=JSON.stringify(r);if(Utilities.newBlob && Utilities.newBlob(text).getBytes().length>8500)throw new Error('재고 판단 근거 크기 초과');props.setProperty(inventorySemanticKey_(r),text);});
    validated.forEach(function(r){if(JSON.parse(props.getProperty(inventorySemanticKey_(r))).sourceHash!==r.sourceHash)throw new Error('AI 구성품 판단 저장 확인 필요');});
   }
   if(typeof requestInventoryRiskScan_==='function')requestInventoryRiskScan_();

@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.resolve(__dirname, '../checkAvailability.js'), 'utf8');
 function fn(name) {
@@ -63,7 +63,7 @@ test('sales aliases resolve to current master prices and preserve model, mount, 
 test('operator-approved aliases link one exact sales product, never a missing target or multiple candidates', () => {
   const h = harness([['렌즈 A', '', 1, '', '', '', 20000], ['렌즈 B', '', 1, '', '', '', 25000]]);
   let aliases = [{alias:'직원 확인 렌즈',canonicalName:'렌즈 A'}];
-  h.context.PropertiesService = {getScriptProperties: () => ({getProperty: () => JSON.stringify(aliases)})};
+  h.context.PropertiesService = {getScriptProperties: () => ({getProperty: key => key === 'SALES_CATALOG_ALIASES_V1' ? JSON.stringify(aliases) : null})};
   assert.equal(h.context.findSetPrice('직원확인렌즈', h.sheet), 20000);
   aliases.push({alias:'직원 확인 렌즈',canonicalName:'렌즈 B'});
   assert.throws(() => h.context.findSetPrice('직원 확인 렌즈', h.sheet), /후보: 렌즈 A, 렌즈 B/);

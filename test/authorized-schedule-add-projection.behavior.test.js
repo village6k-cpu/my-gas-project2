@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const path = require('node:path');
 const tid = '260827-012';
 const row = (suffix) => ({ schedule_id: `${tid}-${suffix}`, trade_id: tid, name: '시네로이드 CFL-800', qty: 2, sort: 22, set_name: '시네로이드 CFL-800', is_set_header: true, is_component: false, category: null });
@@ -79,7 +79,7 @@ test('onsite retry after append restores the exact insertion grant before markin
   const existingIdem = { state: 'pending' };
   const ctx = { tid, existingIdem, idemRows: [existingIdem], idemProp: 'idempotency', idemHash: 'id',
     reservedRows: [{ scheduleId: `${tid}-23` }], reservation: { all: true, items: [row('23')] },
-    PropertiesService: { getScriptProperties: () => ({ setProperty: () => events.push('done') }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: () => null, setProperty: () => events.push('done') }) },
     scheduleDashboardStructureProjectionUnderLock_: (tradeId, patch) => {
       assert.equal(tradeId, tid); assert.equal(existingIdem.state, 'pending');
       assert.deepEqual(Array.from(patch.addedScheduleIds), [`${tid}-23`]); events.push('queue');

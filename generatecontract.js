@@ -109,7 +109,7 @@ function createContractFromMenu() {
     // 기존 파일 있으면 삭제 후 새로 생성 → 신규든 재생성이든 동일하게 처리
     const result = deleteAndRegenerateContract(ss, 거래ID);
     // 디바운스 대기 큐에 쌓여있었다면 정리 + 새 링크 동기화 마킹
-    try { PropertiesService.getScriptProperties().deleteProperty('contractEditTS_' + 거래ID); } catch (e) {}
+    try { villageScriptProperties_().deleteProperty('contractEditTS_' + 거래ID); } catch (e) {}
     try { if (typeof supaMarkTradeDirty_ !== 'undefined') supaMarkTradeDirty_(거래ID); } catch (eMark) {}
     ss.toast("✅ 완료", "계약서 " + 거래ID, 5);
     ui.alert(
@@ -137,7 +137,7 @@ function createContractFromMenu() {
  */
 function generateContractFile(ss, 거래ID, 추가요청, options) {
   options = options || {};
-  const props = PropertiesService.getScriptProperties();
+  const props = villageScriptProperties_();
 
   // ── 설정값 가져오기 ──
   const templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
@@ -955,7 +955,7 @@ function updateContractLink(거래ID, contractUrl, finalAmount, options) {
   const strict = options.strict === true;
   try {
     if (!String(contractUrl || "").trim()) throw new Error("계약서 URL이 비어 있음");
-    const props = PropertiesService.getScriptProperties();
+    const props = villageScriptProperties_();
     const 개고생URL = props.getProperty("개고생2_URL");
     if (!개고생URL) throw new Error("개고생2_URL 속성이 없음");
 
@@ -1039,7 +1039,7 @@ function updateContractLink(거래ID, contractUrl, finalAmount, options) {
  * - 최종 금액 수식: 할인 곱셈 적용
  */
 function setupContractTemplate() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
   if (!templateId) return "❌ CONTRACT_TEMPLATE_ID 미설정";
 
@@ -1088,7 +1088,7 @@ function setupContractTemplate() {
 }
 
 function inspectContractTemplateDiscounts() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
   if (!templateId) return { error: "CONTRACT_TEMPLATE_ID 미설정" };
 
@@ -1142,7 +1142,7 @@ function inspectContractTemplateDiscounts() {
  * 반환: 휴지통으로 옮긴 파일 수.
  */
 function trashContractFilesForTrade_(거래ID, keepFileId) {
-  const props = PropertiesService.getScriptProperties();
+  const props = villageScriptProperties_();
   const folderId = props.getProperty("CONTRACT_FOLDER_ID");
   const fileName = `계약서_${거래ID}_`;
   var trashed = 0;
@@ -1177,7 +1177,7 @@ function trashContractFilesForTrade_(거래ID, keepFileId) {
 }
 
 function deleteAndRegenerateContract(ss, 거래ID, 추가요청, options) {
-  const props = PropertiesService.getScriptProperties();
+  const props = villageScriptProperties_();
   // 직접 재생성도 과거 할인 메타데이터 복원과 같은 선점 경계를 사용한다.
   // Drive/외부 원장 IO 동안 전역 잠금을 잡지 않고 거래별 표식만 유지한다.
   const regenLock = LockService.getScriptLock();
@@ -1268,7 +1268,7 @@ function regenerateContractById(거래ID, 추가요청, options) {
 
 function clearDirectContractRegenPending_(거래ID) {
   try {
-    PropertiesService.getScriptProperties().deleteProperty('contractEditTS_' + 거래ID);
+    villageScriptProperties_().deleteProperty('contractEditTS_' + 거래ID);
   } catch (e) {}
   try {
     if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]);
@@ -1400,7 +1400,7 @@ function formatContractDT(date, time) {
  */
 function autoGenerateContract(ss, 거래ID) {
   try {
-    const props = PropertiesService.getScriptProperties();
+    const props = villageScriptProperties_();
     const templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
     if (!templateId) return; // 템플릿 설정 안 돼있으면 스킵
 
@@ -1423,7 +1423,7 @@ function autoGenerateContract(ss, 거래ID) {
  * GAS 편집기에서 한 번만 실행하면 됨
  */
 function protectContractTemplate() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
   if (!templateId) {
     Logger.log("❌ CONTRACT_TEMPLATE_ID 미설정");
@@ -1455,7 +1455,7 @@ function protectContractTemplate() {
 
 function setupContractSettings() {
   const ui = SpreadsheetApp.getUi();
-  const props = PropertiesService.getScriptProperties();
+  const props = villageScriptProperties_();
 
   // 1) 템플릿 ID
   const current1 = props.getProperty("CONTRACT_TEMPLATE_ID") || "(미설정)";
@@ -1519,7 +1519,7 @@ function syncTemplateMasterFromSetMaster() {
     return "❌ 세트마스터 시트 없음";
   }
 
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
   if (!templateId) {
     Logger.log("❌ CONTRACT_TEMPLATE_ID 미설정");
@@ -1669,7 +1669,7 @@ function syncTemplateMasterFromSetMaster() {
  * GAS 편집기에서 한 번 실행하면 됨.
  */
 function shareAllContractsAsViewable() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var folderId = props.getProperty("CONTRACT_FOLDER_ID");
   var count = 0;
 

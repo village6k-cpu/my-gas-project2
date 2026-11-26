@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const test = require('node:test');
 const source = fs.readFileSync(require.resolve('../checkAvailability.js'), 'utf8');
 const methodCode = source.slice(source.indexOf('function updateTradePaymentMethod('), source.indexOf('/**\n * 오늘일정 웹앱에서 발행처 상호', source.indexOf('function applyTradePaymentSideEffects_(')));

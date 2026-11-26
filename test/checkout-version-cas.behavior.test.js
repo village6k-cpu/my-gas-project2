@@ -1,5 +1,5 @@
 'use strict';
-const test=require('node:test'), assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm'), path=require('node:path');
+const test=require('node:test'), assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('./helpers/gas-storage-vm'), path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'../supabaseSync.js'),'utf8');
 const tid='261023-999',sid=tid+'-01',sid2=tid+'-02';
 const v0='2026-10-23T00:00:00.123456+00:00',v1='2026-10-23T00:00:01.123457+00:00';

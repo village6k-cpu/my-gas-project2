@@ -17,7 +17,7 @@ function invoiceWorkspaceDateTime_(day, clock) {
 }
 function invoiceWorkspaceGuardKey_(tid) { return 'taxInvoiceWorkspacePending_' + tid; }
 function invoiceWorkspacePending_(tid) {
-  var raw = PropertiesService.getScriptProperties().getProperty(invoiceWorkspaceGuardKey_(tid));
+  var raw = villageScriptProperties_().getProperty(invoiceWorkspaceGuardKey_(tid));
   if (!raw) return null;
   try { return JSON.parse(raw); } catch (err) { return { state: 'unknown' }; }
 }
@@ -133,7 +133,7 @@ function issueTaxInvoiceWorkspace_(args) {
     if (snapshot.fingerprint !== args.fingerprint) return { success: false, code: 'STALE_INVOICE', error: '발행 정보가 바뀌었습니다. 최신 정보를 다시 확인해주세요', item: snapshot };
     if (args.dryRun !== false) return { success: true, dryRun: true, item: snapshot };
     if (!/^[a-f0-9-]{16,80}$/i.test(token)) return { success: false, error: '발행 요청 식별자가 필요합니다' };
-    PropertiesService.getScriptProperties().setProperty(invoiceWorkspaceGuardKey_(tid), JSON.stringify({ token: token, state: 'issuing', at: new Date().toISOString() }));
+    villageScriptProperties_().setProperty(invoiceWorkspaceGuardKey_(tid), JSON.stringify({ token: token, state: 'issuing', at: new Date().toISOString() }));
   } finally { lock.releaseLock(); }
   var b = snapshot.buyer, result;
   try {
@@ -145,11 +145,11 @@ function issueTaxInvoiceWorkspace_(args) {
     var after = getTaxInvoiceWorkspace_([tid]).items[0];
     if (result && !result.error && (result.success === true || result.status === 'OK') && after.status === 'issued'
       && after.amount === snapshot.amount && after.buyer.corpNum === b.corpNum && after.buyer.email === b.email) {
-      PropertiesService.getScriptProperties().deleteProperty(invoiceWorkspaceGuardKey_(tid));
+      villageScriptProperties_().deleteProperty(invoiceWorkspaceGuardKey_(tid));
       return { success: true, item: after, message: '세금계산서 발행과 원장 반영을 확인했습니다' };
     }
   } catch (error) { result = { error: error.message }; }
-  PropertiesService.getScriptProperties().setProperty(invoiceWorkspaceGuardKey_(tid), JSON.stringify({ token: token, state: 'unknown', at: new Date().toISOString() }));
+  villageScriptProperties_().setProperty(invoiceWorkspaceGuardKey_(tid), JSON.stringify({ token: token, state: 'unknown', at: new Date().toISOString() }));
   return { success: false, code: 'INVOICE_OUTCOME_UNKNOWN', outcomeUnknown: true,
     error: '발행 결과 확인이 필요합니다. 중복 발행을 막기 위해 재발행을 보류했습니다.', detail: result && result.error || '' };
 }

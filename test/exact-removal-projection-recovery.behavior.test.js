@@ -1,7 +1,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/gas-storage-vm');
 const gas=fs.readFileSync(require('node:path').join(__dirname,'../checkAvailability.js'),'utf8');
 const from=gas.indexOf('function repairDashboardTradeProjection_(');
 const source=gas.slice(from,gas.indexOf('\nfunction ',from+1));

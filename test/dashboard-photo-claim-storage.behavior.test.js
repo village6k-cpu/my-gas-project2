@@ -1,5 +1,5 @@
 'use strict';
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('./helpers/gas-storage-vm');
 const crypto=require('node:crypto'),zlib=require('node:zlib');
 const now=Date.parse('2026-10-22T18:00:00Z'),prefix='dashboardPhotoUpload_v2_',tid='261023-999';
 const fixtureSource=fs.readFileSync(path.join(__dirname,'fixtures/dashboard-photo-upload-v804.js'),'utf8');
@@ -112,7 +112,7 @@ test('a changed snapshot while making backup aborts without overwriting newer cl
 });
 test('per-key CAS stops if a claim changes after the complete snapshot readback',()=>{
   const h=harness(),getProperty=h.props.getProperty;
-  h.props.getProperty=key=>{h.values[key]='new exact-key raw';return getProperty(key);};
+  h.props.getProperty=key=>{if(key.startsWith(prefix))h.values[key]='new exact-key raw';return getProperty(key);};
   const result=h.execute();assert.equal(result.reason,'claim_changed');assert.equal(result.backup.verified,true);
   assert.equal(h.values[prefix+'one'],'new exact-key raw');assert.equal(h.events.filter(e=>e[0]==='set').length,0);
 });

@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const crypto = require('node:crypto');
 const root = process.env.VILLAGE_PROJECTION_TEST_ROOT || path.resolve(__dirname, '..');
 
@@ -20,7 +20,7 @@ function projectAfterInvalidation() {
   const context = {
     console, Logger: { log() {} }, Date, JSON, Math, Number, String, Object, Array,
     SpreadsheetApp: { DataValidationCriteria: {}, getActiveSpreadsheet: () => ({ getSheetByName: () => sheet }) },
-    PropertiesService: { getScriptProperties: () => ({ getProperties: () => ({}) }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: () => null, getProperties: () => ({}) }) },
     CacheService: { getScriptCache: () => cache },
     Utilities: { formatDate: () => '2026-10-23', DigestAlgorithm: { MD5: 'md5' }, Charset: { UTF_8: 'utf8' },
       computeDigest: (_, s) => crypto.createHash('md5').update(s).digest(), base64Encode: b => Buffer.from(b).toString('base64') },

@@ -1,7 +1,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/gas-storage-vm');
 test('operations computes its usual queues and attaches the shared all-future report on cache miss and hit',()=>{
  const headers={
   '스케줄상세':['스케줄ID','거래ID','세트명','장비명','수량','반출일','반출시간','반납일','반납시간','상태','비고','단가','예약자명'],

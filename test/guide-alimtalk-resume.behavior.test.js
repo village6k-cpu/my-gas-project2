@@ -1,7 +1,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/gas-storage-vm');
 function load(){
   const props={};let approved=true,triggers=0,sends=0;
   const booking={tid:'261015-001',cust:{name:'예약자',tel:'01012345678',status:'예약'},checkoutAt:new Date(Date.now()+3600000),returnAt:new Date(Date.now()+86400000)};

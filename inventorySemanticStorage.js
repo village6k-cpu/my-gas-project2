@@ -40,7 +40,7 @@ function inventorySemanticStorageDecode_(manifest) {
 }
 
 function inventorySemanticStorageState_(fresh) {
-  var props = PropertiesService.getScriptProperties(), all = props.getProperties();
+  var props = villageScriptProperties_(), all = props.getProperties();
   var scriptText = all[INVENTORY_SEMANTIC_STORAGE_MANIFEST_] || '', doc = inventorySemanticStorageDocument_();
   var documentText = doc ? doc.getProperty(INVENTORY_SEMANTIC_STORAGE_MANIFEST_) || '' : '';
   if (scriptText && documentText && scriptText !== documentText) throw new Error('AI 판단 manifest stores 충돌');
@@ -120,7 +120,7 @@ function getInventorySemanticStorageStatus(input) {
 }
 
 function inventorySemanticStorageVerifyPublic_(state, requireDocument) {
-  var key = PropertiesService.getScriptProperties().getProperty('VILLAGE_API_WRITE_KEY_V1');
+  var key = villageScriptProperties_().getProperty('VILLAGE_API_WRITE_KEY_V1');
   if (!key) throw new Error('public reader 검증용 내부 인증 없음');
   var nonce = Utilities.getUuid(), result;
   try {
@@ -139,7 +139,7 @@ function inventorySemanticStorageVerifyPublic_(state, requireDocument) {
 
 /** Caller holds ScriptLock. Failed or orphan generations are retained, never automatically deleted. */
 function inventorySemanticStorageCommit_(state, records) {
-  var props = PropertiesService.getScriptProperties(), target = state.manifestStore === 'document' ? state.document : props;
+  var props = villageScriptProperties_(), target = state.manifestStore === 'document' ? state.document : props;
   if (state.manifestStore === 'both') throw new Error('AI 판단 중복 manifest stores 정리 필요');
   var payload = JSON.stringify({ format: 'inventory-semantic-v1', records: records, previousManifest: state.manifest });
   var blob = Utilities.gzip(Utilities.newBlob(payload, 'application/json'), 'inventory-semantic-' + Utilities.getUuid() + '.json.gz');
@@ -162,7 +162,7 @@ function inventorySemanticStorageCommit_(state, records) {
 
 /** Existing applyInventorySemanticReview holds ScriptLock and validates all source identities first. */
 function inventorySemanticStorageWrite_(reviews) {
-  var state = inventorySemanticStorageState_(true), props = PropertiesService.getScriptProperties();
+  var state = inventorySemanticStorageState_(true), props = villageScriptProperties_();
   var records = Object.assign({}, state.records);
   reviews.forEach(function(review) {
     var raw = JSON.stringify(review);
@@ -228,7 +228,7 @@ function migrateInventorySemanticStorage(input) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) throw new Error('AI 판단 이전 중');
   try {
-    var state = inventorySemanticStorageState_(true), props = PropertiesService.getScriptProperties();
+    var state = inventorySemanticStorageState_(true), props = villageScriptProperties_();
     if (state.snapshotHash !== before.snapshotHash || state.manifestText !== before.manifestText || state.proofText !== before.proofText)
       throw new Error('AI 판단 snapshot CAS changed');
     if (input.phase === 'stage') {
@@ -305,8 +305,8 @@ function inventorySemanticStorageStage_(state, input) {
     inventorySemanticStorageCasWrite_(state.document, INVENTORY_SEMANTIC_STORAGE_BOOTSTRAP_, proofText, JSON.stringify(proof));
     proofText = JSON.stringify(proof);
   }
-  if (JSON.stringify(inventorySemanticStorageRecords_(PropertiesService.getScriptProperties().getProperties())) !== JSON.stringify(state.legacy)
-      || PropertiesService.getScriptProperties().getProperty(INVENTORY_SEMANTIC_STORAGE_MANIFEST_)
+  if (JSON.stringify(inventorySemanticStorageRecords_(villageScriptProperties_().getProperties())) !== JSON.stringify(state.legacy)
+      || villageScriptProperties_().getProperty(INVENTORY_SEMANTIC_STORAGE_MANIFEST_)
       || state.document.getProperty(INVENTORY_SEMANTIC_STORAGE_MANIFEST_)) throw new Error('AI 판단 bootstrap CAS changed');
   var manifestText = JSON.stringify(manifest);
   inventorySemanticStorageCasWrite_(state.document, INVENTORY_SEMANTIC_STORAGE_MANIFEST_, '', manifestText);

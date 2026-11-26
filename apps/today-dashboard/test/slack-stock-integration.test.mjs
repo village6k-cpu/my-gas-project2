@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import vm from 'node:vm';
+import vm from '../../../test/helpers/gas-storage-vm.js';
 import './helpers/tsResolve.mjs';
 import {stockThreadHash} from '../lib/server/slackStockCore.mjs';
 const {scanStockQuestions,confirmStockQuestion,retryConfirmedStockMirrors}=await import('../lib/server/slackStock.ts');

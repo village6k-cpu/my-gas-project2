@@ -1,7 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const vm = require('vm');
+const vm = require('./helpers/gas-storage-vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'checkAvailability.js'), 'utf8');
 

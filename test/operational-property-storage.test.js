@@ -2,8 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
+const nativeVm = require('node:vm');
 
 const pointer = 'OPERATIONS_RECORDS_STORE_V1';
 const fileId = 'private_operational_records_v1';
@@ -19,7 +21,7 @@ function fixture() {
     ['preRegStock_v1_enabled', 'true'],
     ['CONTRACT_TEMPLATE_ID', 'fixture-template']
   ]);
-  const flags = { full: true, failSheet: false, failDelete: false, capacityBytes: Infinity };
+  const flags = { full: true, failSheet: false, failDelete: false, failBackup: false, corruptDrive: false, capacityBytes: Infinity };
   const usedBytes = () => [...values].reduce((n, [key, value]) => n + Buffer.byteLength(key + value), 0);
   const base = {
     getProperty: key => values.get(key) ?? null,
@@ -35,7 +37,8 @@ function fixture() {
     deleteProperty(key) {
       if (flags.failDelete) throw Error('Property delete failed');
       values.delete(key);
-    }
+    },
+    setProperties(patch) { for (const [key, value] of Object.entries(patch)) this.setProperty(key, value); }
   };
   function lock() {
     let held = false;
@@ -49,10 +52,13 @@ function fixture() {
   function fakeSheet() {
     const rows = [['key', 'encoded_value']];
     let maxRows = 2;
+    let maxColumns = 26;
     const sheet = {
       rows,
       getLastRow: () => rows.length,
       getMaxRows: () => maxRows,
+      getMaxColumns: () => maxColumns,
+      deleteColumns(first, count) { assert.equal(first + count - 1, maxColumns); maxColumns -= count; },
       insertRowsAfter(row, count) { assert.equal(row, maxRows); maxRows += count; },
       getRange(first, col, count = 1, width = 1) {
         assert.ok(first + count - 1 <= maxRows);
@@ -63,8 +69,14 @@ function fixture() {
           setValues(batch) {
             if (flags.failSheet) throw Error('Sheet write failed');
             assert.equal(script.hasLock(), true);
-            assert.equal(col, 1);
-            batch.forEach((row, i) => { rows[first + i - 1] = [...row]; });
+            batch.forEach((row, i) => {
+              const target = rows[first + i - 1] || (rows[first + i - 1] = []);
+              row.forEach((value, j) => { target[col + j - 1] = value; });
+            });
+          },
+          setValue(value) {
+            if (flags.failSheet) throw Error('Sheet write failed');
+            const target = rows[first - 1] || (rows[first - 1] = []); target[col - 1] = value;
           },
           createTextFinder(key) {
             const finder = {
@@ -80,33 +92,256 @@ function fixture() {
     };
     return sheet;
   }
-  const sheets = { inventory: fakeSheet(), photos: fakeSheet(), receipts: fakeSheet() };
+  const sheets = { inventory: fakeSheet(), photos: fakeSheet(), receipts: fakeSheet(), runtime: fakeSheet() };
+  const book = { getSheetByName: name => sheets[name] || null,
+    insertSheet(name) { assert.equal(sheets[name], undefined); return sheets[name] = fakeSheet(); } };
+  const files = new Map(), fileFlags = { sharing: 'PRIVATE' };
+  let fileSequence = 0;
+  function blob(input) {
+    const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input);
+    return { getBytes: () => bytes, getDataAsString: () => bytes.toString('utf8') };
+  }
+  function file(id, savedBlob) {
+    return { getId: () => id, setSharing(access) { fileFlags.sharing = access; },
+      getSharingAccess: () => fileFlags.sharing, getEditors: () => [], getViewers: () => [],
+      getBlob: () => flags.corruptDrive ? blob('corrupt') : savedBlob };
+  }
+  files.set(fileId, file(fileId));
   class Clock extends Date { static now() { return now; } }
   const ctx = vm.createContext({
     Date: Clock,
     PropertiesService: { getScriptProperties: () => base },
     LockService: { getScriptLock: () => script, getUserLock: () => user },
     SpreadsheetApp: {
-      openById(id) { assert.equal(id, fileId); return { getSheetByName: name => sheets[name] }; },
+      openById(id) { assert.equal(id, fileId); return book; },
       flush() {}
     },
     Utilities: {
-      newBlob: text => ({ getBytes: () => Buffer.from(text) }),
+      newBlob: text => blob(text),
+      gzip: input => blob(zlib.gzipSync(input.getBytes())),
+      ungzip: input => blob(zlib.gunzipSync(input.getBytes())),
       computeDigest: (_, text) => [...crypto.createHash('sha256').update(text).digest()],
       getUuid: () => 'test-id',
       DigestAlgorithm: { SHA_256: 'sha256' },
       Charset: { UTF_8: 'utf8' }
-    }
+    },
+    DriveApp: { Access: { PRIVATE: 'PRIVATE' }, Permission: { NONE: 'NONE' },
+      getFileById(id) { assert.equal(files.has(id), true); return files.get(id); },
+      createFile(savedBlob) {
+        if (flags.failBackup) throw Error('Backup creation failed');
+        const id = 'private_payload_' + ++fileSequence, saved = file(id, savedBlob); files.set(id, saved); return saved;
+      } }
   });
-  for (const filename of ['dashboardPhotoClaimStorage.js', 'operationalPropertyStorage.js', 'preRegistrationStockAlerts.js', 'guideDeliverySafety.js']) {
+  for (const filename of ['villagePropertyStore.js', 'dashboardPhotoClaimStorage.js', 'operationalPropertyStorage.js', 'preRegistrationStockAlerts.js', 'guideDeliverySafety.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', filename), 'utf8'), ctx);
   }
   const store = group => ctx.operationalPropertyStore_(group);
   const migrate = () => ctx.migrateOperationalProperties({
     expectedSnapshotHash: ctx.getOperationalPropertyStorageStatus().snapshotHash
   });
-  return { ctx, values, flags, sheets, now, store, migrate, base, usedBytes };
+  return { ctx, values, flags, sheets, now, store, migrate, base, usedBytes, files };
 }
+
+function activateRuntime(f) {
+  const config = JSON.parse(f.values.get(pointer));
+  config.runtimeReadyAt = f.now;
+  f.values.set(pointer, JSON.stringify(config));
+}
+
+test('settings initialization is independent of GAS file order and preserves the explicit guide safety flag', () => {
+  const names = ['guideDeliverySafety.js', 'operationalPropertyStorage.js', 'villagePropertyStore.js'];
+  const source = names.map(name => fs.readFileSync(path.join(__dirname, '..', name), 'utf8')).join('\n');
+  const context = { PropertiesService: { getScriptProperties: () => ({
+    getProperty: key => key === 'GUIDE_ALIMTALK_SUSPENDED' ? 'false' : null
+  }) } };
+  nativeVm.runInNewContext(source, context);
+  assert.equal(context.GUIDE_DELIVERY_INCIDENT_SUSPENDED_, false);
+  assert.equal(context.villageScriptProperties_().getProperty('GUIDE_ALIMTALK_SUSPENDED'), 'false');
+});
+
+test('setting reads remain available to authenticate diagnostics even when a storage pointer is damaged', () => {
+  const f = fixture(); f.values.set(pointer, '{broken');
+  const p = f.ctx.villageScriptProperties_();
+  assert.equal(p.getProperty('CONTRACT_TEMPLATE_ID'), 'fixture-template');
+  assert.throws(() => p.getProperty('PAYMENT_REV_261126-001'));
+});
+
+test('every growing operational family is classified outside settings, including future record names', () => {
+  const f = fixture();
+  for (const key of ['itemCheck_261126-001-01_checkout', 'returnDone_261126-001',
+    'PAYMENT_REV_261126-001', 'REG_ALIM_SENT_261126-001', 'contractRegenRetry_v1_261126-001',
+    'slackOpsOnsiteIdempotency_v1', 'SUPA_TOKEN', 'SUPA_SYNC_LEASE_v1',
+    'CONFIRM_REQUEST_SEQUENCE_V1_261126', 'dashboardPostItNotes_v1', 'futureJobReceipt_261126-001']) {
+    assert.equal(f.ctx.operationalPropertyGroup_(key), 'runtime', key);
+  }
+  for (const key of ['CONTRACT_TEMPLATE_ID', 'VILLAGE_API_WRITE_KEY_V1',
+    'SUPABASE_BOT_PASSWORD', 'inventoryRisk_v1_slackToken', 'preRegStock_v1_enabled', pointer]) {
+    assert.equal(f.ctx.operationalPropertyGroup_(key), null, key);
+  }
+});
+
+test('an active unified store never sends a new operation to a full settings store', () => {
+  const f = fixture(); activateRuntime(f);
+  const p = f.ctx.villageScriptProperties_(), before = f.usedBytes();
+  for (const key of ['returnDone_261126-001', 'PAYMENT_REV_261126-001', 'futureJobReceipt_261126-001']) {
+    assert.equal(p.setProperty(key, 'saved').getProperty(key), 'saved');
+    assert.equal(f.values.has(key), false);
+  }
+  assert.equal(f.usedBytes(), before);
+  assert.equal(p.setProperty('CONTRACT_TEMPLATE_ID', 'same-setting'), p);
+  assert.equal(f.values.get('CONTRACT_TEMPLATE_ID'), 'same-setting');
+});
+
+test('old specialized stores route leases and other mismatched records through the unified store', () => {
+  const f = fixture(); activateRuntime(f);
+  const inventory = f.store('inventory');
+  inventory.setProperty('preRegStock_v1_lease', '{"owner":"original"}');
+  assert.equal(inventory.getProperty('preRegStock_v1_lease'), '{"owner":"original"}');
+  assert.equal(f.values.has('preRegStock_v1_lease'), false);
+  assert.equal(inventory.getProperties().preRegStock_v1_lease, '{"owner":"original"}');
+});
+
+test('unified bulk writes and key scans preserve the Properties interface without growing settings', () => {
+  const f = fixture(); activateRuntime(f);
+  const p = f.ctx.villageScriptProperties_();
+  const patch = { 'setupDone_261126-001': 'true', 'returnDone_261126-001': 'true',
+    [requestKey]: '{"pending":true}', [receiptKey]: '{"phase":"pending"}' };
+  assert.equal(p.setProperties(patch, false), p);
+  for (const [key, value] of Object.entries(patch)) {
+    assert.equal(p.getProperty(key), value);
+    assert.equal(p.getProperties()[key], value);
+    assert.equal(p.getKeys().includes(key), true);
+    assert.equal(f.values.has(key), false);
+  }
+  assert.equal(p.deleteProperty('returnDone_261126-001'), p);
+  assert.equal(p.getProperty('returnDone_261126-001'), null);
+  assert.equal(p.getKeys().includes('returnDone_261126-001'), false);
+});
+
+test('a missing destination fails closed instead of writing operations back to settings', () => {
+  const f = fixture(); activateRuntime(f);
+  f.sheets.runtime.rows[0] = ['broken', 'header'];
+  const p = f.ctx.villageScriptProperties_();
+  assert.throws(() => p.setProperty('PAYMENT_REV_261126-001', '3'), /invalid/);
+  assert.equal(f.values.has('PAYMENT_REV_261126-001'), false);
+});
+
+test('record reads observe concurrent value changes and do not cache absent records', () => {
+  const f = fixture(); activateRuntime(f);
+  const p = f.ctx.villageScriptProperties_(), key = 'returnDone_261126-001';
+  assert.equal(p.getProperty(key), null);
+  f.sheets.runtime.rows.push([key, 'v:1']);
+  assert.equal(p.getProperty(key), '1');
+  f.sheets.runtime.rows[1][1] = 'v:0';
+  assert.equal(p.getProperty(key), '0');
+});
+
+test('the live storage probe verifies every physical group and removes only its own nonce records', () => {
+  const f = fixture(); activateRuntime(f);
+  const before = Object.fromEntries(f.values);
+  const result = f.ctx.probeOperationalPropertyStorage();
+  assert.equal(result.ok, true);
+  assert.equal(result.groups.length, 4);
+  assert.equal(result.groups.every(row => row.write === 'verified' && row.cleanup === 'deleted_verified'), true);
+  assert.deepEqual(Object.fromEntries(f.values), before);
+  for (const sheet of Object.values(f.sheets)) assert.equal(sheet.rows.slice(1).every(row => row[1] === ''), true);
+});
+
+test('a storage probe failure never falls back to settings or claims successful persistence', () => {
+  const f = fixture(); activateRuntime(f); f.flags.failSheet = true;
+  const result = f.ctx.probeOperationalPropertyStorage();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'operational_write_not_verified');
+  assert.equal([...f.values.keys()].some(key => key.startsWith('operationalStorageProbe_')), false);
+});
+
+test('payloads beyond the cell limit use private files and preserve exact unicode text', () => {
+  const f = fixture(); activateRuntime(f);
+  const p = f.ctx.villageScriptProperties_(), key = 'futureLargeReceipt_261126-001';
+  const value = '한글🙂\n={unchanged} '.repeat(5000);
+  p.setProperty(key, value);
+  assert.match(f.sheets.runtime.rows[1][1], /^f:/);
+  assert.equal(p.getProperty(key), value);
+  assert.equal(f.values.has(key), false);
+  f.ctx.OPERATIONAL_PROPERTY_PAYLOADS_ = Object.create(null);
+  f.flags.corruptDrive = true;
+  assert.throws(() => p.getProperty(key), /hash mismatch/);
+});
+
+test('all-operation migration waits for the staged reader cutover and never restarts its clock', () => {
+  const f = fixture(); f.flags.full = false;
+  const key = 'returnDone_261126-001'; f.values.set(key, '1');
+  const first = f.ctx.prepareOperationalPropertyStorage();
+  assert.equal(first.runtimeMode, 'staged');
+  assert.equal(f.ctx.prepareOperationalPropertyStorage().runtimeReadyAt, first.runtimeReadyAt);
+  assert.throws(f.migrate, /not ready/);
+  assert.equal(f.values.get(key), '1');
+  activateRuntime(f);
+  assert.equal(f.migrate().moved, 1);
+  assert.equal(f.ctx.villageScriptProperties_().getProperty(key), '1');
+});
+
+test('migration archives and verifies exact values before legacy deletion, including retry after failure', () => {
+  const f = fixture(); f.flags.full = false;
+  const key = 'registeredTradePriceReceipt_v1_original';
+  f.values.set(key, '{"mutationId":"keep-me","amount":97020}');
+  f.ctx.prepareOperationalPropertyStorage(); activateRuntime(f);
+  f.flags.failBackup = true;
+  assert.throws(f.migrate, /Backup creation failed/);
+  assert.equal(f.values.has(key), true);
+  assert.equal(f.sheets.runtime.rows.length, 1);
+  f.flags.failBackup = false; f.flags.failDelete = true;
+  assert.throws(f.migrate, /Property delete failed/);
+  assert.equal(f.values.has(key), true);
+  assert.equal(f.sheets.property_migrations.rows[1][6], 'backed_up');
+  f.values.set(key, '{"mutationId":"keep-me","amount":123456}');
+  f.flags.failDelete = false;
+  const result = f.migrate();
+  assert.equal(result.backup.verified, true);
+  assert.equal(result.moved, 1);
+  assert.equal(f.values.has(key), false);
+  assert.equal(f.ctx.villageScriptProperties_().getProperty(key), '{"mutationId":"keep-me","amount":123456}');
+  const archived = JSON.parse(zlib.gunzipSync(f.files.get(result.backup.fileId).getBlob().getBytes()).toString('utf8'));
+  assert.deepEqual(archived.records, [[key, '{"mutationId":"keep-me","amount":123456}']]);
+  assert.equal(f.sheets.property_migrations.rows[2][6], 'migrated:1');
+  assert.equal(f.values.get('CONTRACT_TEMPLATE_ID'), 'fixture-template');
+});
+
+test('all-operation migration uses bounded batches and leaves no dynamic settings records', () => {
+  const f = fixture(); f.flags.full = false;
+  for (let i = 0; i < 127; i++) f.values.set('futureReceipt_' + i, String(i));
+  f.ctx.prepareOperationalPropertyStorage(); activateRuntime(f);
+  assert.equal(f.migrate().moved, 50);
+  assert.equal(f.migrate().moved, 50);
+  assert.equal(f.migrate().moved, 27);
+  assert.equal(f.ctx.getOperationalPropertyStorageStatus().legacyCount, 0);
+  const p = f.ctx.villageScriptProperties_();
+  for (let i = 0; i < 127; i++) assert.equal(p.getProperty('futureReceipt_' + i), String(i));
+  assert.equal(f.sheets.runtime.rows.length, 128);
+  const key = 'futureReceipt_0'; f.values.set(key, 'stale old deployment');
+  assert.throws(f.migrate, /Unexpected legacy writer/);
+  f.ctx.VILLAGE_SCRIPT_PROPERTIES_FACADE_ = null;
+  const routed = f.ctx.villageScriptProperties_();
+  assert.equal(routed.getProperty(key), '0');
+  assert.equal(routed.getProperties()[key], '0');
+  f.values.set('unknownOldWriter_261126-001', 'stale');
+  assert.equal(routed.getProperty('unknownOldWriter_261126-001'), null);
+  assert.equal(routed.getKeys().includes('unknownOldWriter_261126-001'), false);
+  assert.equal(f.values.get(key), 'stale old deployment');
+});
+
+test('durable record storage failures cannot be converted into successful completion revisions', () => {
+  const f = fixture();
+  const source = fs.readFileSync(path.join(__dirname, '..', 'checkAvailability.js'), 'utf8');
+  vm.runInContext(source.slice(source.indexOf('function dashboardCompletionRevisionKey_('),
+    source.indexOf('function ensureDashboardCompletionRevision_(')), f.ctx);
+  const props = { __villageRoutedStorage: true,
+    getProperty() { return '10'; }, setProperty() { throw Error('storage quota unavailable'); },
+    setProperties() { throw Error('storage quota unavailable'); } };
+  assert.throws(() => f.ctx.trySetScriptProperty_(props, 'returnDone_261126-001', '1'), /unavailable/);
+  assert.throws(() => f.ctx.trySetScriptProperties_(props, { 'returnDone_261126-001': '1' }), /unavailable/);
+  assert.throws(() => f.ctx.nextDashboardCompletionRevision_(props, '261126-001', 'return'), /unavailable/);
+});
 
 test('guide receipt migration frees the shared quota for equipment removal without losing delivery proof', () => {
   const f = fixture();

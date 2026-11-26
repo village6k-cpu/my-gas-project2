@@ -36,7 +36,7 @@ function buildGuideAccessSms_(kind, name, password) {
 }
 
 function getGuideDoorTemplateStatus_(kind) {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var code = props.getProperty('GUIDE_SAFE_TEMPLATE_' + kind) || GUIDE_DOOR_TEMPLATE_CODES_[kind];
   if (!code) throw new Error('반출/반납 구분 오류');
   var cache = null;
@@ -86,7 +86,7 @@ function getGuideDoorTemplateStatus_(kind) {
 
 function getGuideAlimtalkPayload_(kind, customerName) {
   if (!GUIDE_DOOR_TEMPLATE_CODES_[kind]) throw new Error('반출/반납 구분 오류');
-  var password = PropertiesService.getScriptProperties().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
+  var password = villageScriptProperties_().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
   if (!password) throw new Error('출입문 비밀번호 미설정');
   var status = getGuideDoorTemplateStatus_(kind);
   if (status && status.approved) {
@@ -103,13 +103,13 @@ function configureGuideDoorAccess(args) {
   args = args || {};
   var password = typeof args.password === 'string' ? args.password.trim() : '';
   if (!password || password.length > 32 || /[\r\n]/.test(password)) return { error: '출입문 비밀번호 형식 오류' };
-  PropertiesService.getScriptProperties().setProperty(GUIDE_DOOR_PASSWORD_PROPERTY_, password);
+  villageScriptProperties_().setProperty(GUIDE_DOOR_PASSWORD_PROPERTY_, password);
   return { configured: true, approvalRequired: true };
 }
 
 /** 발송 없이 승인 상태와 적용 여부만 확인한다. */
 function getGuideDoorAccessStatus() {
-  var configured = !!PropertiesService.getScriptProperties().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
+  var configured = !!villageScriptProperties_().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
   var suspended = typeof GUIDE_DELIVERY_INCIDENT_SUSPENDED_ !== 'undefined' && GUIDE_DELIVERY_INCIDENT_SUSPENDED_;
   var checkout = getGuideDoorTemplateStatus_('checkout');
   var checkin = getGuideDoorTemplateStatus_('checkin');

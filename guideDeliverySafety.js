@@ -3,12 +3,12 @@
 // 문자 API는 영구 차단한 채, 승인 원문을 검증한 알림톡만 운영자가 재개한다.
 var GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = true;
 try {
-  GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = PropertiesService.getScriptProperties()
+  GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = villageScriptProperties_()
     .getProperty('GUIDE_ALIMTALK_SUSPENDED') !== 'false';
 } catch (guideStateError) { /* 상태 조회 실패 시 중단을 유지한다. */ }
 function stopGuideDeliveryIncident() {
   GUIDE_DELIVERY_INCIDENT_SUSPENDED_ = true;
-  PropertiesService.getScriptProperties().setProperty('GUIDE_ALIMTALK_SUSPENDED','true');
+  villageScriptProperties_().setProperty('GUIDE_ALIMTALK_SUSPENDED','true');
   var removed=[];
   ScriptApp.getProjectTriggers().forEach(function(t) {
     var name=t.getHandlerFunction();
@@ -16,7 +16,7 @@ function stopGuideDeliveryIncident() {
       ScriptApp.deleteTrigger(t);removed.push(name);
     }
   });
-  PropertiesService.getScriptProperties().setProperty('GUIDE_DELIVERY_INCIDENT_STOPPED_AT',String(Date.now()));
+  villageScriptProperties_().setProperty('GUIDE_DELIVERY_INCIDENT_STOPPED_AT',String(Date.now()));
   return {suspended:true,removed:removed};
 }
 
@@ -31,7 +31,7 @@ function manageGuideAlimtalk(args) {
       throw new Error('비밀번호 설정 및 반출·반납 템플릿 승인/원문 일치 확인 필요');
     }
     // SMS 및 대체문자 호출은 별도로 계속 차단한다. 재개 자체는 고객에게 발송하지 않는다.
-    PropertiesService.getScriptProperties().setProperty('GUIDE_ALIMTALK_SUSPENDED','false');
+    villageScriptProperties_().setProperty('GUIDE_ALIMTALK_SUSPENDED','false');
     GUIDE_DELIVERY_INCIDENT_SUSPENDED_=false;
     setupGuideAlimtalkTrigger();
     return {suspended:false,intervalMinutes:30,smsEnabled:false};
@@ -70,11 +70,11 @@ function manageGuideAlimtalk(args) {
 function resumeGuideAlimtalk() { return manageGuideAlimtalk({action:'resume'}); }
 function guideSafetyKey_(prefix, tid) { return prefix + String(tid).replace(/-/g, '_'); }
 function guideSafetyRead_(key) {
-  var raw = operationalPropertyStore_('receipts', PropertiesService.getScriptProperties()).getProperty(key);
+  var raw = operationalPropertyStore_('receipts', villageScriptProperties_()).getProperty(key);
   return raw ? JSON.parse(raw) : null; // 기록 파손 시 조용히 지워 재발송하지 않는다.
 }
 function guideSafetyWrite_(key, value) {
-  operationalPropertyStore_('receipts', PropertiesService.getScriptProperties()).setProperty(key, JSON.stringify(value));
+  operationalPropertyStore_('receipts', villageScriptProperties_()).setProperty(key, JSON.stringify(value));
 }
 function guideRecordKey_(tid, kind) {
   return guideSafetyKey_('GUIDE_DELIVERY_V3_' + (kind === 'checkout' ? 'out_' : 'in_'), tid);
@@ -133,7 +133,7 @@ function verifyGuideRecord_(record) {
       record.state='failed';record.reason='안내 템플릿 불일치';return record;
     }
     if (!record.receiptNum && msg.receiptNum) record.receiptNum = String(msg.receiptNum);
-    var password = PropertiesService.getScriptProperties().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
+    var password = villageScriptProperties_().getProperty(GUIDE_DOOR_PASSWORD_PROPERTY_);
     var result = Number(msg.result);
     var body = String(msg.content || '');
     var via = record.channel;
@@ -245,7 +245,7 @@ function verifyGuideAlertRecord_(record) {
 }
 function inspectGuideDeliverySafety() {
   var now=Date.now(), rows=[];
-  var installedAt=Number(PropertiesService.getScriptProperties().getProperty('GUIDE_SAFETY_INSTALLED_AT')||0);
+  var installedAt=Number(villageScriptProperties_().getProperty('GUIDE_SAFETY_INSTALLED_AT')||0);
   guideSafetyBookings_().forEach(function(b) {
     if(b.cust && /취소|완료/.test(b.cust.status))return;
     if(b.checkoutAt && b.returnAt && b.returnAt.getTime()<=b.checkoutAt.getTime()) {
@@ -285,7 +285,7 @@ function inspectGuideDeliverySafety() {
     rows.push({tid:b.tid,checkoutAt:Utilities.formatDate(b.checkoutAt,'Asia/Seoul','yyyy-MM-dd HH:mm'),
       delivered:!!verified,pickupConfirmed:acknowledged,outCheckRequired:outCheckRequired,state:record?record.state:'missing',issues:issue});
   });
-  return {checkedAt:now,rows:rows,alertPhoneConfigured:!!PropertiesService.getScriptProperties().getProperty('GUIDE_ALERT_PHONE')};
+  return {checkedAt:now,rows:rows,alertPhoneConfigured:!!villageScriptProperties_().getProperty('GUIDE_ALERT_PHONE')};
 }
 function checkGuideDeliverySafety() {
   if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return stopGuideDeliveryIncident();
@@ -330,7 +330,7 @@ function showGuideDeliverySafety() {
 }
 function setupGuideDeliverySafety(args) {
   if (GUIDE_DELIVERY_INCIDENT_SUSPENDED_) return stopGuideDeliveryIncident();
-  var props=PropertiesService.getScriptProperties();
+  var props=villageScriptProperties_();
   var removed=[];
   ScriptApp.getProjectTriggers().forEach(function(t) {
     if(t.getHandlerFunction()==='checkGuideDeliverySafety') {

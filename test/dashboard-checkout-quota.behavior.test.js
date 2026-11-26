@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const gas = fs.readFileSync(path.join(__dirname, '..', 'checkAvailability.js'), 'utf8');
 const tid = '261022-001', sid = tid + '-01';
 const version = '2026-10-23T00:00:00.123456+00:00';

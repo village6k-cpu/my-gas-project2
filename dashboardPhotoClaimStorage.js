@@ -79,7 +79,7 @@ function compactDashboardPhotoUploadClaims(input) {
       if (!locked) { output.reason = 'busy'; return output; }
     }
     stage = 'snapshot_read';
-    var props = PropertiesService.getScriptProperties(), records = dashboardPhotoClaimRecords_(props);
+    var props = villageScriptProperties_(), records = dashboardPhotoClaimRecords_(props);
     var plan = dashboardPhotoClaimCompactionPlan_(records, Date.now());output = plan.metadata;output.dryRun = !execute;
     if (!execute) return output;
     if (output.snapshotHash !== input.expectedSnapshotHash) { output.ok = false;output.reason = 'snapshot_changed';return output; }

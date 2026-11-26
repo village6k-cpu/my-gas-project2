@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', 'supabaseSync.js'), 'utf8');
 const start = source.indexOf('function flushDirtyToSupabase()');

@@ -1,4 +1,4 @@
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path'),crypto=require('node:crypto');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('./helpers/gas-storage-vm'),path=require('node:path'),crypto=require('node:crypto');
 function env(){const c={Utilities:{formatDate:d=>d.toISOString(),computeDigest:(_a,s)=>Array.from(crypto.createHash('sha256').update(s).digest()),DigestAlgorithm:{SHA_256:'sha'},Charset:{UTF_8:'utf8'}}};vm.createContext(c);for(const f of ['inventorySupply.js','inventoryRisk.js','inventoryRiskMonitor.js','operationalPropertyStorage.js','preRegistrationStockAlerts.js','inventoryStockIntake.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'..',f),'utf8'),c);return c;}
 const equipment=[{id:'MON-012',name:'LVM-170A',category:'17인치 모니터',stock:4,maintenance:0,status:'정상',aliases:[]}];
 const row={id:'s1',tradeId:'t1',customer:'고객',name:'TVLogic 17인치',setName:'시네마 세트',quantity:1,status:'대기',start:'2099-10-01T09:00:00+09:00',end:'2099-10-02T09:00:00+09:00'};

@@ -7,7 +7,7 @@
 function SUPA_CFG_() {
   // 봇 계정 로그인 방식: publishable 키(apikey, 공개·차단없음) + 봇 user JWT(Authorization).
   // secret/service 키는 GAS(브라우저로 오인)에서 전부 차단되므로 안 씀.
-  var p = PropertiesService.getScriptProperties();
+  var p = villageScriptProperties_();
   return {
     url: p.getProperty('SUPABASE_URL') || 'https://tedffwpijiylklfuzkua.supabase.co',
     apikey: p.getProperty('SUPABASE_ANON_KEY') || 'sb_publishable_bSfUmM7z0scyXEPEQvIfWQ_Cx7fyuHg',
@@ -23,7 +23,7 @@ function supaTokenCacheStorageQuota_(error) {
 
 // 봇 계정으로 로그인해 access_token 획득 (캐시 + 만료 시 재로그인). user JWT라 secret-키 차단에 안 걸림.
 function supaToken_(cfg) {
-  var p = PropertiesService.getScriptProperties();
+  var p = villageScriptProperties_();
   var cached = p.getProperty('SUPA_TOKEN');
   var exp = Number(p.getProperty('SUPA_TOKEN_EXP') || 0);
   if (cached && Date.now() < exp - 60000) return cached;
@@ -1035,7 +1035,7 @@ function supaMarkTradeDirty_(tid) {
   try {
     tid = String(tid || '').trim();
     if (!tid) return;
-    var p = PropertiesService.getScriptProperties();
+    var p = villageScriptProperties_();
     var revision = String(Date.now()) + ':' + String(Math.random()).slice(2);
     lock = LockService.getScriptLock();
     if (!lock.hasLock()) acquired = lock.tryLock(1000);
@@ -1070,7 +1070,7 @@ function migrateLegacySupaDirtyProperties_(p) {
 /** 상시 1분 트리거가 one-shot 생성 실패/강제종료 뒤 남은 내구 큐를 다시 깨운다. */
 function rescueDashboardAsyncWorkerTriggers_() {
   try {
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     var all = props.getProperties();
     var keys = Object.keys(all);
     if (typeof ensureDashboardStructureProjectionTrigger_ === 'function' && keys.some(function(key) {
@@ -1202,7 +1202,7 @@ function flushDirtyToSupabase() {
   rescueDashboardAsyncWorkerTriggers_();
   var cfg = SUPA_CFG_();
   if (!cfg.url || !cfg.apikey) return;
-  var p = PropertiesService.getScriptProperties(), now = Date.now();
+  var p = villageScriptProperties_(), now = Date.now();
   var lock = LockService.getScriptLock(), locked = false, snapshot = {}, retry = {}, tids = [];
   var lease = JSON.stringify({ id: String(now) + ':' + String(Math.random()), until: now + 600000 });
   try {
@@ -1604,7 +1604,7 @@ function buildSupabaseTrades_(tids) {
     return !dates[id] && master[id] && master[id].startISO && master[id].endISO && cancelledTradeIds.indexOf(id) < 0;
   });
   if (archivalIds.length && typeof openTradeLedgerContext_ === 'function') {
-    var archivalProps = PropertiesService.getScriptProperties().getProperties();
+    var archivalProps = villageScriptProperties_().getProperties();
     var ledgerContext = openTradeLedgerContext_(), ledgerSheet = ledgerContext.sheet;
     var ledgerRows = ledgerSheet.getLastRow() > 1 ? ledgerSheet.getRange(2, 1, ledgerSheet.getLastRow() - 1, 9).getValues() : [];
     var ledgerById = {}, documentCounts = {};
@@ -1884,7 +1884,7 @@ function initSupabaseConfig() {
   var BOT_EMAIL = '';    // ← 동기화용 계정 이메일 (직원 계정 재사용 OK)
   var BOT_PASSWORD = ''; // ← 그 계정 비밀번호 (실행 후 이 줄 비우기)
   if (!BOT_EMAIL || !BOT_PASSWORD) { Logger.log('⚠️ BOT_EMAIL, BOT_PASSWORD 둘 다 채우고 실행하세요'); return; }
-  var p = PropertiesService.getScriptProperties();
+  var p = villageScriptProperties_();
   p.setProperties({ SUPABASE_URL: URL, SUPABASE_BOT_EMAIL: BOT_EMAIL, SUPABASE_BOT_PASSWORD: BOT_PASSWORD }, false);
   p.deleteProperty('SUPABASE_SERVICE_KEY'); // 차단됐던 secret 키 제거
   p.deleteProperty('SUPA_TOKEN'); p.deleteProperty('SUPA_TOKEN_EXP'); // 토큰 캐시 초기화
@@ -1893,7 +1893,7 @@ function initSupabaseConfig() {
 
 /** 진단(읽기전용): 속성이 몇 개인지, 종류별 개수, 보존 대상(설정값) 표시 */
 function auditScriptProperties() {
-  var all = PropertiesService.getScriptProperties().getProperties();
+  var all = villageRawProperties_().getProperties();
   var keys = Object.keys(all);
   var cat = {};
   // Metadata only: values may contain credentials or customer notification receipts.
@@ -2118,7 +2118,7 @@ function probeScriptPropertiesCapacity(bytes) {
     locked = lock.tryLock(1000);
     if (!locked) { result.reason = 'busy'; return result; }
     stage = 'collision_check';
-    props = PropertiesService.getScriptProperties();
+    props = villageRawProperties_();
     var uuid = Utilities.getUuid();
     result.probeKey = 'scriptPropertiesCapacityProbe_v1_' + uuid;
     result.keyBytes = result.probeKey.length;
@@ -2202,7 +2202,7 @@ function scriptPropertiesProbeError_(error, stage) {
 function cleanupOldTradeProps(cutoffYYMMDD, dryRun) {
   if (!cutoffYYMMDD || !/^\d{6}$/.test(cutoffYYMMDD)) { Logger.log("⚠️ cutoff를 'YYMMDD'로 주세요. 예: cleanupOldTradeProps('260401', true)"); return; }
   if (dryRun === undefined) dryRun = true;
-  var p = PropertiesService.getScriptProperties();
+  var p = villageScriptProperties_();
   var all = p.getProperties();
   var toDelete = [];
   Object.keys(all).forEach(function (k) {

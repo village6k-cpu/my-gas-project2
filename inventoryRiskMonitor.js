@@ -121,7 +121,7 @@ function readInventoryRiskSnapshot_() {
 }
 
 function getInventoryRiskReport(force) {
-  var props=PropertiesService.getScriptProperties(),cache=CacheService.getScriptCache();
+  var props=villageScriptProperties_(),cache=CacheService.getScriptCache();
   var cacheKey='inventoryRisk_report_v3_'+(props.getProperty(INVENTORY_RISK_PREFIX_+'dirty') || 'initial');
   var cached=force===true?null:inventoryRiskCacheRead_(cache,cacheKey);
   if(cached)return cached;
@@ -174,7 +174,7 @@ function inventoryRiskAttachOperations_(result, report) {
   result.inventoryTurnaroundMinutes=report.turnaroundMinutes;
   result.inventoryUnknownCount=report.alerts.filter(function(a){return a.kind==='unknown_equipment' || a.kind==='ambiguous_equipment';}).length;
   result.summary.inventoryConflicts=report.conflictCount;result.summary.inventoryTight=report.riskCount;
-  var p=PropertiesService.getScriptProperties(),lastScan=JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lastScan') || 'null');
+  var p=villageScriptProperties_(),lastScan=JSON.parse(p.getProperty(INVENTORY_RISK_PREFIX_+'lastScan') || 'null');
   result.inventoryMonitor={enabled:p.getProperty(INVENTORY_RISK_PREFIX_+'enabled')==='true',lastScanAt:lastScan?.at || null,
     notificationFrequency:'daily',notificationHour:inventoryRiskNotificationHour_(),notificationTimeZone:'Asia/Seoul',
     error:p.getProperty(INVENTORY_RISK_PREFIX_+'lastError') || p.getProperty(INVENTORY_RISK_PREFIX_+'lastScanError') || null};
@@ -183,7 +183,7 @@ function inventoryRiskAttachOperations_(result, report) {
 }
 
 function inventoryRiskNotificationHour_() {
-  var value=PropertiesService.getScriptProperties().getProperty(INVENTORY_RISK_PREFIX_+'notificationHour'),hour=Number(value);
+  var value=villageScriptProperties_().getProperty(INVENTORY_RISK_PREFIX_+'notificationHour'),hour=Number(value);
   return value!==null && Number.isInteger(hour) && hour>=0 && hour<=23?hour:9;
 }
 

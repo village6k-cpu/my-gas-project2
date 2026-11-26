@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const crypto = require('node:crypto');
 const source = fs.readFileSync(require.resolve('../taxInvoiceWorkspace.js'), 'utf8');
 const clone = x => JSON.parse(JSON.stringify(x));

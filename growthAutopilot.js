@@ -217,8 +217,8 @@ function runGrowthAutopilotWeekly() {
   try { pack = getGrowthAutopilot({ nocache: '1' }); } catch (e) { Logger.log('오토파일럿 계산 실패: ' + e); return; }  // 주간 발송은 항상 최신 계산
   if (!pack || !pack.ok) { Logger.log('오토파일럿 결과 없음'); return; }
 
-  var webhook = PropertiesService.getScriptProperties().getProperty('GROWTH_SLACK_WEBHOOK');
-  var appUrl = PropertiesService.getScriptProperties().getProperty('HEYVILLY_AUTOPILOT_URL') || '';
+  var webhook = villageScriptProperties_().getProperty('GROWTH_SLACK_WEBHOOK');
+  var appUrl = villageScriptProperties_().getProperty('HEYVILLY_AUTOPILOT_URL') || '';
   var s = pack.summary;
   var due3 = (pack.reactivation.due || []).slice(0, 3).map(function (d) { return '• ' + d.name + ' (' + d.count + '회, ' + d.daysSince + '일 전)'; }).join('\n');
 

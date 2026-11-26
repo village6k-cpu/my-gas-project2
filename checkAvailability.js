@@ -68,7 +68,7 @@ function showManual() {
 }
 
 function showTimeline() {
-  var url = PropertiesService.getScriptProperties().getProperty('WEB_APP_URL');
+  var url = villageScriptProperties_().getProperty('WEB_APP_URL');
   if (!url) url = ScriptApp.getService().getUrl();
   url += '?page=timeline';
   const html = HtmlService.createHtmlOutput(
@@ -78,7 +78,7 @@ function showTimeline() {
 }
 
 function openDashboard() {
-  var url = PropertiesService.getScriptProperties().getProperty('WEB_APP_URL');
+  var url = villageScriptProperties_().getProperty('WEB_APP_URL');
   if (!url) url = ScriptApp.getService().getUrl();
   url += '?page=dashboard';
   const html = HtmlService.createHtmlOutput(
@@ -713,7 +713,7 @@ function parseTimelineDateBoundary_(dateKey, isEnd) {
 
 function getTimelineCacheVersion_() {
   try {
-    return PropertiesService.getScriptProperties().getProperty(TIMELINE_CACHE_VERSION_PROP_) || '0';
+    return villageScriptProperties_().getProperty(TIMELINE_CACHE_VERSION_PROP_) || '0';
   } catch (e) {
     return '0';
   }
@@ -760,7 +760,7 @@ function putTimelineCacheText_(cacheKey, text, seconds) {
 
 function invalidateTimelineCache() {
   try {
-    PropertiesService.getScriptProperties().setProperty(TIMELINE_CACHE_VERSION_PROP_, String(Date.now()));
+    villageScriptProperties_().setProperty(TIMELINE_CACHE_VERSION_PROP_, String(Date.now()));
   } catch (e) {}
   if (typeof requestInventoryRiskScan_ === 'function') requestInventoryRiskScan_();
 }
@@ -994,7 +994,7 @@ function getDashboardData(targetDate, skipCache, options) {
   var activeCount = 0;
 
   // 반출세팅 완료 플래그 일괄 조회 (ScriptProperties 1회 호출)
-  var props = PropertiesService.getScriptProperties().getProperties();
+  var props = villageScriptProperties_().getProperties();
   markDash_('props');
   var dashboardTradeIds = Object.keys(tradeGroups);
   var contractMap = getDashboardContractMapForIds_(contractSheet, dashboardTradeIds);
@@ -1323,7 +1323,7 @@ function getDashboardSearchData(query, options) {
     return attachProfile_(summaryResult);
   }
 
-  var props = PropertiesService.getScriptProperties().getProperties();
+  var props = villageScriptProperties_().getProperties();
   var includeSearchCautions = options.includeCautions === true ||
     options.includeCautions === 1 ||
     options.includeCautions === '1' ||
@@ -1632,7 +1632,7 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
 
   var tradeIds = Object.keys(tradeGroups);
   var contractMap = getDashboardContractMapForIds_(contractSheet, tradeIds);
-  var props = PropertiesService.getScriptProperties().getProperties();
+  var props = villageScriptProperties_().getProperties();
   var tradeExtras = getTradeExtrasForIds_(tradeIds, props);
   var equipmentChecks = getEquipmentCheckMapForIds_(tradeIds);
   var entries = tradeIds.map(function(tid) {
@@ -1780,7 +1780,7 @@ function getDashboardSearchCandidateScore_(entry, terms) {
 
 function getDashboardSearchCacheVersion_() {
   try {
-    return PropertiesService.getScriptProperties().getProperty(DASHBOARD_SEARCH_CACHE_VERSION_PROP_) || '0';
+    return villageScriptProperties_().getProperty(DASHBOARD_SEARCH_CACHE_VERSION_PROP_) || '0';
   } catch (e) {
     return '0';
   }
@@ -1788,7 +1788,7 @@ function getDashboardSearchCacheVersion_() {
 
 function touchDashboardSearchCacheVersion_() {
   try {
-    PropertiesService.getScriptProperties().setProperty(DASHBOARD_SEARCH_CACHE_VERSION_PROP_, String(Date.now()));
+    villageScriptProperties_().setProperty(DASHBOARD_SEARCH_CACHE_VERSION_PROP_, String(Date.now()));
   } catch (e) {}
 }
 
@@ -2172,7 +2172,7 @@ function attachDashboardCardCautions_(checkoutList, checkinList) {
 }
 
 function getEquipmentRiskBackendConfig_() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var baseUrl = String(props.getProperty('VILLAGE_KAKAO_AI_ADMIN_URL') || '').replace(/\/+$/, '').trim();
   var token = String(props.getProperty('VILLAGE_KAKAO_AI_ADMIN_TOKEN') || '').trim();
   if (!baseUrl || !token) {
@@ -2182,7 +2182,7 @@ function getEquipmentRiskBackendConfig_() {
 }
 
 function diagEquipmentRiskBackendConfig() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var baseUrl = String(props.getProperty('VILLAGE_KAKAO_AI_ADMIN_URL') || '').replace(/\/+$/, '').trim();
   var token = String(props.getProperty('VILLAGE_KAKAO_AI_ADMIN_TOKEN') || '').trim();
   return {
@@ -2203,7 +2203,7 @@ function setupEquipmentRiskBackendConfig(adminUrl, adminToken) {
   if (!verify.ok) {
     throw new Error('equipment risk backend verification failed: ' + verify.status);
   }
-  PropertiesService.getScriptProperties().setProperties({
+  villageScriptProperties_().setProperties({
     VILLAGE_KAKAO_AI_ADMIN_URL: baseUrl,
     VILLAGE_KAKAO_AI_ADMIN_TOKEN: token
   }, false);
@@ -2402,7 +2402,7 @@ var DASHBOARD_DEFAULT_NOTES = [
 ];
 
 function getDashboardNotes_() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var raw = props.getProperty(DASHBOARD_NOTES_PROP_KEY);
   if (!raw) return { notes: DASHBOARD_DEFAULT_NOTES.slice(), isDefault: true };
 
@@ -2425,7 +2425,7 @@ function saveDashboardNotes_(notesInput) {
   }
 
   notes = sanitizeDashboardNotes_(notes);
-  PropertiesService.getScriptProperties().setProperty(DASHBOARD_NOTES_PROP_KEY, JSON.stringify(notes));
+  villageScriptProperties_().setProperty(DASHBOARD_NOTES_PROP_KEY, JSON.stringify(notes));
   return {
     success: true,
     notes: notes,
@@ -2618,7 +2618,7 @@ function cleanupRetiredDashboardPhotoIndexProperties_(props) {
   try {
     var cache = CacheService.getScriptCache();
     if (cache.get('dashboardRetiredPhotoPropertyCleanup_v1')) return 0;
-    props = props || PropertiesService.getScriptProperties();
+    props = props || villageScriptProperties_();
     var removed = 0;
     props.getKeys().forEach(function(key) {
       if (
@@ -2669,7 +2669,7 @@ function clearDashboardMutationLease_(props, key, token) {
 
 /** 같은 거래에서 권한 상태 HTTP 전이가 진행 중이면 충돌 변이를 짧게 재시도시킨다. */
 function dashboardTradeMutationLeaseError_(props, tid, ownKind, ownToken) {
-  props = props || PropertiesService.getScriptProperties();
+  props = props || villageScriptProperties_();
   tid = String(tid || '').trim();
   if (!tid) return null;
   var setupClosing = String(props.getProperty('setupClosing_' + tid) || '');
@@ -2783,7 +2783,7 @@ function scheduleDashboardStructureProjectionUnderLock_(tid, patch) {
   tid = String(tid || '').trim();
   if (!tid) return '';
   patch = patch || {};
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var leaseKey = 'dashboardStructureMutation_' + tid;
   var queueKey = DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + tid;
   var lease = activeDashboardMutationLease_(props, leaseKey);
@@ -2864,7 +2864,7 @@ function acknowledgeDashboardReturnProjection_(props, tid) {
 }
 
 function ensureDashboardStructureProjectionTrigger_(delayMs) {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var now = Date.now();
   var delay = Math.max(1000, Number(delayMs || 1000));
   var targetAt = now + delay;
@@ -2928,7 +2928,7 @@ function planDashboardStructureProjectionBatch_(all, now) {
 function flushDashboardStructureProjectionQueue_(targetTradeId) {
   var scoped = typeof targetTradeId === 'string';
   if (scoped && !/^\d{6}-\d{3,}$/.test(targetTradeId)) throw new Error('정확한 거래ID 필수');
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   if (!scoped) try {
     ScriptApp.getProjectTriggers().forEach(function(trigger) {
       if (trigger.getHandlerFunction() === 'flushDashboardStructureProjectionQueue_') ScriptApp.deleteTrigger(trigger);
@@ -3243,7 +3243,7 @@ function repairDashboardTradeProjection_(tid, removedScheduleIds, statusOnly, op
   if (!rowsByTid[tid] || !rowsByTid[tid].length) return { error: '복구할 스케줄 행 없음: ' + tid };
   var groups = getDashboardSearchGroupsForIds_(sched, [tid], rowsByTid);
   var group = groups[tid];
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var localCheckoutStarted = isDashboardTradeCheckoutStarted_(ss, tid);
   var durableCheckout = typeof supaGetCheckoutBaselineState_ === 'function'
     ? supaGetCheckoutBaselineState_(tid)
@@ -3319,7 +3319,7 @@ function repairDashboardTradeProjection_(tid, removedScheduleIds, statusOnly, op
 /** 내부 운영용 읽기 전용 진단. 큐/claim을 수정하거나 외부 쓰기를 실행하지 않는다. */
 function readDashboardTradeProjectionState_(tid) {
   if (!/^\d{6}-\d{3,}$/.test(tid)) return { error: '정확한 거래ID 필수' };
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var raw = props.getProperty(DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + tid);
   var queue = null;
   if (raw) {
@@ -3505,7 +3505,7 @@ function isScriptPropertiesQuotaError_(err) {
  */
 function reclaimDashboardScriptProperties_(props, options) {
   options = options || {};
-  props = props || PropertiesService.getScriptProperties();
+  props = props || villageScriptProperties_();
   var dryRun = options.dryRun === true;
   var keepDays = Math.max(0, Number(options.keepDays) || 14);
   var now = new Date();
@@ -3603,6 +3603,7 @@ function trySetScriptProperty_(props, key, value) {
     props.setProperty(key, value);
     return true;
   } catch (err) {
+    if (props.__villageRoutedStorage) throw err;
     if (!isScriptPropertiesQuotaError_(err)) throw err;
     try { reclaimDashboardScriptProperties_(props, { keepDays: 7, aggressive: true }); } catch (reclaimErr) {}
     try {
@@ -3620,6 +3621,7 @@ function trySetScriptProperties_(props, values) {
     props.setProperties(values, false);
     return true;
   } catch (err) {
+    if (props.__villageRoutedStorage) throw err;
     if (!isScriptPropertiesQuotaError_(err)) throw err;
     try { reclaimDashboardScriptProperties_(props, { keepDays: 7, aggressive: true }); } catch (reclaimErr) {}
     try {
@@ -3648,7 +3650,10 @@ function tryDeleteScriptProperty_(props, key) {
 function nextDashboardCompletionRevision_(props, tid, scope) {
   var key = dashboardCompletionRevisionKey_(tid, scope);
   var previous = 0;
-  try { previous = Number(props.getProperty(key) || 0); } catch (readErr) { previous = 0; }
+  try { previous = Number(props.getProperty(key) || 0); } catch (readErr) {
+    if (props.__villageRoutedStorage) throw readErr;
+    previous = 0;
+  }
   var next = Math.max(Date.now(), isFinite(previous) ? previous + 1 : 1);
   // 속성 용량이 가득 차도 completionRevision 자체는 반환해야 앱 서버 CAS가 진행된다.
   trySetScriptProperty_(props, key, String(next));
@@ -3743,10 +3748,10 @@ function toggleSetupDone(tid, done, options) {
   tid = String(tid).trim();
   var key = 'setupDone_' + tid;
   var atKey = 'setupDoneAt_' + tid;
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   try {
     // 용량이 빡빡하면 완료 전에 휘발 속성을 비운다 (설정값 보존)
-    var propCount = props.getKeys().length;
+    var propCount = props.__villageRoutedStorage ? 0 : props.getKeys().length;
     if (propCount > 400) reclaimDashboardScriptProperties_(props, { keepDays: 10, aggressive: propCount > 450 });
   } catch (reclaimStartErr) {}
   var isDone = done === true || done === "true" || done === "1" || done === 1;
@@ -3973,7 +3978,7 @@ function dashboardReturnIncompleteItems_(items, returnCounts) {
  * 클라이언트 화면을 우회한 호출과 레거시 화면에도 동일하게 적용된다.
  */
 function assertDashboardReturnComplete_(tid, props) {
-  props = props || PropertiesService.getScriptProperties();
+  props = props || villageScriptProperties_();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var schedSheet = ss.getSheetByName('스케줄상세');
   if (!schedSheet) return { error: '반납완료 차단: 스케줄상세 시트를 찾을 수 없습니다: ' + tid };
@@ -4143,7 +4148,7 @@ function invalidateDashboardReturnInspectionForTrade_(tid, scheduleIds, reason) 
   try {
     tid = String(tid || '').trim();
     if (!tid) return { error: '반납 검수 무효화 실패: 거래ID 없음' };
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     (scheduleIds || []).forEach(function(scheduleId) {
       var sid = String(scheduleId || '').trim();
       if (!sid) return;
@@ -4209,9 +4214,9 @@ function toggleReturnDone(tid, done, options) {
   tid = String(tid).trim();
   var key = 'returnDone_' + tid;
   var atKey = 'returnDoneAt_' + tid;
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   try {
-    var propCount = props.getKeys().length;
+    var propCount = props.__villageRoutedStorage ? 0 : props.getKeys().length;
     if (propCount > 400) reclaimDashboardScriptProperties_(props, { keepDays: 10, aggressive: propCount > 450 });
   } catch (reclaimStartErr) {}
   var isDone = done === true || done === "true" || done === "1" || done === 1;
@@ -4429,7 +4434,7 @@ function listDashboardCheckoutItemCheckSids_(tid) {
 
 /** 반납이 확정된 거래의 반출 체크 키는 더 이상 필요 없으므로 누적 quota에서 제거한다. */
 function clearDashboardCheckoutItemChecks_(tid, props) {
-  props = props || PropertiesService.getScriptProperties();
+  props = props || villageScriptProperties_();
   listDashboardCheckoutItemCheckSids_(tid).forEach(function(sid) {
     props.deleteProperty('itemCheck_' + sid + '_checkout');
   });
@@ -4464,7 +4469,7 @@ function dashboardDoneAtMatches_(currentValue, expectedValue) {
 }
 
 function setDashboardReturnContractStatus_(tid, isDone, props, options) {
-  props = props || PropertiesService.getScriptProperties();
+  props = props || villageScriptProperties_();
   // 계약상태 전이는 '반출 시작' 판정을 바꾸므로 판정 캐시를 먼저 비운다
   try { CacheService.getScriptCache().remove('dashStarted_' + tid); } catch (cacheErr) {}
   // skipCompletionCheck: toggleReturnDone이 잠금 밖에서 이미 완료 검증을 마친 경우
@@ -4530,7 +4535,7 @@ function setDashboardReturnContractStatus_(tid, isDone, props, options) {
 /** 완료 후속 저장 실패 시 계약마스터 상태와 이전상태 포인터를 보상 복구한다. */
 function rollbackDashboardReturnContractStatus_(result, props) {
   if (!result || !result.success || !result.tradeId || !result.row) return;
-  props = props || PropertiesService.getScriptProperties();
+  props = props || villageScriptProperties_();
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
   if (!sheet) throw new Error('계약마스터 시트 없음');
   var previousStatus = String(result.previousStatus || '').trim() || '반출';
@@ -4703,7 +4708,7 @@ function inspectContractCancelRecovery(asOfDate) {
   var backgrounds = formatsRange.getBackgrounds();
   var fontColors = formatsRange.getFontColors();
   var scheduleCounts = buildScheduleCountByTradeId_(ss);
-  var props = PropertiesService.getScriptProperties().getProperties();
+  var props = villageScriptProperties_().getProperties();
   var candidates = [];
   var summary = {
     returned: 0,
@@ -4827,7 +4832,7 @@ function restoreCancelledContractsByIds(ids, dryRun) {
     return { success: true, dryRun: true, targetCount: targets.length, targets: targets, missing: missing };
   }
 
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   targets.forEach(function(target) {
     props.deleteProperty('returnDone_' + target.tradeId);
     props.deleteProperty('returnPrevContractStatus_' + target.tradeId);
@@ -4940,7 +4945,7 @@ function toggleItemChecksBatch(tid, entries) {
     };
   }
   var items = order.map(function(id) { return bySchedule[id]; });
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   // 사진 인덱스가 Script Properties 총량을 소진해도 실제 품목 mutation log를 쓰기 전에
   // 폐기된 대용량 조각을 제거하므로, 현장 반출 체크가 즉시 자가 복구된다.
   cleanupRetiredDashboardPhotoIndexProperties_(props);
@@ -5087,7 +5092,7 @@ function toggleItemCheck(scheduleId, phase, done, options) {
 
   var key = 'itemCheck_' + scheduleId + '_' + phase;
   var checkinQtyKey = 'itemCheckQty_' + scheduleId + '_checkin'; // 레거시 정리용
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
   var mutationId = normalizeDashboardMutationId_(options && options.mutationId);
   if (phase === 'checkout') cleanupRetiredDashboardPhotoIndexProperties_(props);
@@ -5649,7 +5654,7 @@ function dashboardUpdateTradeDetails(tradeId, input) {
   }
 
   try {
-    var editLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tradeId, 'tradeEdit', '');
+    var editLeaseBlock = dashboardTradeMutationLeaseError_(villageScriptProperties_(), tradeId, 'tradeEdit', '');
     if (editLeaseBlock) return editLeaseBlock;
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var contractSheet = ss.getSheetByName('계약마스터');
@@ -5747,7 +5752,7 @@ function dashboardUpdateTradeDetails(tradeId, input) {
 
     // 개고생2.0 거래내역의 알려진 고정 열(B 예약자명, F 연락처)도 같은 거래ID(E) 기준으로 갱신.
     try {
-      var ledgerUrl = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+      var ledgerUrl = villageScriptProperties_().getProperty('개고생2_URL');
       if (ledgerUrl) {
         var ledgerSheet = SpreadsheetApp.openByUrl(ledgerUrl).getSheetByName('거래내역');
         if (ledgerSheet && ledgerSheet.getLastRow() >= 2) {
@@ -5801,7 +5806,7 @@ function dashboardDiscountRevisionKey_(tid) {
 }
 
 function getDashboardDiscountRevision_(props, tid) {
-  return Math.max(0, Number((props || PropertiesService.getScriptProperties()).getProperty(
+  return Math.max(0, Number((props || villageScriptProperties_()).getProperty(
     dashboardDiscountRevisionKey_(tid)
   )) || 0);
 }
@@ -5839,7 +5844,7 @@ function getTradeDiscountState(tid) {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = ss.getSheetByName('계약마스터');
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     var projection = typeof supaReadAuthorityRow_ === 'function'
       ? supaReadAuthorityRow_(null, null, 'trades', { trade_id: tid }, 'trade_id,discount_type,contract_regen_pending')
       : { ok: false };
@@ -5932,7 +5937,7 @@ function updateTradeDiscountType(tid, discountType, options) {
 
   var changed = false;
   try {
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     var discountLeaseBlock = dashboardTradeMutationLeaseError_(props, tid, 'discount', '');
     if (discountLeaseBlock) return discountLeaseBlock;
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -6269,7 +6274,7 @@ function updateDashboardContractStatus(tradeId, status, expectedCancellation) {
   }
 
   try {
-    var statusLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tradeId, 'contractStatus', '');
+    var statusLeaseBlock = dashboardTradeMutationLeaseError_(villageScriptProperties_(), tradeId, 'contractStatus', '');
     if (statusLeaseBlock) return cancellationBusyBeforeWrite_(statusLeaseBlock, tradeId, status, expectedCancellation);
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = ss.getSheetByName('계약마스터');
@@ -6288,7 +6293,7 @@ function updateDashboardContractStatus(tradeId, status, expectedCancellation) {
           return { error: "이미 반출된 거래는 취소할 수 없습니다. 반납 절차로 마감해주세요: " + tradeId };
         }
         if (status === "반납완료") {
-          var closeProps = PropertiesService.getScriptProperties();
+          var closeProps = villageScriptProperties_();
           var previousDone = closeProps.getProperty('returnDone_' + tradeId);
           var previousDoneAt = closeProps.getProperty('returnDoneAt_' + tradeId);
           var contractResult = setDashboardReturnContractStatus_(tradeId, true, closeProps);
@@ -6334,7 +6339,7 @@ function updateDashboardContractStatus(tradeId, status, expectedCancellation) {
           }
           cancellationWriteAttempted = true;
           sheet.getRange(row, 10).setValue(status); // J열: 계약상태
-          var cancelProps = PropertiesService.getScriptProperties();
+          var cancelProps = villageScriptProperties_();
           cancelProps.deleteProperty('returnDone_' + tradeId);
           cancelProps.deleteProperty('returnDoneAt_' + tradeId);
           cancelProps.deleteProperty('returnPrevContractStatus_' + tradeId);
@@ -6350,7 +6355,7 @@ function updateDashboardContractStatus(tradeId, status, expectedCancellation) {
           return { success: true, tradeId: tradeId, status: status, row: row, cancelled: true };
         }
 
-        var props = PropertiesService.getScriptProperties();
+        var props = villageScriptProperties_();
         var oldDone = props.getProperty('returnDone_' + tradeId);
         var oldDoneAt = props.getProperty('returnDoneAt_' + tradeId);
         var oldPrev = props.getProperty('returnPrevContractStatus_' + tradeId);
@@ -6389,7 +6394,7 @@ function updateDashboardContractStatus(tradeId, status, expectedCancellation) {
 }
 
 function getEquipmentCheckSpreadsheet_() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var url = props.getProperty("개고생2_URL");
   if (url) {
     try {
@@ -6546,7 +6551,7 @@ function getTradeExtrasForIds_(tradeIds, props, options) {
   var result = {};
   options = options || {};
   var skipCache = options.skipCache === true || options.forceFresh === true;
-  props = props || PropertiesService.getScriptProperties().getProperties();
+  props = props || villageScriptProperties_().getProperties();
   var ids = [];
   var seenIds = {};
   var pendingRegenIds = {};
@@ -6594,7 +6599,7 @@ function getTradeExtrasForIds_(tradeIds, props, options) {
   if (missingIds.length === 0) return result;
 
   try {
-    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
     if (!개고생URL) return result;
     var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
     if (!거래시트 || 거래시트.getLastRow() < 2) return result;
@@ -6674,7 +6679,7 @@ function getDashboardContractExtrasByIds_(ids) {
   });
   if (!tradeIds.length) return { success: true, items: {}, tradeIds: [] };
 
-  var props = PropertiesService.getScriptProperties().getProperties();
+  var props = villageScriptProperties_().getProperties();
   return {
     success: true,
     tradeIds: tradeIds,
@@ -7067,7 +7072,7 @@ function detectTradeIdColumn_(sheet, lastCol) {
 }
 
 function getDashboardPhotoSheet_(required) {
-  var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
   if (!개고생URL) {
     if (required) throw new Error("개고생2_URL 미설정");
     return null;
@@ -7147,7 +7152,7 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, client
   var dedupKey = clientKey ? 'dashboard_photo_upload_' + String(clientKey).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80) : '';
   var claimKey = dashboardPhotoUploadClaimKey_(clientKey);
   var claimScope = tid + '|' + phase;
-  var legacyProps = PropertiesService.getScriptProperties();
+  var legacyProps = villageScriptProperties_();
   var props = operationalPropertyStore_('photos', legacyProps);
   var claimState = null;
   if (claimKey) {
@@ -7464,7 +7469,7 @@ function makeDashboardPhotoFileName_(photoId, fileName, mimeType) {
 }
 
 function getDashboardPhotoStorageFolder_() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var folderId = props.getProperty("DASHBOARD_PHOTO_APPSHEET_FOLDER_ID") ||
     props.getProperty("반출반납사진_이미지_FOLDER_ID");
   if (folderId) {
@@ -7475,7 +7480,7 @@ function getDashboardPhotoStorageFolder_() {
 }
 
 function getDashboardPhotoRootFolder_() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var folderId = props.getProperty("DASHBOARD_PHOTO_FOLDER_ID") ||
     props.getProperty("반출반납사진_FOLDER_ID") ||
     props.getProperty("PHOTO_FOLDER_ID");
@@ -7537,7 +7542,7 @@ function getTradePaymentOptions_() {
 
 function getTradePaymentOptionsFromSheet_() {
   try {
-    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
     if (!개고생URL) return defaultPaymentOptions_();
     var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
     if (!거래시트) return defaultPaymentOptions_();
@@ -7588,7 +7593,7 @@ function getTradeBillingCompanyHeaderCandidates_() {
 
 function getTradeBillingCompanyMasterInfo_() {
   try {
-    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
     if (!개고생URL) return null;
     var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
     var 발행처시트 = 개고생SS.getSheetByName("발행처DB");
@@ -7697,7 +7702,7 @@ function getTradeColumnOptions_(column, fallbackOptions) {
 
 function getTradeColumnOptionsFromSheet_(column, fallbackOptions) {
   try {
-    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
     if (!개고생URL) return fallbackOptions.slice();
     var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
     if (!거래시트) return fallbackOptions.slice();
@@ -7778,7 +7783,7 @@ function inspectTradePaymentColumn() {
     note: "스크립트 setValue/API 변경은 일반적으로 대상 스프레드시트의 onEdit 트리거를 실행하지 않습니다."
   };
   try {
-    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
     if (!개고생URL) {
       info.error = "개고생2_URL 미설정";
       return info;
@@ -7895,7 +7900,7 @@ function claimDashboardAuxMutation_(tid, kind) {
   try {
     acquired = lock.tryLock(1000);
     if (!acquired) return { error: '다른 원장 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     var blocked = dashboardTradeMutationLeaseError_(props, tid, 'aux', '');
     if (blocked) return blocked;
     var key = 'dashboardAuxMutation_' + tid;
@@ -7915,7 +7920,7 @@ function releaseDashboardAuxMutation_(claim) {
   var acquired = false;
   try {
     acquired = lock.tryLock(1000);
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     if (!acquired) {
       // 이 token이 살아 있는 동안 새 claim은 들어올 수 없으므로, 전역 락 경합 시에도
       // 자기 키만 비교 삭제해 같은 거래가 TTL 7분 동안 잠기는 일을 막는다.
@@ -7947,7 +7952,7 @@ function claimDashboardExternalAction_(action, tid, mutationId) {
   try {
     acquired = lock.tryLock(1000);
     if (!acquired) return { error: '다른 원장 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     var recentKey = dashboardExternalActionKey_('dashboardExternalRecent_', action, tid);
     var recent = null;
     try { recent = JSON.parse(props.getProperty(recentKey) || 'null'); } catch (recentErr) {}
@@ -7978,7 +7983,7 @@ function finishDashboardExternalAction_(claim, success) {
   var acquired = false;
   try {
     acquired = lock.tryLock(1000);
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     if (!acquired) {
       if (success && claim.recentKey) {
         props.setProperty(claim.recentKey, JSON.stringify({ at: Date.now(), mutationId: claim.token }));
@@ -8010,7 +8015,7 @@ function updateTradePaymentMethod(tid, method) {
   if (paymentClaim && paymentClaim.error) return paymentClaim;
 
   try {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
 
   var wroteSheet = false;
   var warning = "";
@@ -8291,18 +8296,18 @@ function requestPayAppTestPaymentLink(args) {
 function setupPayAppUserId(userid) {
   userid = String(userid || '').trim();
   if (!userid) throw new Error('userid 필요');
-  PropertiesService.getScriptProperties().setProperty('PAYAPP_USERID', userid);
+  villageScriptProperties_().setProperty('PAYAPP_USERID', userid);
   return diagPayAppConfig();
 }
 
 function setupPayAppPaymentTypes(openpaytype) {
   var value = normalizePayAppOpenpaytype_(openpaytype || getDefaultPayAppOpenpaytype_());
-  PropertiesService.getScriptProperties().setProperty('PAYAPP_OPENPAYTYPE', value);
+  villageScriptProperties_().setProperty('PAYAPP_OPENPAYTYPE', value);
   return diagPayAppConfig();
 }
 
 function diagPayAppConfig() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var userid = String(props.getProperty('PAYAPP_USERID') || '').trim();
   var openpaytype = normalizePayAppOpenpaytype_(props.getProperty('PAYAPP_OPENPAYTYPE'));
   var smsuse = String(props.getProperty('PAYAPP_SMS_USE') || 'y').trim() || 'y';
@@ -8318,7 +8323,7 @@ function diagPayAppConfig() {
 }
 
 function buildPayAppPaymentRequest_(tid) {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var userid = String(props.getProperty('PAYAPP_USERID') || '').trim();
   if (!userid) return { error: 'PAYAPP_USERID 미설정: 페이앱 판매자 아이디를 Script Properties에 넣어주세요.' };
 
@@ -8369,7 +8374,7 @@ function buildPayAppPaymentRequest_(tid) {
 
 function buildPayAppTestPaymentRequest_(args) {
   args = args || {};
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var userid = String(props.getProperty('PAYAPP_USERID') || '').trim();
   if (!userid) return { error: 'PAYAPP_USERID 미설정: 페이앱 판매자 아이디를 Script Properties에 넣어주세요.' };
 
@@ -8512,14 +8517,14 @@ function formatWon_(amount) {
 function rememberPayAppPaymentRequest_(tid, info) {
   try {
     var key = 'PAYAPP_REQ_' + String(tid || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
-    PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(info || {}));
+    villageScriptProperties_().setProperty(key, JSON.stringify(info || {}));
   } catch (err) {}
 }
 
 function rememberPayAppTestPaymentRequest_(testId, info) {
   try {
     var key = 'PAYAPP_TEST_REQ_' + String(testId || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
-    PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(info || {}));
+    villageScriptProperties_().setProperty(key, JSON.stringify(info || {}));
   } catch (err) {}
 }
 
@@ -8608,7 +8613,7 @@ function callVillageOpsApi_(action, tid) {
   var externalConfirmed = false;
 
   try {
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     var url = getVillageOpsApiUrl_(props);
     var payload = {
       action: action,
@@ -8672,7 +8677,7 @@ function getVillageOpsApiKey_(props) {
 }
 
 function getVillageTradeSheet_() {
-  var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
   if (!개고생URL) throw new Error("개고생2_URL 미설정");
   var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
   if (!거래시트) throw new Error("거래내역 시트 없음");
@@ -9024,7 +9029,7 @@ function getSetMasterProductAliases_() {
   // 운영자가 확인한 판매상품 별칭만 저장. 시트 구조와 실물 재고 별칭을 변경하지 않는다.
   // [{alias, canonicalName}] 형식이며 가격은 저장하지 않고 매번 세트마스터 G열을 읽는다.
   var raw = typeof PropertiesService === 'undefined' ? '' :
-    PropertiesService.getScriptProperties().getProperty('SALES_CATALOG_ALIASES_V1');
+    villageScriptProperties_().getProperty('SALES_CATALOG_ALIASES_V1');
   if (!raw) return aliases;
   var configured;
   try { configured = JSON.parse(raw); } catch (error) { throw new Error('세트마스터 판매상품 별칭 설정 형식 오류'); }
@@ -9636,7 +9641,7 @@ function repairDashboardDuplicateScheduleRows(tid, pairs, options) {
     }
 
     deleteDashboardRowsDescending_(sheet, plan.removeRows);
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     plan.removeIds.forEach(function(scheduleId) {
       props.deleteProperty('itemCheck_' + scheduleId + '_checkout');
       props.deleteProperty('itemCheck_' + scheduleId + '_checkin');
@@ -9663,7 +9668,7 @@ function repairDashboardDuplicateScheduleRows(tid, pairs, options) {
 function markDashboardCheckoutBaselineStarted_(tid) {
   tid = String(tid || '').trim();
   if (!tid) return { error: '거래ID 없음' };
-  PropertiesService.getScriptProperties().setProperty('checkoutBaselineStarted_' + tid, '1');
+  villageScriptProperties_().setProperty('checkoutBaselineStarted_' + tid, '1');
   try { CacheService.getScriptCache().remove('dashStarted_' + tid); } catch (cacheErr) {}
   return { success: true, tradeId: tid };
 }
@@ -9671,7 +9676,7 @@ function markDashboardCheckoutBaselineStarted_(tid) {
 function clearDashboardCheckoutBaselineStarted_(tid) {
   tid = String(tid || '').trim();
   if (!tid) return;
-  PropertiesService.getScriptProperties().deleteProperty('checkoutBaselineStarted_' + tid);
+  villageScriptProperties_().deleteProperty('checkoutBaselineStarted_' + tid);
   try { CacheService.getScriptCache().remove('dashStarted_' + tid); } catch (cacheErr) {}
 }
 
@@ -9692,7 +9697,7 @@ function backfillDashboardCheckoutBaselineMarkers(tradeIds) {
     values['checkoutBaselineStarted_' + tid] = '1';
   }
   if (!accepted.length) return { success: true, count: 0, tradeIds: [] };
-  PropertiesService.getScriptProperties().setProperties(values, false);
+  villageScriptProperties_().setProperties(values, false);
   return { success: true, count: accepted.length, tradeIds: accepted };
 }
 
@@ -9700,7 +9705,7 @@ function backfillDashboardCheckoutBaselineMarkers(tradeIds) {
 function isDashboardTradeCheckoutStarted_(ss, tid) {
   tid = String(tid || '').trim();
   if (!tid) return false;
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   if (props.getProperty('returnDone_' + tid) === '1') return true;
 
   // 과거 거래는 Script Property가 없을 수 있어 계약마스터의 최종 반납 상태만 폴백한다.
@@ -9834,7 +9839,7 @@ function dashboardAddEquipments(tid, entries, options) {
   var addFingerprint = '';
   try {
     if (!dryRun) {
-      addProps = PropertiesService.getScriptProperties();
+      addProps = villageScriptProperties_();
       var addLeaseBlock = dashboardTradeMutationLeaseError_(addProps, tid, 'equipmentAdd', '');
       if (addLeaseBlock) return addLeaseBlock;
 
@@ -10255,7 +10260,7 @@ function dashboardOnsiteRequestFingerprint_(tid, entries, options) {
 /** 호출자는 ScriptLock을 보유해야 한다. append 직전 확정된 ID/내용을 복구 증거로 남긴다. */
 function reserveDashboardOnsiteRowsUnderLock_(idempotencyHash, tid, fingerprint, newRows) {
   if (!idempotencyHash) return;
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var rows = [];
   try { rows = JSON.parse(props.getProperty(DASHBOARD_ONSITE_IDEM_PROP_) || '[]'); } catch (parseErr) {}
   if (!Array.isArray(rows)) rows = [];
@@ -10339,7 +10344,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
       idemHash = Utilities.base64EncodeWebSafe(
         Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idempotencyKey)
       ).replace(/=+$/g, '').slice(0, 24);
-      idemRows = JSON.parse(PropertiesService.getScriptProperties().getProperty(idemProp) || '[]');
+      idemRows = JSON.parse(villageScriptProperties_().getProperty(idemProp) || '[]');
       if (!Array.isArray(idemRows)) idemRows = [];
       var existingIdem = idemRows.filter(function(row) { return row && row.k === idemHash; })[0];
       if (existingIdem) {
@@ -10365,7 +10370,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
               onsiteContractQueued = true;
               existingIdem.state = 'done';
               existingIdem.at = Date.now();
-              PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
+              villageScriptProperties_().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
               addResult = {
                 success: true,
                 duplicate: true,
@@ -10430,7 +10435,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
         tid: String(tid || '').trim(),
         f: onsiteFingerprint
       });
-      PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
+      villageScriptProperties_().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
       idemClaimed = true;
     }
     var settlementStatus = String(options.settlementStatus || 'pending').trim();
@@ -10448,7 +10453,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
     if (!addResult || addResult.error) {
       if (idemClaimed) {
         idemRows = idemRows.filter(function(row) { return !(row && row.k === idemHash); });
-        PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
+        villageScriptProperties_().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
       }
       return addResult;
     }
@@ -10468,7 +10473,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
           if (row.logged !== true) row.logged = false;
         }
       });
-      PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
+      villageScriptProperties_().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
       addResult.idempotencyKey = idemHash;
     }
     }
@@ -10515,7 +10520,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
     try {
       loggedLocked = loggedLock.tryLock(1500);
       if (loggedLocked) {
-        var loggedProps = PropertiesService.getScriptProperties();
+        var loggedProps = villageScriptProperties_();
         var loggedRows = [];
         try { loggedRows = JSON.parse(loggedProps.getProperty(idemProp) || '[]'); } catch (loggedParseErr) {}
         if (!Array.isArray(loggedRows)) loggedRows = [];
@@ -10572,7 +10577,7 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
 
   try {
     if (!dryRun) {
-      var qtyLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'equipmentQty', '');
+      var qtyLeaseBlock = dashboardTradeMutationLeaseError_(villageScriptProperties_(), tid, 'equipmentQty', '');
       if (qtyLeaseBlock) return qtyLeaseBlock;
     }
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -10767,7 +10772,7 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
 
   try {
     if (!dryRun) {
-      var nameLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'equipmentName', '');
+      var nameLeaseBlock = dashboardTradeMutationLeaseError_(villageScriptProperties_(), tid, 'equipmentName', '');
       if (nameLeaseBlock) return nameLeaseBlock;
     }
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -10791,7 +10796,7 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
     var qty = Number(row[4]) || 1;
     if (!oldName) return { error: "기존 장비명이 비어있습니다" };
     if (!dryRun && mutationId) {
-      nameMutationProps = PropertiesService.getScriptProperties();
+      nameMutationProps = villageScriptProperties_();
       var nameMutation = beginDashboardMutation_(
         nameMutationProps,
         tid,
@@ -10951,7 +10956,7 @@ function dashboardAddEquipment(tid, equipName, qty) {
   }
 
   try {
-    var legacyAddLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'equipmentAdd', '');
+    var legacyAddLeaseBlock = dashboardTradeMutationLeaseError_(villageScriptProperties_(), tid, 'equipmentAdd', '');
     if (legacyAddLeaseBlock) return legacyAddLeaseBlock;
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
@@ -11170,7 +11175,7 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
   }
 
   try {
-    var removeProps = PropertiesService.getScriptProperties();
+    var removeProps = villageScriptProperties_();
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
     if (!sched) return { error: "스케줄상세 비어있음" };
@@ -11401,7 +11406,7 @@ function dashboardRemoveEquipmentBatch(tid, entries, options) {
   }
 
   try {
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName('스케줄상세');
     if (!sched) return { error: '스케줄상세 비어있음' };
@@ -11700,7 +11705,7 @@ function refreshEquipmentList(skipIfUnchanged) {
   // ── 변경 없으면 스킵 (onOpen 자동 갱신용) ──
   // 목록 재구축+열 전체 유효성 재설정이 2~5초라, 세트마스터·확인요청 행수가 그대로면 생략.
   // 메뉴/셋업/API 호출(인자 없음)은 항상 전체 갱신.
-  var refreshProps = PropertiesService.getScriptProperties();
+  var refreshProps = villageScriptProperties_();
   var refreshReqSheet = ss.getSheetByName("확인요청");
   var refreshHash = "";
   var refreshSchedSheet = ss.getSheetByName("스케줄상세");
@@ -12056,7 +12061,7 @@ function _confirmRequestCustomerDbSheets_(ss) {
   // 개고생2.0 / 빌리지 2.0 고객DB가 할인유형(I열)의 기준이다.
   // Properties가 비어 있는 환경도 있어, 운영 매뉴얼의 고정 sheetId를 fallback으로 둔다.
   try {
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     ["개고생2_URL", "VILLAGE2_SHEET_URL", "VILLAGE2_URL"].forEach(function(key) {
       var url = props.getProperty(key);
       if (!url) return;
@@ -12316,7 +12321,7 @@ var CUSTOMER_DB_PENDING_PREFIX_ = 'customerDbPending_v1_';
 
 function _queueCustomerDbPendingWrite_(tradeId, 예약자명, 연락처, 할인유형, reason) {
   try {
-    PropertiesService.getScriptProperties().setProperty(
+    villageScriptProperties_().setProperty(
       CUSTOMER_DB_PENDING_PREFIX_ + String(tradeId || 연락처 || ''),
       JSON.stringify({
         name: String(예약자명 || ''), phone: String(연락처 || ''),
@@ -12328,7 +12333,7 @@ function _queueCustomerDbPendingWrite_(tradeId, 예약자명, 연락처, 할인�
 
 function drainPendingCustomerDbWrites_() {
   var props;
-  try { props = PropertiesService.getScriptProperties(); } catch (e) { return 0; }
+  try { props = villageScriptProperties_(); } catch (e) { return 0; }
   var keys;
   try { keys = props.getKeys(); } catch (e) { return 0; }
   var drained = 0;
@@ -13045,7 +13050,7 @@ function _reserveNextConfirmRequestId_(sheet, dateStr) {
 
   var prefix = "RQ-" + dayKey;
   var propertyKey = "CONFIRM_REQUEST_SEQUENCE_V1_" + dayKey;
-  var properties = PropertiesService.getScriptProperties();
+  var properties = villageScriptProperties_();
   var storedMax = parseInt(properties.getProperty(propertyKey), 10);
   if (!Number.isFinite(storedMax) || storedMax < 0) storedMax = 0;
 
@@ -14371,7 +14376,7 @@ function deleteTrade(tradeId) {
 
   // 3) 개고생2.0 거래내역 행도 있으면 삭제 (취소 로직과 동일 — best-effort)
   try {
-    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
     if (개고생URL) {
       var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
       if (거래시트 && 거래시트.getLastRow() >= 2) {
@@ -15792,7 +15797,7 @@ function ensureTradeLedgerRowOnSheet_(ledgerSheet, fields, options) {
 }
 
 function openTradeLedgerContext_() {
-  var ledgerUrl = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  var ledgerUrl = villageScriptProperties_().getProperty("개고생2_URL");
   if (!ledgerUrl) throw new Error("개고생2_URL 미설정");
   var ledgerSpreadsheet = SpreadsheetApp.openByUrl(ledgerUrl);
   var ledgerSheet = ledgerSpreadsheet.getSheetByName("거래내역");
@@ -15918,7 +15923,7 @@ function finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, tradeID)
   // 계약마스터 K·고객DB I에 재반영한다 (멱등 — 이미 같으면 no-op).
   try { _reconcileRegisteredDiscount_(allData, reqID, tradeID); } catch (discountReconcileErr) {}
   try {
-    if (PropertiesService.getScriptProperties().getProperty("CONTRACT_TEMPLATE_ID")) {
+    if (villageScriptProperties_().getProperty("CONTRACT_TEMPLATE_ID")) {
       scheduleContractRegen(tradeID);
     }
   } catch (regenErr) {}
@@ -16025,7 +16030,7 @@ function deferRegistrationIntent_(reqID, direct) {
   if (!reqID) return;
   // One key per request and approval level: simultaneous writers cannot lose
   // another request or downgrade a direct approval. A worker owns sheet writes.
-  PropertiesService.getScriptProperties().setProperty((direct ? 'registerDirectIntent_' : 'registerRetryIntent_') + reqID, '1');
+  villageScriptProperties_().setProperty((direct ? 'registerDirectIntent_' : 'registerRetryIntent_') + reqID, '1');
   ensurePendingRegisterTrigger_(30000);
 }
 
@@ -16079,7 +16084,7 @@ function readPendingRegisterQueue_(props) {
 
 function enqueuePendingRegister_(reqID, delayMs) {
   if (!reqID) return;
-  var qProps = PropertiesService.getScriptProperties();
+  var qProps = villageScriptProperties_();
   var qLock = LockService.getScriptLock();
   var qLocked = false;
   try {
@@ -16227,7 +16232,7 @@ function scheduleRegister(reqID) {
  * 시간 기반 트리거에서 호출 — pendingRegister 처리
  */
 function _runPendingRegister() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   // 1단계는 읽기만 한다. 트리거 I/O를 ScriptLock 밖에서 완료하기 전에는
   // durable queue를 지우지 않아야 GAS hard-kill에도 실행 경로가 남는다.
   var drainLock = LockService.getScriptLock();
@@ -17367,7 +17372,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   const triggerIdx = triggerRow - 2;
   reqID = allData[triggerIdx][0];
   if (!hasTransferredConfirmedLock && reqID) {
-    var intentProps = PropertiesService.getScriptProperties();
+    var intentProps = villageScriptProperties_();
     var directIntent = intentProps.getProperty('registerDirectIntent_' + reqID);
     var retryIntent = intentProps.getProperty('registerRetryIntent_' + reqID);
     var registered = registrationQueueBinding_(allData, reqID);
@@ -17745,7 +17750,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     // 삭제/완료 처리하지 않고 내구 대기에 보존해 짧은 claim 해제 후 재시도한다.
     if (mergeMode && mergeTargetTID) {
       var mergeMutationBlock = dashboardTradeMutationLeaseError_(
-        PropertiesService.getScriptProperties(), mergeTargetTID, 'equipmentAdd', ''
+        villageScriptProperties_(), mergeTargetTID, 'equipmentAdd', ''
       );
       if (mergeMutationBlock) {
         if (registerOptions.failIfBusy === true) {
@@ -17819,7 +17824,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
 
   // 개고생2.0 거래내역도 같은 스프레드시트 권한으로 직접 확인한다.
   try {
-    const 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    const 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
     if (개고생URL) {
       const 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
       const 거래시트 = 개고생SS.getSheetByName("거래내역");
@@ -18051,7 +18056,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   // 반드시 위의 P열 기록 이후에 예약해야 한다.
   if (!mergeMode) {
     try {
-      if (PropertiesService.getScriptProperties().getProperty("CONTRACT_TEMPLATE_ID")) {
+      if (villageScriptProperties_().getProperty("CONTRACT_TEMPLATE_ID")) {
         scheduleContractRegen(거래ID);
       }
     } catch (regenErr) {}
@@ -18280,7 +18285,7 @@ function addEquipmentToContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
-  const addLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), 거래ID, 'equipmentAdd', '');
+  const addLeaseBlock = dashboardTradeMutationLeaseError_(villageScriptProperties_(), 거래ID, 'equipmentAdd', '');
   if (addLeaseBlock) {
     sheet.getRange(row, 15).setValue("⏳ " + addLeaseBlock.error);
     sheet.getRange(row, 14).clearContent();
@@ -18415,7 +18420,7 @@ function removeEquipmentFromContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
-  const removeLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), 거래ID, 'equipmentRemove', '');
+  const removeLeaseBlock = dashboardTradeMutationLeaseError_(villageScriptProperties_(), 거래ID, 'equipmentRemove', '');
   if (removeLeaseBlock) {
     sheet.getRange(row, 15).setValue("⏳ " + removeLeaseBlock.error);
     sheet.getRange(row, 14).clearContent();
@@ -18879,7 +18884,7 @@ var TRADE_LEDGER_SYNC_PENDING_PREFIX_ = 'tradeLedgerSyncPending_v1_';
 
 function queuePendingTradeLedgerSync_(tradeId, reason) {
   try {
-    PropertiesService.getScriptProperties().setProperty(
+    villageScriptProperties_().setProperty(
       TRADE_LEDGER_SYNC_PENDING_PREFIX_ + String(tradeId || ''),
       JSON.stringify({ at: Date.now(), reason: String(reason || '') })
     );
@@ -18888,7 +18893,7 @@ function queuePendingTradeLedgerSync_(tradeId, reason) {
 
 function drainPendingTradeLedgerSyncs_() {
   var props;
-  try { props = PropertiesService.getScriptProperties(); } catch (e) { return 0; }
+  try { props = villageScriptProperties_(); } catch (e) { return 0; }
   var keys;
   try { keys = props.getKeys(); } catch (e) { return 0; }
   var drained = 0;
@@ -19407,7 +19412,7 @@ function _getPopbillToken(forceRefresh) {
     if (cachedToken) return cachedToken;
   }
 
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var linkID = props.getProperty('POPBILL_LINK_ID');
   var secretKey = props.getProperty('POPBILL_SECRET_KEY');
   var corpNum = String(props.getProperty('POPBILL_CORP_NUM') || '').replace(/-/g, '');
@@ -19471,7 +19476,7 @@ function _getPopbillToken(forceRefresh) {
 function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns, options) {
   options = options || {};
   var receiverPhone = normalizeAlimtalkReceiver_(receiver);
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var senderNum = props.getProperty('POPBILL_SENDER_NUM');
   var altSendType = Object.prototype.hasOwnProperty.call(options, 'altSendType') ? String(options.altSendType) : 'A';
   var altContent = Object.prototype.hasOwnProperty.call(options, 'altContent') ? String(options.altContent) : content;
@@ -19557,7 +19562,7 @@ function repairFailedGuideAlimtalk(args) {
   if (Number(message.state) !== 3 || Number(message.result) !== 624 || normalizeAlimtalkReceiver_(rawPhone) !== phone
       || rawPhone === phone || String(message.receiveName).trim() !== String(customer[1]).trim()
       || /^(0|000|100)$/.test(String(message.altResult || ''))) throw new Error('전화번호 선행 0 실패의 복구 조건 불일치');
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var sent = _getGuideSentData_(props);
   var flag = (kind === 'checkout' ? 'out_' : 'in_') + tid;
   if (!sent[flag]) return { success: true, reset: false, tradeId: tid };
@@ -19612,7 +19617,7 @@ function _alimtalkAccepted_(res) {
  * 중복 방지: 거래ID당 1회만 발송 (합침 재등록 시 재발송 안 함)
  */
 function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간) {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var tpl = props.getProperty('POPBILL_TPL_REGISTER');
   if (!tpl) return { skipped: '템플릿 미설정' };
   if (!연락처 || !예약자명) return { skipped: '고객 정보 없음' };
@@ -19663,7 +19668,7 @@ function testRegisterAlimtalk(args) {
   if (!연락처) return { error: "연락처 필수" };
   var quoteGuide = args.quoteGuide === true;
   var tpl = quoteGuide ? bookingConfirmationTemplateCode_()
-    : PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_REGISTER');
+    : villageScriptProperties_().getProperty('POPBILL_TPL_REGISTER');
   if (!tpl) return { error: quoteGuide ? "예약 확정·견적서 안내 템플릿 승인 확인 필요" : "POPBILL_TPL_REGISTER 미설정" };
 
   var 고객명 = "테스트", 반출표시 = "2026-06-15 10:00", 반납표시 = "2026-06-18 18:00";
@@ -19861,7 +19866,7 @@ function readGuideCustomerVisitMap_() {
     error: ''
   };
 
-  var url = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+  var url = villageScriptProperties_().getProperty('개고생2_URL');
   if (!url) {
     result.error = '개고생2_URL 미설정';
     return result;
@@ -19994,7 +19999,7 @@ function getGuideCustomerVisitInfo_(visitMap, customerName, tel) {
 }
 
 function _getGuideSentData_(props) {
-  props = props || PropertiesService.getScriptProperties();
+  props = props || villageScriptProperties_();
   var sentData = {};
   try {
     var sentRaw = props.getProperty('GUIDE_SENT_V2');
@@ -20045,7 +20050,7 @@ function diagGuideAlimtalkSchedule(args) {
     });
   }
 
-  var sentData = _getGuideSentData_(PropertiesService.getScriptProperties());
+  var sentData = _getGuideSentData_(villageScriptProperties_());
   var visitMap = readGuideCustomerVisitMap_();
   var now = new Date();
   var nowMs = now.getTime();
@@ -20114,7 +20119,7 @@ function markGuideAlimtalkSent(args) {
     : String(rawIds || '').split(/[,\s]+/);
   var kind = String(args.kind || args.종류 || '반납').trim();
   var prefix = kind === '반출' ? 'out_' : 'in_';
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var sentData = _getGuideSentData_(props);
   var sentAt = String(args.sentAt || args.sent_at || '').trim();
   if (!sentAt) sentAt = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd HH:mm');
@@ -20209,7 +20214,7 @@ function checkGuideAlimtalkLocked_() {
 
   // ── 중복 발송 방지 (거래 단위 단일 키 — 날짜별 키는 자정 넘으면 플래그가 사라져
   //     반납 안내[반납-12h~반납]처럼 자정을 걸치는 구간에서 중복 발송됐음) ──
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var sentKey = 'GUIDE_SENT_V2';
   var sentData = _getGuideSentData_(props);
 
@@ -20384,12 +20389,12 @@ function ensurePendingScheduleFormatTrigger_(delayMs) {
 }
 
 function requestScheduleFormat_() {
-  PropertiesService.getScriptProperties().setProperty("_pendingScheduleFormat", String(Date.now()));
+  villageScriptProperties_().setProperty("_pendingScheduleFormat", String(Date.now()));
   ensurePendingScheduleFormatTrigger_(1000);
 }
 
 function _runPendingScheduleFormat() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var claimedMarker = props.getProperty("_pendingScheduleFormat");
   if (!claimedMarker) return;
 
@@ -20660,7 +20665,7 @@ function fixScheduleHeaders() {
  * 진단: 현재 대기 중인 계약서 재생성 큐 + 마지막 편집부터 경과시간 반환.
  */
 function listPendingContractRegens() {
-  var props = PropertiesService.getScriptProperties().getProperties();
+  var props = villageScriptProperties_().getProperties();
   var now = Date.now();
   var items = [];
   for (var key in props) {
@@ -21219,7 +21224,7 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices, expectedTradeId) 
       var oldStatus = String(values[9] || '').trim();
       if (tradeId && !guardedTrades[tradeId]) {
         var scheduleStatusLeaseBlock = dashboardTradeMutationLeaseError_(
-          PropertiesService.getScriptProperties(), tradeId, 'scheduleStatus', ''
+          villageScriptProperties_(), tradeId, 'scheduleStatus', ''
         );
         if (scheduleStatusLeaseBlock) throw new Error(scheduleStatusLeaseBlock.error);
         guardedTrades[tradeId] = true;
@@ -21269,7 +21274,7 @@ function getClaudeApiKey() {
 function parseWithClaude(text, imageBase64, imageMediaType) {
   // API 키는 GAS Script Properties에 저장 (코드에 하드코딩 금지)
   // 설정: GAS 편집기 → 프로젝트 설정 → 스크립트 속성 → ANTHROPIC_API_KEY
-  var apiKey = PropertiesService.getScriptProperties().getProperty("ANTHROPIC_API_KEY");
+  var apiKey = villageScriptProperties_().getProperty("ANTHROPIC_API_KEY");
   if (!apiKey) return { error: "ANTHROPIC_API_KEY가 스크립트 속성에 설정되지 않았습니다" };
 
   var systemPrompt = "너는 카메라 렌탈샵 '빌리지'의 예약 문의 파서야. 카카오톡 메시지나 채팅 캡쳐 이미지를 받아서 예약 정보를 JSON으로 추출해.\n\n반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없이):\n{\n  \"예약자명\": \"이름 또는 빈 문자열\",\n  \"연락처\": \"010-XXXX-XXXX 형식 또는 빈 문자열\",\n  \"반출일\": \"YYYY-MM-DD 또는 빈 문자열\",\n  \"반출시간\": \"HH:MM 또는 빈 문자열 (기본 10:00)\",\n  \"반납일\": \"YYYY-MM-DD 또는 빈 문자열\",\n  \"반납시간\": \"HH:MM 또는 빈 문자열 (기본 18:00)\",\n  \"할인유형\": \"일반|학생|개인사업자/프리랜서 또는 빈 문자열\",\n  \"장비\": [{\"이름\": \"정확한 장비명\", \"수량\": 1}],\n  \"비고\": \"추가 메모\"\n}\n\n장비명 변환 규칙:\n- FX3, fx3 → 소니 FX3 (풀세트/바디세트/바디 구분은 고객 표현 그대로)\n- A7S3, a7s III → 소니 A7S3\n- 코모도, komodo → 레드 코모도\n- 부라노, burano → 부라노\n- A7M4 → 소니 A7M4\n- 70-200 GM2 → 소니 GM 70-200mm II\n- 24-70 GM2 → 소니 GM 24-70mm II\n- 600X → 어퓨쳐 600X\n- V마운트 배터리 → V마운트 배터리\n- C대, 시대 → C스탠드\n- 장비명은 최대한 정확하게, 모호하면 원문 그대로\n\n할인유형:\n- 학생/대학/졸작/과제 → \"학생\"\n- 프리랜서/사업자/크리에이터 → \"개인사업자/프리랜서\"\n- 고객이 일반 할인을 명시한 경우에만 → \"일반\"\n- 할인 언급이 없으면 반드시 \"\"\n\n날짜:\n- 상대 날짜(내일, 모레 등)는 오늘 기준으로 계산. 오늘: " + Utilities.formatDate(new Date(), "Asia/Seoul", "yyyy-MM-dd") + "\n- 시간 미언급 시: 반출 10:00, 반납 18:00\n\n이미지인 경우 채팅 내용을 읽어서 동일하게 파싱해.";
@@ -21906,7 +21911,7 @@ function readRegisteredTradeCorrectionState_(tradeId, includeLedger, allowEmptyS
     };
   }
 
-  var ledgerUrl = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+  var ledgerUrl = villageScriptProperties_().getProperty('개고생2_URL');
   if (!ledgerUrl) throw new Error('개고생2_URL 속성이 없습니다');
   var ledgerSheet = SpreadsheetApp.openByUrl(ledgerUrl).getSheetByName('거래내역');
   if (!ledgerSheet || ledgerSheet.getLastRow() < 2) throw new Error('거래내역 원장을 찾을 수 없습니다');
@@ -22325,7 +22330,7 @@ function verifyPendingPriceContract_(contractUrl, tradeId, customerName) {
 }
 
 function readRegisteredTradePriceLedger_(tradeId, pendingCustomerName) {
-  var url = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+  var url = villageScriptProperties_().getProperty('개고생2_URL');
   if (!url) throw new Error('price correction ledger URL missing');
   var sheet = SpreadsheetApp.openByUrl(url).getSheetByName('거래내역');
   if (!sheet || sheet.getLastRow() < 2) throw new Error('price correction ledger missing');
@@ -22391,7 +22396,7 @@ function registeredTradePriceResult_(correction, receipt, snapshot, replayed) {
 // An interrupted/partial operation is read back by an operator; it never retries
 // either side effect. The short shared lease protects the unlocked Drive work.
 function correctRegisteredTradePrices_(correction) {
-  var props = PropertiesService.getScriptProperties(), lock = LockService.getScriptLock();
+  var props = villageScriptProperties_(), lock = LockService.getScriptLock();
   var key = 'registeredTradePriceReceipt_v1_' + correction.operationId;
   var leaseKey = 'registeredTradePriceMutation_' + correction.tradeId;
   var digest = registeredTradePriceDigest_(correction), held = false, claimed = false, ownsLease = false, receipt = null, stages = [];
@@ -22567,7 +22572,7 @@ function registeredTradeRoundsResult_(correction, receipt, snapshot, replayed) {
 // A rounds operation owns one permanent receipt. Once claimed, neither its exact
 // I/L write nor its strict regeneration is ever replayed after an interruption.
 function correctRegisteredTradeRounds_(correction) {
-  var props = PropertiesService.getScriptProperties(), lock = LockService.getScriptLock();
+  var props = villageScriptProperties_(), lock = LockService.getScriptLock();
   var key = 'registeredTradeRoundsReceipt_v1_' + correction.operationId;
   var leaseKey = 'registeredTradeRoundsMutation_' + correction.tradeId;
   var digest = registeredTradePriceDigest_(correction), held = false, claimed = false, ownsLease = false, receipt = null, stages = [];
@@ -22760,7 +22765,7 @@ function correctRegisteredTrade(args) {
     // ScriptLock does not cover the HTTP portions of checkout/return/setup/aux
     // transitions. Their durable lease is the cross-operation exclusion signal.
     var correctionLeaseBlock = dashboardTradeMutationLeaseError_(
-      PropertiesService.getScriptProperties(),
+      villageScriptProperties_(),
       correction.tradeId,
       'registeredTradeCorrection',
       correction.operationId
@@ -22955,7 +22960,7 @@ function correctRegisteredTrade(args) {
   var shouldWakeStructureProjection = structureChanged;
   if (!shouldWakeStructureProjection && (correction.add.length || correction.remove.length)) {
     try {
-      shouldWakeStructureProjection = !!PropertiesService.getScriptProperties().getProperty(
+      shouldWakeStructureProjection = !!villageScriptProperties_().getProperty(
         DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + correction.tradeId
       );
     } catch (structureQueueReadError) {}
@@ -23383,7 +23388,7 @@ function changeRegisteredTradeDates(args, options) {
     }
 
     // 거래내역도 쓰기 전에 먼저 찾아 둔다. 누락된 원장을 허용하면 이번 사고처럼 부분 성공이 된다.
-    var ledgerUrl = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+    var ledgerUrl = villageScriptProperties_().getProperty('개고생2_URL');
     if (!ledgerUrl) throw new Error('개고생2_URL 속성이 없어 거래내역 원장을 검증할 수 없습니다');
     var ledgerSheet = SpreadsheetApp.openByUrl(ledgerUrl).getSheetByName('거래내역');
     if (!ledgerSheet || ledgerSheet.getLastRow() < 2) throw new Error('거래내역 원장을 찾을 수 없습니다');
@@ -23650,7 +23655,7 @@ function repairTradeContractStatus(tid, status) {
     var prev = String(sheet.getRange(row, 10).getDisplayValue() || '').trim();
     sheet.getRange(row, 10).setValue(status);
     try { applyContractMasterStatusRowStyle_(sheet, row, status); } catch (e) {}
-    try { PropertiesService.getScriptProperties().deleteProperty('returnPrevContractStatus_' + tid); } catch (e2) {}
+    try { villageScriptProperties_().deleteProperty('returnPrevContractStatus_' + tid); } catch (e2) {}
     try { CacheService.getScriptCache().remove('dashStarted_' + tid); } catch (e3) {}
     return { success: true, tradeId: tid, row: row, previousStatus: prev, status: status };
   }

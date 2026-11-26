@@ -1,4 +1,4 @@
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('./helpers/gas-storage-vm'),crypto=require('node:crypto');
 const gas=fs.readFileSync(require('node:path').join(__dirname,'../checkAvailability.js'),'utf8');
 // Replacing the metadata-only path with ordinary discount regeneration must fail:
 // paid historical totals, coupon and the original linked document are immutable.

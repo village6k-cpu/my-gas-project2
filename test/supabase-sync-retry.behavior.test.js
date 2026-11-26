@@ -1,4 +1,4 @@
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('./helpers/gas-storage-vm'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','supabaseSync.js'),'utf8');
 function fixture(options={}){
  let now=Date.parse('2026-10-24T10:00:00Z');const values={SUPA_TOKEN:'test-token',SUPA_TOKEN_EXP:String(now+86400000),SUPA_DIRTY_v2_good:'revision-good',SUPA_DIRTY_v2_bad:'revision-bad'};

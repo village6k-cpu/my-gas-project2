@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const read = name => fs.readFileSync(path.join(__dirname, '..', name), 'utf8').replaceAll('\r\n', '\n');
 const section = (source, start, end) => {
   const from = source.indexOf(start), to = source.indexOf(end, from + start.length);

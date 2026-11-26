@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const vm = require("node:vm");
+const vm = require("../../../test/helpers/gas-storage-vm");
 const ts = require("typescript");
 
 // 성능/안정성 전면 점검(2026-07)의 코어 데이터 계층 수정 회귀 방지.
@@ -911,7 +911,8 @@ test("GAS 할인 정본 조회는 dirty worker 성공 전에는 같은 문자열
   };
   const context = {
     SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: () => sheet }) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: () => {
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => {
+      if (key === 'OPERATIONS_RECORDS_STORE_V1') return null;
       assert.equal(lockHeld, true, "dirty 표식은 K열·revision과 같은 잠금에서 읽어야 한다");
       return dirty ? "dirty-token" : "";
     } }) },
@@ -965,7 +966,7 @@ test("GAS 할인 저장은 unchanged도 commit하고 오래된 오프라인 선�
   let commits = 0;
   let serverRevision = 1000;
   let mutationResult = { duplicate: false, skip: false, previousTarget: "", previousClientAt: 0 };
-  const props = { setProperties() {} };
+  const props = { getProperty: () => null, setProperties() {} };
   const range = {
     getDisplayValue() { return current; },
     setValue(value) { current = value; setCalls++; },

@@ -1,7 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const vm = require('vm');
+const vm = require('./helpers/gas-storage-vm');
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
 const builders = source.slice(source.indexOf('function _buildCheckoutMsg'), source.indexOf('function _parseCheckoutDateTime'));

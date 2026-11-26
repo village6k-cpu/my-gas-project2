@@ -205,6 +205,9 @@ cd ../my-gas-project2-worktrees/작업명
 **원칙: 떠나는 맥에서 endwork, 도착하는 맥에서 startwork.** 빼먹으면 다른 맥 작업분이 GAS와 git 사이에서 어긋남.
 
 ### 주의사항
+- 모든 GAS 설정/운영 상태 접근은 `villageScriptProperties_()`를 사용한다. `PropertiesService.getScriptProperties()`와 `villageRawProperties_()`의 직접 사용은 저장소 어댑터 및 명시적 물리 저장소 진단에서만 허용한다.
+- `villagePropertyStore.js`의 설정 허용 목록에는 인증 정보·연결 주소·고정 기능 설정·저장소 포인터만 등록한다. 거래별 상태, 작업 대기열, 발송 기록, 중복 실행 방지 키, 토큰 캐시와 새 종류의 운영 기록은 모두 전용 운영기록 저장소로 자동 분리한다.
+- 저장소 이전은 기존 공개 실행이 끝나는 유예 시간 뒤에 수행한다. 매 배치의 비공개 백업과 대상 재조회가 확인되기 전에 원본을 제거하지 않는다. 저장소 장애를 성공으로 처리하거나 작은 설정 저장소로 되돌려 쓰지 않는다.
 - doGet/doPost는 sheetAPI.js에만 정의
 - onOpen은 checkAvailability.js에만 정의
 - .clasp.json의 scriptId로 GAS 프로젝트 식별
