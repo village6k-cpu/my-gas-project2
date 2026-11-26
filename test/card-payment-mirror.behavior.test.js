@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const source = fs.readFileSync(require.resolve('../checkAvailability.js'), 'utf8');
 const code = source.slice(source.indexOf('function updateTradePaymentMethod('), source.indexOf('function applyTradePaymentSideEffects_('));
 function run(found, applied) {

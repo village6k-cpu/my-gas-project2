@@ -1,4 +1,4 @@
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('./helpers/gas-storage-vm'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'../supabaseSync.js'),'utf8');
 const body=source.slice(source.indexOf('function buildSupabaseTrades_'),source.indexOf('/** payload 키 구성이 같은 행끼리'));
 const tid='260403-015',url='https://docs.google.com/spreadsheets/d/fixture-contract/edit';
@@ -9,7 +9,7 @@ function fixture(){
  const table=rows=>({getLastRow:()=>rows.length+1,getRange:(_r,c,_h,w)=>({getValues:()=>rows.map(r=>r.slice(c-1,c-1+w)),getDisplayValues:()=>rows.map(r=>r.slice(c-1,c-1+w).map(String))})});
  const context={Date,Math,JSON,Object,String,Number,Array,
   Utilities:{formatDate:(d,tz)=>new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'}).format(d)},
-  PropertiesService:{getScriptProperties:()=>({getProperties:()=>({...props})})},
+  PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k]??null,getProperties:()=>({...props})})},
   parseDT:(d,t)=>new Date(d+'T'+t+':00+09:00'),
   getTimelineData:()=>({groups:[],items:[]}),getDashboardData:()=>{throw Error('old financial values must not depend on a current dashboard window');},
   SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheetByName:n=>n==='계약마스터'?table(masters):null})},

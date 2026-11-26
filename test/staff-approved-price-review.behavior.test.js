@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const path = require('node:path');
 const gas = fs.readFileSync(path.join(__dirname, '../checkAvailability.js'), 'utf8');
 function fn(name) {

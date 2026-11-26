@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'supabaseSync.js'), 'utf8');
 const now = Date.parse('2026-10-22T17:00:00Z');

@@ -1,6 +1,6 @@
 /** 수납 원본/배분은 Postgres가 정본, 청구액은 기존 거래내역 I열이 정본이다. */
 function paymentLedgerEnabled_() {
-  return PropertiesService.getScriptProperties().getProperty('PAYMENT_LEDGER_ENABLED') === 'true';
+  return villageScriptProperties_().getProperty('PAYMENT_LEDGER_ENABLED') === 'true';
 }
 
 function paymentLedgerDate_(value) {
@@ -81,7 +81,7 @@ function applyPaymentLedgerProjection_(items) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) throw new Error('다른 변경을 반영 중입니다. 재시도해주세요.');
   try {
-    var ledger = getVillageTradeSheet_(), props = PropertiesService.getScriptProperties();
+    var ledger = getVillageTradeSheet_(), props = villageScriptProperties_();
     var rows = ledger.getLastRow() < 2 ? [] : ledger.getRange(2, 1, ledger.getLastRow() - 1, 13).getValues();
     var index = {}, duplicates = {};
     rows.forEach(function(row, i) {
@@ -131,7 +131,7 @@ function applyPaymentLedgerProjection_(items) {
 }
 
 function paymentLedgerServerRequest_(body) {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var key = props.getProperty('VILLAGE_API_WRITE_KEY_V1');
   if (!key) throw new Error('수납 내부 인증 설정 없음');
   var fetch = typeof supaSyncFetch_ === 'function' ? supaSyncFetch_ : function(url, options) { return UrlFetchApp.fetch(url, options); };
@@ -166,6 +166,6 @@ function flushPaymentLedgerMirror_(tradeIds, report) {
 
 function configurePaymentLedger_(enabled) {
   if (enabled !== true && enabled !== false) throw new Error('enabled boolean 필요');
-  PropertiesService.getScriptProperties().setProperty('PAYMENT_LEDGER_ENABLED', enabled ? 'true' : 'false');
+  villageScriptProperties_().setProperty('PAYMENT_LEDGER_ENABLED', enabled ? 'true' : 'false');
   return { success: true, enabled: enabled };
 }

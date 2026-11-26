@@ -1,4 +1,4 @@
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('./helpers/gas-storage-vm'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','supabaseSync.js'),'utf8');
 const start=source.indexOf('function buildSupabaseTrades_'),end=source.indexOf('\n/** payload 키 구성이 같은 행끼리 묶어 upsert');
 function fixture({fresh={tradeRowFound:true,actualAmount:182160,contractUrl:'new-contract',contractRegenPending:false,paymentMethod:'must-not-copy'},missingDetail=false,readThrows=false}={}){

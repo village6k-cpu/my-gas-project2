@@ -1,5 +1,5 @@
 'use strict';
-const test = require('node:test'), assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
+const test = require('node:test'), assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('./helpers/gas-storage-vm');
 const crypto = require('node:crypto'), zlib = require('node:zlib'), path = require('node:path');
 const prefix = 'inventorySemantic_v1_', pointer = 'inventorySemanticStore_v1_manifest';
 function harness() {

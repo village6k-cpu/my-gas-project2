@@ -1,7 +1,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/gas-storage-vm');
 const path=require('node:path');
 // Keep the October booking fixtures in the future regardless of the machine clock.
 class FixtureDate extends Date {

@@ -1,6 +1,6 @@
 /** Durable, independently scheduled inventory alerts. Never edits a rental or a customer message. */
 function inventoryRiskLoadState_() {
-  var p=PropertiesService.getScriptProperties(),head=p.getProperty(INVENTORY_RISK_PREFIX_+'state');
+  var p=villageScriptProperties_(),head=p.getProperty(INVENTORY_RISK_PREFIX_+'state');
   if(!head)return {entries:{},pending:null};
   var pointer=JSON.parse(head),text='';
   for(var i=0;i<pointer.parts;i++) {
@@ -12,7 +12,7 @@ function inventoryRiskLoadState_() {
 }
 
 function inventoryRiskSaveState_(state) {
-  var p=PropertiesService.getScriptProperties(),oldText=p.getProperty(INVENTORY_RISK_PREFIX_+'state');
+  var p=villageScriptProperties_(),oldText=p.getProperty(INVENTORY_RISK_PREFIX_+'state');
   var old=oldText?JSON.parse(oldText):null,text=JSON.stringify(state),generation=Utilities.getUuid(),parts=Math.ceil(text.length/1800),patch={};
   // A new generation is complete before changing the pointer. Korean stays below 9 KB/property.
   for(var i=0;i<parts;i++)patch[INVENTORY_RISK_PREFIX_+'state_'+generation+'_'+i]=text.slice(i*1800,(i+1)*1800);
@@ -22,7 +22,7 @@ function inventoryRiskSaveState_(state) {
 }
 
 function inventoryRiskSlack_(method,payload) {
-  var p=PropertiesService.getScriptProperties(),token=p.getProperty(INVENTORY_RISK_PREFIX_+'slackToken');
+  var p=villageScriptProperties_(),token=p.getProperty(INVENTORY_RISK_PREFIX_+'slackToken');
   if(!token)throw new Error('재고 경보 Slack 연결 필요');
   var backoffKey=INVENTORY_RISK_PREFIX_+'retryAfter_'+method;
   if(Number(p.getProperty(backoffKey) || 0)>Date.now())throw new Error('Slack 재시도 대기: '+method);
@@ -92,7 +92,7 @@ function inventoryRiskClaim_() {
   var lock=LockService.getScriptLock();
   if(!lock.tryLock(1000))return null;
   try {
-    var p=PropertiesService.getScriptProperties(),raw=p.getProperty(INVENTORY_RISK_PREFIX_+'lease'),lease=raw?JSON.parse(raw):null;
+    var p=villageScriptProperties_(),raw=p.getProperty(INVENTORY_RISK_PREFIX_+'lease'),lease=raw?JSON.parse(raw):null;
     if(lease && lease.until>Date.now())return null;
     var owner=Utilities.getUuid();p.setProperty(INVENTORY_RISK_PREFIX_+'lease',JSON.stringify({owner:owner,until:Date.now()+7*60000}));
     return owner;
@@ -101,7 +101,7 @@ function inventoryRiskClaim_() {
 
 function inventoryRiskRelease_(owner) {
   var lock=LockService.getScriptLock();if(!lock.tryLock(1000))return;
-  try{var p=PropertiesService.getScriptProperties(),raw=p.getProperty(INVENTORY_RISK_PREFIX_+'lease');
+  try{var p=villageScriptProperties_(),raw=p.getProperty(INVENTORY_RISK_PREFIX_+'lease');
     if(raw && JSON.parse(raw).owner===owner)p.deleteProperty(INVENTORY_RISK_PREFIX_+'lease');
   }finally{lock.releaseLock();}
 }
@@ -133,7 +133,7 @@ function flushInventoryRiskAlerts(event) {
   if(event?.triggerUid)ScriptApp.getProjectTriggers().forEach(function(t){
     if(t.getUniqueId()===event.triggerUid && t.getHandlerFunction()==='flushInventoryRiskAlerts')ScriptApp.deleteTrigger(t);
   });
-  var p=PropertiesService.getScriptProperties();
+  var p=villageScriptProperties_();
   if(p.getProperty(INVENTORY_RISK_PREFIX_+'enabled')!=='true')return {status:'disabled'};
   var owner=inventoryRiskClaim_();if(!owner)return {status:'busy'};
   var started=Date.now();p.deleteProperty(INVENTORY_RISK_PREFIX_+'queuedAt');
@@ -194,7 +194,7 @@ function flushInventoryRiskAlerts(event) {
 function recordInventoryPropertyCapacityDiagnostic_() {
   var lock, held=false;
   try {
-    var build='capacity-20261023-v1',p=PropertiesService.getScriptProperties();
+    var build='capacity-20261023-v1',p=villageScriptProperties_();
     var key=INVENTORY_RISK_PREFIX_+'lastScan',raw=p.getProperty(key),scan=JSON.parse(raw || '{}');
     if(!scan || typeof scan!=='object' || Array.isArray(scan) || scan.propertyCapacity?.build===build)return;
     var errorKey=INVENTORY_RISK_PREFIX_+'lastError',priorError=p.getProperty(errorKey);
@@ -258,7 +258,7 @@ function inventoryRiskHeartbeat(event){
 function requestInventoryRiskScan_() {
   // Called from booking locks too: no nested locks or network work here.
   try{
-    var p=PropertiesService.getScriptProperties();p.setProperty(INVENTORY_RISK_PREFIX_+'dirty',String(Date.now()));
+    var p=villageScriptProperties_();p.setProperty(INVENTORY_RISK_PREFIX_+'dirty',String(Date.now()));
     if(p.getProperty(INVENTORY_RISK_PREFIX_+'enabled')!=='true')return;
     if(!inventoryRiskNotificationSchedule_(inventoryRiskLoadState_(),Date.now()).due)return;
     var queued=Number(p.getProperty(INVENTORY_RISK_PREFIX_+'queuedAt') || 0);
@@ -269,7 +269,7 @@ function requestInventoryRiskScan_() {
 }
 
 function getInventoryRiskMonitorStatus() {
-  var p=PropertiesService.getScriptProperties(),state=inventoryRiskLoadState_();
+  var p=villageScriptProperties_(),state=inventoryRiskLoadState_();
   var schedule=inventoryRiskNotificationSchedule_(state,Date.now());
   return {enabled:p.getProperty(INVENTORY_RISK_PREFIX_+'enabled')==='true',channel:p.getProperty(INVENTORY_RISK_PREFIX_+'channel'),
     turnaroundMinutes:Number(p.getProperty(INVENTORY_RISK_PREFIX_+'turnaroundMinutes') || 60),
@@ -281,7 +281,7 @@ function getInventoryRiskMonitorStatus() {
 }
 
 function setupInventoryRiskMonitor(options) {
-  options=options || {};var p=PropertiesService.getScriptProperties();
+  options=options || {};var p=villageScriptProperties_();
   if(options.channel && !/^[CG][A-Z0-9]{8,}$/.test(options.channel))throw new Error('Slack 채널 ID 확인 필요');
   if(options.turnaroundMinutes!==undefined && (!Number.isInteger(options.turnaroundMinutes) || options.turnaroundMinutes<0 || options.turnaroundMinutes>1440))throw new Error('반납 여유시간 확인 필요');
   if(options.notificationHour!==undefined && (!Number.isInteger(options.notificationHour) || options.notificationHour<0 || options.notificationHour>23))throw new Error('재고 알림 시간 확인 필요');

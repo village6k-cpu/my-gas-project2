@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const root = path.resolve(__dirname, '..');
 const period = { startDate: '2026-11-02', startTime: '20:00', endDate: '2026-11-05', endTime: '02:00' };
 const marker = '[승인회차:v1 회차=2.5 기간=2026-11-02T20:00/2026-11-05T02:00]';

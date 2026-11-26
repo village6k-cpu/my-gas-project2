@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const vm = require('node:vm');
+const vm = require('./helpers/gas-storage-vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'inventoryRiskDelivery.js'), 'utf8');
 const prefix = 'inventoryRisk_v1_', scanKey = prefix + 'lastScan';
 const preservedIncidentError = JSON.stringify({ at: '2026-10-21T22:54:33.712Z', message: '재고 경보 전송·상태 확인 필요' });

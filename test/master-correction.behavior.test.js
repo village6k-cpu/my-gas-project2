@@ -1,5 +1,5 @@
 'use strict';
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('./helpers/gas-storage-vm'),crypto=require('node:crypto');
 function harness(){
  const tables={세트마스터:[['세트명','구성장비명','수량','비고','대체가능장비','가용체크(Y/N)','단가'],['Kit','Body',1,'','','Y','']],장비마스터:[['분류','장비ID','카테고리','장비명'],['','CAM-1','','Body'],['','BAT-1','','Battery']]};
  let writes=[],locked=false;

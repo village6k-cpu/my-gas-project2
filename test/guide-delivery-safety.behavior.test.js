@@ -1,7 +1,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/gas-storage-vm');
 function load(){
   const props={GUIDE_DOOR_PASSWORD:'test-password',GUIDE_ALERT_PHONE:'01000000000'};
   const sends=[],alerts=[];let reply={receiptNum:'026101499999900001'},delivery=null;

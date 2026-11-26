@@ -1,11 +1,11 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/gas-storage-vm');
 test('production incident stop blocks all guide API calls and removes only the guide sending/watchdog triggers',()=>{
   let calls=0;const removed=[],props={};
   const triggers=['checkGuideAlimtalk','checkGuideDeliverySafety','onEditInstallable','warmDashboardCache'].map(name=>({getHandlerFunction:()=>name}));
-  const ctx={Date,Error,PropertiesService:{getScriptProperties:()=>({setProperty:(k,v)=>props[k]=v})},
+  const ctx={Date,Error,PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k]??null,setProperty:(k,v)=>props[k]=v})},
     ScriptApp:{getProjectTriggers:()=>triggers.filter(t=>!removed.includes(t.getHandlerFunction())),deleteTrigger:t=>removed.push(t.getHandlerFunction())},
     UrlFetchApp:{fetch:()=>{calls++;throw Error('must not reach gateway');}}};
   vm.runInNewContext(fs.readFileSync('guideDeliverySafety.js','utf8'),ctx);

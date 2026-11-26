@@ -148,7 +148,7 @@ function mcFinishSync_(ss,audit,row,r,plan,replay){
  const state=audit.getRange(row,3).getValues()[0][0];
  if(state==='synced'){
   const list=ss.getSheetByName('목록');
-  const id=PropertiesService.getScriptProperties().getProperty('CONTRACT_TEMPLATE_ID');
+  const id=villageScriptProperties_().getProperty('CONTRACT_TEMPLATE_ID');
   const template=id?SpreadsheetApp.openById(id).getSheets().find(x=>x.getName().indexOf('마스터')>=0):null;
   const rates=mcSnapshot_(ss).rows.filter(x=>x[0]===r.target&&x[6]!==''&&x[6]!==null).map(x=>x[6]);
   const listOk=list&&list.getLastRow()>1&&list.getRange(2,1,list.getLastRow()-1,1).getValues().some(x=>x[0]===r.target);
@@ -163,7 +163,7 @@ function mcFinishSync_(ss,audit,row,r,plan,replay){
   SpreadsheetApp.flush();
   const list=ss.getSheetByName('목록');
   if(!list||list.getLastRow()<2||!list.getRange(2,1,list.getLastRow()-1,1).getValues().some(x=>x[0]===r.target))throw new Error('list readback missing');
-  const templateId=PropertiesService.getScriptProperties().getProperty('CONTRACT_TEMPLATE_ID');
+  const templateId=villageScriptProperties_().getProperty('CONTRACT_TEMPLATE_ID');
   if(!templateId)throw new Error('template not configured');
   const template=SpreadsheetApp.openById(templateId).getSheets().find(x=>x.getName().indexOf('마스터')>=0);
   if(!template||template.getLastRow()<2)throw new Error('template master missing');
@@ -197,7 +197,7 @@ function mcSyncTemplateTarget_(ss,target){
  const expected=mcSnapshot_(ss).rows.filter(x=>x[0]===target&&x[6]!==''&&x[6]!==null).map(x=>x[6]);
  if(!expected.length)throw new Error('target has no catalog rate');
  if(new Set(expected).size!==1)throw new Error('target price conflict');
- const id=PropertiesService.getScriptProperties().getProperty('CONTRACT_TEMPLATE_ID');
+ const id=villageScriptProperties_().getProperty('CONTRACT_TEMPLATE_ID');
  if(!id)throw new Error('template not configured');
  const sheets=SpreadsheetApp.openById(id).getSheets().filter(x=>x.getName().indexOf('마스터')>=0);
  if(sheets.length!==1)throw new Error('template master ambiguous');
@@ -215,7 +215,7 @@ function mcSyncTemplateTarget_(ss,target){
 
 // Dedicated catalog proof key only; the Slack credential never leaves the issuer.
 function mcAuthorizeApply_(r){
- const props=PropertiesService.getScriptProperties();
+ const props=villageScriptProperties_();
  const key=props.getProperty('MASTER_CORRECTION_PROOF_KEY');
  const owner=props.getProperty('MASTER_CORRECTION_OWNER_ID'),team=props.getProperty('MASTER_CORRECTION_TEAM_ID');
  if(props.getProperty('MASTER_CORRECTION_APPLY_ENABLED')!=='true'||!key||!owner||!team)throw new Error('MASTER_APPLY_DISABLED: authenticated owner issuer not configured; preview only');
@@ -244,7 +244,7 @@ function mcProvision_(input){
  if(typeof key!=='string'||! /^[a-f0-9]{64}$/.test(key)||!/^U[A-Z0-9]+$/.test(owner||'')||!/^T[A-Z0-9]+$/.test(team||''))throw new Error('invalid provisioning configuration');
  const lock=LockService.getScriptLock();if(!lock.tryLock(20000))throw new Error('provisioning busy');
  try{
-  const props=PropertiesService.getScriptProperties();
+  const props=villageScriptProperties_();
   if(props.getProperty('MASTER_CORRECTION_PROOF_KEY'))throw new Error('already provisioned; reset requires administrator outside this API');
   props.setProperties({MASTER_CORRECTION_PROOF_KEY:key,MASTER_CORRECTION_OWNER_ID:owner,MASTER_CORRECTION_TEAM_ID:team,MASTER_CORRECTION_APPLY_ENABLED:input.enable===true?'true':'false'});
   return {success:true,provisioned:true,enabled:props.getProperty('MASTER_CORRECTION_APPLY_ENABLED')==='true'};

@@ -25,7 +25,7 @@ function villageApiPrincipal_(key) {
   key = String(key || "").trim();
   if (!key) return "";
   var internalKey = String(
-    PropertiesService.getScriptProperties().getProperty(VILLAGE_INTERNAL_API_KEY_PROPERTY) || ""
+    villageScriptProperties_().getProperty(VILLAGE_INTERNAL_API_KEY_PROPERTY) || ""
   ).trim();
   if (internalKey && key === internalKey) return "internal";
   if (key === VILLAGE_OPERATOR_API_KEY) return "public";
@@ -37,7 +37,7 @@ function villageApiPrincipal_(key) {
 function configureVillageApiInternalKeyV1(value) {
   var key = String(value || "").trim();
   if (!/^[A-Za-z0-9_-]{43}$/.test(key)) throw new Error("invalid internal API key");
-  PropertiesService.getScriptProperties().setProperty(VILLAGE_INTERNAL_API_KEY_PROPERTY, key);
+  villageScriptProperties_().setProperty(VILLAGE_INTERNAL_API_KEY_PROPERTY, key);
   return { success: true, configured: true, keyLength: key.length };
 }
 
@@ -267,7 +267,7 @@ function getVillageOperationCapability_(capabilityId, action) {
 
 function readVillageOperationReceipt_(operationId) {
   if (!/^[a-f0-9-]{16,80}$/i.test(String(operationId || ""))) return null;
-  var text = PropertiesService.getScriptProperties().getProperty(villageOperationReceiptKey_(operationId));
+  var text = villageScriptProperties_().getProperty(villageOperationReceiptKey_(operationId));
   if (!text) return null;
   try { return JSON.parse(text); } catch (error) { return { status: "indeterminate", operationId: operationId }; }
 }
@@ -316,7 +316,7 @@ function withVillageOperationReceipt_(e, execute) {
   }
 
   var digest = villageOperationDigest_(capabilityId, action, body);
-  var properties = PropertiesService.getScriptProperties();
+  var properties = villageScriptProperties_();
   var receiptKey = villageOperationReceiptKey_(operationId);
   var pending = {
     kind: "village-operation-receipt",
@@ -1689,6 +1689,7 @@ function runFunction(funcName, params) {
     "getInventorySemanticStorageStatus",
     "migrateInventorySemanticStorage",
     "probeScriptPropertiesCapacity",
+    "probeOperationalPropertyStorage",
     "getOperationalPropertyStorageStatus",
     "prepareOperationalPropertyStorage",
     "migrateOperationalProperties",
@@ -2008,7 +2009,7 @@ function runFunction(funcName, params) {
     if (funcName === "reclaimDashboardScriptProperties_") {
       var reclaimArgs = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : {};
       if (Array.isArray(reclaimArgs)) reclaimArgs = reclaimArgs[0] || {};
-      var reclaimResult = reclaimDashboardScriptProperties_(PropertiesService.getScriptProperties(), reclaimArgs || {});
+      var reclaimResult = reclaimDashboardScriptProperties_(villageScriptProperties_(), reclaimArgs || {});
       return { success: true, function: funcName, result: reclaimResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "repairTradeContractStatus") {
@@ -2033,7 +2034,7 @@ function runFunction(funcName, params) {
         funcName === 'migrateOperationalProperties') {
       var storageArgs = typeof params.args === 'string' ? JSON.parse(params.args) : params.args;
       if (Array.isArray(storageArgs)) storageArgs = storageArgs[0];
-      var storageResult = funcName === 'getOperationalPropertyStorageStatus' ? getOperationalPropertyStorageStatus()
+      var storageResult = funcName === 'getOperationalPropertyStorageStatus' ? getOperationalPropertyStorageStatus(storageArgs)
         : funcName === 'prepareOperationalPropertyStorage' ? prepareOperationalPropertyStorage()
         : migrateOperationalProperties(storageArgs);
       return { success: true, function: funcName, result: storageResult, executionTime: (new Date() - startTime) + 'ms' };
@@ -2042,6 +2043,9 @@ function runFunction(funcName, params) {
       var capacityArgs=params.args ? (typeof params.args==='string'?JSON.parse(params.args):params.args) : [];
       if(!Array.isArray(capacityArgs))capacityArgs=[capacityArgs];
       return {success:true,function:funcName,result:probeScriptPropertiesCapacity.apply(null,capacityArgs),executionTime:(new Date()-startTime)+'ms'};
+    }
+    if (funcName === 'probeOperationalPropertyStorage') {
+      return {success:true,function:funcName,result:probeOperationalPropertyStorage(),executionTime:(new Date()-startTime)+'ms'};
     }
     if (funcName === 'getCheckoutMutationProtocol') {
       return {success:true,function:funcName,result:getCheckoutMutationProtocol(),executionTime:(new Date()-startTime)+'ms'};
@@ -2621,7 +2625,7 @@ function cloneScheduleNoSend_(input) {
     var writeState = { tradeId: newTradeId, contractRow: 0, scheduleStartRow: 0, scheduleCount: 0, ledgerRow: 0, ledgerSheet: ledger.sheet };
     try {
       cloneWriteTrade_(ss, source, target, newTradeId, ledger.sheet, writeState, availability);
-      PropertiesService.getScriptProperties().setProperty('cloneNoSend_' + newTradeId, JSON.stringify({
+      villageScriptProperties_().setProperty('cloneNoSend_' + newTradeId, JSON.stringify({
         sourceTradeId: source.tradeId,
         sourceFingerprint: sourceFingerprint,
         customerSendSuppressed: true,
@@ -2840,7 +2844,7 @@ function clonePreviewResult_(source, fingerprint, target, availability, duplicat
 
 function cloneOpenLedger_() {
   try {
-    var url = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+    var url = villageScriptProperties_().getProperty('개고생2_URL');
     if (!url) return { success: false, status: 'LEDGER_UNAVAILABLE', error: '개고생2_URL is not configured' };
     var sheet = SpreadsheetApp.openByUrl(url).getSheetByName('거래내역');
     if (!sheet) return { success: false, status: 'LEDGER_UNAVAILABLE', error: '거래내역 sheet is missing' };
@@ -2932,7 +2936,7 @@ function cloneRollbackWrite_(state) {
     var contractSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
     if (contractSheet && state.contractRow && String(contractSheet.getRange(state.contractRow, 1).getDisplayValue() || '').trim() === state.tradeId) contractSheet.deleteRow(state.contractRow);
   } catch (contractError) {}
-  try { PropertiesService.getScriptProperties().deleteProperty('cloneNoSend_' + state.tradeId); } catch (markerError) {}
+  try { villageScriptProperties_().deleteProperty('cloneNoSend_' + state.tradeId); } catch (markerError) {}
 }
 
 function cloneReadback_(ss, ledgerSheet, source, target, tradeId) {
@@ -2955,6 +2959,6 @@ function cloneReadback_(ss, ledgerSheet, source, target, tradeId) {
   var ledger = false;
   if (ledgerSheet && ledgerSheet.getLastRow() >= 2) ledger = ledgerSheet.getRange(2, 5, ledgerSheet.getLastRow() - 1, 1).getDisplayValues().some(function(row) { return String(row[0] || '').trim() === tradeId; });
   var marker = null;
-  try { marker = JSON.parse(PropertiesService.getScriptProperties().getProperty('cloneNoSend_' + tradeId) || ''); } catch (markerError) {}
+  try { marker = JSON.parse(villageScriptProperties_().getProperty('cloneNoSend_' + tradeId) || ''); } catch (markerError) {}
   return { contract: contract, schedule: schedule, ledger: ledger, customerSendFlagPresent: !!(marker && marker.customerSendSuppressed === true), targetRowCount: targetRows.length };
 }

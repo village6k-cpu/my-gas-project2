@@ -1,5 +1,5 @@
 'use strict';
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('./helpers/gas-storage-vm');
 const root=path.resolve(__dirname,'..'),modulePath=path.join(root,'pendingRequestReconciliation.js');
 const source=fs.existsSync(modulePath)?fs.readFileSync(modulePath,'utf8'):'';
 const gas=fs.readFileSync(path.join(root,'checkAvailability.js'),'utf8');

@@ -1,5 +1,5 @@
 const test=require('node:test'),assert=require('node:assert/strict');
-const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const fs=require('node:fs'),vm=require('./helpers/gas-storage-vm'),path=require('node:path');
 const gas=fs.readFileSync(path.join(__dirname,'../checkAvailability.js'),'utf8');
 const tid='261008-003';
 function fixture(raw){

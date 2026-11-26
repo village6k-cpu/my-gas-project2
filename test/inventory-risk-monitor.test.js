@@ -1,7 +1,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/gas-storage-vm');
 const crypto=require('node:crypto');
 function env(){
  const values={},cache={};let held=false,now=Date.parse('2026-09-12T00:00:00Z');

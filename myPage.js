@@ -20,7 +20,7 @@
  */
 
 function MYPAGE_CFG_() {
-  var p = PropertiesService.getScriptProperties();
+  var p = villageScriptProperties_();
   return {
     secret: p.getProperty("MYPAGE_SECRET") || "",
     baseUrl: (p.getProperty("MYPAGE_BASE_URL") || "").replace(/\/+$/, "")
@@ -54,7 +54,7 @@ function myPagePutCachedJson_(key, value, seconds) {
 
 /** 1회 설정 — 비밀키가 없으면 생성. opts로 도메인/안내문도 함께 설정 가능 (API run 호출용) */
 function setupMyPage(opts) {
-  var p = PropertiesService.getScriptProperties();
+  var p = villageScriptProperties_();
   if (!p.getProperty("MYPAGE_SECRET")) {
     p.setProperty("MYPAGE_SECRET", Utilities.getUuid() + Utilities.getUuid());
   }
@@ -245,7 +245,7 @@ function getMyReservation(token) {
   var cached = myPageGetCachedJson_(cacheKey);
   if (cached) return cached;
 
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var notice = props.getProperty("MYPAGE_NOTICE") || "";
   var kakaoUrl = props.getProperty("MYPAGE_KAKAO_URL") || ""; // 카카오톡 채널 링크 (선택)
   var result;
@@ -344,7 +344,7 @@ function myPageEstimatePdfUrl_(tradeId) {
   tradeId = String(tradeId || "").trim();
   if (!tradeId) throw new Error("거래ID 필수");
 
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var url = myPageVillageOpsApiUrl_(props);
   var payload = {
     action: "previewQuote",

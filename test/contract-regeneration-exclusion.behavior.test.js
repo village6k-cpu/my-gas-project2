@@ -1,4 +1,4 @@
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('./helpers/gas-storage-vm'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'../generatecontract.js'),'utf8');
 function fixture(){
  const props=new Map(),tid='260403-015',events=[];let held=false;

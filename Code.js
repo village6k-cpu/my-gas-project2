@@ -374,7 +374,7 @@ function onEditInstallable(e) {
         var proofRowCount = row + editRowCount - proofStartRow;
         var proofRows = sheet.getRange(proofStartRow, 1, proofRowCount, 2).getDisplayValues();
         var changedByTrade = {};
-        var proofProps = PropertiesService.getScriptProperties();
+        var proofProps = villageScriptProperties_();
         proofRows.forEach(function(values) {
           var scheduleId = String(values[0] || '').trim();
           var tradeId = String(values[1] || '').trim();
@@ -484,7 +484,7 @@ function syncScheduleEditedProductPrice_(ss, sheet, row, previousName) {
 function reconcileDashboardOrphanedReturnProofs_(sheet, props, reason) {
   try {
     if (!sheet || sheet.getName() !== '스케줄상세') return { success: true, reopened: 0 };
-    props = props || PropertiesService.getScriptProperties();
+    props = props || villageScriptProperties_();
     var currentIds = {};
     if (sheet.getLastRow() >= 2) {
       sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues().forEach(function(row) {
@@ -528,7 +528,7 @@ function onChangeInstallable(e) {
     lock.waitLock(30000);
     acquired = true;
     var result = reconcileDashboardOrphanedReturnProofs_(
-      sheet, PropertiesService.getScriptProperties(), '스케줄상세 행 구조 삭제'
+      sheet, villageScriptProperties_(), '스케줄상세 행 구조 삭제'
     );
     if (result && result.error) throw new Error(result.error);
   } finally {
@@ -552,7 +552,7 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
         try { ss.toast('이미 반출된 거래는 취소할 수 없습니다. 반납 절차로 마감해주세요.', '취소 차단', 6); } catch (toastErr) {}
         return;
       }
-      var cancelProps = PropertiesService.getScriptProperties();
+      var cancelProps = villageScriptProperties_();
       cancelProps.deleteProperty('returnDone_' + tradeId);
       cancelProps.deleteProperty('returnPrevContractStatus_' + tradeId);
       cancelContract(ss, tradeId, row);
@@ -570,7 +570,7 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
       : true;
 
     if (previousStatus === "취소" || hadCancelStyle || !hasScheduleRows) {
-      var restoreProps = PropertiesService.getScriptProperties();
+      var restoreProps = villageScriptProperties_();
       restoreProps.deleteProperty('returnDone_' + tradeId);
       restoreProps.deleteProperty('returnPrevContractStatus_' + tradeId);
       sheet.getRange(row, 10).setValue("취소");
@@ -582,7 +582,7 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
     var completionCheck;
     try {
       completionCheck = typeof assertDashboardReturnComplete_ === "function"
-        ? assertDashboardReturnComplete_(tradeId, PropertiesService.getScriptProperties())
+        ? assertDashboardReturnComplete_(tradeId, villageScriptProperties_())
         : { error: "반납완료 차단: 품목 검증 함수를 찾을 수 없습니다" };
     } catch (validationErr) {
       completionCheck = {
@@ -592,7 +592,7 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
     }
     if (completionCheck && completionCheck.error) {
       var restoreStatus = previousStatus && previousStatus !== "반납완료" ? previousStatus : "반출";
-      var incompleteProps = PropertiesService.getScriptProperties();
+      var incompleteProps = villageScriptProperties_();
       incompleteProps.deleteProperty('returnDone_' + tradeId);
       incompleteProps.deleteProperty('returnPrevContractStatus_' + tradeId);
       sheet.getRange(row, 10).setValue(restoreStatus);
@@ -609,7 +609,7 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
   }
 
   if (tradeId) {
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     if (status === "반납완료") {
       props.setProperty('returnDone_' + tradeId, '1');
     } else {
@@ -661,7 +661,7 @@ function lookupDiscountForSelectedRow() {
   var 연락처Raw = sheet.getRange(row, 12).getValue();
   var 연락처Norm = _normPhone(연락처Raw);
 
-  var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  var url = villageScriptProperties_().getProperty("개고생2_URL");
   if (!url) { ui.alert("개고생2_URL 속성 없음"); return; }
   var dbSheet;
   try {
@@ -727,7 +727,7 @@ function _getCustomerDiscountMap_() {
     try { return JSON.parse(cached); } catch (e) {}
   }
 
-  var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  var url = villageScriptProperties_().getProperty("개고생2_URL");
   if (!url) return null;
   var dbSheet;
   try {
@@ -845,7 +845,7 @@ function setupDiscountColumns() {
 
   // 4) 고객DB I열 헤더 + 드롭다운
   try {
-    var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    var url = villageScriptProperties_().getProperty("개고생2_URL");
     if (url) {
       var dbSheet = SpreadsheetApp.openByUrl(url).getSheetByName("고객DB");
       if (dbSheet) {
@@ -1177,7 +1177,7 @@ function propagateContractDates(ss, contractSheet, row, 거래ID) {
   // ⚠️ 값이 실제로 다를 때만 setValue. 같은 값이면 setValue 안 함 →
   //    개고생2.0의 autoContract 트리거 폭주 방지 (AppSheet 부하 감소).
   try {
-    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
     if (개고생URL) {
       var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
       var 거래시트 = 개고생SS.getSheetByName("거래내역");
@@ -1476,7 +1476,7 @@ function replaceOneShotTrigger_(handler, delayMs) {
 
 /** 임계구역에서도 안전한 계약서 queue 표식. ScriptApp I/O는 하지 않는다. */
 function scheduleContractRegenUnderLock_(거래ID) {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var now = Date.now();
   props.setProperty('contractEditTS_' + 거래ID, String(now));
   try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
@@ -1488,7 +1488,7 @@ function scheduleContractRegenUnderLock_(거래ID) {
 
 /** queue 표식 뒤 one-shot 트리거를 보장한다. 전역 ScriptLock 밖에서만 호출한다. */
 function ensureContractRegenTrigger_() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var now = Date.now();
   try {
     var scheduledAt = Number(props.getProperty(CONTRACT_REGEN_TRIGGER_PROP_) || 0);
@@ -1777,7 +1777,7 @@ function finishPendingContractRegen_(props, claim, outcome) {
  * watchdog 자체 정리/상태 확인만 잠그고 실제 계약서 재생성은 잠금을 푼 뒤 호출한다.
  */
 function regenPendingContractsWatchdog() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var lock = LockService.getScriptLock();
   var acquired = false;
   var hasWork = false;
@@ -1816,7 +1816,7 @@ function regenPendingContractsWatchdog() {
  */
 function regenPendingContracts() {
   var STABLE_MS = 2800;
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   // 현재 one-shot을 정리하기 전에 실행 전체를 덮는 watchdog부터 만든다.
   // claim 사이/트리거 정리 직후 hard-timeout도 편집 큐를 고아로 만들 수 없다.
   if (!armContractRegenRunWatchdog_(props)) {
@@ -2008,7 +2008,7 @@ var TEMPLATE_SYNC_TRIGGER_PROP_ = 'templateSyncTriggerScheduledAt_v1';
 var TEMPLATE_SYNC_TRIGGER_STALE_MS_ = 10 * 60 * 1000;
 
 function scheduleTemplateMasterSync_() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var now = Date.now();
   props.setProperty(TEMPLATE_SYNC_EDIT_TS_PROP_, String(now));
 
@@ -2030,7 +2030,7 @@ function syncTemplateMasterDebounced() {
   var lock = LockService.getScriptLock();
   try { lock.waitLock(10000); } catch (e) { return; }
   try {
-    var props = PropertiesService.getScriptProperties();
+    var props = villageScriptProperties_();
     ScriptApp.getProjectTriggers().forEach(function (t) {
       if (t.getHandlerFunction() === 'syncTemplateMasterDebounced') ScriptApp.deleteTrigger(t);
     });
@@ -2128,7 +2128,7 @@ function scheduleCancelledTradeCleanupTriggerOutsideLock_(props, delayMs) {
 }
 
 function ensureCancelledTradeCleanupTrigger_(delayMs) {
-  scheduleCancelledTradeCleanupTriggerOutsideLock_(PropertiesService.getScriptProperties(), delayMs || 1000);
+  scheduleCancelledTradeCleanupTriggerOutsideLock_(villageScriptProperties_(), delayMs || 1000);
 }
 
 /**
@@ -2139,7 +2139,7 @@ function scheduleCancelledTradeCleanup_(거래ID) {
   거래ID = String(거래ID || '').trim();
   if (!거래ID) return;
 
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var key = cancelledTradeCleanupKey_(거래ID);
   var state = parseCancelledTradeCleanup_(props.getProperty(key), 거래ID);
   if (state.status !== 'running') {
@@ -2183,7 +2183,7 @@ function nextCancelledTradeCleanupUnderLock_(props) {
 
 /** 외부 I/O 전에 짧은 잠금 안에서 정확히 한 거래만 선점한다. */
 function claimCancelledTradeCleanup_() {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var lock = LockService.getScriptLock();
   var acquired = false;
   var ensureDelay = 0;
@@ -2233,7 +2233,7 @@ function claimCancelledTradeCleanup_() {
 }
 
 function deleteCancelledTradeFromExternalLedger_(거래ID) {
-  var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  var 개고생URL = villageScriptProperties_().getProperty("개고생2_URL");
   if (!개고생URL) return 0;
 
   var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
@@ -2259,7 +2259,7 @@ function deleteCancelledTradeFromExternalLedger_(거래ID) {
  * durable queue가 실제로 재시도할 수 있게 한다.
  */
 function trashCancelledContractFiles_(거래ID) {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var folderId = props.getProperty("CONTRACT_FOLDER_ID");
   var fileName = "계약서_" + 거래ID + "_";
   var iter = folderId
@@ -2315,7 +2315,7 @@ function runCancelledTradeCleanupOutsideLock_(state) {
 
 /** 결과 기록과 다음 트리거 계획만 짧은 잠금 안에서 수행한다. */
 function finishCancelledTradeCleanup_(claim, result) {
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var lock = LockService.getScriptLock();
   var acquired = false;
   var ensureDelay = 0;

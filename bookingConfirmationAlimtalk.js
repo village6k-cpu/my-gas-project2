@@ -43,7 +43,7 @@ function sendBookingConfirmationAlimtalk_(tid, name, phone, outDate, outTime, in
   var link = getMyPageLink(tid);
   if (!link.success || !link.token || link.url !== BOOKING_CONFIRMATION_LINK_ + encodeURIComponent(link.token)) return null;
 
-  var props = PropertiesService.getScriptProperties();
+  var props = villageScriptProperties_();
   var receipts = operationalPropertyStore_('receipts', props);
   var key = bookingConfirmationRecordKey_(tid);
   var receiver = normalizeAlimtalkReceiver_(phone);
