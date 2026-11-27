@@ -1,5 +1,5 @@
 import type { Trade } from "../domain/types";
-import { optimisticPackingCheck, packingStarted, type PackingCommand, type PackingManifest } from "../domain/packing";
+import { optimisticPackingCheck, packingStarted, type PackingCommand, type PackingEntry, type PackingManifest } from "../domain/packing";
 
 type Intent = { id: string; checked: boolean; resolve: () => void; reject: (error: unknown) => void };
 type Queue = { confirmed: PackingManifest; pending: Intent[]; failing: boolean; done?: Promise<void> };
@@ -53,7 +53,7 @@ export function createPackingCheckQueue(io: {
     void task.then(cleanup, cleanup);
     return task;
   }
-  function checkNow(id: string, entryId: string, checked: boolean): Promise<void> {
+  function checkNow(id: string, entryId: string, checked: boolean, expectedEntry?: PackingEntry): Promise<void> {
     const trade = io.read(id);
     if (!trade?.packing) return Promise.reject(new Error("구성품을 먼저 불러와주세요"));
     const q = queues.get(id);
@@ -61,6 +61,9 @@ export function createPackingCheckQueue(io: {
     const manifest = trade.packing;
     const entry = manifest.entries.find(e => e.id === entryId);
     if (!entry) return Promise.reject(new Error("현재 구성품은 체크할 수 없습니다"));
+    if (expectedEntry && Object.keys({ ...expectedEntry, ...entry }).some(key =>
+      key !== "checked" && expectedEntry[key as keyof PackingEntry] !== entry[key as keyof PackingEntry]
+    )) return Promise.reject(new Error("구성품이 변경되었습니다. 최신 종류와 수량을 확인한 뒤 다시 체크해주세요"));
     const entries = manifest.entries.map(e => e.id === entryId ? { ...e, checked } : e);
     try {
       if (!optimisticPackingCheck(trade, manifest.version, { action: "save", entries, note: manifest.note }))
@@ -78,7 +81,7 @@ export function createPackingCheckQueue(io: {
         if (fresh.packing.phase !== "draft" || fresh.packing.version !== manifest.version || !current ||
             fields.some(key => current[key] !== entry[key]))
           throw new Error("구성품이 변경되었습니다. 최신 항목을 다시 확인해주세요");
-        await checkNow(id, entryId, checked);
+        await checkNow(id, entryId, checked, expectedEntry);
       });
     }
     const queue: Queue = q ?? { confirmed: trade.packing, pending: [], failing: false };
@@ -96,7 +99,10 @@ export function createPackingCheckQueue(io: {
     pending: (id: string) => queues.has(id) || commands.has(id),
     flush: (id: string): Promise<void> => commands.get(id) ?? queues.get(id)?.done ?? Promise.resolve(),
     command,
-    check: (id: string, entryId: string, checked: boolean): Promise<void> => commands.has(id)
-      ? command(id, () => checkNow(id, entryId, checked)) : checkNow(id, entryId, checked),
+    check: (id: string, entryId: string, checked: boolean, expectedEntry?: PackingEntry): Promise<void> => {
+      const original = expectedEntry ?? io.read(id)?.packing?.entries.find(e => e.id === entryId);
+      const snapshot = original ? { ...original } : undefined;
+      return commands.has(id) ? command(id, () => checkNow(id, entryId, checked, snapshot)) : checkNow(id, entryId, checked, snapshot);
+    },
   };
 }

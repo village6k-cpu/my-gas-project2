@@ -2385,12 +2385,16 @@ const packingCheckQueue = createPackingCheckQueue({
 });
 
 export function savePackingCheck(tradeId: string, entryId: string, checked: boolean): Promise<void> {
+  const requested = state.trades.find(trade => trade.tradeId === tradeId);
+  const entry = requested && packingPreparationTrade(requested).packing?.entries.find(row => row.id === entryId);
+  if (!entry) return Promise.reject(new Error("현재 구성품은 체크할 수 없습니다"));
+  const snapshot = { ...entry };
   // 본체 체크와 구성품 체크는 서로 다른 정본 행이다. 본체 저장 대기 때문에 클릭을 버리지 않는다.
   // 구성 변경/제외 중에는 기존 원본을 사용한 체크만 잠깐 제한한다.
   if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
-    return settlePackingDependencies_(tradeId).then(() => packingCheckQueue.check(tradeId, entryId, checked));
+    return settlePackingDependencies_(tradeId).then(() => packingCheckQueue.check(tradeId, entryId, checked, snapshot));
   }
-  return packingCheckQueue.check(tradeId, entryId, checked);
+  return packingCheckQueue.check(tradeId, entryId, checked, snapshot);
 }
 
 /** 구성품 사실에 영향을 주는 저장만 기다린다. 결제/메모 저장은 검수를 막지 않는다. */
