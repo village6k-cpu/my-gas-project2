@@ -2,7 +2,7 @@
 var OPERATIONAL_PROPERTY_STORE_KEY_ = 'OPERATIONS_RECORDS_STORE_V1';
 var OPERATIONAL_PROPERTY_GROUPS_ = ['inventory', 'photos', 'receipts', 'runtime'];
 var OPERATIONAL_PROPERTY_HEADER_ = ['key', 'encoded_value'];
-var OPERATIONAL_PROPERTY_BUILD_ = 'sheet-records-v3-all-operations';
+var OPERATIONAL_PROPERTY_BUILD_ = 'sheet-records-v3-all-operations-append-safe';
 var OPERATIONAL_PROPERTY_SHEETS_ = Object.create(null);
 var OPERATIONAL_PROPERTY_ROWS_ = new WeakMap();
 var OPERATIONAL_PROPERTY_PAYLOADS_ = Object.create(null);
@@ -114,6 +114,8 @@ function operationalPropertySheetRows_(sheet, group) {
   if (count <= 0) return records;
   sheet.getRange(2, 1, count, 2).getValues().forEach(function(row, index) {
     var key = row[0];
+    // Earlier capacity growth can leave empty grid rows; they are not records.
+    if (key === '' && row[1] === '') return;
     if (operationalPropertyGroup_(key) !== group || Object.prototype.hasOwnProperty.call(records, key)) {
       throw new Error('Invalid or duplicate operational record key');
     }
@@ -131,23 +133,36 @@ function operationalPropertyWriteRow_(sheet, row, key, value) {
 
 function operationalPropertyWriteBatch_(sheet, changes) {
   if (!changes.length) return;
-  var nextRow = sheet.getLastRow() + 1;
   changes = changes.map(function(change) {
-    return { row: change.row || nextRow++, key: change.key, encoded: operationalPropertyEncode_(change.value) };
-  }).sort(function(a, b) { return a.row - b.row; });
-  var last = changes[changes.length - 1].row, maxRows = sheet.getMaxRows();
-  if (last > maxRows) sheet.insertRowsAfter(maxRows, Math.max(200, last - maxRows));
-  var chunks = [];
-  changes.forEach(function(change) {
-    var prior = chunks[chunks.length - 1];
-    if (!prior || prior.row + prior.values.length !== change.row) {
-      prior = { row: change.row, values: [] }; chunks.push(prior);
-    }
-    prior.values.push([change.key, change.encoded]);
+    return { row: change.row || 0, key: change.key, encoded: operationalPropertyEncode_(change.value) };
   });
-  chunks.forEach(function(chunk) { sheet.getRange(chunk.row, 1, chunk.values.length, 2).setValues(chunk.values); });
+  function chunksFor(rows) {
+    var chunks = [];
+    rows.slice().sort(function(a, b) { return a.row - b.row; }).forEach(function(change) {
+      var prior = chunks[chunks.length - 1];
+      if (!prior || prior.row + prior.values.length !== change.row) {
+        prior = { row: change.row, values: [] }; chunks.push(prior);
+      }
+      prior.values.push([change.key, change.encoded]);
+    });
+    return chunks;
+  }
+  chunksFor(changes.filter(function(change) { return change.row; })).forEach(function(chunk) {
+    sheet.getRange(chunk.row, 1, chunk.values.length, 2).setValues(chunk.values);
+  });
+  // Append against the server's current grid. Cached getMaxRows() can insert into
+  // the middle after another execution expands the same sheet under the lock.
+  changes.forEach(function(change) {
+    if (!change.row) sheet.appendRow([change.key, change.encoded]);
+  });
   SpreadsheetApp.flush();
-  chunks.forEach(function(chunk) {
+  changes.forEach(function(change) {
+    if (!change.row) {
+      change.row = operationalPropertyRow_(sheet, change.key);
+      if (!change.row) throw new Error('Appended operational record could not be located');
+    }
+  });
+  chunksFor(changes).forEach(function(chunk) {
     if (JSON.stringify(sheet.getRange(chunk.row, 1, chunk.values.length, 2).getValues()) !== JSON.stringify(chunk.values)) {
       throw new Error('Operational record write could not be verified');
     }
@@ -409,9 +424,7 @@ function migrateOperationalProperties(input) {
           }
         });
         if (append.length) {
-          var first = sheet.getLastRow() + 1, last = first + append.length - 1;
-          if (last > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), last - sheet.getMaxRows());
-          sheet.getRange(first, 1, append.length, 2).setValues(append);
+          append.forEach(function(row) { sheet.appendRow(row); });
         }
         SpreadsheetApp.flush();
         var verified = operationalPropertySheetRows_(sheet, group);
