@@ -1602,6 +1602,15 @@ function searchSheet(sheetName, col, query) {
 
   const results = [];
   const queryLower = query.toLowerCase();
+  // Hermes searches the product list through this route. Return the actual
+  // catalog row for a reviewed name. Preserve ordinary substring searches.
+  const nameColumn = sheetName === '목록' || sheetName === '세트마스터';
+  let canonical = '';
+  if (nameColumn && (searchColIdx === 0 || !col)) {
+    const names = Object.create(null);
+    data.forEach(row => { if (row[0]) names[String(row[0]).trim()] = true; });
+    canonical = resolveSetMasterProduct_(query, { items: names }).canonicalName;
+  }
 
   data.forEach((row, idx) => {
     let match = false;
@@ -1610,7 +1619,7 @@ function searchSheet(sheetName, col, query) {
     } else {
       match = row.some(cell => String(cell).toLowerCase().includes(queryLower));
     }
-    if (match) {
+    if (match || (canonical && String(row[0]).trim() === canonical)) {
       results.push({
         row: idx + 2,
         data: row.map(cell => {

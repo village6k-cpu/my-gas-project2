@@ -9002,6 +9002,22 @@ function setMasterProductKey_(name) {
   return String(name || '').normalize('NFC').trim().toLowerCase().replace(/\s+/g, '');
 }
 
+// Scoped to a single GAS execution. A new request sees newly reviewed names.
+var reviewedSalesAliasRows_;
+function getReviewedSalesAliases_() {
+  if (reviewedSalesAliasRows_) return reviewedSalesAliasRows_;
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('판매상품별칭');
+  if (!sheet) return [];
+  var rows = sheet.getRange(1, 1, sheet.getLastRow(), 4).getDisplayValues();
+  if (JSON.stringify(rows.shift()) !== JSON.stringify(['현장표기', '정식상품', '확인근거', '상태'])) {
+    throw new Error('판매상품별칭 A:D 열 제목 확인 필요');
+  }
+  reviewedSalesAliasRows_ = rows.filter(function(row) {
+    return row[3].trim() === '확정' && row.slice(0, 3).every(function(value) { return value.trim(); });
+  }).map(function(row) { return { alias: row[0].trim(), canonicalName: row[1].trim() }; });
+  return reviewedSalesAliasRows_;
+}
+
 function getSetMasterProductAliases_() {
   var aliases = [
     { alias: 'DZO CATTA ACE 렌즈세트', canonicalName: 'DZOFILM 3 Lens 세트' },
@@ -9026,6 +9042,9 @@ function getSetMasterProductAliases_() {
     { alias: 'FX3 핸들그립', canonicalName: '핸들그립' }
   ];
   if (typeof homepageSetMasterAliases_ === 'function') aliases = aliases.concat(homepageSetMasterAliases_());
+  if (typeof getReviewedSalesAliases_ === 'function' && typeof SpreadsheetApp !== 'undefined') {
+    aliases = aliases.concat(getReviewedSalesAliases_());
+  }
   // 운영자가 확인한 판매상품 별칭만 저장. 시트 구조와 실물 재고 별칭을 변경하지 않는다.
   // [{alias, canonicalName}] 형식이며 가격은 저장하지 않고 매번 세트마스터 G열을 읽는다.
   var raw = typeof PropertiesService === 'undefined' ? '' :
@@ -9038,6 +9057,11 @@ function getSetMasterProductAliases_() {
       typeof entry.canonicalName !== 'string' || !entry.canonicalName.trim() ||
       /[\r\n]/.test(entry.alias + entry.canonicalName);
   })) throw new Error('세트마스터 판매상품 별칭 설정 형식 오류');
+  // Version 831 consumes a snapshot of these rows from the legacy property.
+  // Once the review sheet is readable, its edits and retirements take priority.
+  if (typeof reviewedSalesAliasRows_ !== 'undefined' && Array.isArray(reviewedSalesAliasRows_)) {
+    configured = configured.filter(function(entry) { return entry.source !== 'reviewed_sales_sheet'; });
+  }
   return aliases.concat(configured);
 }
 
