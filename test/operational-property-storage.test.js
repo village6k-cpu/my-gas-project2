@@ -60,6 +60,13 @@ function fixture() {
       getMaxColumns: () => maxColumns,
       deleteColumns(first, count) { assert.equal(first + count - 1, maxColumns); maxColumns -= count; },
       insertRowsAfter(row, count) { assert.equal(row, maxRows); maxRows += count; },
+      appendRow(row) {
+        if (flags.failSheet) throw Error('Sheet write failed');
+        assert.equal(script.hasLock(), true);
+        rows.push(row.slice());
+        maxRows = Math.max(maxRows, rows.length);
+        return sheet;
+      },
       getRange(first, col, count = 1, width = 1) {
         assert.ok(first + count - 1 <= maxRows);
         return {
@@ -234,6 +241,44 @@ test('record reads observe concurrent value changes and do not cache absent reco
   assert.equal(p.getProperty(key), '1');
   f.sheets.runtime.rows[1][1] = 'v:0';
   assert.equal(p.getProperty(key), '0');
+});
+
+test('bulk reads skip completely empty grid gaps while rejecting orphan values and duplicate keys', () => {
+  const f = fixture(); activateRuntime(f);
+  f.ctx.operationalPropertyWithLock_(() => {
+    f.sheets.runtime.appendRow(['returnDone_261126-001', 'v:1']);
+    f.sheets.runtime.appendRow(['', '']);
+    f.sheets.runtime.appendRow(['setupDone_261126-001', 'v:1']);
+  });
+  const p = f.ctx.villageScriptProperties_();
+  assert.equal(p.getProperties()['setupDone_261126-001'], '1');
+  f.sheets.runtime.rows[2] = ['', 'v:orphan'];
+  assert.throws(() => p.getProperties(), /Invalid/);
+  f.sheets.runtime.rows[2] = ['returnDone_261126-001', 'v:duplicate'];
+  assert.throws(() => p.getProperties(), /duplicate/);
+});
+
+test('writes append safely when a long execution has stale grid capacity metadata', () => {
+  const f = fixture(); activateRuntime(f);
+  const p = f.ctx.villageScriptProperties_();
+  p.setProperty('returnDone_261126-001', 'original');
+  f.sheets.runtime.getMaxRows = () => 1;
+  f.sheets.runtime.insertRowsAfter = () => assert.fail('Stale row capacity must never insert inside existing records');
+  p.setProperties({ 'setupDone_261126-001': '1', 'setupDoneAt_261126-001': '2' }, false);
+  assert.equal(p.getProperty('returnDone_261126-001'), 'original');
+  assert.equal(p.getProperty('setupDone_261126-001'), '1');
+  assert.equal(p.getProperty('setupDoneAt_261126-001'), '2');
+  assert.equal(f.sheets.runtime.rows.some(row => !row[0]), false);
+});
+
+test('migration appends safely with stale capacity without shifting verified records', () => {
+  const f = fixture(); f.flags.full = false; activateRuntime(f);
+  f.ctx.prepareOperationalPropertyStorage();
+  f.sheets.runtime.getMaxRows = () => 1;
+  f.sheets.runtime.insertRowsAfter = () => assert.fail('Migration must not resize from cached capacity');
+  f.values.set('setupDone_261126-001', '1');
+  assert.equal(f.migrate().moved, 1);
+  assert.equal(f.ctx.villageScriptProperties_().getProperty('setupDone_261126-001'), '1');
 });
 
 test('the live storage probe verifies every physical group and removes only its own nonce records', () => {
