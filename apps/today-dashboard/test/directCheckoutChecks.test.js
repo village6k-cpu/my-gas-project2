@@ -32,10 +32,16 @@ test('DB 일시 장애는 실패 완료로 확정하지 않고 재시도한다',
 });
 test('본체 체크 저장 중에도 구성품 클릭을 수락하고 구조 변경만 막는다',async()=>{
  const source=fs.readFileSync(path.join(__dirname,'../lib/data/store.ts'),'utf8');
- const start=source.indexOf('export function savePackingCheck('),end=source.indexOf('export async function savePacking(',start);
- const module={exports:{}};let queued=0;
- const context={module,exports:module.exports,activeTradeTransitions:new Set(),pendingRemoveEquipmentTrades:new Set(),hasTradePending:()=>true,packingCheckQueue:{pending:()=>false,check:async()=>{queued++;}}};
+ const start=source.indexOf('export function savePackingCheck('),end=source.indexOf('async function settlePackingDependencies_',start);
+ const module={exports:{}};let queued=0,release,captured;
+ const gate=new Promise(resolve=>release=resolve);
+ const trade={tradeId:payload.tid,packing:{entries:[{id:'line',name:'모터',partId:'motor',qty:1,checked:false}]}};
+ const context={module,exports:module.exports,state:{trades:[trade]},packingPreparationTrade:trade=>trade,
+ activeTradeTransitions:new Set(),pendingRemoveEquipmentTrades:new Set(),hasTradePending:()=>true,
+ settlePackingDependencies_:()=>gate,packingCheckQueue:{pending:()=>false,check:async(_id,_entry,_checked,expected)=>{queued++;captured=expected;}}};
  vm.runInNewContext(ts.transpileModule(source.slice(start,end),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,context);
  await module.exports.savePackingCheck(payload.tid,'line',true);assert.equal(queued,1);
- context.activeTradeTransitions.add(payload.tid);await assert.rejects(module.exports.savePackingCheck(payload.tid,'line',true));assert.equal(queued,1);
+ context.activeTradeTransitions.add(payload.tid);const waiting=module.exports.savePackingCheck(payload.tid,'line',true);assert.equal(queued,1);
+ trade.packing.entries[0]={...trade.packing.entries[0],qty:2};context.activeTradeTransitions.clear();release();await waiting;
+ assert.equal(queued,2);assert.equal(captured.qty,1,'the queue receives the clicked quantity, never a later quantity');
 });

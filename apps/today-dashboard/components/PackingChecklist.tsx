@@ -7,7 +7,7 @@ import { templateFor, registeredPart } from "@/lib/domain/packingCatalog";
 import { savePacking, savePackingCheck, syncPackingPreparation } from "@/lib/data/store";
 import { packingDeviceName, packingDeviceReplacements, packingReplacementEntries } from "@/lib/domain/packing";
 
-type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; pendingEntries: ReadonlyMap<string, Partial<PackingEntry>>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
+type PackingContextValue = { trade: Trade; devices: ReturnType<typeof packingDevices>; entriesByOwner: Map<string | undefined, PackingEntry[]>; pendingEntries: ReadonlyMap<string, Partial<PackingEntry>>; pendingChecks: ReadonlyMap<string, boolean>; busy: boolean; checkBusy: boolean; check: (e: PackingEntry) => Promise<void>; update: (e: PackingEntry, patch: Partial<PackingEntry>) => Promise<boolean>; open: (e: PackingEntry) => void; run: (command: PackingCommand, version?: number) => Promise<boolean> };
 const PackingContext = createContext<PackingContextValue | null>(null);
 const button = "tap rounded-lg px-3 py-2 text-sm font-bold ring-1 ring-line disabled:opacity-40";
 
@@ -17,6 +17,8 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const [checking, setChecking] = useState(0);
   const [pendingEntries, setPendingEntries] = useState<ReadonlyMap<string, Partial<PackingEntry>>>(new Map());
   const pendingIds = useRef(new Set<string>());
+  const [pendingChecks, setPendingChecks] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const checkSequences = useRef(new Map<string, number>());
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<PackingEntry | null>(null);
   const [editingBase, setEditingBase] = useState<PackingManifest>();
@@ -90,12 +92,25 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
   const missing = groups.reduce((n, g) => n + g.expected - g.count.good - g.count.damaged - g.count.lost, 0);
   const check = async (e: PackingEntry) => {
     if (onCommand) { await update(e, { checked: !e.checked }); return; }
+    const checked = !e.checked;
+    const sequence = (checkSequences.current.get(e.id) ?? 0) + 1;
+    checkSequences.current.set(e.id, sequence);
+    // Display the click while a prior preparation command is still waiting.
+    // This local preview never becomes the input of another save command.
+    setPendingChecks(current => new Map(current).set(e.id, checked));
     setChecking(n => n + 1); setError("");
-    try { await savePackingCheck(trade.tradeId, e.id, !e.checked); }
-    catch (error) { setError(error instanceof Error ? error.message : "체크 저장 실패. 다시 확인해주세요"); }
-    finally { setChecking(n => n - 1); }
+    try { await savePackingCheck(trade.tradeId, e.id, checked); }
+    catch (error) {
+      if (checkSequences.current.get(e.id) === sequence) setError(error instanceof Error ? error.message : "체크 저장 실패. 다시 확인해주세요");
+    }
+    finally {
+      setChecking(n => n - 1);
+      if (checkSequences.current.get(e.id) === sequence) setPendingChecks(current => {
+        const remaining = new Map(current); remaining.delete(e.id); return remaining;
+      });
+    }
   };
-  const context = { trade, devices, entriesByOwner, pendingEntries, busy, checkBusy: busy, check, update, open: openEditor, run };
+  const context = { trade, devices, entriesByOwner, pendingEntries, pendingChecks, busy, checkBusy: busy, check, update, open: openEditor, run };
   return <PackingContext.Provider value={context}><section aria-label="구성품 검수" className="mb-3">
     <div className="flex flex-wrap items-center justify-between gap-2 bg-brand-50 px-3 py-3">
       <div><h3 className="text-sm font-extrabold text-brand-700">구성품 검수</h3>
@@ -144,7 +159,7 @@ export function PackingChecklist({ trade: savedTrade, phase, onCommand, children
 export function PackingDevice({ ownerId, common = false }: { ownerId?: string; common?: boolean }) {
   const ctx = useContext(PackingContext);
   if (!ctx?.trade.packing) return null;
-  const { trade, devices, entriesByOwner, pendingEntries, busy, checkBusy, check, update, open, run } = ctx;
+  const { trade, devices, entriesByOwner, pendingEntries, pendingChecks, busy, checkBusy, check, update, open, run } = ctx;
   const p=trade.packing!;
   if (packingNeedsUpgrade(p)) return null;
   const owner=devices.find(e=>e.scheduleId===ownerId);
@@ -173,7 +188,8 @@ export function PackingDevice({ ownerId, common = false }: { ownerId?: string; c
     </label>}
     {(!replacement ? entries : []).map(saved => {
       const patch = pendingEntries.get(saved.id);
-      const e = patch ? { ...saved, ...patch } : saved;
+      const prepared = patch ? { ...saved, ...patch } : saved;
+      const e = pendingChecks.has(saved.id) ? { ...prepared, checked: pendingChecks.get(saved.id)! } : prepared;
       return <fieldset key={e.id} disabled={!!patch} aria-busy={!!patch} className="border-b border-line/50 py-2 last:border-0">
       <div className="flex items-start gap-2"><button aria-label={`${e.name} 준비 확인`} aria-pressed={e.checked} disabled={checkBusy || e.qty === 0 || p.phase !== "draft" || (modelNeeded && !p.deviceModels?.[ownerId!])} aria-haspopup={e.unresolved ? "dialog" : undefined} title={e.unresolved ? "실제로 챙기는 종류를 먼저 선택해주세요" : undefined} onClick={()=>e.unresolved ? open(e) : check(e)} className={`tap h-6 w-6 shrink-0 rounded border-2 text-sm ${e.checked ? "border-brand-600 bg-brand-600 text-white" : "border-line"}`}>{e.checked ? "✓" : e.unresolved && e.qty > 0 ? "?" : ""}</button>
         <span className={`min-w-0 flex-1 break-words text-sm ${e.qty===0 ? "line-through text-ink-faint" : ""}`}>{e.name}{e.custom && <span className="ml-1 text-xs text-ink-mute">직접 입력</span>}{e.unresolved && e.qty>0 && <span className="ml-1 text-xs font-bold text-attention-fg">종류 선택 필요</span>}</span>{patch && <span className="text-xs text-ink-mute" role="status">저장 중</span>}<strong className="text-sm">{e.qty ? `×${e.qty}` : "제외"}</strong></div>

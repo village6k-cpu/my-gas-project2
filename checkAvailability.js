@@ -2615,10 +2615,13 @@ var DASHBOARD_RETIRED_PHOTO_PROPERTY_MANIFEST_KEY_ = 'dashboard_photo_file_index
 var DASHBOARD_RETIRED_PHOTO_PROPERTY_CHUNK_PREFIX_ = 'dashboard_photo_file_index_v2_property_';
 
 function cleanupRetiredDashboardPhotoIndexProperties_(props) {
+  props = props || villageScriptProperties_();
+  // Quota cleanup belongs only to the old physical settings store. Routed
+  // records are durable history; scanning all of them blocks unrelated trades.
+  if (props.__villageRoutedStorage) return 0;
   try {
     var cache = CacheService.getScriptCache();
     if (cache.get('dashboardRetiredPhotoPropertyCleanup_v1')) return 0;
-    props = props || villageScriptProperties_();
     var removed = 0;
     props.getKeys().forEach(function(key) {
       if (
@@ -3400,6 +3403,9 @@ function readDashboardMutationLog_(props, tid, scope) {
 
 /** 거래/품목별로 나눈 idempotency log의 빈 키를 주기적으로 제거해 Properties quota를 지킨다. */
 function cleanupExpiredDashboardMutationLogs_(props) {
+  // beginDashboardMutation_ filters the current scope by TTL. There is no
+  // settings quota to reclaim after cutover, so retain other scopes for audit.
+  if (props.__villageRoutedStorage) return;
   try {
     var cache = CacheService.getScriptCache();
     if (cache.get('dashboardMutationCleanup_v2')) return;
@@ -3802,16 +3808,19 @@ function toggleSetupDone(tid, done, options) {
       }
       if (sameSetupLease) {
         closingToken = String(existingSetupLease.token || existingClosing || '');
+        trySetScriptProperty_(props, closingKey, closingToken);
       } else {
         closingToken = String(Date.now()) + '|' + (mutationId || String(Math.random()).slice(2));
-        trySetScriptProperty_(props, setupLeaseKey, JSON.stringify({
+        var setupLeaseWrites = {};
+        setupLeaseWrites[setupLeaseKey] = JSON.stringify({
           token: closingToken,
           mutationId: mutationId,
           target: isDone ? '1' : '0',
           at: Date.now()
-        }));
+        });
+        setupLeaseWrites[closingKey] = closingToken;
+        trySetScriptProperties_(props, setupLeaseWrites);
       }
-      trySetScriptProperty_(props, closingKey, closingToken);
       closingMarked = true;
     } finally {
       if (transitionLocked) try { transitionLock.releaseLock(); } catch (transitionReleaseErr) {}

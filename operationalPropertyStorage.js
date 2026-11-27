@@ -2,7 +2,7 @@
 var OPERATIONAL_PROPERTY_STORE_KEY_ = 'OPERATIONS_RECORDS_STORE_V1';
 var OPERATIONAL_PROPERTY_GROUPS_ = ['inventory', 'photos', 'receipts', 'runtime'];
 var OPERATIONAL_PROPERTY_HEADER_ = ['key', 'encoded_value'];
-var OPERATIONAL_PROPERTY_BUILD_ = 'sheet-records-v3-all-operations-append-safe';
+var OPERATIONAL_PROPERTY_BUILD_ = 'sheet-records-v4-operation-hotpath';
 var OPERATIONAL_PROPERTY_SHEETS_ = Object.create(null);
 var OPERATIONAL_PROPERTY_ROWS_ = new WeakMap();
 var OPERATIONAL_PROPERTY_PAYLOADS_ = Object.create(null);
@@ -213,7 +213,12 @@ function operationalPropertyStore_(group, base) {
       if (value !== null && !config.runtimeLegacyClearedAt && base.getProperty(key) !== null) return base.setProperty(key, value);
       var sheet = sheetFor(config);
       var row = operationalPropertyRow_(sheet, key);
-      if (row || value !== null) operationalPropertyWriteRow_(sheet, row, key, value);
+      // Tombstones preserve row identities. Repeated finally/lease cleanup must
+      // not flush and verify the same deletion again. Read fresh under the lock;
+      // a concurrent new lease is never hidden by an execution-local value cache.
+      if (value !== null || row && sheet.getRange(row, 2).getValue() !== '') {
+        operationalPropertyWriteRow_(sheet, row, key, value);
+      }
       if (value === null && !config.runtimeLegacyClearedAt) base.deleteProperty(key);
     });
   }

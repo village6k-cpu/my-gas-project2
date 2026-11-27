@@ -243,6 +243,20 @@ test('record reads observe concurrent value changes and do not cache absent reco
   assert.equal(p.getProperty(key), '0');
 });
 
+test('repeated lease cleanup skips an already empty record but observes a new concurrent lease', () => {
+  const f = fixture(); activateRuntime(f);
+  const config = JSON.parse(f.values.get(pointer)); config.runtimeLegacyClearedAt = f.now;
+  f.values.set(pointer, JSON.stringify(config));
+  const p = f.ctx.villageScriptProperties_(), key = 'setupMutation_261127-999';
+  p.setProperty(key, 'first-owner'); p.deleteProperty(key);
+  f.flags.failSheet = true;
+  assert.doesNotThrow(() => p.deleteProperty(key), 'an empty lease needs no durable write');
+  const row = f.sheets.runtime.rows.find(row => row[0] === key);
+  row[1] = 'v:next-owner';
+  assert.throws(() => p.deleteProperty(key), /Sheet write failed/, 'a fresh concurrent value still requires persistence');
+  assert.equal(p.getProperty(key), 'next-owner');
+});
+
 test('bulk reads skip completely empty grid gaps while rejecting orphan values and duplicate keys', () => {
   const f = fixture(); activateRuntime(f);
   f.ctx.operationalPropertyWithLock_(() => {

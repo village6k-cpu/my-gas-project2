@@ -89,6 +89,31 @@ test('같은 논리 항목의 오래된 mutation retry만 폐기하고 다른 �
 
 });
 
+test('분리된 운영 저장소의 완료 변경은 전체 기록을 읽지 않고 현재 항목만 정리한다', () => {
+  const source = section(read('checkAvailability.js'), 'var DASHBOARD_SETUP_CLOSING_LEASE_MS_', '\nfunction dashboardSetupCanonicalResult_');
+  const context = { CacheService: { getScriptCache: () => ({ get: () => null, put() {} }) } };
+  vm.runInNewContext(source, context);
+  const key = context.dashboardMutationLogKey_('261127-999', 'setup');
+  const values = new Map([[key, JSON.stringify([
+    { id: 'old:operation', target: '0', state: 'committed', at: 1 },
+    { id: 'current:operation', target: '1', state: 'committed', at: Date.now() },
+  ])]]);
+  let fullReads = 0;
+  const props = {
+    __villageRoutedStorage: true,
+    getProperty: key => values.get(key) ?? null,
+    setProperty: (key, value) => values.set(key, value),
+    getProperties() { fullReads++; return Object.fromEntries(values); },
+    getKeys() { fullReads++; return Array.from(values.keys()); },
+    deleteProperty: key => values.delete(key),
+  };
+  assert.equal(context.beginDashboardMutation_(props, '261127-999', 'current:operation', 'setup', '1').skip, true);
+  assert.equal(context.beginDashboardMutation_(props, '261127-999', 'next:operation', 'setup', '0').skip, false);
+  context.cleanupRetiredDashboardPhotoIndexProperties_(props);
+  assert.equal(fullReads, 0, '공용 잠금 안에서 전체 운영 저장소를 조회하지 않는다');
+  assert.deepEqual(JSON.parse(values.get(key)).map(e => e.id), ['current:operation', 'next:operation']);
+});
+
 test('반납완료와 상세 수량은 같은 JSON snapshot/완료 플래그 CAS로 맞물린다', () => {
   const supa = read('supabaseSync.js');
   const remote = read('apps/today-dashboard/lib/data/remote.ts');
