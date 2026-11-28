@@ -8955,10 +8955,10 @@ function getDashboardEquipmentCatalog_(ss) {
   };
 }
 
-function buildDashboardSetLookup_(setSheet) {
+function buildDashboardSetLookup_(setSheet, rows) {
     // 실행 간 가격 캐시를 사용하지 않는다. 등록 시 항상 현재 정본 A/G열을 읽는다.
     var lookup = { components: {}, prices: {}, items: {}, priceErrors: {} };
-    var data = getSetMasterRows_(setSheet);
+    var data = rows || getSetMasterRows_(setSheet);
     data.forEach(function(row) {
       var setName = String(row[0] || "").trim();
       if (!setName) return;
@@ -9088,6 +9088,27 @@ function resolveSetMasterProduct_(name, lookup, salesAliases) {
     if (!Object.prototype.hasOwnProperty.call(items, entry.canonicalName)) { staleAlias = true; return; }
     if (candidates.indexOf(entry.canonicalName) < 0) candidates.push(entry.canonicalName);
   });
+  // A requested mount qualifies a camera package. Keep the full source name
+  // on the reservation and use the verified package only to expand its parts.
+  if (!candidates.length && !staleAlias) {
+    var option = /(?:\(\s*(?:(?:ND\s*없는\s*)?일반\s+)?(?:PL|LPL|EF|RF|E)(?:\s*마운트)?\s*\)|(?:^|\s)(?:LPL|PL|EF|RF|E)(?:\s*마운트)?(?=\s|$))/ig;
+    var qualifiers = name.match(option) || [];
+    if (qualifiers.length === 1) {
+      var baseKey = setMasterProductKey_(name.replace(option, ' '));
+      if (/(?:풀세트|바디세트|베이직세트)$/.test(baseKey)) {
+        var names = Object.keys(items);
+        var baseNames = names.filter(function(item) { return setMasterProductKey_(item) === baseKey; });
+        var hasMountVariants = names.some(function(item) {
+          return setMasterProductKey_(item) !== baseKey && setMasterProductKey_(item.replace(option, ' ')) === baseKey;
+        });
+        if (baseNames.length === 1 && !hasMountVariants && (lookup.components || {})[baseNames[0]] &&
+            lookup.components[baseNames[0]].some(function(row) { return /바디|카메라|\bbody\b/i.test(row.name); })) {
+          return {canonicalName: baseNames[0], candidates: baseNames, match: 'qualified_camera_set',
+            requestedOption: qualifiers[0].replace(/[()]/g, '').trim()};
+        }
+      }
+    }
+  }
   return { canonicalName: !staleAlias && candidates.length === 1 ? candidates[0] : '',
     candidates: candidates, match: staleAlias ? 'stale_alias' : candidates.length === 1 ? 'alias' : candidates.length ? 'ambiguous' : 'unknown' };
 }
@@ -16882,8 +16903,14 @@ function _confirmedReservationCatalogNames_(ss) {
 
 function _collectConfirmedReservationCatalogIssues_(ss, plan) {
   var exact = _confirmedReservationCatalogNames_(ss);
-  return plan.filter(function(item) {
+  var unresolved = plan.filter(function(item) {
     return !exact[String(item.name || "").normalize("NFKC").trim()];
+  });
+  if (!unresolved.length) return [];
+  var setSheet = ss.getSheetByName("세트마스터");
+  var lookup = setSheet ? buildDashboardSetLookup_(setSheet) : null;
+  return unresolved.filter(function(item) {
+    return !lookup || !resolveSetMasterProduct_(item.name, lookup).canonicalName;
   }).map(function(item) {
     return { kind: "catalog_unresolved", equipment: item.name, quantity: item.quantity };
   });

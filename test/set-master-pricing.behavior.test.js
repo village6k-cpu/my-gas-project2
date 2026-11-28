@@ -22,6 +22,33 @@ function harness(rows) {
   }
   return { context, sheet };
 }
+
+test('a qualified camera kit keeps the request label while using its catalog price and quantity-scaled parts', () => {
+  const rows = [
+    ['테스트 카메라 풀세트', '카메라 바디', 1, '', '', 'Y', 100000],
+    ['테스트 카메라 풀세트', '배터리', 4, '', '', 'Y', ''],
+    ['테스트 렌즈 풀세트', '24mm PL 렌즈', 1, '', '', 'Y', 50000]
+  ];
+  const {context:c, sheet} = harness(rows);
+  const lookup = c.buildDashboardSetLookup_(sheet);
+  for (const label of ['테스트 카메라 (PL) 풀세트', '테스트 카메라 풀세트 PL', '테스트 카메라 풀세트 (ND 없는 일반 PL)']) {
+    assert.equal(c.resolveSetMasterProduct_(label, lookup).canonicalName, rows[0][0]);
+    assert.equal(c.findSetPrice(label,sheet), 100000);
+    vm.runInContext(fn('_projectStaffConfirmedDesiredSetComponents_'), c);
+    c.getSetComponents = name => c.resolveSetMasterComponents_(name, lookup);
+    c._normalizeStaffConfirmedPendingPlan_ = plan => plan;
+    c._normalizeStaffConfirmedSetComponents_ = plan => plan;
+    c._projectStaffConfirmedSetComponents_ = plan => plan;
+    const expanded = c._projectStaffConfirmedDesiredSetComponents_([], [], [{name:label,quantity:2}], sheet, []);
+    assert.deepEqual(Array.from(expanded, row=>[row.set_item,row.component_item,row.quantity]), [[label,'카메라 바디',2],[label,'배터리',8]]);
+  }
+  for (const label of ['테스트 렌즈 풀세트 PL','새 외부장비','테스트 카메라 미니 풀세트 PL']) {
+    assert.equal(c.resolveSetMasterProduct_(label,lookup).canonicalName,'');
+  }
+  lookup.items['테스트 카메라 (EF) 풀세트'] = true;
+  assert.equal(c.resolveSetMasterProduct_('테스트 카메라 PL 풀세트',lookup).canonicalName,'');
+  assert.equal(c.resolveSetMasterProduct_('테스트 카메라 (EF) 풀세트',lookup).match,'exact');
+});
 test('set-master rate is numeric, including comma text and an explicit zero', () => {
   const h = harness([['미니 매트박스', '업링', 1, '', '', 'Y', '10,000'], ['무료 상품', '', 1, '', '', '', 0]]);
   assert.equal(h.context.findSetPrice('미니 매트박스', h.sheet), 10000);

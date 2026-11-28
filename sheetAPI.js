@@ -1607,9 +1607,13 @@ function searchSheet(sheetName, col, query) {
   const nameColumn = sheetName === '목록' || sheetName === '세트마스터';
   let canonical = '';
   if (nameColumn && (searchColIdx === 0 || !col)) {
-    const names = Object.create(null);
-    data.forEach(row => { if (row[0]) names[String(row[0]).trim()] = true; });
-    canonical = resolveSetMasterProduct_(query, { items: names }).canonicalName;
+    if (sheetName === '세트마스터') {
+      canonical = resolveSetMasterProduct_(query, buildDashboardSetLookup_(sheet, data)).canonicalName;
+    } else {
+      const names = Object.create(null);
+      data.forEach(row => { if (row[0]) names[String(row[0]).trim()] = true; });
+      canonical = resolveSetMasterProduct_(query, { items: names }).canonicalName;
+    }
   }
 
   data.forEach((row, idx) => {
